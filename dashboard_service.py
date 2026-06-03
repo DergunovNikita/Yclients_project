@@ -20,6 +20,7 @@ from models import (
     ServiceCatalog,
     ServiceLabel,
     Staff,
+    StaffSchedule,
     Transaction,
 )
 from plan_config import (
@@ -83,6 +84,32 @@ def _coerce_date(value: Any) -> date:
     if isinstance(value, date):
         return value
     return date.fromisoformat(str(value)[:10])
+
+
+def _coerce_time(value: Any) -> time | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.time()
+    if isinstance(value, time):
+        return value
+    text = str(value)
+    if 'T' in text:
+        text = text.split('T', 1)[1]
+    elif ' ' in text:
+        text = text.split(' ', 1)[1]
+    return time.fromisoformat(text[:8])
+
+
+def _schedule_slot_covers_datetime(slot_from: Any, slot_to: Any, value: Any) -> bool:
+    appt_time = _coerce_time(value)
+    start_time = _coerce_time(slot_from)
+    end_time = _coerce_time(slot_to)
+    if appt_time is None or start_time is None or end_time is None:
+        return True
+    if start_time <= end_time:
+        return start_time <= appt_time < end_time
+    return appt_time >= start_time or appt_time < end_time
 
 
 def _appt_revenue_filters(
@@ -957,6 +984,99 @@ async def _opz_count(
     return float(len(booked_clients))
 
 
+async def _admin_clients_by_finished_appointments(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+    staff_ids: list[int],
+    user_id_by_staff: dict[int, Optional[int]],
+    barber_staff_ids: list[int] | None = None,
+) -> dict[int, int]:
+    """Assign each finished appointment to at most one admin, keeping admin totals aligned with barbers."""
+    if not staff_ids:
+        return {}
+    ordered_staff_ids = sorted({int(staff_id) for staff_id in staff_ids})
+    counts = {staff_id: 0 for staff_id in ordered_staff_ids}
+    user_to_staff = {
+        int(user_id): staff_id
+        for staff_id, user_id in user_id_by_staff.items()
+        if staff_id in counts and user_id is not None
+    }
+
+    appointment_filters = [
+        Appointment.company_id == company_id,
+        Appointment.date >= start,
+        Appointment.date <= end,
+        Appointment.attendance > 0,
+    ]
+    if barber_staff_ids:
+        appointment_filters.append(Appointment.staff_id.in_(barber_staff_ids))
+
+    appointment_rows = (
+        await db.execute(
+            select(
+                Appointment.id,
+                Appointment.date,
+                Appointment.datetime,
+                Appointment.created_user_id,
+            )
+            .where(*appointment_filters)
+            .order_by(Appointment.date.asc(), Appointment.datetime.asc(), Appointment.id.asc())
+        )
+    ).all()
+    if not appointment_rows:
+        return counts
+
+    schedule_rows = (
+        await db.execute(
+            select(
+                StaffSchedule.staff_id,
+                StaffSchedule.date,
+                StaffSchedule.slot_from,
+                StaffSchedule.slot_to,
+            )
+            .where(
+                StaffSchedule.staff_id.in_(ordered_staff_ids),
+                StaffSchedule.company_id == company_id,
+                StaffSchedule.date >= start,
+                StaffSchedule.date <= end,
+            )
+            .order_by(StaffSchedule.date.asc(), StaffSchedule.slot_from.asc(), StaffSchedule.staff_id.asc())
+        )
+    ).all()
+    schedules_by_date: dict[date, list[Any]] = {}
+    for row in schedule_rows:
+        schedules_by_date.setdefault(_coerce_date(row.date), []).append(row)
+
+    for appointment in appointment_rows:
+        creator_staff_id = (
+            user_to_staff.get(int(appointment.created_user_id))
+            if appointment.created_user_id is not None
+            else None
+        )
+        scheduled_staff_ids = {
+            int(schedule.staff_id)
+            for schedule in schedules_by_date.get(_coerce_date(appointment.date), [])
+            if _schedule_slot_covers_datetime(
+                schedule.slot_from,
+                schedule.slot_to,
+                appointment.datetime,
+            )
+        }
+        if creator_staff_id in scheduled_staff_ids:
+            assigned_staff_id = creator_staff_id
+        elif scheduled_staff_ids:
+            assigned_staff_id = min(scheduled_staff_ids, key=lambda sid: (counts[sid], sid))
+        elif creator_staff_id in counts:
+            assigned_staff_id = creator_staff_id
+        else:
+            assigned_staff_id = min(ordered_staff_ids, key=lambda sid: (counts[sid], sid))
+        counts[assigned_staff_id] += 1
+
+    return counts
+
+
 async def _fact_metric_components(
     db: AsyncSession,
     start: date,
@@ -964,6 +1084,7 @@ async def _fact_metric_components(
     company_id: int,
     staff_id: Optional[int] = None,
     created_user_id: Optional[int] = None,
+    clients_override: Optional[float] = None,
 ) -> dict[str, float]:
     revenue = await _revenue_block(
         db,
@@ -975,9 +1096,10 @@ async def _fact_metric_components(
     )
     opz_staff_id = None if created_user_id is not None else staff_id
     goods_metrics = await _goods_sales_metrics(db, start, end, company_id, staff_id)
+    clients_count = float(clients_override) if clients_override is not None else float(revenue['appointments'] or 0)
     values: dict[str, float] = {
         'revenue': float(revenue['revenue'] or 0) + float(goods_metrics.get('cosmo_sum') or 0),
-        'clients': float(revenue['appointments'] or 0),
+        'clients': clients_count,
         'opz_qty': await _opz_count(
             db, start, end, company_id,
             staff_id=opz_staff_id,
@@ -1318,9 +1440,14 @@ async def _staff_plan_groups_for_branch(
     if has_staff_plans or not include_all_when_branch_planned:
         staff_rows = [
             staff for staff in staff_rows
-            if (
+            if _is_visible_staff_plan(plans_by_staff.get(int(staff.id), {}))
+            and (
                 _has_plan_values(plans_by_staff.get(int(staff.id), {}))
-                and _is_visible_staff_plan(plans_by_staff.get(int(staff.id), {}))
+                or _staff_category(
+                    staff,
+                    categories_by_staff.get(int(staff.id)),
+                    plans_by_staff.get(int(staff.id), {}),
+                ) == 'administrator'
             )
         ]
     else:
@@ -1339,13 +1466,22 @@ async def _staff_plan_groups_for_branch(
         int(staff.id): getattr(staff, 'user_id', None) for staff in staff_rows
     }
 
+    admin_staff_ids = [sid for sid in staff_ids if categories_by_staff_id.get(sid) == 'administrator']
+    barber_staff_ids = [sid for sid in staff_ids if categories_by_staff_id.get(sid) == 'barber']
+    admin_clients_by_staff = await _admin_clients_by_finished_appointments(
+        db,
+        start,
+        end,
+        branch_id,
+        admin_staff_ids,
+        user_id_by_staff,
+        barber_staff_ids or None,
+    )
+
     facts_by_staff: dict[int, dict[str, float]] = {}
     for sid in staff_ids:
-        admin_user_id = (
-            user_id_by_staff.get(sid)
-            if categories_by_staff_id.get(sid) == 'administrator'
-            else None
-        )
+        is_admin = categories_by_staff_id.get(sid) == 'administrator'
+        admin_user_id = user_id_by_staff.get(sid) if is_admin else None
         facts_by_staff[sid] = await _fact_metric_components(
             db,
             start,
@@ -1353,6 +1489,7 @@ async def _staff_plan_groups_for_branch(
             branch_id,
             sid,
             created_user_id=admin_user_id,
+            clients_override=admin_clients_by_staff.get(sid) if is_admin else None,
         )
 
     groups: list[dict[str, Any]] = []

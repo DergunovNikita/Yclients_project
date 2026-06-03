@@ -68,7 +68,6 @@ SYNC_LOOKBACK_DAYS = _get_int('SYNC_LOOKBACK_DAYS', 2)
 # Служебные параметры синхронизации
 # ============================================================================
 SYNC_LOG_DIR = os.getenv('SYNC_LOG_DIR', 'logs')
-SYNC_FULL_REFRESH_HOUR = _get_int('SYNC_FULL_REFRESH_HOUR', 2)
 SYNC_LOCK_ID = _get_int('SYNC_LOCK_ID', 826451)
 SYNC_API_TOKEN = os.getenv('SYNC_API_TOKEN', '')
 SYNC_WORKER_POLL_INTERVAL = _get_float('SYNC_WORKER_POLL_INTERVAL', 5.0)

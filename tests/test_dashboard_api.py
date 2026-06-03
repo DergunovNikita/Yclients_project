@@ -1,7 +1,7 @@
 """Dashboard JSON API (product portal metrics)."""
 
 import csv
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -30,6 +30,7 @@ from models import (
     ServiceCatalog,
     ServiceLabel,
     Staff,
+    StaffSchedule,
     Transaction,
 )
 
@@ -1300,6 +1301,12 @@ async def test_plan_fact_reports_admin_barber_clients_mismatch_diagnostics(async
             created_user_id=999,
         ),
     ])
+    async_session.add_all([
+        StaffSchedule(staff_id=2, company_id=1, date=date(2025, 1, 10),
+                      slot_from=time(10, 0), slot_to=time(22, 0)),
+        StaffSchedule(staff_id=2, company_id=1, date=date(2025, 1, 11),
+                      slot_from=time(10, 0), slot_to=time(22, 0)),
+    ])
     now = datetime(2025, 1, 1)
     async_session.add_all([
         PlanMetric(
@@ -1338,12 +1345,129 @@ async def test_plan_fact_reports_admin_barber_clients_mismatch_diagnostics(async
     app.dependency_overrides.clear()
 
     assert r.status_code == 200
-    diagnostics = r.json()['data']['diagnostics']
-    assert [item['code'] for item in diagnostics] == ['admin_barber_clients_mismatch']
-    assert diagnostics[0]['barber_clients_fact'] == 2.0
-    assert diagnostics[0]['administrator_clients_fact'] == 1.0
-    assert diagnostics[0]['unassigned_records_count'] == 1
-    assert diagnostics[0]['sample_record_ids'] == [2]
+    data = r.json()['data']
+    assert data['diagnostics'] == []
+
+    groups = data['groups']
+    admin_group = next(g for g in groups if g['category'] == 'administrator')
+    admin_clients_cell = next(m for m in admin_group['metrics'] if m['code'] == 'clients')
+    assert admin_clients_cell['fact'] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_admin_clients_do_not_duplicate_overlapping_shifts(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Barber', position='Барбер', company_id=1))
+    async_session.add(Staff(id=2, name='Admin A', position='Администратор', company_id=1, user_id=500))
+    async_session.add(Staff(id=3, name='Admin B', position='Администратор', company_id=1, user_id=501))
+    async_session.add_all([
+        Client(id=1, name='C1', company_id=1),
+        Client(id=2, name='C2', company_id=1),
+        Client(id=3, name='C3', company_id=1),
+        Client(id=4, name='C4', company_id=1),
+    ])
+    await async_session.flush()
+
+    async_session.add_all([
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 12, 0, 0),
+            create_date=datetime(2025, 1, 5, 12, 0, 0),
+            seance_length=3600,
+            attendance=1,
+            created_user_id=999,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=2,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 13, 0, 0),
+            create_date=datetime(2025, 1, 5, 12, 0, 0),
+            seance_length=3600,
+            attendance=1,
+            created_user_id=999,
+        ),
+        Appointment(
+            id=3,
+            company_id=1,
+            staff_id=1,
+            client_id=3,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 14, 0, 0),
+            create_date=datetime(2025, 1, 5, 12, 0, 0),
+            seance_length=3600,
+            attendance=2,
+            created_user_id=999,
+        ),
+        Appointment(
+            id=4,
+            company_id=1,
+            staff_id=1,
+            client_id=4,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 15, 0, 0),
+            create_date=datetime(2025, 1, 5, 12, 0, 0),
+            seance_length=3600,
+            attendance=0,
+            created_user_id=999,
+        ),
+        StaffSchedule(staff_id=2, company_id=1, date=date(2025, 1, 10),
+                      slot_from=time(10, 0), slot_to=time(22, 0)),
+        StaffSchedule(staff_id=3, company_id=1, date=date(2025, 1, 10),
+                      slot_from=time(10, 0), slot_to=time(22, 0)),
+    ])
+    now = datetime(2025, 1, 1)
+    async_session.add(
+        PlanMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=1,
+            staff_category='barber',
+            metric_code='clients',
+            value=1.0,
+            updated_at=now,
+        )
+    )
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        r = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    data = r.json()['data']
+    assert data['diagnostics'] == []
+
+    groups = data['groups']
+    barber_clients = sum(
+        next(m for m in group['metrics'] if m['code'] == 'clients')['fact']
+        for group in groups
+        if group['category'] == 'barber'
+    )
+    admin_clients_by_staff = {
+        group['staff_id']: next(m for m in group['metrics'] if m['code'] == 'clients')['fact']
+        for group in groups
+        if group['category'] == 'administrator'
+    }
+    assert barber_clients == 3.0
+    assert sum(admin_clients_by_staff.values()) == barber_clients
+    assert admin_clients_by_staff == {2: 2.0, 3: 1.0}
 
 
 @pytest.mark.asyncio

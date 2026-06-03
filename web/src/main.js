@@ -1,7 +1,6 @@
 import Chart from 'chart.js/auto';
 
 const apiBase = import.meta.env.VITE_API_BASE || '';
-const apiKey = import.meta.env.VITE_API_KEY || '';
 
 const els = {
   kpi: document.getElementById('kpi'),
@@ -54,12 +53,6 @@ let activeView = 'overview';
 let branchOptions = [];
 
 const ADMIN_HIDDEN_METRIC_CODES = new Set(['revenue', 'avg_check_total']);
-
-function headers() {
-  const h = {};
-  if (apiKey) h['X-API-Key'] = apiKey;
-  return h;
-}
 
 function apiUrl(path, params = {}) {
   const qs = new URLSearchParams();
@@ -161,7 +154,7 @@ async function fetchJson(path, params) {
   for (const url of apiUrlCandidates(path, params)) {
     let response;
     try {
-      response = await fetch(url, { headers: headers() });
+      response = await fetch(url);
     } catch (error) {
       errors.push(`${url}\n${error.message}`);
       continue;
