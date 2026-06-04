@@ -421,6 +421,26 @@
     .metric-status.bad { background: #fee2e2; color: #991b1b; }
     .metric-status.no-plan { background: #f1f5f9; color: #64748b; }
 
+    .review-fact-panel {
+      margin-bottom: 16px;
+    }
+
+    .review-fact-scroll table {
+      min-width: 560px;
+    }
+
+    .review-fact-table input {
+      max-width: 120px;
+      margin-left: auto;
+      text-align: right;
+    }
+
+    .review-fact-actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 12px;
+    }
+
     .empty {
       min-height: 160px;
       display: grid;
@@ -430,6 +450,10 @@
       border-radius: 8px;
       text-align: center;
       padding: 16px;
+    }
+
+    .empty.compact {
+      min-height: 82px;
     }
 
     @media (max-width: 900px) {
@@ -596,6 +620,17 @@
         </label>
         <button type="button" id="plan-load">Обновить</button>
       </section>
+
+      <div class="panel wide review-fact-panel">
+        <div class="panel-title">
+          <h2>Отзывы факт</h2>
+          <span class="meta" id="review-fact-meta"></span>
+        </div>
+        <div id="review-fact-editor"></div>
+        <div class="review-fact-actions">
+          <button type="button" id="review-fact-save">Сохранить факт</button>
+        </div>
+      </div>
 
       <div class="panel wide">
         <div class="panel-title">

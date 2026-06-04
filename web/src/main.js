@@ -16,6 +16,9 @@ const els = {
   planMeta: document.getElementById('plan-meta'),
   tableMeta: document.getElementById('table-meta'),
   planFactTable: document.getElementById('plan-fact-table'),
+  reviewFactEditor: document.getElementById('review-fact-editor'),
+  reviewFactMeta: document.getElementById('review-fact-meta'),
+  reviewFactSave: document.getElementById('review-fact-save'),
   servicesTable: document.getElementById('services-table'),
   extraServicesTable: document.getElementById('extra-services-table'),
   revenueChart: document.getElementById('revenue-chart'),
@@ -51,6 +54,7 @@ const charts = {
 
 let activeView = 'overview';
 let branchOptions = [];
+let reviewFactRows = [];
 
 const ADMIN_HIDDEN_METRIC_CODES = new Set(['revenue', 'avg_check_total']);
 
@@ -101,6 +105,13 @@ function formatMetricValue(value, format) {
   if (format === 'money') return formatMoney(value);
   if (format === 'percent') return `${Number(value).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%`;
   return formatNumber(value);
+}
+
+function formatInputNumber(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const number = Number(value);
+  if (Number.isNaN(number)) return '';
+  return Number.isInteger(number) ? String(number) : String(number);
 }
 
 function formatMoscowDateTime(value) {
@@ -163,6 +174,38 @@ async function fetchJson(path, params) {
     if (!response.ok) {
       const body = await response.text();
       throw new Error(`API вернул ${response.status} для ${url}\n\n${body.slice(0, 1000)}`);
+    }
+
+    const payload = await response.json();
+    if (payload.success === false) {
+      throw new Error(`API вернул success=false для ${url}`);
+    }
+    return payload;
+  }
+
+  throw new Error(
+    `Не удалось подключиться к API.\n\n${errors.join('\n\n')}\n\nПроверь, что локальный API открыт в браузере по http://127.0.0.1:8000/health или http://localhost:8000/health.`,
+  );
+}
+
+async function postJson(path, body) {
+  const errors = [];
+  for (const url of apiUrlCandidates(path)) {
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      errors.push(`${url}\n${error.message}`);
+      continue;
+    }
+
+    if (!response.ok) {
+      const responseBody = await response.text();
+      throw new Error(`API вернул ${response.status} для ${url}\n\n${responseBody.slice(0, 1000)}`);
     }
 
     const payload = await response.json();
@@ -667,6 +710,115 @@ function renderPlanFact(planFact) {
   els.planMeta.textContent = `${scopeText} · ${groups.length} строк${planPeriodText}`;
 }
 
+function renderReviewFactEditor(data) {
+  reviewFactRows = data?.rows || [];
+  const totalValue = data?.total_value || 0;
+  els.reviewFactMeta.textContent = `${reviewFactRows.length} администраторов · ${formatNumber(totalValue)} отзывов`;
+
+  if (!reviewFactRows.length) {
+    els.reviewFactEditor.innerHTML = '<div class="empty compact">Нет активных администраторов</div>';
+    els.reviewFactSave.disabled = true;
+    return;
+  }
+
+  els.reviewFactSave.disabled = false;
+  els.reviewFactEditor.innerHTML = `
+    <div class="table-scroll review-fact-scroll">
+      <table class="review-fact-table">
+        <thead>
+          <tr>
+            <th>Филиал</th>
+            <th>Администратор</th>
+            <th class="number">Отзывы факт</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${reviewFactRows
+            .map(
+              (row) => `
+                <tr>
+                  <td>${escapeHtml(row.company_title || `Филиал ${row.company_id}`)}</td>
+                  <td>${escapeHtml(row.staff_name)}</td>
+                  <td class="number">
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      inputmode="numeric"
+                      data-company-id="${escapeHtml(row.company_id)}"
+                      data-staff-id="${escapeHtml(row.staff_id)}"
+                      value="${escapeHtml(formatInputNumber(row.value))}"
+                    />
+                  </td>
+                </tr>
+              `,
+            )
+            .join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function loadReviewFactEditor() {
+  const filter = filterEls.plan;
+  const payload = await fetchJson('/dashboard/plan/reviews_fact', {
+    start_date: filter.start.value,
+    end_date: filter.end.value,
+    company_id: filter.branch.value,
+  });
+  renderReviewFactEditor(payload.data);
+}
+
+function reviewFactPayload() {
+  const filter = filterEls.plan;
+  const items = [...els.reviewFactEditor.querySelectorAll('input[data-staff-id]')].map((input) => {
+    const rawValue = input.value.trim().replace(',', '.');
+    if (rawValue === '') {
+      return {
+        company_id: Number(input.dataset.companyId),
+        staff_id: Number(input.dataset.staffId),
+        value: null,
+      };
+    }
+    const value = Number(rawValue);
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error('Отзывы факт должны быть неотрицательным числом');
+    }
+    return {
+      company_id: Number(input.dataset.companyId),
+      staff_id: Number(input.dataset.staffId),
+      value,
+    };
+  });
+
+  return {
+    start_date: filter.start.value,
+    end_date: filter.end.value,
+    company_id: filter.branch.value ? Number(filter.branch.value) : null,
+    items,
+  };
+}
+
+async function saveReviewFactEditor() {
+  clearError();
+  els.reviewFactSave.disabled = true;
+  els.reviewFactSave.textContent = 'Сохранение';
+  setApiState('API: сохранение', 'warn');
+
+  try {
+    const payload = await postJson('/dashboard/plan/reviews_fact', reviewFactPayload());
+    renderReviewFactEditor(payload.data);
+    await loadPlanFact();
+    setApiState('API: подключен', 'ok');
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    els.reviewFactSave.textContent = 'Сохранить факт';
+    els.reviewFactSave.disabled = !reviewFactRows.length;
+  }
+}
+
 function renderBundle(bundle) {
   const {
     summary,
@@ -788,6 +940,7 @@ async function loadPlanFact() {
   try {
     const payload = await fetchJson('/dashboard/widget/plan_fact', filterParams(filter));
     renderPlanFact(payload.data);
+    await loadReviewFactEditor();
     setApiState('API: подключен', 'ok');
     await loadSyncStatus();
   } catch (error) {
@@ -846,6 +999,7 @@ filterEls.plan.branch.addEventListener('change', async () => {
   await loadPlanFact();
 });
 filterEls.plan.staff.addEventListener('change', () => loadPlanFact());
+els.reviewFactSave.addEventListener('click', () => saveReviewFactEditor());
 
 window.addEventListener('hashchange', async () => {
   const nextView = viewFromHash();

@@ -531,6 +531,34 @@ class PlanMetric(Base):
     )
 
 
+class ManualFactMetric(Base):
+    """Manually entered fact values for metrics unavailable from YClients."""
+
+    __tablename__ = 'manual_fact_metrics'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    period_start = Column(Date, nullable=False, index=True)
+    period_end = Column(Date, nullable=False, index=True)
+    company_id = Column(Integer, ForeignKey('companies.id'), nullable=False, index=True)
+    staff_id = Column(Integer, ForeignKey('staff.id'), nullable=False, index=True)
+    metric_code = Column(String, nullable=False, index=True)
+    value = Column(Float, nullable=False)
+    source = Column(String, default='dashboard')
+    updated_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        Index(
+            'uq_manual_fact_metric_period_company_staff_metric',
+            'period_start',
+            'period_end',
+            'company_id',
+            'staff_id',
+            'metric_code',
+            unique=True,
+        ),
+    )
+
+
 class PortalAccount(Base):
     """Logical owner account for the product portal (future multi-tenant)."""
 

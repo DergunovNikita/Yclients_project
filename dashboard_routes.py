@@ -9,14 +9,17 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import Response
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import SYNC_API_TOKEN
 from dashboard_service import (
     fetch_branches,
     fetch_extra_services,
+    fetch_manual_review_facts,
     fetch_plan_fact,
     fetch_revenue_daily,
+    save_manual_review_facts,
     fetch_staff,
     fetch_staff_directory,
     fetch_summary,
@@ -28,6 +31,19 @@ from sync_jobs import SyncJobService
 from sync_orchestrator import get_sync_status
 
 router = APIRouter()
+
+
+class ManualReviewFactItem(BaseModel):
+    company_id: int
+    staff_id: int
+    value: float | None = None
+
+
+class ManualReviewFactsPayload(BaseModel):
+    start_date: date
+    end_date: date
+    company_id: int | None = None
+    items: list[ManualReviewFactItem]
 
 
 def _parse_range(start: date, end: date) -> tuple[date, date]:
@@ -153,6 +169,36 @@ async def dashboard_widget_plan_fact(
 ):
     start, end = _parse_range(start_date, end_date)
     return {'success': True, 'data': await fetch_plan_fact(db, start, end, company_id, staff_id)}
+
+
+@router.get('/plan/reviews_fact')
+async def dashboard_plan_reviews_fact(
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    company_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_async_db),
+):
+    start, end = _parse_range(start_date, end_date)
+    return {'success': True, 'data': await fetch_manual_review_facts(db, start, end, company_id)}
+
+
+@router.post('/plan/reviews_fact')
+async def dashboard_plan_reviews_fact_save(
+    payload: ManualReviewFactsPayload,
+    db: AsyncSession = Depends(get_async_db),
+):
+    start, end = _parse_range(payload.start_date, payload.end_date)
+    try:
+        data = await save_manual_review_facts(
+            db,
+            start,
+            end,
+            payload.company_id,
+            [item.model_dump() for item in payload.items],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
 
 
 @router.post('/plan/sync')

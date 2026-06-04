@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 
+REVIEWS_QTY_CODE = 'reviews_qty'
+
 PLAN_FACT_METRICS: tuple[dict[str, str], ...] = (
     {'code': 'revenue', 'label': 'Выручка', 'format': 'money'},
     {'code': 'avg_check_total', 'label': 'СЧ общий', 'format': 'money'},
@@ -18,6 +20,7 @@ PLAN_FACT_METRICS: tuple[dict[str, str], ...] = (
     {'code': 'opz_qty', 'label': 'ОПЗ, шт', 'format': 'number'},
     {'code': 'opz_pct', 'label': 'ОПЗ,%', 'format': 'percent'},
     {'code': 'extra_services_pct', 'label': '% доп.услуг', 'format': 'percent'},
+    {'code': REVIEWS_QTY_CODE, 'label': 'Отзывы', 'format': 'number'},
 )
 
 RAW_PLAN_FACT_CODES = {
@@ -30,9 +33,14 @@ RAW_PLAN_FACT_CODES = {
     'cosmo_qty',
     'cosmo_sum',
     'opz_qty',
+    REVIEWS_QTY_CODE,
 }
 
-BARBER_METRIC_CODES = tuple(metric['code'] for metric in PLAN_FACT_METRICS)
+BARBER_METRIC_CODES = tuple(
+    metric['code']
+    for metric in PLAN_FACT_METRICS
+    if metric['code'] != REVIEWS_QTY_CODE
+)
 ADMIN_METRIC_CODES = (
     'revenue',
     'avg_check_total',
@@ -41,6 +49,7 @@ ADMIN_METRIC_CODES = (
     'cosmo_sum',
     'opz_qty',
     'opz_pct',
+    REVIEWS_QTY_CODE,
 )
 
 STAFF_CATEGORY_METRIC_CODES = {

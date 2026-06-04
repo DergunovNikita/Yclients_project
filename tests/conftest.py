@@ -17,6 +17,7 @@ from models import (
     GoodCategoryCatalog,
     GoodTransaction,
     Group,
+    ManualFactMetric,
     PlanMetric,
     Service,
     ServiceCatalog,
@@ -62,6 +63,7 @@ PUBLIC_TABLES = [
     Comment.__table__,
     StaffSchedule.__table__,
     PlanMetric.__table__,
+    ManualFactMetric.__table__,
 ]
 
 

@@ -25,6 +25,7 @@ from models import (
     FinancialTransaction,
     GoodTransaction,
     Group,
+    ManualFactMetric,
     PlanMetric,
     Service,
     ServiceCatalog,
@@ -912,7 +913,8 @@ async def test_dashboard_plan_fact_uses_plan_and_fact_formulas(async_session):
     assert cells['camouflage_qty']['fact'] == 2.0
     assert cells['cosmo_qty']['fact'] == 3.0
     assert cells['cosmo_sum']['fact'] == 1500.0
-    assert 'reviews_qty' not in cells
+    assert cells['reviews_qty']['plan'] is None
+    assert cells['reviews_qty']['fact'] == 0.0
     assert cells['opz_qty']['fact'] == 1.0
     assert cells['opz_pct']['fact'] == 50.0
     assert cells['extra_services_pct']['fact'] == 150.0
@@ -1021,6 +1023,103 @@ async def test_dashboard_plan_fact_lists_staff_plans_for_each_branch(async_sessi
     company2_groups = r_company2.json()['data']['groups']
     assert [group['title'] for group in company2_groups] == ['Admin 2']
     assert company2_groups[0]['category'] == 'administrator'
+
+
+@pytest.mark.asyncio
+async def test_manual_review_facts_feed_plan_fact_for_administrators(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Barber', position='Барбер', company_id=1, fired=0))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0, user_id=500))
+    now = datetime(2025, 1, 1, 0, 0, 0)
+    async_session.add_all([
+        PlanMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            metric_code='reviews_qty',
+            value=10.0,
+            updated_at=now,
+        ),
+        PlanMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=2,
+            staff_category='administrator',
+            metric_code='reviews_qty',
+            value=10.0,
+            updated_at=now,
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        save_response = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 7}],
+            },
+        )
+        editor_response = await client.get(
+            '/dashboard/plan/reviews_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+        plan_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+        network_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+    app.dependency_overrides.clear()
+
+    assert save_response.status_code == 200
+    assert editor_response.status_code == 200
+    editor_rows = editor_response.json()['data']['rows']
+    assert [(row['staff_id'], row['value']) for row in editor_rows] == [(2, 7.0)]
+
+    saved_rows = (
+        await async_session.execute(
+            select(ManualFactMetric).where(
+                ManualFactMetric.period_start == date(2025, 1, 1),
+                ManualFactMetric.period_end == date(2025, 1, 31),
+                ManualFactMetric.company_id == 1,
+                ManualFactMetric.staff_id == 2,
+                ManualFactMetric.metric_code == 'reviews_qty',
+            )
+        )
+    ).scalars().all()
+    assert len(saved_rows) == 1
+    assert saved_rows[0].value == 7.0
+
+    assert plan_response.status_code == 200
+    plan_data = plan_response.json()['data']
+    parent_cells = {cell['code']: cell for cell in plan_data['parent_group']['metrics']}
+    assert parent_cells['reviews_qty']['plan'] == 10.0
+    assert parent_cells['reviews_qty']['fact'] == 7.0
+
+    admin_group = next(group for group in plan_data['groups'] if group['category'] == 'administrator')
+    admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
+    assert admin_cells['reviews_qty']['plan'] == 10.0
+    assert admin_cells['reviews_qty']['fact'] == 7.0
+    assert admin_cells['reviews_qty']['completion_pct'] == 70.0
+
+    assert network_response.status_code == 200
+    network_groups = network_response.json()['data']['groups']
+    network_cells = {cell['code']: cell for cell in network_groups[0]['metrics']}
+    branch_cells = {cell['code']: cell for cell in network_groups[1]['metrics']}
+    assert network_cells['reviews_qty']['fact'] == 7.0
+    assert branch_cells['reviews_qty']['fact'] == 7.0
 
 
 @pytest.mark.asyncio

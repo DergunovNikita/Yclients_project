@@ -174,6 +174,7 @@ async def root():
             "/dashboard/staff_directory.csv": "CSV справочник сотрудников для Google Sheets",
             "/dashboard/bundle": "Сводка дашборда за период (JSON)",
             "/dashboard/widget/plan_fact": "План/факт по филиалам за период",
+            "/dashboard/plan/reviews_fact": "Ручной факт по отзывам администраторов",
             "/dashboard/plan/sync": "Импорт плана из Google Sheets CSV",
             "/dashboard/widget/sync_status": "Статус синка для UI",
         },
