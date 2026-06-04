@@ -441,6 +441,54 @@
       margin-top: 12px;
     }
 
+    .plan-settings-toolbar {
+      grid-template-columns: minmax(180px, 220px) auto auto auto 1fr;
+    }
+
+    .plan-settings-status {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      min-height: 40px;
+      color: #64748b;
+      font-size: 13px;
+      text-align: right;
+    }
+
+    .plan-settings-dirty {
+      display: none;
+      color: #9a3412;
+      font-weight: 700;
+    }
+
+    .plan-settings-dirty.visible {
+      display: inline;
+    }
+
+    .plan-settings-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .plan-settings-table input {
+      min-width: 86px;
+      text-align: right;
+    }
+
+    .plan-settings-table .readonly {
+      color: #64748b;
+      white-space: nowrap;
+    }
+
+    button.secondary {
+      border: 1px solid #cbd5e1;
+      background: #ffffff;
+      color: #334155;
+    }
+
     .empty {
       min-height: 160px;
       display: grid;
@@ -469,6 +517,10 @@
         grid-template-columns: 1fr 1fr;
       }
 
+      .plan-settings-toolbar {
+        grid-template-columns: 1fr 1fr;
+      }
+
       .toolbar button {
         grid-column: 1 / -1;
       }
@@ -493,6 +545,7 @@
       }
 
       .toolbar,
+      .plan-settings-toolbar,
       .kpi,
       .visit-metrics {
         grid-template-columns: 1fr;
@@ -521,6 +574,8 @@
     <nav class="tabs" aria-label="Разделы дашборда">
       <a class="tab active" href="#overview" data-view-link="overview">Обзор</a>
       <a class="tab" href="#plan-fact" data-view-link="plan">План / факт</a>
+      <a class="tab" href="#plan-settings" data-view-link="planSettings">Установка планов</a>
+      <a class="tab" href="#review-facts" data-view-link="reviewFacts">Отзывы факт</a>
     </nav>
 
     <div class="alert" id="error"></div>
@@ -621,6 +676,76 @@
         <button type="button" id="plan-load">Обновить</button>
       </section>
 
+      <div class="panel wide">
+        <div class="panel-title">
+          <h2>План / факт</h2>
+          <span class="meta" id="plan-meta"></span>
+        </div>
+        <div id="plan-fact-table"></div>
+      </div>
+    </section>
+
+    <section class="view" id="plan-settings-view" data-view="planSettings">
+      <section class="toolbar plan-settings-toolbar" aria-label="Фильтры установки планов">
+        <label>
+          Месяц
+          <input type="month" id="plan-settings-month" />
+        </label>
+        <button type="button" id="plan-settings-load">Загрузить</button>
+        <button type="button" class="secondary" id="plan-settings-copy">Скопировать прошлый месяц</button>
+        <button type="button" class="secondary" id="plan-settings-reset">Сбросить изменения</button>
+        <div class="plan-settings-status">
+          <span id="plan-settings-dirty" class="plan-settings-dirty">Есть несохранённые изменения</span>
+          <span id="plan-settings-saved">Последнее сохранение: нет</span>
+        </div>
+      </section>
+
+      <div class="panel wide">
+        <div class="panel-title">
+          <h2>Настройки филиалов</h2>
+          <span class="meta" id="plan-settings-branch-meta"></span>
+        </div>
+        <div id="plan-settings-branches"></div>
+      </div>
+
+      <div class="panel wide review-fact-panel">
+        <div class="panel-title">
+          <h2>Планы сотрудников</h2>
+          <span class="meta" id="plan-settings-staff-meta"></span>
+        </div>
+        <div id="plan-settings-staff"></div>
+        <div class="plan-settings-actions">
+          <a class="tab" href="#review-facts">Отзывы факт</a>
+          <button type="button" id="plan-settings-save">Сохранить</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="review-facts-view" data-view="reviewFacts">
+      <section class="toolbar" aria-label="Фильтры факта отзывов">
+        <label>
+          С
+          <input type="date" id="review-fact-start" />
+        </label>
+        <label>
+          По
+          <input type="date" id="review-fact-end" />
+        </label>
+        <label>
+          Филиал
+          <select id="review-fact-branch">
+            <option value="">Все филиалы</option>
+          </select>
+        </label>
+        <label>
+          Сотрудник
+          <select id="review-fact-staff">
+            <option value="">Все сотрудники</option>
+          </select>
+        </label>
+        <button type="button" id="review-fact-load">Обновить</button>
+      </section>
+
       <div class="panel wide review-fact-panel">
         <div class="panel-title">
           <h2>Отзывы факт</h2>
@@ -630,14 +755,6 @@
         <div class="review-fact-actions">
           <button type="button" id="review-fact-save">Сохранить факт</button>
         </div>
-      </div>
-
-      <div class="panel wide">
-        <div class="panel-title">
-          <h2>План / факт</h2>
-          <span class="meta" id="plan-meta"></span>
-        </div>
-        <div id="plan-fact-table"></div>
       </div>
     </section>
   </main>

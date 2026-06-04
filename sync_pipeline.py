@@ -1760,7 +1760,7 @@ def execute_sync(mode: str = 'incremental', end_date: date | None = None):
             ("Склады", sync_storages, {}),
             ("Категории товаров", sync_good_categories, {}),
             ("Товары", sync_goods, {}),
-            ("Записи", sync_records, {'start_date': sd, 'end_date': ed}),
+            ("Записи", sync_records, {'start_date': sd, 'end_date': schedule_end.isoformat()}),
             (
                 "Финансовые транзакции",
                 sync_financial_transactions,

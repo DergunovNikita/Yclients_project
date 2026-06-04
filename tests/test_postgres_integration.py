@@ -47,6 +47,30 @@ def test_migration_creates_sync_jobs_and_typed_columns(pg_session_factory):
             WHERE table_schema = 'public' AND table_name = 'appointments' AND column_name = 'date'
         """)).scalar_one()
         assert result == 'date'
+
+        plan_settings_tables = session.execute(text("""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name IN ('plan_branch_settings', 'plan_staff_inputs')
+            ORDER BY table_name
+        """)).scalars().all()
+        assert plan_settings_tables == ['plan_branch_settings', 'plan_staff_inputs']
+
+        plan_settings_indexes = session.execute(text("""
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND indexname IN (
+                'uq_plan_branch_setting_period_company',
+                'uq_plan_staff_input_period_company_staff'
+              )
+            ORDER BY indexname
+        """)).scalars().all()
+        assert plan_settings_indexes == [
+            'uq_plan_branch_setting_period_company',
+            'uq_plan_staff_input_period_company_staff',
+        ]
     finally:
         session.close()
 

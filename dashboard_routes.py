@@ -6,6 +6,7 @@ import asyncio
 import csv
 import io
 from datetime import date
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import Response
@@ -18,7 +19,9 @@ from dashboard_service import (
     fetch_extra_services,
     fetch_manual_review_facts,
     fetch_plan_fact,
+    fetch_plan_settings,
     fetch_revenue_daily,
+    save_plan_settings,
     save_manual_review_facts,
     fetch_staff,
     fetch_staff_directory,
@@ -43,7 +46,35 @@ class ManualReviewFactsPayload(BaseModel):
     start_date: date
     end_date: date
     company_id: int | None = None
+    staff_id: int | None = None
     items: list[ManualReviewFactItem]
+
+
+class PlanSettingsBranchPayload(BaseModel):
+    company_id: int
+    wax_pct: Any = None
+    head_care_pct: Any = None
+    face_care_pct: Any = None
+    camouflage_pct: Any = None
+    cosmo_pct: Any = None
+    opz_pct: Any = None
+    cosmo_price: Any = None
+
+
+class PlanSettingsStaffPayload(BaseModel):
+    company_id: int
+    staff_id: int
+    staff_category: str
+    clients: Any = None
+    avg_check_total: Any = None
+    reviews_qty: Any = None
+    cosmo_qty: Any = None
+
+
+class PlanSettingsPayload(BaseModel):
+    month: str
+    branches: list[PlanSettingsBranchPayload]
+    staff: list[PlanSettingsStaffPayload]
 
 
 def _parse_range(start: date, end: date) -> tuple[date, date]:
@@ -171,15 +202,46 @@ async def dashboard_widget_plan_fact(
     return {'success': True, 'data': await fetch_plan_fact(db, start, end, company_id, staff_id)}
 
 
+@router.get('/plan/settings')
+async def dashboard_plan_settings(
+    month: str = Query(..., description='Plan settings month in YYYY-MM format'),
+    copy_from: str | None = Query(None, description='Optional source month in YYYY-MM format'),
+    db: AsyncSession = Depends(get_async_db),
+):
+    try:
+        data = await fetch_plan_settings(db, month, copy_from)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
+
+
+@router.post('/plan/settings')
+async def dashboard_plan_settings_save(
+    payload: PlanSettingsPayload,
+    db: AsyncSession = Depends(get_async_db),
+):
+    try:
+        data = await save_plan_settings(
+            db,
+            payload.month,
+            [item.model_dump() for item in payload.branches],
+            [item.model_dump() for item in payload.staff],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
+
+
 @router.get('/plan/reviews_fact')
 async def dashboard_plan_reviews_fact(
     start_date: date = Query(...),
     end_date: date = Query(...),
     company_id: int | None = Query(None),
+    staff_id: int | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
 ):
     start, end = _parse_range(start_date, end_date)
-    return {'success': True, 'data': await fetch_manual_review_facts(db, start, end, company_id)}
+    return {'success': True, 'data': await fetch_manual_review_facts(db, start, end, company_id, staff_id)}
 
 
 @router.post('/plan/reviews_fact')
@@ -194,6 +256,7 @@ async def dashboard_plan_reviews_fact_save(
             start,
             end,
             payload.company_id,
+            payload.staff_id,
             [item.model_dump() for item in payload.items],
         )
     except ValueError as exc:

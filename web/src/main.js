@@ -26,7 +26,20 @@ const els = {
   servicesChart: document.getElementById('services-chart'),
   overviewView: document.getElementById('overview-view'),
   planView: document.getElementById('plan-view'),
+  planSettingsView: document.getElementById('plan-settings-view'),
+  reviewFactsView: document.getElementById('review-facts-view'),
   viewLinks: [...document.querySelectorAll('[data-view-link]')],
+  planSettingsMonth: document.getElementById('plan-settings-month'),
+  planSettingsLoad: document.getElementById('plan-settings-load'),
+  planSettingsCopy: document.getElementById('plan-settings-copy'),
+  planSettingsReset: document.getElementById('plan-settings-reset'),
+  planSettingsSave: document.getElementById('plan-settings-save'),
+  planSettingsDirty: document.getElementById('plan-settings-dirty'),
+  planSettingsSaved: document.getElementById('plan-settings-saved'),
+  planSettingsBranchMeta: document.getElementById('plan-settings-branch-meta'),
+  planSettingsStaffMeta: document.getElementById('plan-settings-staff-meta'),
+  planSettingsBranches: document.getElementById('plan-settings-branches'),
+  planSettingsStaff: document.getElementById('plan-settings-staff'),
 };
 
 const filterEls = {
@@ -44,6 +57,13 @@ const filterEls = {
     staff: document.getElementById('plan-staff'),
     load: document.getElementById('plan-load'),
   },
+  reviewFacts: {
+    start: document.getElementById('review-fact-start'),
+    end: document.getElementById('review-fact-end'),
+    branch: document.getElementById('review-fact-branch'),
+    staff: document.getElementById('review-fact-staff'),
+    load: document.getElementById('review-fact-load'),
+  },
 };
 
 const charts = {
@@ -55,6 +75,12 @@ const charts = {
 let activeView = 'overview';
 let branchOptions = [];
 let reviewFactRows = [];
+let planSettingsData = null;
+let planSettingsSavedData = null;
+let planSettingsSavedSnapshot = '';
+let planSettingsDirty = false;
+let planSettingsLoadedMonth = '';
+let allowDirtyPlanSettingsNavigation = false;
 
 const ADMIN_HIDDEN_METRIC_CODES = new Set(['revenue', 'avg_check_total']);
 
@@ -225,6 +251,17 @@ function defaultDates(filter) {
   const start = new Date(now.getFullYear(), now.getMonth(), 1);
   filter.end.value = formatInputDate(now);
   filter.start.value = formatInputDate(start);
+}
+
+function currentMonthValue() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function previousMonthValue(month) {
+  const [year, monthNumber] = String(month || currentMonthValue()).split('-').map(Number);
+  const date = new Date(year, monthNumber - 2, 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 }
 
 function formatInputDate(date) {
@@ -710,6 +747,238 @@ function renderPlanFact(planFact) {
   els.planMeta.textContent = `${scopeText} · ${groups.length} строк${planPeriodText}`;
 }
 
+function renderPlanSettingInput(scope, row, field) {
+  return `
+    <input
+      type="text"
+      inputmode="decimal"
+      data-plan-${scope}
+      data-company-id="${escapeHtml(row.company_id)}"
+      ${row.staff_id ? `data-staff-id="${escapeHtml(row.staff_id)}"` : ''}
+      data-field="${escapeHtml(field)}"
+      value="${escapeHtml(formatInputNumber(row[field]))}"
+    />
+  `;
+}
+
+function renderPlanSettingsBranches(rows) {
+  if (!rows.length) {
+    els.planSettingsBranches.innerHTML = '<div class="empty compact">Нет филиалов</div>';
+    return;
+  }
+  const fields = [
+    ['wax_pct', 'Воск, %'],
+    ['head_care_pct', 'Уход голова, %'],
+    ['face_care_pct', 'Уход лицо, %'],
+    ['camouflage_pct', 'Камуфляж, %'],
+    ['cosmo_pct', 'Космо, %'],
+    ['opz_pct', 'ОПЗ, %'],
+    ['cosmo_price', 'Цена космо'],
+  ];
+  els.planSettingsBranchMeta.textContent = `${rows.length} филиалов`;
+  els.planSettingsBranches.innerHTML = `
+    <div class="table-scroll">
+      <table class="plan-settings-table">
+        <thead>
+          <tr>
+            <th>Филиал</th>
+            ${fields.map(([, label]) => `<th class="number">${escapeHtml(label)}</th>`).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          ${rows
+            .map((row) => `
+              <tr>
+                <td>${escapeHtml(row.company_title || `Филиал ${row.company_id}`)}</td>
+                ${fields.map(([field]) => `<td class="number">${renderPlanSettingInput('branch', row, field)}</td>`).join('')}
+              </tr>
+            `)
+            .join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderPlanSettingsStaffSection(title, rows, fields) {
+  if (!rows.length) return '';
+  return `
+    <section class="plan-section">
+      <div class="plan-section-title">
+        <h3>${escapeHtml(title)}</h3>
+        <span class="meta">${rows.length} сотрудников</span>
+      </div>
+      <div class="table-scroll">
+        <table class="plan-settings-table">
+          <thead>
+            <tr>
+              <th>Филиал</th>
+              <th>Имя</th>
+              <th class="number">staff_id</th>
+              <th class="number">user_id</th>
+              ${fields.map(([, label]) => `<th class="number">${escapeHtml(label)}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map((row) => `
+                <tr>
+                  <td>${escapeHtml(row.company_title || `Филиал ${row.company_id}`)}</td>
+                  <td>${escapeHtml(row.staff_name || `Сотрудник ${row.staff_id}`)}</td>
+                  <td class="number readonly">${escapeHtml(row.staff_id)}</td>
+                  <td class="number readonly">${escapeHtml(row.user_id || '')}</td>
+                  ${fields.map(([field]) => `<td class="number">${renderPlanSettingInput('staff', row, field)}</td>`).join('')}
+                </tr>
+              `)
+              .join('')}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function renderPlanSettingsStaff(rows) {
+  const barbers = rows.filter((row) => row.staff_category === 'barber');
+  const admins = rows.filter((row) => row.staff_category === 'administrator');
+  els.planSettingsStaffMeta.textContent = `${barbers.length} барберов · ${admins.length} администраторов`;
+  els.planSettingsStaff.innerHTML = [
+    renderPlanSettingsStaffSection('Барберы', barbers, [
+      ['clients', 'Клиентов'],
+      ['avg_check_total', 'СЧ общий'],
+    ]),
+    renderPlanSettingsStaffSection('Администраторы', admins, [
+      ['clients', 'Клиентов'],
+      ['reviews_qty', 'Отзывы'],
+      ['cosmo_qty', 'Космо шт'],
+    ]),
+  ].join('') || '<div class="empty compact">Нет активных сотрудников</div>';
+}
+
+function setPlanSettingsDirty(isDirty) {
+  planSettingsDirty = isDirty;
+  els.planSettingsDirty.classList.toggle('visible', isDirty);
+  els.planSettingsSave.disabled = !planSettingsData;
+  els.planSettingsReset.disabled = !isDirty || !planSettingsSavedData;
+}
+
+function planSettingsInputValue(selector) {
+  const input = document.querySelector(selector);
+  const value = input?.value.trim() || '';
+  return value === '' ? null : value;
+}
+
+function collectPlanSettingsPayload() {
+  const branches = (planSettingsData?.branches || []).map((row) => ({
+    company_id: Number(row.company_id),
+    wax_pct: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="wax_pct"]`),
+    head_care_pct: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="head_care_pct"]`),
+    face_care_pct: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="face_care_pct"]`),
+    camouflage_pct: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="camouflage_pct"]`),
+    cosmo_pct: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="cosmo_pct"]`),
+    opz_pct: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="opz_pct"]`),
+    cosmo_price: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="cosmo_price"]`),
+  }));
+  const staff = (planSettingsData?.staff || []).map((row) => ({
+    company_id: Number(row.company_id),
+    staff_id: Number(row.staff_id),
+    staff_category: row.staff_category,
+    clients: planSettingsInputValue(`input[data-plan-staff][data-staff-id="${row.staff_id}"][data-field="clients"]`),
+    avg_check_total: planSettingsInputValue(`input[data-plan-staff][data-staff-id="${row.staff_id}"][data-field="avg_check_total"]`),
+    reviews_qty: planSettingsInputValue(`input[data-plan-staff][data-staff-id="${row.staff_id}"][data-field="reviews_qty"]`),
+    cosmo_qty: planSettingsInputValue(`input[data-plan-staff][data-staff-id="${row.staff_id}"][data-field="cosmo_qty"]`),
+  }));
+  return {
+    month: els.planSettingsMonth.value,
+    branches,
+    staff,
+  };
+}
+
+function updatePlanSettingsDirtyFromForm() {
+  if (!planSettingsData) return;
+  setPlanSettingsDirty(JSON.stringify(collectPlanSettingsPayload()) !== planSettingsSavedSnapshot);
+}
+
+function renderPlanSettings(data, { updateSnapshot = true, dirty = false } = {}) {
+  planSettingsData = data;
+  els.planSettingsMonth.value = data.month;
+  planSettingsLoadedMonth = data.month;
+  renderPlanSettingsBranches(data.branches || []);
+  renderPlanSettingsStaff(data.staff || []);
+  els.planSettingsSaved.textContent = data.last_saved_at
+    ? `Последнее сохранение: ${formatMoscowDateTime(data.last_saved_at)}`
+    : 'Последнее сохранение: нет';
+
+  if (updateSnapshot) {
+    planSettingsSavedData = JSON.parse(JSON.stringify(data));
+    planSettingsSavedSnapshot = JSON.stringify(collectPlanSettingsPayload());
+    setPlanSettingsDirty(false);
+  } else {
+    setPlanSettingsDirty(dirty);
+  }
+}
+
+function confirmDiscardPlanSettings() {
+  return !planSettingsDirty || window.confirm('Есть несохранённые изменения. Перейти без сохранения?');
+}
+
+function setPlanSettingsLoading(isLoading) {
+  els.planSettingsLoad.disabled = isLoading;
+  els.planSettingsCopy.disabled = isLoading;
+  els.planSettingsSave.disabled = isLoading || !planSettingsData;
+  els.planSettingsReset.disabled = isLoading || !planSettingsDirty || !planSettingsSavedData;
+  els.planSettingsLoad.textContent = isLoading ? 'Загрузка' : 'Загрузить';
+  els.planSettingsSave.textContent = isLoading ? 'Сохранение' : 'Сохранить';
+}
+
+async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom = null, dirty = false } = {}) {
+  clearError();
+  setPlanSettingsLoading(true);
+  setApiState('API: загрузка', 'warn');
+  try {
+    const params = { month };
+    if (copyFrom) params.copy_from = copyFrom;
+    const payload = await fetchJson('/dashboard/plan/settings', params);
+    renderPlanSettings(payload.data, { updateSnapshot: !copyFrom, dirty });
+    setApiState('API: подключен', 'ok');
+    await loadSyncStatus();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setPlanSettingsLoading(false);
+  }
+}
+
+async function savePlanSettings() {
+  clearError();
+  setPlanSettingsLoading(true);
+  setApiState('API: сохранение', 'warn');
+  try {
+    const payload = await postJson('/dashboard/plan/settings', collectPlanSettingsPayload());
+    renderPlanSettings(payload.data);
+    setApiState('API: подключен', 'ok');
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setPlanSettingsLoading(false);
+  }
+}
+
+async function copyPreviousPlanSettings() {
+  if (!confirmDiscardPlanSettings()) return;
+  const month = els.planSettingsMonth.value || currentMonthValue();
+  await loadPlanSettings({ month, copyFrom: previousMonthValue(month), dirty: true });
+}
+
+async function reloadPlanSettingsMonth() {
+  if (!confirmDiscardPlanSettings()) {
+    els.planSettingsMonth.value = planSettingsLoadedMonth || currentMonthValue();
+    return;
+  }
+  await loadPlanSettings({ month: els.planSettingsMonth.value || currentMonthValue() });
+}
+
 function renderReviewFactEditor(data) {
   reviewFactRows = data?.rows || [];
   const totalValue = data?.total_value || 0;
@@ -761,17 +1030,13 @@ function renderReviewFactEditor(data) {
 }
 
 async function loadReviewFactEditor() {
-  const filter = filterEls.plan;
-  const payload = await fetchJson('/dashboard/plan/reviews_fact', {
-    start_date: filter.start.value,
-    end_date: filter.end.value,
-    company_id: filter.branch.value,
-  });
+  const filter = filterEls.reviewFacts;
+  const payload = await fetchJson('/dashboard/plan/reviews_fact', filterParams(filter));
   renderReviewFactEditor(payload.data);
 }
 
 function reviewFactPayload() {
-  const filter = filterEls.plan;
+  const filter = filterEls.reviewFacts;
   const items = [...els.reviewFactEditor.querySelectorAll('input[data-staff-id]')].map((input) => {
     const rawValue = input.value.trim().replace(',', '.');
     if (rawValue === '') {
@@ -796,6 +1061,7 @@ function reviewFactPayload() {
     start_date: filter.start.value,
     end_date: filter.end.value,
     company_id: filter.branch.value ? Number(filter.branch.value) : null,
+    staff_id: filter.staff.value ? Number(filter.staff.value) : null,
     items,
   };
 }
@@ -809,7 +1075,6 @@ async function saveReviewFactEditor() {
   try {
     const payload = await postJson('/dashboard/plan/reviews_fact', reviewFactPayload());
     renderReviewFactEditor(payload.data);
-    await loadPlanFact();
     setApiState('API: подключен', 'ok');
   } catch (error) {
     showError(error.message);
@@ -871,7 +1136,8 @@ async function loadStaff(filter) {
       company_id: filter.branch.value,
     });
     const staffOptions = payload.data || [];
-    filter.staff.innerHTML = '<option value="">Все работники</option>';
+    const defaultLabel = filter === filterEls.reviewFacts ? 'Все сотрудники' : 'Все работники';
+    filter.staff.innerHTML = `<option value="">${defaultLabel}</option>`;
     staffOptions.forEach((staff) => {
       const option = document.createElement('option');
       option.value = staff.id;
@@ -916,19 +1182,28 @@ async function loadSyncStatus() {
 }
 
 function viewFromHash() {
-  return window.location.hash === '#plan-fact' ? 'plan' : 'overview';
+  if (window.location.hash === '#plan-fact') return 'plan';
+  if (window.location.hash === '#plan-settings') return 'planSettings';
+  if (window.location.hash === '#review-facts') return 'reviewFacts';
+  return 'overview';
 }
 
 function setActiveView(view) {
   activeView = view;
   els.overviewView.classList.toggle('active', view === 'overview');
   els.planView.classList.toggle('active', view === 'plan');
+  els.planSettingsView.classList.toggle('active', view === 'planSettings');
+  els.reviewFactsView.classList.toggle('active', view === 'reviewFacts');
   els.viewLinks.forEach((link) => {
     link.classList.toggle('active', link.dataset.viewLink === view);
   });
-  els.periodLabel.textContent = view === 'plan'
-    ? 'План/факт по филиалам и сотрудникам'
-    : 'Метрики по филиалам и услугам';
+  const labels = {
+    overview: 'Метрики по филиалам и услугам',
+    plan: 'План/факт по филиалам и сотрудникам',
+    planSettings: 'Установка планов по месяцам',
+    reviewFacts: 'Ручной факт отзывов по администраторам',
+  };
+  els.periodLabel.textContent = labels[view] || labels.overview;
 }
 
 async function loadPlanFact() {
@@ -940,6 +1215,22 @@ async function loadPlanFact() {
   try {
     const payload = await fetchJson('/dashboard/widget/plan_fact', filterParams(filter));
     renderPlanFact(payload.data);
+    setApiState('API: подключен', 'ok');
+    await loadSyncStatus();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setFilterLoading(filter, false);
+  }
+}
+
+async function loadReviewFacts() {
+  const filter = filterEls.reviewFacts;
+  clearError();
+  setFilterLoading(filter, true);
+  setApiState('API: загрузка', 'warn');
+
+  try {
     await loadReviewFactEditor();
     setApiState('API: подключен', 'ok');
     await loadSyncStatus();
@@ -971,6 +1262,10 @@ async function loadDashboard() {
 async function loadCurrentView() {
   if (activeView === 'plan') {
     await loadPlanFact();
+  } else if (activeView === 'planSettings') {
+    await loadPlanSettings();
+  } else if (activeView === 'reviewFacts') {
+    await loadReviewFacts();
   } else {
     await loadDashboard();
   }
@@ -978,6 +1273,7 @@ async function loadCurrentView() {
 
 async function init() {
   Object.values(filterEls).forEach((filter) => defaultDates(filter));
+  els.planSettingsMonth.value = currentMonthValue();
   renderServicesTable([]);
   renderExtraServicesTable([]);
   await loadBranches();
@@ -999,12 +1295,55 @@ filterEls.plan.branch.addEventListener('change', async () => {
   await loadPlanFact();
 });
 filterEls.plan.staff.addEventListener('change', () => loadPlanFact());
+filterEls.reviewFacts.load.addEventListener('click', () => loadReviewFacts());
+filterEls.reviewFacts.branch.addEventListener('change', async () => {
+  await loadStaff(filterEls.reviewFacts);
+  await loadReviewFacts();
+});
+filterEls.reviewFacts.staff.addEventListener('change', () => loadReviewFacts());
 els.reviewFactSave.addEventListener('click', () => saveReviewFactEditor());
+els.planSettingsLoad.addEventListener('click', () => reloadPlanSettingsMonth());
+els.planSettingsMonth.addEventListener('change', () => reloadPlanSettingsMonth());
+els.planSettingsCopy.addEventListener('click', () => copyPreviousPlanSettings());
+els.planSettingsReset.addEventListener('click', () => {
+  if (planSettingsSavedData) {
+    renderPlanSettings(JSON.parse(JSON.stringify(planSettingsSavedData)));
+  }
+});
+els.planSettingsSave.addEventListener('click', () => savePlanSettings());
+els.planSettingsBranches.addEventListener('input', () => updatePlanSettingsDirtyFromForm());
+els.planSettingsStaff.addEventListener('input', () => updatePlanSettingsDirtyFromForm());
+
+document.querySelectorAll('a[href^="#"]').forEach((link) => {
+  link.addEventListener('click', (event) => {
+    const href = link.getAttribute('href');
+    if (!href || href === window.location.hash) return;
+    if (!confirmDiscardPlanSettings()) {
+      event.preventDefault();
+    } else if (planSettingsDirty) {
+      setPlanSettingsDirty(false);
+      allowDirtyPlanSettingsNavigation = true;
+    }
+  });
+});
 
 window.addEventListener('hashchange', async () => {
   const nextView = viewFromHash();
   if (nextView === activeView) return;
+  if (planSettingsDirty && activeView === 'planSettings' && nextView !== 'planSettings') {
+    if (!allowDirtyPlanSettingsNavigation && !confirmDiscardPlanSettings()) {
+      window.location.hash = '#plan-settings';
+      return;
+    }
+    setPlanSettingsDirty(false);
+  }
+  allowDirtyPlanSettingsNavigation = false;
   setActiveView(nextView);
   await loadCurrentView();
+});
+window.addEventListener('beforeunload', (event) => {
+  if (!planSettingsDirty) return;
+  event.preventDefault();
+  event.returnValue = '';
 });
 init();
