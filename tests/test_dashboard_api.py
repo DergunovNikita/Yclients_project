@@ -21,6 +21,7 @@ from api import app
 from models import (
     Appointment,
     Client,
+    Comment,
     Company,
     FinancialTransaction,
     GoodTransaction,
@@ -36,6 +37,210 @@ from models import (
     StaffSchedule,
     Transaction,
 )
+
+
+@pytest.mark.asyncio
+async def test_dashboard_reports_registry_contract(async_session):
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        r = await client.get('/dashboard/reports')
+    app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    data = r.json()['data']
+    assert len(data) == 71
+    by_id = {item['id']: item for item in data}
+    assert by_id['revenue_dynamics']['status'] == 'ready'
+    assert by_id['conversion_funnel']['status'] == 'source_missing'
+    assert by_id['nps_dashboard']['status'] == 'partial'
+    assert by_id['revenue_dynamics']['filters']['compare'] is True
+
+
+@pytest.mark.asyncio
+async def test_dashboard_report_data_ready_report_and_compare(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add(Client(id=1, name='Client', phone='+100', company_id=1))
+    async_session.add(Service(id=10, title='Cut', company_id=1))
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 12, 0, 0),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2024, 12, 10),
+            datetime=datetime(2024, 12, 10, 12, 0, 0),
+            attendance=1,
+        ),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Transaction(id=1, appointment_id=1, service_id=10, service_title='Cut', amount=1, company_id=1),
+        Transaction(id=2, appointment_id=2, service_id=10, service_title='Cut', amount=1, company_id=1),
+        FinancialTransaction(
+            id=1,
+            date=datetime(2025, 1, 10, 12, 0, 0),
+            amount=1200.0,
+            record_id=1,
+            sold_item_id=10,
+            sold_item_type='service',
+            master_id=1,
+            company_id=1,
+        ),
+        FinancialTransaction(
+            id=2,
+            date=datetime(2024, 12, 10, 12, 0, 0),
+            amount=800.0,
+            record_id=2,
+            sold_item_id=10,
+            sold_item_type='service',
+            master_id=1,
+            company_id=1,
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        r = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'revenue_dynamics',
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+                'granularity': 'month',
+                'compare_start_date': '2024-12-01',
+                'compare_end_date': '2024-12-31',
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    data = r.json()['data']
+    assert data['source_status'] == 'ready'
+    assert data['report_id'] == 'revenue_dynamics'
+    assert data['cards'][0]['value'] == 1200.0
+    assert data['comparison']['cards'][0]['value'] == 800.0
+    assert data['charts']
+    assert data['tables']
+
+
+@pytest.mark.asyncio
+async def test_dashboard_report_data_validates_request(async_session):
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        bad_granularity = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'revenue_dynamics',
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+                'granularity': 'quarter',
+            },
+        )
+        bad_report = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'missing', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+        bad_compare = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'revenue_dynamics',
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+                'compare_start_date': '2024-12-01',
+            },
+        )
+        bad_company = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'revenue_dynamics',
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+                'company_id': 999,
+            },
+        )
+        bad_staff = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'revenue_dynamics',
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+                'staff_id': 999,
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert bad_granularity.status_code == 400
+    assert bad_report.status_code == 400
+    assert bad_compare.status_code == 400
+    assert bad_company.status_code == 400
+    assert bad_staff.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_dashboard_report_data_missing_and_partial_sources(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', company_id=1))
+    async_session.add(Comment(
+        id=1,
+        type='review',
+        master_id=1,
+        text='bad',
+        date=datetime(2025, 1, 10, 12, 0, 0),
+        rating=2,
+        company_id=1,
+    ))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        missing = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'conversion_funnel', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+        partial = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'nps_dashboard', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+    app.dependency_overrides.clear()
+
+    assert missing.status_code == 200
+    assert missing.json()['data']['source_status'] == 'missing'
+    assert missing.json()['data']['missing_sources'] == ['yandex_metrika']
+    assert partial.status_code == 200
+    partial_data = partial.json()['data']
+    assert partial_data['source_status'] == 'partial'
+    assert 'telegram_nps' in partial_data['missing_sources']
+    assert partial_data['tables'][0]['rows'][0]['rating'] == 2.0
 
 
 @pytest.mark.asyncio

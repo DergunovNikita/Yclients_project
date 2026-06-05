@@ -510,6 +510,331 @@
       min-height: 82px;
     }
 
+    .reports-toolbar {
+      grid-template-columns: minmax(220px, 1.4fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(150px, 1fr) auto auto;
+    }
+
+    .reports-filter-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(130px, 1fr)) auto auto;
+      gap: 10px;
+      align-items: end;
+      margin-bottom: 16px;
+    }
+
+    .reports-filter-row .checkline,
+    .report-filter-row .checkline {
+      min-height: 40px;
+      flex-direction: row;
+      align-items: center;
+      text-transform: none;
+      font-size: 13px;
+      color: #334155;
+    }
+
+    .reports-filter-row .checkline input,
+    .report-filter-row .checkline input {
+      width: auto;
+      min-height: auto;
+    }
+
+    .reports-section {
+      margin-bottom: 24px;
+    }
+
+    .reports-section__head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .reports-section__head h3 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: 0;
+    }
+
+    .reports-section__head span {
+      color: #64748b;
+      font-size: 13px;
+    }
+
+    .reports-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .report-card {
+      position: relative;
+      min-height: 186px;
+      padding: 14px;
+      border: 1px solid #dbe3ef;
+      border-radius: 8px;
+      background: #ffffff;
+      cursor: pointer;
+      transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
+    }
+
+    .report-card:hover {
+      transform: translateY(-1px);
+      border-color: #94a3b8;
+      box-shadow: 0 12px 28px rgba(15, 23, 42, .08);
+    }
+
+    .report-card--source_missing,
+    .report-card--planned {
+      background: #fbfdff;
+    }
+
+    .report-card__pin {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      min-height: 30px;
+      padding: 0;
+      border: 1px solid #dbe3ef;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #94a3b8;
+    }
+
+    .report-card__pin.active {
+      color: #b45309;
+      border-color: #fcd34d;
+      background: #fffbeb;
+    }
+
+    .report-card__status {
+      display: inline-flex;
+      margin-bottom: 10px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: #f1f5f9;
+      color: #475569;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .report-card h4 {
+      margin: 0 36px 8px 0;
+      font-size: 16px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    .report-card p {
+      margin: 0 0 12px;
+      color: #64748b;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .report-card__tags {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .report-card__tags span {
+      padding: 3px 7px;
+      border: 1px solid #e2e8f0;
+      border-radius: 999px;
+      color: #334155;
+      font-size: 12px;
+      background: #ffffff;
+    }
+
+    .report-card__source {
+      color: #94a3b8;
+      font-size: 12px;
+    }
+
+    .reports-viewer {
+      display: none;
+      margin-top: 16px;
+    }
+
+    .reports-viewer.visible {
+      display: block;
+    }
+
+    .reports-viewer__head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+
+    .reports-viewer__head h2 {
+      font-size: 22px;
+    }
+
+    .report-filter-row {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr)) auto auto;
+      gap: 10px;
+      align-items: end;
+      margin-bottom: 16px;
+      padding: 14px;
+      border: 1px solid #dbe3ef;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
+    .report-compare-row {
+      display: grid;
+      grid-template-columns: minmax(140px, 180px) minmax(140px, 180px) 1fr;
+      gap: 10px;
+      grid-column: 1 / -1;
+      align-items: end;
+    }
+
+    .reports-metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .reports-metric {
+      min-height: 96px;
+      padding: 14px;
+      border: 1px solid #dbe3ef;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
+    .reports-metric__label {
+      color: #64748b;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .reports-metric__value {
+      margin-top: 8px;
+      color: #172033;
+      font-size: 26px;
+      font-weight: 800;
+      line-height: 1.1;
+      overflow-wrap: anywhere;
+    }
+
+    .reports-chart-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .reports-panel {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid #dbe3ef;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
+    .reports-panel--wide {
+      margin-bottom: 16px;
+    }
+
+    .reports-panel__head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .reports-panel__head h3 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: 0;
+    }
+
+    .reports-panel__head span {
+      color: #64748b;
+      font-size: 13px;
+    }
+
+    .reports-chart-box {
+      position: relative;
+      height: 320px;
+    }
+
+    .reports-table-scroll {
+      max-height: 520px;
+      overflow: auto;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+    }
+
+    .reports-table {
+      min-width: 840px;
+    }
+
+    .reports-table thead th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #ffffff;
+    }
+
+    .reports-table .number {
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .reports-note,
+    .reports-unavailable {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 16px;
+      padding: 14px;
+      border: 1px solid #dbe3ef;
+      border-radius: 8px;
+      background: #ffffff;
+      color: #334155;
+      font-size: 14px;
+    }
+
+    .reports-note--missing,
+    .reports-note--planned {
+      border-color: #fed7aa;
+      background: #fff7ed;
+      color: #9a3412;
+    }
+
+    .reports-note--partial {
+      border-color: #bfdbfe;
+      background: #eff6ff;
+      color: #1d4ed8;
+    }
+
+    .reports-note__sources {
+      color: #64748b;
+      font-size: 13px;
+    }
+
+    .reports-unavailable h3 {
+      margin: 0;
+      font-size: 18px;
+    }
+
+    .reports-compare .reports-metrics {
+      margin-bottom: 0;
+    }
+
     @media (max-width: 900px) {
       .topbar {
         flex-direction: column;
@@ -561,6 +886,23 @@
       .chart-box.short {
         height: 260px;
       }
+
+      .reports-toolbar,
+      .reports-filter-row,
+      .report-filter-row,
+      .report-compare-row {
+        grid-template-columns: 1fr;
+      }
+
+      .reports-grid,
+      .reports-chart-grid,
+      .reports-metrics {
+        grid-template-columns: 1fr;
+      }
+
+      .reports-viewer__head {
+        flex-direction: column;
+      }
     }
   </style>
 </head>
@@ -582,6 +924,7 @@
       <a class="tab" href="#plan-fact" data-view-link="plan">План / факт</a>
       <a class="tab" href="#plan-settings" data-view-link="planSettings">Установка планов</a>
       <a class="tab" href="#review-facts" data-view-link="reviewFacts">Отзывы факт</a>
+      <a class="tab" href="/reports" data-view-link="reports">Отчеты</a>
     </nav>
 
     <div class="alert" id="error"></div>
@@ -721,7 +1064,7 @@
         </div>
         <div id="plan-settings-staff"></div>
         <div class="plan-settings-actions">
-          <a class="tab" href="#review-facts">Отзывы факт</a>
+          <a class="tab" href="#review-facts" data-view-link="reviewFacts">Отзывы факт</a>
           <button type="button" id="plan-settings-save">Сохранить</button>
         </div>
       </div>
@@ -762,6 +1105,111 @@
           <button type="button" id="review-fact-save">Сохранить факт</button>
         </div>
       </div>
+    </section>
+
+    <section class="view" id="reports-view" data-view="reports">
+      <section class="toolbar reports-toolbar" aria-label="Фильтры каталога отчетов">
+        <label>
+          Поиск
+          <input type="search" id="reports-search" placeholder="Название или ID отчета" autocomplete="off" />
+        </label>
+        <label>
+          Группа
+          <select id="reports-group">
+            <option value="">Все группы</option>
+          </select>
+        </label>
+        <label>
+          Статус
+          <select id="reports-status">
+            <option value="">Все статусы</option>
+          </select>
+        </label>
+        <label>
+          Роль
+          <select id="reports-role">
+            <option value="">Все роли</option>
+          </select>
+        </label>
+        <label>
+          Тема
+          <select id="reports-theme">
+            <option value="">Все темы</option>
+          </select>
+        </label>
+        <label class="checkline">
+          <input type="checkbox" id="reports-favorites" />
+          Избранное
+        </label>
+        <button type="button" class="secondary" id="reports-reset">Сбросить</button>
+      </section>
+
+      <div class="panel wide">
+        <div class="panel-title">
+          <h2>Каталог отчетов</h2>
+          <span class="meta" id="reports-count"></span>
+        </div>
+        <div id="reports-catalog"></div>
+      </div>
+
+      <section class="reports-viewer" id="reports-viewer" aria-live="polite">
+        <div class="reports-viewer__head">
+          <div>
+            <h2 id="reports-viewer-title">Отчет</h2>
+            <p class="subhead" id="reports-viewer-subtitle"></p>
+          </div>
+          <button type="button" class="secondary" id="reports-viewer-back">К каталогу</button>
+        </div>
+
+        <section class="report-filter-row" aria-label="Фильтры отчета">
+          <label>
+            С
+            <input type="date" id="report-start" />
+          </label>
+          <label>
+            По
+            <input type="date" id="report-end" />
+          </label>
+          <label>
+            Филиал
+            <select id="report-branch">
+              <option value="">Все филиалы</option>
+            </select>
+          </label>
+          <label>
+            Сотрудник
+            <select id="report-staff">
+              <option value="">Все сотрудники</option>
+            </select>
+          </label>
+          <label>
+            Гранулярность
+            <select id="report-granularity">
+              <option value="day">День</option>
+              <option value="week">Неделя</option>
+              <option value="month">Месяц</option>
+            </select>
+          </label>
+          <button type="button" id="report-refresh">Обновить</button>
+          <button type="button" class="secondary" id="report-data-labels" aria-pressed="false">Значения</button>
+          <div class="report-compare-row">
+            <label class="checkline">
+              <input type="checkbox" id="report-compare-enabled" />
+              Сравнить период
+            </label>
+            <label>
+              Сравнить с
+              <input type="date" id="report-compare-start" />
+            </label>
+            <label>
+              Сравнить по
+              <input type="date" id="report-compare-end" />
+            </label>
+          </div>
+        </section>
+
+        <div id="reports-report-content"></div>
+      </section>
     </section>
   </main>
   <script type="module" src="/src/main.js"></script>

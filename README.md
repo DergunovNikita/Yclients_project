@@ -96,17 +96,33 @@ curl http://127.0.0.1:8000/health
 
 ## Тесты
 
+Локальное окружение проекта уже содержит Python tooling и Node.js в `.venv/bin`.
+Для ручных команд в текущем shell:
+
+```bash
+source scripts/dev-env.sh
+node --version
+npm --version
+pytest --version
+```
+
+Полная проверка backend + frontend build:
+
+```bash
+./scripts/check.sh
+```
+
 Локальные unit/API тесты:
 
 ```bash
-pytest tests/test_sync_parsing.py tests/test_api.py tests/test_dashboard_api.py
+./scripts/check.sh tests/test_sync_parsing.py tests/test_api.py tests/test_dashboard_api.py
 ```
 
 Postgres integration tests:
 
 ```bash
 TEST_DATABASE_URL=postgresql+psycopg2://postgres:changeme@127.0.0.1:5432/yclients_test \
-pytest tests/test_postgres_integration.py
+./scripts/check.sh tests/test_postgres_integration.py
 ```
 
 ## Примечания

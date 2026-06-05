@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import SYNC_API_TOKEN
@@ -28,7 +29,13 @@ from dashboard_service import (
     fetch_summary,
     fetch_top_services,
 )
+from dashboard_reports import (
+    REPORT_GRANULARITIES,
+    fetch_report_data,
+    fetch_report_registry,
+)
 from database import get_async_db
+from models import Company, Staff
 from plan_import import import_plan_sheet_from_config
 from sync_jobs import SyncJobService
 from sync_orchestrator import get_sync_status
@@ -89,6 +96,28 @@ def _require_sync_token(x_sync_token: str | None) -> None:
         raise HTTPException(status_code=401, detail='Invalid sync token')
 
 
+async def _validate_dashboard_scope(
+    db: AsyncSession,
+    company_id: int | None,
+    staff_id: int | None,
+    compare_staff_id: int | None = None,
+) -> None:
+    if company_id is not None:
+        company_exists = await db.scalar(select(Company.id).where(Company.id == company_id).limit(1))
+        if company_exists is None:
+            raise HTTPException(status_code=400, detail='unknown company_id')
+
+    for field_name, candidate_staff_id in (('staff_id', staff_id), ('compare_staff_id', compare_staff_id)):
+        if candidate_staff_id is None:
+            continue
+        conditions = [Staff.id == candidate_staff_id]
+        if company_id is not None:
+            conditions.append(Staff.company_id == company_id)
+        staff_exists = await db.scalar(select(Staff.id).where(*conditions).limit(1))
+        if staff_exists is None:
+            raise HTTPException(status_code=400, detail=f'unknown {field_name}')
+
+
 @router.get('/branches')
 async def dashboard_branches(db: AsyncSession = Depends(get_async_db)):
     """Companies available as salon branches (filtered when system.portal_branches is populated)."""
@@ -131,6 +160,49 @@ async def dashboard_staff_directory_csv(
         media_type='text/csv; charset=utf-8',
         headers={'Content-Disposition': 'inline; filename=staff_directory.csv'},
     )
+
+
+@router.get('/reports')
+async def dashboard_reports():
+    """Full report catalog for the product reports SPA."""
+    return {'success': True, 'data': fetch_report_registry()}
+
+
+@router.get('/reports/data')
+async def dashboard_report_data(
+    report_id: str = Query(...),
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    company_id: int | None = Query(None),
+    staff_id: int | None = Query(None),
+    granularity: str = Query('day', description='day, week or month'),
+    compare_start_date: date | None = Query(None),
+    compare_end_date: date | None = Query(None),
+    compare_staff_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_async_db),
+):
+    start, end = _parse_range(start_date, end_date)
+    if granularity not in REPORT_GRANULARITIES:
+        raise HTTPException(status_code=400, detail='granularity must be one of day, week, month')
+    if (compare_start_date is None) ^ (compare_end_date is None):
+        raise HTTPException(status_code=400, detail='compare_start_date and compare_end_date must be passed together')
+    await _validate_dashboard_scope(db, company_id, staff_id, compare_staff_id)
+    try:
+        data = await fetch_report_data(
+            db,
+            report_id,
+            start,
+            end,
+            company_id,
+            staff_id,
+            granularity,
+            compare_start_date,
+            compare_end_date,
+            compare_staff_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
 
 
 @router.get('/widget/sync_status')

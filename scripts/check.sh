@@ -2,19 +2,27 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NODE_BIN="$ROOT_DIR/.tools/node/bin"
+LOCAL_BIN="$ROOT_DIR/.venv/bin"
+NODE_BIN="$LOCAL_BIN"
+PYTHON_BIN="$LOCAL_BIN/python"
 
-if [[ ! -x "$NODE_BIN/node" || ! -x "$NODE_BIN/npm" ]]; then
-  echo "Local Node.js is not installed at $NODE_BIN" >&2
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "Local Python is not installed at $PYTHON_BIN" >&2
   exit 1
 fi
 
-export PATH="$NODE_BIN:$PATH"
+if [[ ! -x "$NODE_BIN/node" ]]; then
+  echo "Local Node.js is not installed at $NODE_BIN/node" >&2
+  exit 1
+fi
+
+export PATH="$LOCAL_BIN:$PATH"
 
 cd "$ROOT_DIR"
 
-python -m compileall \
+"$PYTHON_BIN" -m compileall \
   api.py \
+  dashboard_reports.py \
   dashboard_routes.py \
   dashboard_service.py \
   models.py \
@@ -23,7 +31,7 @@ python -m compileall \
   tests/conftest.py \
   tests/test_dashboard_api.py
 
-python -m pytest -p no:capture "$@"
+"$PYTHON_BIN" -m pytest -p no:capture "$@"
 
 cd "$ROOT_DIR/web"
-npm run build
+"$NODE_BIN/node" ./node_modules/vite/bin/vite.js build

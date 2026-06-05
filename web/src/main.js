@@ -1,5 +1,7 @@
 import Chart from 'chart.js/auto';
 
+import { initReports } from './reports/index.js';
+
 const apiBase = import.meta.env.VITE_API_BASE || '';
 
 const els = {
@@ -28,6 +30,7 @@ const els = {
   planView: document.getElementById('plan-view'),
   planSettingsView: document.getElementById('plan-settings-view'),
   reviewFactsView: document.getElementById('review-facts-view'),
+  reportsView: document.getElementById('reports-view'),
   viewLinks: [...document.querySelectorAll('[data-view-link]')],
   planSettingsMonth: document.getElementById('plan-settings-month'),
   planSettingsLoad: document.getElementById('plan-settings-load'),
@@ -81,6 +84,7 @@ let planSettingsSavedSnapshot = '';
 let planSettingsDirty = false;
 let planSettingsLoadedMonth = '';
 let allowDirtyPlanSettingsNavigation = false;
+let reportsController = null;
 
 const ADMIN_HIDDEN_METRIC_CODES = new Set(['revenue', 'avg_check_total']);
 
@@ -1201,7 +1205,8 @@ async function loadSyncStatus() {
   }
 }
 
-function viewFromHash() {
+function viewFromLocation() {
+  if (window.location.pathname.replace(/\/$/, '') === '/reports') return 'reports';
   if (window.location.hash === '#plan-fact') return 'plan';
   if (window.location.hash === '#plan-settings') return 'planSettings';
   if (window.location.hash === '#review-facts') return 'reviewFacts';
@@ -1214,6 +1219,7 @@ function setActiveView(view) {
   els.planView.classList.toggle('active', view === 'plan');
   els.planSettingsView.classList.toggle('active', view === 'planSettings');
   els.reviewFactsView.classList.toggle('active', view === 'reviewFacts');
+  els.reportsView.classList.toggle('active', view === 'reports');
   els.viewLinks.forEach((link) => {
     link.classList.toggle('active', link.dataset.viewLink === view);
   });
@@ -1222,6 +1228,7 @@ function setActiveView(view) {
     plan: 'План/факт по филиалам и сотрудникам',
     planSettings: 'Установка планов по месяцам',
     reviewFacts: 'Ручной факт отзывов по администраторам',
+    reports: 'Каталог отчетов и аналитика',
   };
   els.periodLabel.textContent = labels[view] || labels.overview;
 }
@@ -1286,19 +1293,22 @@ async function loadCurrentView() {
     await loadPlanSettings();
   } else if (activeView === 'reviewFacts') {
     await loadReviewFacts();
+  } else if (activeView === 'reports') {
+    await reportsController?.loadFromLocation();
   } else {
     await loadDashboard();
   }
 }
 
 async function init() {
+  reportsController = initReports({ clearError, showError, setApiState });
   Object.values(filterEls).forEach((filter) => defaultDates(filter));
   els.planSettingsMonth.value = currentMonthValue();
   renderServicesTable([]);
   renderExtraServicesTable([]);
   await loadBranches();
   await Promise.all(Object.values(filterEls).map((filter) => loadStaff(filter)));
-  setActiveView(viewFromHash());
+  setActiveView(viewFromLocation());
   await loadCurrentView();
 }
 
@@ -1334,21 +1344,34 @@ els.planSettingsSave.addEventListener('click', () => savePlanSettings());
 els.planSettingsBranches.addEventListener('input', () => updatePlanSettingsDirtyFromForm());
 els.planSettingsStaff.addEventListener('input', () => updatePlanSettingsDirtyFromForm());
 
-document.querySelectorAll('a[href^="#"]').forEach((link) => {
+els.viewLinks.forEach((link) => {
   link.addEventListener('click', (event) => {
-    const href = link.getAttribute('href');
-    if (!href || href === window.location.hash) return;
+    const view = link.dataset.viewLink;
+    if (!view) return;
     if (!confirmDiscardPlanSettings()) {
       event.preventDefault();
-    } else if (planSettingsDirty) {
+      return;
+    }
+    event.preventDefault();
+    if (planSettingsDirty) {
       setPlanSettingsDirty(false);
       allowDirtyPlanSettingsNavigation = true;
     }
+    const paths = {
+      overview: '/#overview',
+      plan: '/#plan-fact',
+      planSettings: '/#plan-settings',
+      reviewFacts: '/#review-facts',
+      reports: '/reports',
+    };
+    history.pushState({ view }, '', paths[view] || '/#overview');
+    setActiveView(view);
+    loadCurrentView();
   });
 });
 
 window.addEventListener('hashchange', async () => {
-  const nextView = viewFromHash();
+  const nextView = viewFromLocation();
   if (nextView === activeView) return;
   if (planSettingsDirty && activeView === 'planSettings' && nextView !== 'planSettings') {
     if (!allowDirtyPlanSettingsNavigation && !confirmDiscardPlanSettings()) {
@@ -1358,6 +1381,12 @@ window.addEventListener('hashchange', async () => {
     setPlanSettingsDirty(false);
   }
   allowDirtyPlanSettingsNavigation = false;
+  setActiveView(nextView);
+  await loadCurrentView();
+});
+window.addEventListener('popstate', async () => {
+  const nextView = viewFromLocation();
+  if (nextView === activeView && nextView !== 'reports') return;
   setActiveView(nextView);
   await loadCurrentView();
 });
