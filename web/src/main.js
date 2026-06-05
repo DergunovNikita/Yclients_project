@@ -271,6 +271,12 @@ function formatInputDate(date) {
   return `${year}-${month}-${day}`;
 }
 
+function formatShortDate(value) {
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+}
+
 function renderCards(target, cards) {
   target.innerHTML = cards
     .map(
@@ -981,8 +987,9 @@ async function reloadPlanSettingsMonth() {
 
 function renderReviewFactEditor(data) {
   reviewFactRows = data?.rows || [];
+  const days = data?.days || [];
   const totalValue = data?.total_value || 0;
-  els.reviewFactMeta.textContent = `${reviewFactRows.length} администраторов · ${formatNumber(totalValue)} отзывов`;
+  els.reviewFactMeta.textContent = `${reviewFactRows.length} администраторов · ${days.length} дней · ${formatNumber(totalValue)} отзывов`;
 
   if (!reviewFactRows.length) {
     els.reviewFactEditor.innerHTML = '<div class="empty compact">Нет активных администраторов</div>';
@@ -998,30 +1005,41 @@ function renderReviewFactEditor(data) {
           <tr>
             <th>Филиал</th>
             <th>Администратор</th>
-            <th class="number">Отзывы факт</th>
+            ${days.map((day) => `<th class="number review-fact-day">${escapeHtml(formatShortDate(day))}</th>`).join('')}
+            <th class="number">Итого</th>
           </tr>
         </thead>
         <tbody>
           ${reviewFactRows
-            .map(
-              (row) => `
+            .map((row) => {
+              const valuesByDate = Object.fromEntries((row.values || []).map((item) => [item.date, item]));
+              return `
                 <tr>
                   <td>${escapeHtml(row.company_title || `Филиал ${row.company_id}`)}</td>
                   <td>${escapeHtml(row.staff_name)}</td>
-                  <td class="number">
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      inputmode="numeric"
-                      data-company-id="${escapeHtml(row.company_id)}"
-                      data-staff-id="${escapeHtml(row.staff_id)}"
-                      value="${escapeHtml(formatInputNumber(row.value))}"
-                    />
-                  </td>
+                  ${days
+                    .map((day) => {
+                      const item = valuesByDate[day] || {};
+                      return `
+                        <td class="number review-fact-day">
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            inputmode="numeric"
+                            data-company-id="${escapeHtml(row.company_id)}"
+                            data-staff-id="${escapeHtml(row.staff_id)}"
+                            data-date="${escapeHtml(day)}"
+                            value="${escapeHtml(formatInputNumber(item.value))}"
+                          />
+                        </td>
+                      `;
+                    })
+                    .join('')}
+                  <td class="number readonly">${escapeHtml(formatNumber(row.value || 0))}</td>
                 </tr>
-              `,
-            )
+              `;
+            })
             .join('')}
         </tbody>
       </table>
@@ -1037,12 +1055,13 @@ async function loadReviewFactEditor() {
 
 function reviewFactPayload() {
   const filter = filterEls.reviewFacts;
-  const items = [...els.reviewFactEditor.querySelectorAll('input[data-staff-id]')].map((input) => {
+  const items = [...els.reviewFactEditor.querySelectorAll('input[data-staff-id][data-date]')].map((input) => {
     const rawValue = input.value.trim().replace(',', '.');
     if (rawValue === '') {
       return {
         company_id: Number(input.dataset.companyId),
         staff_id: Number(input.dataset.staffId),
+        date: input.dataset.date,
         value: null,
       };
     }
@@ -1053,6 +1072,7 @@ function reviewFactPayload() {
     return {
       company_id: Number(input.dataset.companyId),
       staff_id: Number(input.dataset.staffId),
+      date: input.dataset.date,
       value,
     };
   });

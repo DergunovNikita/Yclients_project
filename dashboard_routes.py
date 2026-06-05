@@ -39,6 +39,7 @@ router = APIRouter()
 class ManualReviewFactItem(BaseModel):
     company_id: int
     staff_id: int
+    date: date
     value: float | None = None
 
 
@@ -241,7 +242,11 @@ async def dashboard_plan_reviews_fact(
     db: AsyncSession = Depends(get_async_db),
 ):
     start, end = _parse_range(start_date, end_date)
-    return {'success': True, 'data': await fetch_manual_review_facts(db, start, end, company_id, staff_id)}
+    try:
+        data = await fetch_manual_review_facts(db, start, end, company_id, staff_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
 
 
 @router.post('/plan/reviews_fact')

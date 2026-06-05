@@ -1068,7 +1068,7 @@ async def test_manual_review_facts_feed_plan_fact_for_administrators(async_sessi
                 'start_date': '2025-01-01',
                 'end_date': '2025-01-31',
                 'company_id': 1,
-                'items': [{'company_id': 1, 'staff_id': 2, 'value': 7}],
+                'items': [{'company_id': 1, 'staff_id': 2, 'date': '2025-01-01', 'value': 7}],
             },
         )
         editor_response = await client.get(
@@ -1094,7 +1094,7 @@ async def test_manual_review_facts_feed_plan_fact_for_administrators(async_sessi
         await async_session.execute(
             select(ManualFactMetric).where(
                 ManualFactMetric.period_start == date(2025, 1, 1),
-                ManualFactMetric.period_end == date(2025, 1, 31),
+                ManualFactMetric.period_end == date(2025, 1, 1),
                 ManualFactMetric.company_id == 1,
                 ManualFactMetric.staff_id == 2,
                 ManualFactMetric.metric_code == 'reviews_qty',
@@ -1132,7 +1132,7 @@ async def test_manual_review_facts_can_filter_by_staff(async_session):
     async_session.add(Staff(id=3, name='Admin 2', position='Администратор', company_id=1, fired=0))
     async_session.add(ManualFactMetric(
         period_start=date(2025, 1, 1),
-        period_end=date(2025, 1, 31),
+        period_end=date(2025, 1, 1),
         company_id=1,
         staff_id=2,
         metric_code='reviews_qty',
@@ -1164,7 +1164,7 @@ async def test_manual_review_facts_can_filter_by_staff(async_session):
                 'end_date': '2025-01-31',
                 'company_id': 1,
                 'staff_id': 3,
-                'items': [{'company_id': 1, 'staff_id': 3, 'value': 9}],
+                'items': [{'company_id': 1, 'staff_id': 3, 'date': '2025-01-01', 'value': 9}],
             },
         )
     app.dependency_overrides.clear()
@@ -1176,6 +1176,153 @@ async def test_manual_review_facts_can_filter_by_staff(async_session):
     assert save_response.status_code == 200
     saved_rows = save_response.json()['data']['rows']
     assert [(row['staff_id'], row['value']) for row in saved_rows] == [(3, 9.0)]
+
+
+@pytest.mark.asyncio
+async def test_manual_review_facts_are_daily_and_sum_selected_period(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    async_session.add(ManualFactMetric(
+        period_start=date(2025, 6, 1),
+        period_end=date(2025, 6, 4),
+        company_id=1,
+        staff_id=2,
+        metric_code='reviews_qty',
+        value=99.0,
+        source='legacy',
+        updated_at=datetime(2025, 6, 1, 0, 0, 0),
+    ))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        save_response = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'start_date': '2025-06-01',
+                'end_date': '2025-06-04',
+                'company_id': 1,
+                'items': [
+                    {'company_id': 1, 'staff_id': 2, 'date': '2025-06-01', 'value': 1},
+                    {'company_id': 1, 'staff_id': 2, 'date': '2025-06-02', 'value': 2},
+                    {'company_id': 1, 'staff_id': 2, 'date': '2025-06-03', 'value': 3},
+                    {'company_id': 1, 'staff_id': 2, 'date': '2025-06-04', 'value': 4},
+                ],
+            },
+        )
+        full_response = await client.get(
+            '/dashboard/plan/reviews_fact',
+            params={'start_date': '2025-06-01', 'end_date': '2025-06-04', 'company_id': 1},
+        )
+        partial_response = await client.get(
+            '/dashboard/plan/reviews_fact',
+            params={'start_date': '2025-06-03', 'end_date': '2025-06-04', 'company_id': 1},
+        )
+        extended_response = await client.get(
+            '/dashboard/plan/reviews_fact',
+            params={'start_date': '2025-06-01', 'end_date': '2025-06-05', 'company_id': 1},
+        )
+        plan_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-06-03', 'end_date': '2025-06-04', 'company_id': 1},
+        )
+        network_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-06-01', 'end_date': '2025-06-05'},
+        )
+    app.dependency_overrides.clear()
+
+    assert save_response.status_code == 200
+
+    full_data = full_response.json()['data']
+    assert full_data['days'] == ['2025-06-01', '2025-06-02', '2025-06-03', '2025-06-04']
+    assert full_data['total_value'] == 10.0
+    full_row = full_data['rows'][0]
+    assert full_row['value'] == 10.0
+    assert [(item['date'], item['value']) for item in full_row['values']] == [
+        ('2025-06-01', 1.0),
+        ('2025-06-02', 2.0),
+        ('2025-06-03', 3.0),
+        ('2025-06-04', 4.0),
+    ]
+
+    partial_row = partial_response.json()['data']['rows'][0]
+    assert partial_row['value'] == 7.0
+    assert [item['value'] for item in partial_row['values']] == [3.0, 4.0]
+
+    extended_row = extended_response.json()['data']['rows'][0]
+    assert extended_row['value'] == 10.0
+    assert extended_row['values'][-1] == {'date': '2025-06-05', 'value': None, 'updated_at': None}
+
+    plan_data = plan_response.json()['data']
+    parent_cells = {cell['code']: cell for cell in plan_data['parent_group']['metrics']}
+    admin_group = next(group for group in plan_data['groups'] if group['category'] == 'administrator')
+    admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
+    assert parent_cells['reviews_qty']['fact'] == 7.0
+    assert admin_cells['reviews_qty']['fact'] == 7.0
+
+    network_cells = {cell['code']: cell for cell in network_response.json()['data']['groups'][0]['metrics']}
+    assert network_cells['reviews_qty']['fact'] == 10.0
+
+
+@pytest.mark.asyncio
+async def test_manual_review_facts_daily_validation(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        long_range_response = await client.get(
+            '/dashboard/plan/reviews_fact',
+            params={'start_date': '2025-06-01', 'end_date': '2025-07-02', 'company_id': 1},
+        )
+        outside_date_response = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'start_date': '2025-06-01',
+                'end_date': '2025-06-04',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'date': '2025-06-05', 'value': 1}],
+            },
+        )
+        negative_response = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'start_date': '2025-06-01',
+                'end_date': '2025-06-04',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'date': '2025-06-01', 'value': -1}],
+            },
+        )
+        zero_response = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'start_date': '2025-06-01',
+                'end_date': '2025-06-04',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'date': '2025-06-02', 'value': 0}],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert long_range_response.status_code == 400
+    assert outside_date_response.status_code == 400
+    assert negative_response.status_code == 400
+    assert zero_response.status_code == 200
+    zero_row = zero_response.json()['data']['rows'][0]
+    assert zero_row['value'] == 0.0
+    assert [item['value'] for item in zero_row['values']] == [None, 0.0, None, None]
 
 
 @pytest.mark.asyncio
@@ -1364,6 +1511,45 @@ async def test_plan_settings_save_generates_historical_plan_metrics(async_sessio
     }
     assert may_after_cells['wax_qty']['plan'] == 20.0
     assert may_after_cells['reviews_qty']['plan'] == 12.0
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_does_not_fallback_to_previous_plan_period(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(
+        PlanMetric(
+            period_start=date(2025, 5, 1),
+            period_end=date(2025, 5, 31),
+            company_id=1,
+            staff_id=None,
+            staff_category=None,
+            metric_code='revenue',
+            value=500000.0,
+            updated_at=datetime(2025, 5, 1, 0, 0, 0),
+        )
+    )
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-06-10', 'end_date': '2025-06-20', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    data = response.json()['data']
+    assert data['plan_period'] == {'start': '2025-06-10', 'end': '2025-06-20'}
+    cells = {cell['code']: cell for cell in data['parent_group']['metrics']}
+    assert cells['revenue']['plan'] is None
+    assert cells['revenue']['remaining'] is None
+    assert cells['revenue']['completion_pct'] is None
 
 
 @pytest.mark.asyncio

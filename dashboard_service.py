@@ -44,6 +44,7 @@ GOODS_SOLD_ITEM_TYPE = 'goods_transaction'
 WAITLIST_STAFF_NAME = 'лист ожидания'
 ADMIN_PLACEHOLDER_STAFF_PREFIX = 'администратор'
 PLAN_SETTINGS_SOURCE = 'dashboard_plan_settings'
+MANUAL_REVIEW_FACT_MAX_DAYS = 31
 
 WAX_TITLE_PARTS = ('воск',)
 CAMOUFLAGE_TITLE_PARTS = ('камуфляж',)
@@ -1222,8 +1223,9 @@ async def _manual_review_fact_values_by_staff(
             func.coalesce(func.sum(ManualFactMetric.value), 0.0).label('value'),
         )
         .where(
-            ManualFactMetric.period_start == start,
-            ManualFactMetric.period_end == end,
+            ManualFactMetric.period_start >= start,
+            ManualFactMetric.period_start <= end,
+            ManualFactMetric.period_end == ManualFactMetric.period_start,
             ManualFactMetric.company_id == company_id,
             ManualFactMetric.staff_id.in_(staff_ids),
             ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
@@ -1248,8 +1250,9 @@ async def _manual_review_fact_values_by_company(
             func.coalesce(func.sum(ManualFactMetric.value), 0.0).label('value'),
         )
         .where(
-            ManualFactMetric.period_start == start,
-            ManualFactMetric.period_end == end,
+            ManualFactMetric.period_start >= start,
+            ManualFactMetric.period_start <= end,
+            ManualFactMetric.period_end == ManualFactMetric.period_start,
             ManualFactMetric.company_id.in_(company_ids),
             ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
         )
@@ -1295,17 +1298,6 @@ async def _resolve_plan_period(
     if exact_count:
         return start, end
 
-    row = (
-        await db.execute(
-            select(PlanMetric.period_start, PlanMetric.period_end)
-            .where(PlanMetric.company_id.in_(company_ids))
-            .group_by(PlanMetric.period_start, PlanMetric.period_end)
-            .order_by(PlanMetric.period_start.desc(), PlanMetric.period_end.desc())
-            .limit(1)
-        )
-    ).first()
-    if row:
-        return row.period_start, row.period_end
     return start, end
 
 
@@ -2112,6 +2104,48 @@ def _is_manual_review_admin_row(row: Any) -> bool:
     )
 
 
+def _manual_review_days(start: date, end: date) -> list[date]:
+    days_count = (end - start).days + 1
+    if days_count > MANUAL_REVIEW_FACT_MAX_DAYS:
+        raise ValueError(f'reviews fact period cannot exceed {MANUAL_REVIEW_FACT_MAX_DAYS} days')
+    return [start + timedelta(days=offset) for offset in range(days_count)]
+
+
+def _manual_review_payload_row(
+    row: Any,
+    days: list[date],
+    values_by_key: dict[tuple[int, int, date], ManualFactMetric],
+) -> dict[str, Any]:
+    company_id = int(row.company_id)
+    staff_id = int(row.staff_id)
+    daily_values = []
+    updated_at_values = []
+    total_value = 0.0
+
+    for day in days:
+        item = values_by_key.get((company_id, staff_id, day))
+        value = _round_optional(item.value) if item is not None else None
+        if value is not None:
+            total_value += float(value or 0.0)
+            updated_at_values.append(item.updated_at)
+        daily_values.append({
+            'date': day.isoformat(),
+            'value': value,
+            'updated_at': item.updated_at.isoformat() if item is not None else None,
+        })
+
+    return {
+        'company_id': company_id,
+        'company_title': row.company_title,
+        'staff_id': staff_id,
+        'staff_name': row.staff_name,
+        'position': row.position,
+        'value': _round_optional(total_value) or 0.0,
+        'updated_at': max(updated_at_values).isoformat() if updated_at_values else None,
+        'values': daily_values,
+    }
+
+
 async def fetch_manual_review_facts(
     db: AsyncSession,
     start: date,
@@ -2119,6 +2153,7 @@ async def fetch_manual_review_facts(
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
 ) -> dict[str, Any]:
+    days = _manual_review_days(start, end)
     branches = await fetch_branches(db)
     if company_id is not None:
         branches = [branch for branch in branches if int(branch['id']) == company_id]
@@ -2126,6 +2161,7 @@ async def fetch_manual_review_facts(
     if not company_ids:
         return {
             'period': {'start': start.isoformat(), 'end': end.isoformat()},
+            'days': [day.isoformat() for day in days],
             'metric_code': REVIEWS_QTY_CODE,
             'total_value': 0.0,
             'rows': [],
@@ -2138,21 +2174,9 @@ async def fetch_manual_review_facts(
             Staff.position,
             Staff.company_id,
             Company.title.label('company_title'),
-            ManualFactMetric.value.label('manual_value'),
-            ManualFactMetric.updated_at.label('manual_updated_at'),
         )
         .select_from(Staff)
         .join(Company, Company.id == Staff.company_id)
-        .outerjoin(
-            ManualFactMetric,
-            and_(
-                ManualFactMetric.period_start == start,
-                ManualFactMetric.period_end == end,
-                ManualFactMetric.company_id == Staff.company_id,
-                ManualFactMetric.staff_id == Staff.id,
-                ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
-            ),
-        )
         .where(
             Staff.company_id.in_(company_ids),
             Staff.fired == 0,
@@ -2166,20 +2190,30 @@ async def fetch_manual_review_facts(
         row for row in (await db.execute(stmt)).all()
         if _is_manual_review_admin_row(row)
     ]
-    payload_rows = [
-        {
-            'company_id': int(row.company_id),
-            'company_title': row.company_title,
-            'staff_id': int(row.staff_id),
-            'staff_name': row.staff_name,
-            'position': row.position,
-            'value': _round_optional(row.manual_value),
-            'updated_at': row.manual_updated_at.isoformat() if row.manual_updated_at else None,
+    staff_ids = [int(row.staff_id) for row in rows]
+    values_by_key: dict[tuple[int, int, date], ManualFactMetric] = {}
+    if staff_ids:
+        manual_rows = (
+            await db.execute(
+                select(ManualFactMetric).where(
+                    ManualFactMetric.period_start >= start,
+                    ManualFactMetric.period_start <= end,
+                    ManualFactMetric.period_end == ManualFactMetric.period_start,
+                    ManualFactMetric.company_id.in_(company_ids),
+                    ManualFactMetric.staff_id.in_(staff_ids),
+                    ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
+                )
+            )
+        ).scalars().all()
+        values_by_key = {
+            (int(row.company_id), int(row.staff_id), row.period_start): row
+            for row in manual_rows
         }
-        for row in rows
-    ]
+
+    payload_rows = [_manual_review_payload_row(row, days, values_by_key) for row in rows]
     return {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
+        'days': [day.isoformat() for day in days],
         'metric_code': REVIEWS_QTY_CODE,
         'total_value': _round_optional(sum(float(row['value'] or 0.0) for row in payload_rows)) or 0.0,
         'rows': payload_rows,
@@ -2194,15 +2228,26 @@ async def save_manual_review_facts(
     staff_id: Optional[int],
     items: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    _manual_review_days(start, end)
     scoped_company_id = int(company_id) if company_id is not None else None
     scoped_staff_id = int(staff_id) if staff_id is not None else None
-    normalized_items: dict[tuple[int, int], float | None] = {}
+    normalized_items: dict[tuple[int, int, date], float | None] = {}
     for item in items:
         try:
             item_company_id = int(item.get('company_id'))
             item_staff_id = int(item.get('staff_id'))
         except (TypeError, ValueError):
             raise ValueError('company_id and staff_id are required for every row') from None
+        raw_date = item.get('date')
+        if isinstance(raw_date, date):
+            item_date = raw_date
+        else:
+            try:
+                item_date = datetime.strptime(str(raw_date or ''), '%Y-%m-%d').date()
+            except ValueError:
+                raise ValueError(f'invalid reviews fact date for staff {item_staff_id}') from None
+        if item_date < start or item_date > end:
+            raise ValueError(f'reviews fact date must be within selected period for staff {item_staff_id}')
         if scoped_company_id is not None and item_company_id != scoped_company_id:
             raise ValueError(f'staff {item_staff_id} does not belong to selected company {scoped_company_id}')
         if scoped_staff_id is not None and item_staff_id != scoped_staff_id:
@@ -2218,18 +2263,18 @@ async def save_manual_review_facts(
                 raise ValueError(f'invalid reviews fact for staff {item_staff_id}') from None
             if value < 0:
                 raise ValueError(f'reviews fact cannot be negative for staff {item_staff_id}')
-        normalized_items[(item_company_id, item_staff_id)] = value
+        normalized_items[(item_company_id, item_staff_id, item_date)] = value
 
     if not normalized_items:
         return await fetch_manual_review_facts(db, start, end, scoped_company_id, scoped_staff_id)
 
     allowed_company_ids = await branch_company_ids(db)
     if allowed_company_ids is not None:
-        invalid_company_ids = sorted({company_id for company_id, _ in normalized_items} - set(allowed_company_ids))
+        invalid_company_ids = sorted({company_id for company_id, _, _ in normalized_items} - set(allowed_company_ids))
         if invalid_company_ids:
             raise ValueError(f'company is not allowed: {invalid_company_ids[0]}')
 
-    staff_ids = sorted({staff_id for _, staff_id in normalized_items})
+    staff_ids = sorted({staff_id for _, staff_id, _ in normalized_items})
     staff_rows = (
         await db.execute(
             select(Staff.id, Staff.name, Staff.position, Staff.company_id, Staff.fired)
@@ -2244,17 +2289,18 @@ async def save_manual_review_facts(
         for row in staff_rows
         if _is_manual_review_admin_row(row)
     }
-    invalid_keys = sorted(set(normalized_items) - valid_staff_keys)
+    item_staff_keys = {(company_id, staff_id) for company_id, staff_id, _ in normalized_items}
+    invalid_keys = sorted(item_staff_keys - valid_staff_keys)
     if invalid_keys:
         invalid_company_id, invalid_staff_id = invalid_keys[0]
         raise ValueError(f'staff {invalid_staff_id} is not an active administrator in company {invalid_company_id}')
 
     now = datetime.now()
-    for (item_company_id, item_staff_id), value in normalized_items.items():
+    for (item_company_id, item_staff_id, item_date), value in normalized_items.items():
         await db.execute(
             delete(ManualFactMetric).where(
-                ManualFactMetric.period_start == start,
-                ManualFactMetric.period_end == end,
+                ManualFactMetric.period_start == item_date,
+                ManualFactMetric.period_end == item_date,
                 ManualFactMetric.company_id == item_company_id,
                 ManualFactMetric.staff_id == item_staff_id,
                 ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
@@ -2264,8 +2310,8 @@ async def save_manual_review_facts(
             continue
         db.add(
             ManualFactMetric(
-                period_start=start,
-                period_end=end,
+                period_start=item_date,
+                period_end=item_date,
                 company_id=item_company_id,
                 staff_id=item_staff_id,
                 metric_code=REVIEWS_QTY_CODE,
