@@ -1108,7 +1108,7 @@
     </section>
 
     <section class="view" id="reports-view" data-view="reports">
-      <section class="toolbar reports-toolbar" aria-label="Фильтры каталога отчетов">
+      <section class="toolbar reports-toolbar" id="reports-catalog-toolbar" aria-label="Фильтры каталога отчетов">
         <label>
           Поиск
           <input type="search" id="reports-search" placeholder="Название или ID отчета" autocomplete="off" />
@@ -1144,7 +1144,7 @@
         <button type="button" class="secondary" id="reports-reset">Сбросить</button>
       </section>
 
-      <div class="panel wide">
+      <div class="panel wide" id="reports-catalog-panel">
         <div class="panel-title">
           <h2>Каталог отчетов</h2>
           <span class="meta" id="reports-count"></span>

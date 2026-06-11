@@ -1828,6 +1828,232 @@ async def test_admin_opz_attributes_to_creator(async_session):
 
 
 @pytest.mark.asyncio
+async def test_admin_opz_distributes_unknown_creator_by_schedule(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Barber', position='Барбер', company_id=1))
+    async_session.add(Staff(id=2, name='Admin A', position='Администратор', company_id=1, user_id=500))
+    async_session.add(Staff(id=3, name='Admin B', position='Администратор', company_id=1, user_id=501))
+    async_session.add(Client(id=1, name='C', company_id=1, visits_count=1, last_visit_date=date(2025, 1, 10)))
+    await async_session.flush()
+
+    async_session.add_all([
+        Appointment(
+            id=1, company_id=1, staff_id=1, client_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 12, 0, 0),
+            create_date=datetime(2025, 1, 9, 12, 0, 0),
+            seance_length=3600, attendance=1, created_user_id=999,
+        ),
+        Appointment(
+            id=2, company_id=1, staff_id=1, client_id=1,
+            date=date(2025, 2, 10),
+            datetime=datetime(2025, 2, 10, 12, 0, 0),
+            create_date=datetime(2025, 1, 10, 18, 0, 0),
+            seance_length=3600, attendance=0, created_user_id=999,
+        ),
+        StaffSchedule(staff_id=2, company_id=1, date=date(2025, 1, 10),
+                      slot_from=time(10, 0), slot_to=time(14, 0)),
+        StaffSchedule(staff_id=3, company_id=1, date=date(2025, 1, 10),
+                      slot_from=time(14, 0), slot_to=time(22, 0)),
+        PlanMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=1,
+            staff_category='barber',
+            metric_code='opz_qty',
+            value=1.0,
+            updated_at=datetime(2025, 1, 1),
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        r = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    groups = r.json()['data']['groups']
+    barber_group = next(g for g in groups if g['category'] == 'barber')
+    admin_opz_by_staff = {
+        group['staff_id']: next(m for m in group['metrics'] if m['code'] == 'opz_qty')['fact']
+        for group in groups
+        if group['category'] == 'administrator'
+    }
+    barber_opz = next(m for m in barber_group['metrics'] if m['code'] == 'opz_qty')['fact']
+    assert barber_opz == 1.0
+    assert admin_opz_by_staff == {2: 0.0, 3: 1.0}
+    assert sum(admin_opz_by_staff.values()) == barber_opz
+
+
+async def _seed_plan_fact_normalization_case(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Visible Barber', position='Барбер', company_id=1))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, user_id=500))
+    async_session.add(Staff(id=3, name='Hidden Barber', position='Барбер', company_id=1))
+    async_session.add_all([
+        Client(id=1, name='Visible Client', company_id=1),
+        Client(id=2, name='Hidden Client', company_id=1),
+    ])
+    await async_session.flush()
+
+    async_session.add_all([
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 12, 0, 0),
+            create_date=datetime(2025, 1, 1, 12, 0, 0),
+            seance_length=3600,
+            attendance=1,
+            created_user_id=500,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 2, 10),
+            datetime=datetime(2025, 2, 10, 12, 0, 0),
+            create_date=datetime(2025, 1, 10, 18, 0, 0),
+            seance_length=3600,
+            attendance=0,
+            created_user_id=500,
+        ),
+        Appointment(
+            id=3,
+            company_id=1,
+            staff_id=3,
+            client_id=2,
+            date=date(2025, 1, 11),
+            datetime=datetime(2025, 1, 11, 12, 0, 0),
+            create_date=datetime(2025, 1, 1, 12, 0, 0),
+            seance_length=3600,
+            attendance=1,
+            created_user_id=500,
+        ),
+        Appointment(
+            id=4,
+            company_id=1,
+            staff_id=3,
+            client_id=2,
+            date=date(2025, 2, 11),
+            datetime=datetime(2025, 2, 11, 12, 0, 0),
+            create_date=datetime(2025, 1, 11, 18, 0, 0),
+            seance_length=3600,
+            attendance=0,
+            created_user_id=500,
+        ),
+        StaffSchedule(staff_id=2, company_id=1, date=date(2025, 1, 10),
+                      slot_from=time(10, 0), slot_to=time(22, 0)),
+        StaffSchedule(staff_id=2, company_id=1, date=date(2025, 1, 11),
+                      slot_from=time(10, 0), slot_to=time(22, 0)),
+        PlanMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=1,
+            staff_category='barber',
+            metric_code='clients',
+            value=1.0,
+            updated_at=datetime(2025, 1, 1),
+        ),
+    ])
+    await async_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_branch_totals_use_visible_staff_facts(async_session):
+    await _seed_plan_fact_normalization_case(async_session)
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        r = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    data = r.json()['data']
+    branch_cells = {cell['code']: cell for cell in data['parent_group']['metrics']}
+    groups = data['groups']
+    barber_clients = sum(
+        next(m for m in group['metrics'] if m['code'] == 'clients')['fact']
+        for group in groups
+        if group['category'] == 'barber'
+    )
+    admin_clients = sum(
+        next(m for m in group['metrics'] if m['code'] == 'clients')['fact']
+        for group in groups
+        if group['category'] == 'administrator'
+    )
+    barber_opz = sum(
+        next(m for m in group['metrics'] if m['code'] == 'opz_qty')['fact']
+        for group in groups
+        if group['category'] == 'barber'
+    )
+    admin_opz = sum(
+        next(m for m in group['metrics'] if m['code'] == 'opz_qty')['fact']
+        for group in groups
+        if group['category'] == 'administrator'
+    )
+
+    assert branch_cells['clients']['fact'] == barber_clients == admin_clients == 1.0
+    assert branch_cells['opz_qty']['fact'] == barber_opz == admin_opz == 1.0
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_network_branch_rows_use_normalized_staff_facts(async_session):
+    await _seed_plan_fact_normalization_case(async_session)
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        branch_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+        network_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+    app.dependency_overrides.clear()
+
+    assert branch_response.status_code == 200
+    assert network_response.status_code == 200
+    branch_cells = {cell['code']: cell for cell in branch_response.json()['data']['parent_group']['metrics']}
+    network_groups = network_response.json()['data']['groups']
+    network_cells = {cell['code']: cell for cell in network_groups[0]['metrics']}
+    network_branch = next(group for group in network_groups if group['scope'] == 'branch')
+    network_branch_cells = {cell['code']: cell for cell in network_branch['metrics']}
+
+    assert network_branch_cells['clients']['fact'] == branch_cells['clients']['fact'] == 1.0
+    assert network_branch_cells['opz_qty']['fact'] == branch_cells['opz_qty']['fact'] == 1.0
+    assert network_cells['clients']['fact'] == 1.0
+    assert network_cells['opz_qty']['fact'] == 1.0
+
+
+@pytest.mark.asyncio
 async def test_admin_fact_revenue_uses_created_records_and_goods_cost(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))

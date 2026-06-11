@@ -49,7 +49,16 @@ function reportMatches(report, filters, favorites) {
 }
 
 function reportPath(reportId = '') {
-  return reportId ? `/reports?report=${encodeURIComponent(reportId)}` : '/reports';
+  return reportId ? `/reports/${encodeURIComponent(reportId)}` : '/reports';
+}
+
+function reportIdFromLocation() {
+  const legacyReportId = new URLSearchParams(window.location.search).get('report');
+  if (legacyReportId) return legacyReportId;
+  const path = window.location.pathname.replace(/\/+$/, '');
+  if (path === '/reports') return '';
+  if (!path.startsWith('/reports/')) return '';
+  return decodeURIComponent(path.slice('/reports/'.length).split('/')[0] || '');
 }
 
 function periodSubtitle(data) {
@@ -69,6 +78,8 @@ export function initReports({ clearError, showError, setApiState }) {
     theme: document.getElementById('reports-theme'),
     favoritesOnly: document.getElementById('reports-favorites'),
     reset: document.getElementById('reports-reset'),
+    catalogToolbar: document.getElementById('reports-catalog-toolbar'),
+    catalogPanel: document.getElementById('reports-catalog-panel'),
     catalog: document.getElementById('reports-catalog'),
     viewer: document.getElementById('reports-viewer'),
     viewerTitle: document.getElementById('reports-viewer-title'),
@@ -103,6 +114,11 @@ export function initReports({ clearError, showError, setApiState }) {
       favoritesOnly: false,
     },
   };
+
+  function setCatalogVisible(visible) {
+    if (els.catalogToolbar) els.catalogToolbar.hidden = !visible;
+    if (els.catalogPanel) els.catalogPanel.hidden = !visible;
+  }
 
   function setDefaultDates() {
     const dates = defaultReportDates();
@@ -184,6 +200,7 @@ export function initReports({ clearError, showError, setApiState }) {
 
   function renderCatalog() {
     collectCatalogFilters();
+    setCatalogVisible(true);
     const favorites = getFavorites();
     const filtered = state.reports.filter((report) => reportMatches(report, state.filters, favorites));
     els.count.textContent = `${state.reports.length} отчет · показано ${filtered.length}`;
@@ -223,6 +240,7 @@ export function initReports({ clearError, showError, setApiState }) {
 
   function showCatalog(push = true) {
     state.activeReportId = '';
+    setCatalogVisible(true);
     els.viewer.classList.remove('visible');
     if (push) history.pushState({ view: 'reports' }, '', reportPath());
     renderCatalog();
@@ -252,6 +270,7 @@ export function initReports({ clearError, showError, setApiState }) {
       return;
     }
     if (push) history.pushState({ view: 'reports', report: reportId }, '', reportPath(reportId));
+    setCatalogVisible(false);
     els.viewer.classList.add('visible');
     els.viewerTitle.textContent = meta.title;
     els.viewerSubtitle.textContent = 'Загрузка';
@@ -275,7 +294,7 @@ export function initReports({ clearError, showError, setApiState }) {
 
   async function loadFromLocation() {
     await ensureLoaded();
-    const reportId = new URLSearchParams(window.location.search).get('report');
+    const reportId = reportIdFromLocation();
     if (reportId) {
       await openReport(reportId, false);
     } else {

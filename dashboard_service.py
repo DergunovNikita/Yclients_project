@@ -92,6 +92,25 @@ class DateRange:
         return DateRange(start=prev_start, end=prev_end)
 
 
+@dataclass(frozen=True)
+class AdminAssignmentEvent:
+    event_id: int
+    event_date: date
+    event_moment: Any
+    created_user_id: Optional[int]
+
+
+@dataclass(frozen=True)
+class OpzEvent:
+    event_id: int
+    company_id: int
+    client_id: int
+    create_date: datetime
+    appointment_date: date
+    barber_staff_id: Optional[int]
+    created_user_id: Optional[int]
+
+
 def _pct_change(current: float, previous: float) -> Optional[float]:
     if previous == 0:
         return None if current == 0 else 100.0
@@ -937,14 +956,13 @@ async def _goods_sales_metrics(
     }
 
 
-async def _opz_count(
+async def _opz_events(
     db: AsyncSession,
     start: date,
     end: date,
     company_id: int,
-    staff_id: Optional[int] = None,
     created_user_id: Optional[int] = None,
-) -> float:
+) -> list[OpzEvent]:
     create_start = datetime.combine(start, time.min)
     create_end = datetime.combine(end + timedelta(days=1), time.min)
     candidate_filters = [
@@ -964,12 +982,14 @@ async def _opz_count(
             Appointment.client_id,
             Appointment.date,
             Appointment.create_date,
+            Appointment.created_user_id,
         )
         .where(*candidate_filters)
+        .order_by(Appointment.create_date.asc(), Appointment.id.asc())
     )
     candidates = (await db.execute(candidates_stmt)).all()
     if not candidates:
-        return 0.0
+        return []
 
     client_ids = sorted({candidate.client_id for candidate in candidates if candidate.client_id is not None})
     visit_filters = [
@@ -985,6 +1005,8 @@ async def _opz_count(
             Appointment.client_id,
             Appointment.staff_id,
             Appointment.date,
+            Appointment.datetime,
+            Appointment.id,
         )
         .where(*visit_filters)
     )
@@ -993,72 +1015,88 @@ async def _opz_count(
     for visit in visits:
         visits_by_client.setdefault((visit.company_id, visit.client_id), []).append(visit)
 
+    events: list[OpzEvent] = []
     booked_clients: set[tuple[int, int]] = set()
     for candidate in candidates:
         create_day = candidate.create_date.date()
-        last_visit_date: date | None = None
-        last_visit_matches_staff = staff_id is None
-        for visit in visits_by_client.get((candidate.company_id, candidate.client_id), []):
-            if visit.date > create_day:
-                continue
-            if last_visit_date is None or visit.date > last_visit_date:
-                last_visit_date = visit.date
-                last_visit_matches_staff = staff_id is None or visit.staff_id == staff_id
-            elif staff_id is not None and visit.date == last_visit_date and visit.staff_id == staff_id:
-                last_visit_matches_staff = True
-        if last_visit_date is None or not last_visit_matches_staff:
+        last_visits = [
+            visit
+            for visit in visits_by_client.get((candidate.company_id, candidate.client_id), [])
+            if visit.date <= create_day
+        ]
+        if not last_visits:
             continue
+        last_visit = max(
+            last_visits,
+            key=lambda visit: (
+                _coerce_date(visit.date),
+                visit.datetime or datetime.combine(_coerce_date(visit.date), time.min),
+                int(visit.id or 0),
+            ),
+        )
+        last_visit_date = _coerce_date(last_visit.date)
         if candidate.date <= last_visit_date:
             continue
-        if create_day in {last_visit_date, last_visit_date + timedelta(days=1)}:
-            booked_clients.add((candidate.company_id, candidate.client_id))
+        if create_day not in {last_visit_date, last_visit_date + timedelta(days=1)}:
+            continue
+        client_key = (int(candidate.company_id), int(candidate.client_id))
+        if client_key in booked_clients:
+            continue
+        booked_clients.add(client_key)
+        events.append(
+            OpzEvent(
+                event_id=int(candidate.id),
+                company_id=int(candidate.company_id),
+                client_id=int(candidate.client_id),
+                create_date=candidate.create_date,
+                appointment_date=_coerce_date(candidate.date),
+                barber_staff_id=int(last_visit.staff_id) if last_visit.staff_id is not None else None,
+                created_user_id=(
+                    int(candidate.created_user_id)
+                    if candidate.created_user_id is not None
+                    else None
+                ),
+            )
+        )
 
-    return float(len(booked_clients))
+    return events
 
 
-async def _admin_clients_by_finished_appointments(
+async def _opz_count(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+    staff_id: Optional[int] = None,
+    created_user_id: Optional[int] = None,
+) -> float:
+    events = await _opz_events(db, start, end, company_id, created_user_id=created_user_id)
+    if staff_id is not None:
+        events = [event for event in events if event.barber_staff_id == staff_id]
+    return float(len(events))
+
+
+async def _admin_event_counts(
     db: AsyncSession,
     start: date,
     end: date,
     company_id: int,
     staff_ids: list[int],
     user_id_by_staff: dict[int, Optional[int]],
-    barber_staff_ids: list[int] | None = None,
+    events: list[AdminAssignmentEvent],
 ) -> dict[int, int]:
-    """Assign each finished appointment to at most one admin, keeping admin totals aligned with barbers."""
     if not staff_ids:
         return {}
     ordered_staff_ids = sorted({int(staff_id) for staff_id in staff_ids})
     counts = {staff_id: 0 for staff_id in ordered_staff_ids}
+    if not events:
+        return counts
+
     user_to_staff = {
         int(user_id): staff_id
         for staff_id, user_id in user_id_by_staff.items()
         if staff_id in counts and user_id is not None
     }
-
-    appointment_filters = [
-        Appointment.company_id == company_id,
-        Appointment.date >= start,
-        Appointment.date <= end,
-        Appointment.attendance > 0,
-    ]
-    if barber_staff_ids:
-        appointment_filters.append(Appointment.staff_id.in_(barber_staff_ids))
-
-    appointment_rows = (
-        await db.execute(
-            select(
-                Appointment.id,
-                Appointment.date,
-                Appointment.datetime,
-                Appointment.created_user_id,
-            )
-            .where(*appointment_filters)
-            .order_by(Appointment.date.asc(), Appointment.datetime.asc(), Appointment.id.asc())
-        )
-    ).all()
-    if not appointment_rows:
-        return counts
 
     schedule_rows = (
         await db.execute(
@@ -1081,19 +1119,19 @@ async def _admin_clients_by_finished_appointments(
     for row in schedule_rows:
         schedules_by_date.setdefault(_coerce_date(row.date), []).append(row)
 
-    for appointment in appointment_rows:
+    for event in sorted(events, key=lambda item: (item.event_date, item.event_moment or datetime.min, item.event_id)):
         creator_staff_id = (
-            user_to_staff.get(int(appointment.created_user_id))
-            if appointment.created_user_id is not None
+            user_to_staff.get(int(event.created_user_id))
+            if event.created_user_id is not None
             else None
         )
         scheduled_staff_ids = {
             int(schedule.staff_id)
-            for schedule in schedules_by_date.get(_coerce_date(appointment.date), [])
+            for schedule in schedules_by_date.get(event.event_date, [])
             if _schedule_slot_covers_datetime(
                 schedule.slot_from,
                 schedule.slot_to,
-                appointment.datetime,
+                event.event_moment,
             )
         }
         if creator_staff_id in scheduled_staff_ids:
@@ -1109,6 +1147,86 @@ async def _admin_clients_by_finished_appointments(
     return counts
 
 
+async def _admin_opz_by_created_appointments(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+    staff_ids: list[int],
+    user_id_by_staff: dict[int, Optional[int]],
+    barber_staff_ids: list[int] | None = None,
+) -> dict[int, int]:
+    if not staff_ids:
+        return {}
+    opz_events = await _opz_events(db, start, end, company_id)
+    if barber_staff_ids:
+        allowed_barbers = {int(staff_id) for staff_id in barber_staff_ids}
+        opz_events = [
+            event for event in opz_events
+            if event.barber_staff_id in allowed_barbers
+        ]
+    events = [
+        AdminAssignmentEvent(
+            event_id=event.event_id,
+            event_date=event.create_date.date(),
+            event_moment=event.create_date,
+            created_user_id=event.created_user_id,
+        )
+        for event in opz_events
+    ]
+    return await _admin_event_counts(db, start, end, company_id, staff_ids, user_id_by_staff, events)
+
+
+async def _admin_clients_by_finished_appointments(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+    staff_ids: list[int],
+    user_id_by_staff: dict[int, Optional[int]],
+    barber_staff_ids: list[int] | None = None,
+) -> dict[int, int]:
+    """Assign each finished appointment to at most one admin, keeping admin totals aligned with barbers."""
+    if not staff_ids:
+        return {}
+
+    appointment_filters = [
+        Appointment.company_id == company_id,
+        Appointment.date >= start,
+        Appointment.date <= end,
+        Appointment.attendance > 0,
+    ]
+    if barber_staff_ids:
+        appointment_filters.append(Appointment.staff_id.in_(barber_staff_ids))
+
+    appointment_rows = (
+        await db.execute(
+            select(
+                Appointment.id,
+                Appointment.date,
+                Appointment.datetime,
+                Appointment.created_user_id,
+            )
+            .where(*appointment_filters)
+            .order_by(Appointment.date.asc(), Appointment.datetime.asc(), Appointment.id.asc())
+        )
+    ).all()
+    events = [
+        AdminAssignmentEvent(
+            event_id=int(appointment.id),
+            event_date=_coerce_date(appointment.date),
+            event_moment=appointment.datetime,
+            created_user_id=(
+                int(appointment.created_user_id)
+                if appointment.created_user_id is not None
+                else None
+            ),
+        )
+        for appointment in appointment_rows
+    ]
+    return await _admin_event_counts(db, start, end, company_id, staff_ids, user_id_by_staff, events)
+
+
 async def _fact_metric_components(
     db: AsyncSession,
     start: date,
@@ -1117,6 +1235,7 @@ async def _fact_metric_components(
     staff_id: Optional[int] = None,
     created_user_id: Optional[int] = None,
     clients_override: Optional[float] = None,
+    opz_override: Optional[float] = None,
 ) -> dict[str, float]:
     revenue = await _revenue_block(
         db,
@@ -1132,10 +1251,14 @@ async def _fact_metric_components(
     values: dict[str, float] = {
         'revenue': float(revenue['revenue'] or 0) + float(goods_metrics.get('cosmo_sum') or 0),
         'clients': clients_count,
-        'opz_qty': await _opz_count(
-            db, start, end, company_id,
-            staff_id=opz_staff_id,
-            created_user_id=created_user_id,
+        'opz_qty': (
+            float(opz_override)
+            if opz_override is not None
+            else await _opz_count(
+                db, start, end, company_id,
+                staff_id=opz_staff_id,
+                created_user_id=created_user_id,
+            )
         ),
     }
     values.update(await _service_group_counts(db, start, end, company_id, staff_id))
@@ -1368,6 +1491,32 @@ def _metric_fact_value(group: dict[str, Any], code: str) -> float:
     return 0.0
 
 
+def _staff_total_for_aggregate(groups: list[dict[str, Any]], code: str) -> Optional[float]:
+    barber_groups = [group for group in groups if group.get('category') == 'barber']
+    admin_groups = [group for group in groups if group.get('category') == 'administrator']
+    if barber_groups:
+        return sum(_metric_fact_value(group, code) for group in barber_groups)
+    if admin_groups:
+        return sum(_metric_fact_value(group, code) for group in admin_groups)
+    return None
+
+
+def _normalize_aggregate_fact_from_staff(
+    fact_values: dict[str, float],
+    groups: list[dict[str, Any]],
+) -> dict[str, float]:
+    normalized = dict(fact_values)
+    changed = False
+    for code in ('clients', 'opz_qty'):
+        staff_total = _staff_total_for_aggregate(groups, code)
+        if staff_total is not None:
+            normalized[code] = staff_total
+            changed = True
+    if not changed:
+        return normalized
+    return _derive_metric_values(normalized, include_zero_derived=True, prefer_explicit=False)
+
+
 def _selected_staff_plan_payload(
     selected_staff: dict[str, Any] | None,
     groups: list[dict[str, Any]],
@@ -1567,6 +1716,15 @@ async def _staff_plan_groups_for_branch(
         user_id_by_staff,
         barber_staff_ids or None,
     )
+    admin_opz_by_staff = await _admin_opz_by_created_appointments(
+        db,
+        start,
+        end,
+        branch_id,
+        admin_staff_ids,
+        user_id_by_staff,
+        barber_staff_ids or None,
+    )
     admin_review_facts_by_staff = await _manual_review_fact_values_by_staff(
         db,
         start,
@@ -1587,6 +1745,7 @@ async def _staff_plan_groups_for_branch(
             sid,
             created_user_id=admin_user_id,
             clients_override=admin_clients_by_staff.get(sid) if is_admin else None,
+            opz_override=admin_opz_by_staff.get(sid) if is_admin else None,
         )
         if is_admin:
             facts_by_staff[sid][REVIEWS_QTY_CODE] = admin_review_facts_by_staff.get(sid, 0.0)
@@ -2371,12 +2530,6 @@ async def fetch_plan_fact(
         branch_fact = await _fact_metric_components(db, start, end, branch_id)
         branch_review_facts = await _manual_review_fact_values_by_company(db, start, end, [branch_id])
         branch_fact[REVIEWS_QTY_CODE] = branch_review_facts.get(branch_id, 0.0)
-        parent_group = {
-            'company_id': branch_id,
-            'title': branch['title'],
-            'scope': 'branch',
-            'metrics': _metric_cells(plans_by_company.get(branch_id, {}), branch_fact),
-        }
         groups = await _staff_plan_groups_for_branch(
             db,
             start,
@@ -2387,6 +2540,14 @@ async def fetch_plan_fact(
             staff_id,
             include_all_when_branch_planned=_has_plan_values(plans_by_company.get(branch_id, {})),
         )
+        if staff_id is None:
+            branch_fact = _normalize_aggregate_fact_from_staff(branch_fact, groups)
+        parent_group = {
+            'company_id': branch_id,
+            'title': branch['title'],
+            'scope': 'branch',
+            'metrics': _metric_cells(plans_by_company.get(branch_id, {}), branch_fact),
+        }
         selected_staff_plan = _selected_staff_plan_payload(selected_staff, groups)
         diagnostics = await _client_fact_diagnostics(db, start, end, branch_id, groups)
 
@@ -2405,11 +2566,26 @@ async def fetch_plan_fact(
         }
 
     facts_by_company: dict[int, dict[str, float]] = {}
+    staff_groups_by_company: dict[int, list[dict[str, Any]]] = {}
     for branch_id in company_ids:
         facts_by_company[branch_id] = await _fact_metric_components(db, start, end, branch_id)
     review_facts_by_company = await _manual_review_fact_values_by_company(db, start, end, company_ids)
     for branch_id in company_ids:
         facts_by_company.setdefault(branch_id, {})[REVIEWS_QTY_CODE] = review_facts_by_company.get(branch_id, 0.0)
+        staff_groups_by_company[branch_id] = await _staff_plan_groups_for_branch(
+            db,
+            start,
+            end,
+            plan_start,
+            plan_end,
+            branch_id,
+            None,
+            include_all_when_branch_planned=_has_plan_values(plans_by_company.get(branch_id, {})),
+        )
+        facts_by_company[branch_id] = _normalize_aggregate_fact_from_staff(
+            facts_by_company.get(branch_id, {}),
+            staff_groups_by_company.get(branch_id, []),
+        )
 
     groups: list[dict[str, Any]] = []
     if company_id is None and company_ids:

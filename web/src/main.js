@@ -1206,7 +1206,7 @@ async function loadSyncStatus() {
 }
 
 function viewFromLocation() {
-  if (window.location.pathname.replace(/\/$/, '') === '/reports') return 'reports';
+  if (window.location.pathname.replace(/\/+$/, '') === '/reports' || window.location.pathname.startsWith('/reports/')) return 'reports';
   if (window.location.hash === '#plan-fact') return 'plan';
   if (window.location.hash === '#plan-settings') return 'planSettings';
   if (window.location.hash === '#review-facts') return 'reviewFacts';
