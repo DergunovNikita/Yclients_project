@@ -1146,11 +1146,15 @@ async def test_dashboard_plan_fact_uses_plan_and_fact_formulas(async_session):
     assert [group['title'] for group in selected_staff_data['groups']] == ['Master']
     assert selected_staff_data['selected_staff_plan']['title'] == 'Master'
     selected_plan_rows = {
-        row['code']: row['plan']
+        row['code']: row
         for row in selected_staff_data['selected_staff_plan']['metrics']
     }
-    assert selected_plan_rows['revenue'] == 7000.0
-    assert selected_plan_rows['clients'] == 2.0
+    assert selected_plan_rows['revenue']['plan'] == 7000.0
+    assert selected_plan_rows['revenue']['fact'] == 4000.0
+    assert selected_plan_rows['revenue']['completion_pct'] == pytest.approx(57.14, abs=0.01)
+    assert selected_plan_rows['revenue']['status'] == 'bad'
+    assert selected_plan_rows['clients']['plan'] == 2.0
+    assert selected_plan_rows['clients']['fact'] == 2.0
 
     assert r_partial.status_code == 200
     partial_data = r_partial.json()['data']
@@ -1160,6 +1164,180 @@ async def test_dashboard_plan_fact_uses_plan_and_fact_formulas(async_session):
     partial_cells = {cell['code']: cell for cell in partial_branch_group['metrics']}
     assert partial_cells['revenue']['plan'] == 7000.0
     assert partial_cells['revenue']['fact'] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_returns_staff_rankings_and_goods_kpis_by_scope(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon 1', group_id=1))
+    async_session.add(Company(id=2, title='Salon 2', group_id=1))
+    async_session.add_all([
+        Staff(id=1, name='Alpha', position='Барбер', company_id=1, fired=0),
+        Staff(id=2, name='Bravo', position='Барбер', company_id=1, fired=0),
+        Staff(id=3, name='Charlie', position='Барбер', company_id=2, fired=0),
+    ])
+    async_session.add_all([
+        Client(id=1, name='Client 1', company_id=1),
+        Client(id=2, name='Client 2', company_id=1),
+        Client(id=3, name='Client 3', company_id=1),
+        Client(id=4, name='Client 4', company_id=2),
+        Client(id=5, name='Client 5', company_id=2),
+    ])
+    await async_session.flush()
+
+    appointments = [
+        (1, 1, 1, 1, date(2025, 1, 10)),
+        (2, 1, 1, 2, date(2025, 1, 11)),
+        (3, 1, 2, 3, date(2025, 1, 12)),
+        (4, 2, 3, 4, date(2025, 1, 13)),
+        (5, 2, 3, 5, date(2025, 1, 14)),
+    ]
+    async_session.add_all([
+        Appointment(
+            id=appointment_id,
+            company_id=company_id,
+            staff_id=staff_id,
+            client_id=client_id,
+            date=appointment_date,
+            datetime=datetime(2025, 1, appointment_date.day, 12, 0, 0),
+            create_date=datetime(2025, 1, appointment_date.day - 1, 12, 0, 0),
+            seance_length=3600,
+            attendance=1,
+        )
+        for appointment_id, company_id, staff_id, client_id, appointment_date in appointments
+    ])
+    await async_session.flush()
+
+    transaction_rows = [
+        (1, 1, 1, 10, 'воск', 1000.0, 1),
+        (2, 2, 1, 11, 'камуфляж', 2000.0, 2),
+        (3, 3, 2, 12, 'Black Mask', 5000.0, 3),
+        (4, 4, 3, 13, 'уход за головой', 1500.0, 4),
+        (5, 5, 3, 14, 'Стрижка', 2500.0, 5),
+    ]
+    async_session.add_all([
+        Transaction(
+            id=txn_id,
+            appointment_id=appointment_id,
+            service_id=service_id,
+            service_title=title,
+            cost=amount,
+            first_cost=amount,
+            amount=qty,
+            company_id=company_id,
+        )
+        for txn_id, appointment_id, company_id, service_id, title, amount, qty in transaction_rows
+    ])
+    async_session.add_all([
+        FinancialTransaction(
+            id=txn_id,
+            date=datetime(2025, 1, 10 + txn_id, 12, 0, 0),
+            amount=amount,
+            record_id=appointment_id,
+            visit_id=appointment_id,
+            sold_item_id=service_id,
+            sold_item_type='service',
+            master_id=appointments[appointment_id - 1][2],
+            company_id=company_id,
+        )
+        for txn_id, appointment_id, company_id, service_id, _title, amount, _qty in transaction_rows
+    ])
+
+    now = datetime(2025, 1, 1, 0, 0, 0)
+    staff_plans = {
+        1: {
+            'company_id': 1,
+            'revenue': 3000.0,
+            'clients': 2.0,
+            'wax_qty': 2.0,
+            'camouflage_qty': 3.0,
+            'face_care_qty': 0.0,
+            'head_care_qty': 0.0,
+        },
+        2: {
+            'company_id': 1,
+            'revenue': 6000.0,
+            'clients': 1.0,
+            'wax_qty': 0.0,
+            'camouflage_qty': 0.0,
+            'face_care_qty': 4.0,
+            'head_care_qty': 0.0,
+        },
+        3: {
+            'company_id': 2,
+            'revenue': 5000.0,
+            'clients': 2.0,
+            'wax_qty': 0.0,
+            'camouflage_qty': 0.0,
+            'face_care_qty': 0.0,
+            'head_care_qty': 5.0,
+        },
+    }
+    for staff_id, values in staff_plans.items():
+        company_id = values['company_id']
+        for code, value in values.items():
+            if code == 'company_id':
+                continue
+            async_session.add(
+                PlanMetric(
+                    period_start=date(2025, 1, 1),
+                    period_end=date(2025, 1, 31),
+                    company_id=company_id,
+                    staff_id=staff_id,
+                    staff_category='barber',
+                    metric_code=code,
+                    value=value,
+                    updated_at=now,
+                )
+            )
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        network_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+        branch_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    assert network_response.status_code == 200
+    network_data = network_response.json()['data']
+    assert [row['title'] for row in network_data['staff_rankings']['revenue_top']] == [
+        'Bravo',
+        'Charlie',
+        'Alpha',
+    ]
+    assert [row['title'] for row in network_data['staff_rankings']['avg_check_top']] == [
+        'Bravo',
+        'Charlie',
+        'Alpha',
+    ]
+    network_goods = {row['code']: row for row in network_data['goods_kpi_execution']}
+    assert set(network_goods) == {'wax_qty', 'camouflage_qty', 'face_care_qty', 'head_care_qty'}
+    assert network_goods['wax_qty']['plan'] == 2.0
+    assert network_goods['wax_qty']['fact'] == 1.0
+    assert network_goods['wax_qty']['completion_pct'] == 50.0
+    assert network_goods['face_care_qty']['plan'] == 4.0
+    assert network_goods['face_care_qty']['fact'] == 3.0
+    assert network_goods['head_care_qty']['plan'] == 5.0
+    assert network_goods['head_care_qty']['fact'] == 4.0
+
+    assert branch_response.status_code == 200
+    branch_data = branch_response.json()['data']
+    assert [row['title'] for row in branch_data['staff_rankings']['revenue_top']] == ['Bravo', 'Alpha']
+    branch_goods = {row['code']: row for row in branch_data['goods_kpi_execution']}
+    assert branch_goods['wax_qty']['plan'] == 2.0
+    assert branch_goods['wax_qty']['fact'] == 1.0
+    assert branch_goods['head_care_qty']['plan'] == 0.0
+    assert branch_goods['head_care_qty']['fact'] == 0.0
 
 
 @pytest.mark.asyncio

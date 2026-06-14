@@ -45,6 +45,7 @@ WAITLIST_STAFF_NAME = 'лист ожидания'
 ADMIN_PLACEHOLDER_STAFF_PREFIX = 'администратор'
 PLAN_SETTINGS_SOURCE = 'dashboard_plan_settings'
 MANUAL_REVIEW_FACT_MAX_DAYS = 31
+GOODS_KPI_CODES = ('wax_qty', 'camouflage_qty', 'face_care_qty', 'head_care_qty')
 
 WAX_TITLE_PARTS = ('воск',)
 CAMOUFLAGE_TITLE_PARTS = ('камуфляж',)
@@ -1491,6 +1492,14 @@ def _metric_fact_value(group: dict[str, Any], code: str) -> float:
     return 0.0
 
 
+def _metric_plan_value(group: dict[str, Any], code: str) -> float | None:
+    for cell in group.get('metrics') or []:
+        if cell.get('code') == code:
+            value = cell.get('plan')
+            return None if value is None else float(value or 0.0)
+    return None
+
+
 def _staff_total_for_aggregate(groups: list[dict[str, Any]], code: str) -> Optional[float]:
     barber_groups = [group for group in groups if group.get('category') == 'barber']
     admin_groups = [group for group in groups if group.get('category') == 'administrator']
@@ -1517,6 +1526,61 @@ def _normalize_aggregate_fact_from_staff(
     return _derive_metric_values(normalized, include_zero_derived=True, prefer_explicit=False)
 
 
+def _staff_rankings_payload(groups: list[dict[str, Any]], limit: int = 5) -> dict[str, list[dict[str, Any]]]:
+    def ranking(metric_code: str) -> list[dict[str, Any]]:
+        rows = [
+            {
+                'company_id': group.get('company_id'),
+                'staff_id': group.get('staff_id'),
+                'title': group.get('title'),
+                'position': group.get('position'),
+                'category': group.get('category'),
+                'category_label': group.get('category_label'),
+                'value': _round_optional(_metric_fact_value(group, metric_code)) or 0.0,
+            }
+            for group in groups
+            if group.get('staff_id') is not None
+        ]
+        rows.sort(key=lambda item: (-float(item['value'] or 0.0), str(item.get('title') or '')))
+        return rows[:limit]
+
+    return {
+        'revenue_top': ranking('revenue'),
+        'avg_check_top': ranking('avg_check_total'),
+    }
+
+
+def _goods_kpi_execution_payload(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    metric_by_code = {metric['code']: metric for metric in PLAN_FACT_METRICS}
+    out = []
+    for code in GOODS_KPI_CODES:
+        metric = metric_by_code[code]
+        plan_values = [
+            plan
+            for plan in (_metric_plan_value(group, code) for group in groups)
+            if plan is not None
+        ]
+        plan = sum(plan_values) if plan_values else None
+        fact = sum(_metric_fact_value(group, code) for group in groups)
+        if plan is None:
+            completion_pct = None
+        elif plan == 0:
+            completion_pct = 100.0 if fact >= 0 else None
+        else:
+            completion_pct = 100.0 * fact / plan
+        out.append({
+            'code': code,
+            'label': metric['label'],
+            'format': metric['format'],
+            'plan': _round_optional(plan),
+            'fact': _round_optional(fact),
+            'remaining': None if plan is None else _round_optional(plan - fact),
+            'completion_pct': _round_optional(completion_pct),
+            'status': _completion_status(completion_pct),
+        })
+    return out
+
+
 def _selected_staff_plan_payload(
     selected_staff: dict[str, Any] | None,
     groups: list[dict[str, Any]],
@@ -1536,6 +1600,10 @@ def _selected_staff_plan_payload(
             'label': metric['label'],
             'format': metric['format'],
             'plan': cell.get('plan'),
+            'fact': cell.get('fact'),
+            'remaining': cell.get('remaining'),
+            'completion_pct': cell.get('completion_pct'),
+            'status': cell.get('status'),
         })
     return {
         'company_id': group.get('company_id'),
@@ -2522,6 +2590,8 @@ async def fetch_plan_fact(
                 'metrics': list(PLAN_FACT_METRICS),
                 'metric_sets': _metric_sets_payload(),
                 'diagnostics': [],
+                'staff_rankings': _staff_rankings_payload([]),
+                'goods_kpi_execution': _goods_kpi_execution_payload([]),
                 'groups': [],
             }
 
@@ -2562,6 +2632,8 @@ async def fetch_plan_fact(
             'metrics': list(PLAN_FACT_METRICS),
             'metric_sets': _metric_sets_payload(),
             'diagnostics': diagnostics,
+            'staff_rankings': _staff_rankings_payload(groups),
+            'goods_kpi_execution': _goods_kpi_execution_payload(groups),
             'groups': groups,
         }
 
@@ -2610,6 +2682,12 @@ async def fetch_plan_fact(
             ),
         })
 
+    all_staff_groups = [
+        group
+        for branch_id in company_ids
+        for group in staff_groups_by_company.get(branch_id, [])
+    ]
+
     return {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
         'plan_period': {'start': plan_start.isoformat(), 'end': plan_end.isoformat()},
@@ -2617,6 +2695,8 @@ async def fetch_plan_fact(
         'metrics': list(PLAN_FACT_METRICS),
         'metric_sets': _metric_sets_payload(),
         'diagnostics': [],
+        'staff_rankings': _staff_rankings_payload(all_staff_groups),
+        'goods_kpi_execution': _goods_kpi_execution_payload(all_staff_groups),
         'groups': groups,
     }
 

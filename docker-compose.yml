@@ -2,6 +2,8 @@ x-app-base: &app-base
   build:
     context: .
     dockerfile: Dockerfile
+    args:
+      APP_REVISION: ${APP_REVISION:-local}
   image: yclients_bi_system-app:local
   env_file:
     - .env

@@ -17,6 +17,7 @@ const els = {
   extraServicesMeta: document.getElementById('extra-services-meta'),
   planMeta: document.getElementById('plan-meta'),
   tableMeta: document.getElementById('table-meta'),
+  planInsights: document.getElementById('plan-insights'),
   planFactTable: document.getElementById('plan-fact-table'),
   reviewFactEditor: document.getElementById('review-fact-editor'),
   reviewFactMeta: document.getElementById('review-fact-meta'),
@@ -43,6 +44,8 @@ const els = {
   planSettingsStaffMeta: document.getElementById('plan-settings-staff-meta'),
   planSettingsBranches: document.getElementById('plan-settings-branches'),
   planSettingsStaff: document.getElementById('plan-settings-staff'),
+  overviewPresetButtons: [...document.querySelectorAll('[data-overview-preset]')],
+  overviewJumpButtons: [...document.querySelectorAll('[data-overview-jump]')],
 };
 
 const filterEls = {
@@ -73,8 +76,11 @@ const charts = {
   revenue: null,
   appointments: null,
   services: null,
+  selectedStaffPlan: null,
+  goodsKpi: null,
 };
 
+const pageOpenedAt = new Date();
 let activeView = 'overview';
 let branchOptions = [];
 let reviewFactRows = [];
@@ -251,10 +257,41 @@ async function postJson(path, body) {
 }
 
 function defaultDates(filter) {
-  const now = new Date();
+  const now = new Date(pageOpenedAt);
   const start = new Date(now.getFullYear(), now.getMonth(), 1);
   filter.end.value = formatInputDate(now);
   filter.start.value = formatInputDate(start);
+}
+
+function setReviewFactDefaultDates() {
+  const now = new Date(pageOpenedAt);
+  filterEls.reviewFacts.start.value = formatInputDate(new Date(now.getFullYear(), now.getMonth(), 1));
+  filterEls.reviewFacts.end.value = formatInputDate(now);
+}
+
+function overviewPresetRange(preset) {
+  const end = new Date(pageOpenedAt);
+  const start = new Date(end);
+  if (preset === 'week') {
+    const day = start.getDay() || 7;
+    start.setDate(start.getDate() - day + 1);
+  } else if (preset === 'month') {
+    start.setDate(1);
+  } else if (preset === 'quarter') {
+    start.setMonth(Math.floor(start.getMonth() / 3) * 3, 1);
+  } else if (preset === 'year') {
+    start.setMonth(0, 1);
+  }
+  return { start, end };
+}
+
+function setOverviewPreset(preset) {
+  const range = overviewPresetRange(preset);
+  filterEls.overview.start.value = formatInputDate(range.start);
+  filterEls.overview.end.value = formatInputDate(range.end);
+  els.overviewPresetButtons.forEach((button) => {
+    button.classList.toggle('active', button.dataset.overviewPreset === preset);
+  });
 }
 
 function currentMonthValue() {
@@ -674,6 +711,8 @@ function renderSelectedStaffPlanTable(staffPlan) {
             <tr>
               <th>KPI</th>
               <th class="number">План</th>
+              <th class="number">Факт</th>
+              <th class="number">% выполнения</th>
             </tr>
           </thead>
           <tbody>
@@ -683,6 +722,10 @@ function renderSelectedStaffPlanTable(staffPlan) {
                   <tr>
                     <td>${escapeHtml(metric.label)}</td>
                     <td class="number">${escapeHtml(formatMetricValue(metric.plan, metric.format))}</td>
+                    <td class="number">${escapeHtml(formatMetricValue(metric.fact, metric.format))}</td>
+                    <td class="number metric-status ${escapeHtml(metric.status || 'no-plan')}">
+                      ${escapeHtml(formatMetricValue(metric.completion_pct, 'percent'))}
+                    </td>
                   </tr>
                 `,
               )
@@ -692,6 +735,154 @@ function renderSelectedStaffPlanTable(staffPlan) {
       </div>
     </section>
   `;
+}
+
+function renderRankingList(rows, format) {
+  if (!rows?.length) return '<div class="empty compact">Нет сотрудников за выбранный период</div>';
+  return `
+    <ol class="ranking-list">
+      ${rows
+        .map((row, index) => `
+          <li>
+            <span class="rank">${index + 1}</span>
+            <span class="name">${escapeHtml(row.title || `Сотрудник ${row.staff_id || ''}`)}</span>
+            <span class="score">${escapeHtml(formatMetricValue(row.value, format))}</span>
+          </li>
+        `)
+        .join('')}
+    </ol>
+  `;
+}
+
+function chartValue(value) {
+  return Number(value || 0);
+}
+
+function renderPlanInsights(planFact) {
+  destroyChart('selectedStaffPlan');
+  destroyChart('goodsKpi');
+  if (!els.planInsights) return;
+
+  const rankings = planFact?.staff_rankings || {};
+  const goodsKpis = planFact?.goods_kpi_execution || [];
+  const selectedStaffPlan = planFact?.selected_staff_plan;
+  const panels = [];
+
+  if (selectedStaffPlan?.metrics?.length) {
+    panels.push(`
+      <div class="panel wide">
+        <div class="panel-title">
+          <h2>План vs факт: ${escapeHtml(selectedStaffPlan.title || 'сотрудник')}</h2>
+          <span class="meta">${escapeHtml(selectedStaffPlan.category_label || '')}</span>
+        </div>
+        <div class="chart-box short"><canvas id="selected-staff-plan-chart"></canvas></div>
+      </div>
+    `);
+  }
+
+  panels.push(`
+    <div class="panel">
+      <div class="panel-title">
+        <h2>Топ-5 по выручке</h2>
+        <span class="meta">${formatNumber(rankings.revenue_top?.length || 0)} сотрудников</span>
+      </div>
+      ${renderRankingList(rankings.revenue_top || [], 'money')}
+    </div>
+  `);
+  panels.push(`
+    <div class="panel">
+      <div class="panel-title">
+        <h2>Топ-5 по СЧ</h2>
+        <span class="meta">${formatNumber(rankings.avg_check_top?.length || 0)} сотрудников</span>
+      </div>
+      ${renderRankingList(rankings.avg_check_top || [], 'money')}
+    </div>
+  `);
+
+  if (goodsKpis.length) {
+    panels.push(`
+      <div class="panel wide">
+        <div class="panel-title">
+          <h2>Выполнение товарных KPI</h2>
+          <span class="meta">${goodsKpis.length} KPI</span>
+        </div>
+        <div class="chart-box short"><canvas id="goods-kpi-chart"></canvas></div>
+      </div>
+    `);
+  }
+
+  els.planInsights.innerHTML = panels.join('');
+
+  const selectedCanvas = document.getElementById('selected-staff-plan-chart');
+  if (selectedCanvas && selectedStaffPlan?.metrics?.length) {
+    const visibleMetrics = selectedStaffPlan.metrics.filter(
+      (metric) => (metric.plan !== null && metric.plan !== undefined) || chartValue(metric.fact) !== 0,
+    );
+    charts.selectedStaffPlan = new Chart(selectedCanvas, {
+      type: 'bar',
+      data: {
+        labels: visibleMetrics.map((metric) => metric.label),
+        datasets: [
+          {
+            label: 'План',
+            data: visibleMetrics.map((metric) => chartValue(metric.plan)),
+            backgroundColor: '#94a3b8',
+            borderRadius: 4,
+          },
+          {
+            label: 'Факт',
+            data: visibleMetrics.map((metric) => chartValue(metric.fact)),
+            backgroundColor: '#0f766e',
+            borderRadius: 4,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { y: { beginAtZero: true } },
+      },
+    });
+  }
+
+  const goodsCanvas = document.getElementById('goods-kpi-chart');
+  if (goodsCanvas && goodsKpis.length) {
+    charts.goodsKpi = new Chart(goodsCanvas, {
+      type: 'bar',
+      data: {
+        labels: goodsKpis.map((metric) => metric.label),
+        datasets: [
+          {
+            label: 'План',
+            data: goodsKpis.map((metric) => chartValue(metric.plan)),
+            backgroundColor: '#94a3b8',
+            borderRadius: 4,
+          },
+          {
+            label: 'Факт',
+            data: goodsKpis.map((metric) => chartValue(metric.fact)),
+            backgroundColor: '#b45309',
+            borderRadius: 4,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { y: { beginAtZero: true } },
+        plugins: {
+          tooltip: {
+            callbacks: {
+              afterBody: (items) => {
+                const item = goodsKpis[items[0]?.dataIndex];
+                return item ? [`Выполнение: ${formatMetricValue(item.completion_pct, 'percent')}`] : [];
+              },
+            },
+          },
+        },
+      },
+    });
+  }
 }
 
 function renderPlanDiagnostics(diagnostics) {
@@ -722,10 +913,13 @@ function renderPlanFact(planFact) {
   const metrics = planFact?.metrics || [];
   const diagnosticsHtml = renderPlanDiagnostics(planFact?.diagnostics || []);
   if (!groups.length && !planFact?.parent_group) {
+    renderPlanInsights(null);
+    if (els.planInsights) els.planInsights.innerHTML = '';
     els.planFactTable.innerHTML = `${diagnosticsHtml}<div class="empty">Нет плана за выбранный период</div>`;
     els.planMeta.textContent = '';
     return;
   }
+  renderPlanInsights(planFact);
 
   const metricSets = planFact?.metric_sets || {};
   if (planFact?.view_scope === 'staff') {
@@ -1303,6 +1497,10 @@ async function loadCurrentView() {
 async function init() {
   reportsController = initReports({ clearError, showError, setApiState });
   Object.values(filterEls).forEach((filter) => defaultDates(filter));
+  setReviewFactDefaultDates();
+  els.overviewPresetButtons.forEach((button) => {
+    button.classList.toggle('active', button.dataset.overviewPreset === 'month');
+  });
   els.planSettingsMonth.value = currentMonthValue();
   renderServicesTable([]);
   renderExtraServicesTable([]);
@@ -1313,11 +1511,30 @@ async function init() {
 }
 
 filterEls.overview.load.addEventListener('click', () => loadDashboard());
+filterEls.overview.start.addEventListener('change', () => {
+  els.overviewPresetButtons.forEach((button) => button.classList.remove('active'));
+});
+filterEls.overview.end.addEventListener('change', () => {
+  els.overviewPresetButtons.forEach((button) => button.classList.remove('active'));
+});
 filterEls.overview.branch.addEventListener('change', async () => {
   await loadStaff(filterEls.overview);
   await loadDashboard();
 });
 filterEls.overview.staff.addEventListener('change', () => loadDashboard());
+els.overviewPresetButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    setOverviewPreset(button.dataset.overviewPreset || 'month');
+    loadDashboard();
+  });
+});
+els.overviewJumpButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    const section = button.dataset.overviewJump;
+    const target = document.querySelector(`[data-overview-section="${section}"]`);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+});
 
 filterEls.plan.load.addEventListener('click', () => loadPlanFact());
 filterEls.plan.branch.addEventListener('change', async () => {

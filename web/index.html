@@ -107,6 +107,13 @@
       margin-bottom: 16px;
     }
 
+    .segmented {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
     .tab {
       display: inline-flex;
       min-height: 36px;
@@ -121,6 +128,21 @@
     }
 
     .tab.active {
+      border-color: #0f766e;
+      background: #e6fffb;
+      color: #0f766e;
+    }
+
+    .segmented button {
+      min-height: 34px;
+      padding: 6px 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #334155;
+    }
+
+    .segmented button.active {
       border-color: #0f766e;
       background: #e6fffb;
       color: #0f766e;
@@ -246,6 +268,10 @@
       align-items: start;
     }
 
+    [data-overview-section] {
+      scroll-margin-top: 18px;
+    }
+
     .panel {
       min-width: 0;
       padding: 16px;
@@ -282,6 +308,58 @@
 
     .chart-box.short {
       height: 270px;
+    }
+
+    .plan-insights {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .plan-insights:empty {
+      display: none;
+    }
+
+    .ranking-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .ranking-list li {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: baseline;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    .ranking-list li:last-child {
+      padding-bottom: 0;
+      border-bottom: 0;
+    }
+
+    .ranking-list .rank {
+      color: #64748b;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .ranking-list .name {
+      min-width: 0;
+      color: #172033;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .ranking-list .score {
+      color: #0f766e;
+      font-weight: 800;
+      white-space: nowrap;
     }
 
     table {
@@ -867,6 +945,10 @@
       .grid {
         grid-template-columns: 1fr;
       }
+
+      .plan-insights {
+        grid-template-columns: 1fr;
+      }
     }
 
     @media (max-width: 560px) {
@@ -878,7 +960,8 @@
       .toolbar,
       .plan-settings-toolbar,
       .kpi,
-      .visit-metrics {
+      .visit-metrics,
+      .segmented {
         grid-template-columns: 1fr;
       }
 
@@ -954,19 +1037,25 @@
         <button type="button" id="overview-load">Обновить</button>
       </section>
 
+      <nav class="segmented" aria-label="Быстрые периоды обзора">
+        <button type="button" data-overview-preset="today">Сегодня</button>
+        <button type="button" data-overview-preset="week">Неделя</button>
+        <button type="button" data-overview-preset="month">Месяц</button>
+        <button type="button" data-overview-preset="quarter">Квартал</button>
+        <button type="button" data-overview-preset="year">Год</button>
+      </nav>
+
+      <nav class="segmented" aria-label="Группы графиков обзора">
+        <button type="button" data-overview-jump="appointments">Записи</button>
+        <button type="button" data-overview-jump="revenue">Выручка</button>
+        <button type="button" data-overview-jump="services">Услуги</button>
+      </nav>
+
       <section class="kpi" id="kpi"></section>
       <section class="visit-metrics" id="visit-metrics" aria-label="Посещения и доп. услуги"></section>
 
       <section class="grid">
-        <div class="panel wide">
-          <div class="panel-title">
-            <h2>Доп. услуги</h2>
-            <span class="meta" id="extra-services-meta"></span>
-          </div>
-          <div id="extra-services-table"></div>
-        </div>
-
-        <div class="panel wide">
+        <div class="panel wide" data-overview-section="revenue">
           <div class="panel-title">
             <h2>Выручка по дням</h2>
             <span class="meta" id="revenue-meta"></span>
@@ -974,7 +1063,7 @@
           <div class="chart-box"><canvas id="revenue-chart"></canvas></div>
         </div>
 
-        <div class="panel">
+        <div class="panel" data-overview-section="appointments">
           <div class="panel-title">
             <h2>Записи по дням</h2>
             <span class="meta" id="appointments-meta"></span>
@@ -982,7 +1071,15 @@
           <div class="chart-box short"><canvas id="appointments-chart"></canvas></div>
         </div>
 
-        <div class="panel">
+        <div class="panel wide" data-overview-section="services">
+          <div class="panel-title">
+            <h2>Доп. услуги</h2>
+            <span class="meta" id="extra-services-meta"></span>
+          </div>
+          <div id="extra-services-table"></div>
+        </div>
+
+        <div class="panel" data-overview-section="services">
           <div class="panel-title">
             <h2>Топ услуг</h2>
             <span class="meta" id="services-meta"></span>
@@ -990,7 +1087,7 @@
           <div class="chart-box short"><canvas id="services-chart"></canvas></div>
         </div>
 
-        <div class="panel wide">
+        <div class="panel wide" data-overview-section="services">
           <div class="panel-title">
             <h2>Услуги с максимальной выручкой</h2>
             <span class="meta" id="table-meta"></span>
@@ -1024,6 +1121,8 @@
         </label>
         <button type="button" id="plan-load">Обновить</button>
       </section>
+
+      <div class="plan-insights" id="plan-insights"></div>
 
       <div class="panel wide">
         <div class="panel-title">
