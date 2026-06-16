@@ -180,6 +180,13 @@
       margin-bottom: 16px;
     }
 
+    .segmented {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
     .tab {
       display: inline-flex;
       min-height: 36px;
@@ -194,6 +201,21 @@
     }
 
     .tab.active {
+      border-color: #0f766e;
+      background: #e6fffb;
+      color: #0f766e;
+    }
+
+    .segmented button {
+      min-height: 34px;
+      padding: 6px 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #334155;
+    }
+
+    .segmented button.active {
       border-color: #0f766e;
       background: #e6fffb;
       color: #0f766e;
@@ -343,6 +365,10 @@
       align-items: start;
     }
 
+    [data-overview-section] {
+      scroll-margin-top: 18px;
+    }
+
     .panel {
       min-width: 0;
       padding: 16px;
@@ -379,6 +405,58 @@
 
     .chart-box.short {
       height: 270px;
+    }
+
+    .plan-insights {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .plan-insights:empty {
+      display: none;
+    }
+
+    .ranking-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .ranking-list li {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: baseline;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    .ranking-list li:last-child {
+      padding-bottom: 0;
+      border-bottom: 0;
+    }
+
+    .ranking-list .rank {
+      color: #64748b;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .ranking-list .name {
+      min-width: 0;
+      color: #172033;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .ranking-list .score {
+      color: #0f766e;
+      font-weight: 800;
+      white-space: nowrap;
     }
 
     table {
@@ -518,6 +596,80 @@
     .metric-status.bad { background: #fee2e2; color: #991b1b; }
     .metric-status.no-plan { background: #f1f5f9; color: #64748b; }
 
+    .review-fact-panel {
+      margin-bottom: 16px;
+    }
+
+    .review-fact-scroll table {
+      min-width: 760px;
+    }
+
+    .review-fact-table input {
+      max-width: 72px;
+      margin-left: auto;
+      text-align: right;
+    }
+
+    .review-fact-table th.review-fact-day,
+    .review-fact-table td.review-fact-day {
+      min-width: 82px;
+      white-space: nowrap;
+    }
+
+    .review-fact-actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 12px;
+    }
+
+    .plan-settings-toolbar {
+      grid-template-columns: minmax(180px, 220px) auto auto auto 1fr;
+    }
+
+    .plan-settings-status {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      min-height: 40px;
+      color: #64748b;
+      font-size: 13px;
+      text-align: right;
+    }
+
+    .plan-settings-dirty {
+      display: none;
+      color: #9a3412;
+      font-weight: 700;
+    }
+
+    .plan-settings-dirty.visible {
+      display: inline;
+    }
+
+    .plan-settings-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .plan-settings-table input {
+      min-width: 86px;
+      text-align: right;
+    }
+
+    .plan-settings-table .readonly {
+      color: #64748b;
+      white-space: nowrap;
+    }
+
+    button.secondary {
+      border: 1px solid #cbd5e1;
+      background: #ffffff;
+      color: #334155;
+    }
+
     .empty {
       min-height: 160px;
       display: grid;
@@ -527,6 +679,335 @@
       border-radius: 8px;
       text-align: center;
       padding: 16px;
+    }
+
+    .empty.compact {
+      min-height: 82px;
+    }
+
+    .reports-toolbar {
+      grid-template-columns: minmax(220px, 1.4fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(150px, 1fr) auto auto;
+    }
+
+    .reports-filter-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(130px, 1fr)) auto auto;
+      gap: 10px;
+      align-items: end;
+      margin-bottom: 16px;
+    }
+
+    .reports-filter-row .checkline,
+    .report-filter-row .checkline {
+      min-height: 40px;
+      flex-direction: row;
+      align-items: center;
+      text-transform: none;
+      font-size: 13px;
+      color: #334155;
+    }
+
+    .reports-filter-row .checkline input,
+    .report-filter-row .checkline input {
+      width: auto;
+      min-height: auto;
+    }
+
+    .reports-section {
+      margin-bottom: 24px;
+    }
+
+    .reports-section__head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .reports-section__head h3 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: 0;
+    }
+
+    .reports-section__head span {
+      color: #64748b;
+      font-size: 13px;
+    }
+
+    .reports-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .report-card {
+      position: relative;
+      min-height: 186px;
+      padding: 14px;
+      border: 1px solid #dbe3ef;
+      border-radius: 8px;
+      background: #ffffff;
+      cursor: pointer;
+      transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
+    }
+
+    .report-card:hover {
+      transform: translateY(-1px);
+      border-color: #94a3b8;
+      box-shadow: 0 12px 28px rgba(15, 23, 42, .08);
+    }
+
+    .report-card--source_missing,
+    .report-card--planned {
+      background: #fbfdff;
+    }
+
+    .report-card__pin {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      min-height: 30px;
+      padding: 0;
+      border: 1px solid #dbe3ef;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #94a3b8;
+    }
+
+    .report-card__pin.active {
+      color: #b45309;
+      border-color: #fcd34d;
+      background: #fffbeb;
+    }
+
+    .report-card__status {
+      display: inline-flex;
+      margin-bottom: 10px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: #f1f5f9;
+      color: #475569;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .report-card h4 {
+      margin: 0 36px 8px 0;
+      font-size: 16px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    .report-card p {
+      margin: 0 0 12px;
+      color: #64748b;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .report-card__tags {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .report-card__tags span {
+      padding: 3px 7px;
+      border: 1px solid #e2e8f0;
+      border-radius: 999px;
+      color: #334155;
+      font-size: 12px;
+      background: #ffffff;
+    }
+
+    .report-card__source {
+      color: #94a3b8;
+      font-size: 12px;
+    }
+
+    .reports-viewer {
+      display: none;
+      margin-top: 16px;
+    }
+
+    .reports-viewer.visible {
+      display: block;
+    }
+
+    .reports-viewer__head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+
+    .reports-viewer__head h2 {
+      font-size: 22px;
+    }
+
+    .report-filter-row {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr)) auto auto;
+      gap: 10px;
+      align-items: end;
+      margin-bottom: 16px;
+      padding: 14px;
+      border: 1px solid #dbe3ef;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
+    .report-compare-row {
+      display: grid;
+      grid-template-columns: minmax(140px, 180px) minmax(140px, 180px) 1fr;
+      gap: 10px;
+      grid-column: 1 / -1;
+      align-items: end;
+    }
+
+    .reports-metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .reports-metric {
+      min-height: 96px;
+      padding: 14px;
+      border: 1px solid #dbe3ef;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
+    .reports-metric__label {
+      color: #64748b;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .reports-metric__value {
+      margin-top: 8px;
+      color: #172033;
+      font-size: 26px;
+      font-weight: 800;
+      line-height: 1.1;
+      overflow-wrap: anywhere;
+    }
+
+    .reports-chart-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .reports-panel {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid #dbe3ef;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
+    .reports-panel--wide {
+      margin-bottom: 16px;
+    }
+
+    .reports-panel__head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .reports-panel__head h3 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: 0;
+    }
+
+    .reports-panel__head span {
+      color: #64748b;
+      font-size: 13px;
+    }
+
+    .reports-chart-box {
+      position: relative;
+      height: 320px;
+    }
+
+    .reports-table-scroll {
+      max-height: 520px;
+      overflow: auto;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+    }
+
+    .reports-table {
+      min-width: 840px;
+    }
+
+    .reports-table thead th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #ffffff;
+    }
+
+    .reports-table .number {
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .reports-note,
+    .reports-unavailable {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 16px;
+      padding: 14px;
+      border: 1px solid #dbe3ef;
+      border-radius: 8px;
+      background: #ffffff;
+      color: #334155;
+      font-size: 14px;
+    }
+
+    .reports-note--missing,
+    .reports-note--planned {
+      border-color: #fed7aa;
+      background: #fff7ed;
+      color: #9a3412;
+    }
+
+    .reports-note--partial {
+      border-color: #bfdbfe;
+      background: #eff6ff;
+      color: #1d4ed8;
+    }
+
+    .reports-note__sources {
+      color: #64748b;
+      font-size: 13px;
+    }
+
+    .reports-unavailable h3 {
+      margin: 0;
+      font-size: 18px;
+    }
+
+    .reports-compare .reports-metrics {
+      margin-bottom: 0;
     }
 
     @media (max-width: 900px) {
@@ -539,6 +1020,10 @@
       }
 
       .toolbar {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .plan-settings-toolbar {
         grid-template-columns: 1fr 1fr;
       }
 
@@ -557,6 +1042,10 @@
       .grid {
         grid-template-columns: 1fr;
       }
+
+      .plan-insights {
+        grid-template-columns: 1fr;
+      }
     }
 
     @media (max-width: 560px) {
@@ -566,14 +1055,33 @@
       }
 
       .toolbar,
+      .plan-settings-toolbar,
       .kpi,
-      .visit-metrics {
+      .visit-metrics,
+      .segmented {
         grid-template-columns: 1fr;
       }
 
       .chart-box,
       .chart-box.short {
         height: 260px;
+      }
+
+      .reports-toolbar,
+      .reports-filter-row,
+      .report-filter-row,
+      .report-compare-row {
+        grid-template-columns: 1fr;
+      }
+
+      .reports-grid,
+      .reports-chart-grid,
+      .reports-metrics {
+        grid-template-columns: 1fr;
+      }
+
+      .reports-viewer__head {
+        flex-direction: column;
       }
     }
   </style>
@@ -606,6 +1114,9 @@
     <nav class="tabs" aria-label="Разделы дашборда">
       <a class="tab active" href="#overview" data-view-link="overview">Обзор</a>
       <a class="tab" href="#plan-fact" data-view-link="plan">План / факт</a>
+      <a class="tab" href="#plan-settings" data-view-link="planSettings">Установка планов</a>
+      <a class="tab" href="#review-facts" data-view-link="reviewFacts">Отзывы факт</a>
+      <a class="tab" href="/reports" data-view-link="reports">Отчеты</a>
     </nav>
 
     <div class="alert" id="error"></div>
@@ -635,19 +1146,25 @@
         <button type="button" id="overview-load">Обновить</button>
       </section>
 
+      <nav class="segmented" aria-label="Быстрые периоды обзора">
+        <button type="button" data-overview-preset="today">Сегодня</button>
+        <button type="button" data-overview-preset="week">Неделя</button>
+        <button type="button" data-overview-preset="month">Месяц</button>
+        <button type="button" data-overview-preset="quarter">Квартал</button>
+        <button type="button" data-overview-preset="year">Год</button>
+      </nav>
+
+      <nav class="segmented" aria-label="Группы графиков обзора">
+        <button type="button" data-overview-jump="appointments">Записи</button>
+        <button type="button" data-overview-jump="revenue">Выручка</button>
+        <button type="button" data-overview-jump="services">Услуги</button>
+      </nav>
+
       <section class="kpi" id="kpi"></section>
       <section class="visit-metrics" id="visit-metrics" aria-label="Посещения и доп. услуги"></section>
 
       <section class="grid">
-        <div class="panel wide">
-          <div class="panel-title">
-            <h2>Доп. услуги</h2>
-            <span class="meta" id="extra-services-meta"></span>
-          </div>
-          <div id="extra-services-table"></div>
-        </div>
-
-        <div class="panel wide">
+        <div class="panel wide" data-overview-section="revenue">
           <div class="panel-title">
             <h2>Выручка по дням</h2>
             <span class="meta" id="revenue-meta"></span>
@@ -655,7 +1172,7 @@
           <div class="chart-box"><canvas id="revenue-chart"></canvas></div>
         </div>
 
-        <div class="panel">
+        <div class="panel" data-overview-section="appointments">
           <div class="panel-title">
             <h2>Записи по дням</h2>
             <span class="meta" id="appointments-meta"></span>
@@ -663,7 +1180,15 @@
           <div class="chart-box short"><canvas id="appointments-chart"></canvas></div>
         </div>
 
-        <div class="panel">
+        <div class="panel wide" data-overview-section="services">
+          <div class="panel-title">
+            <h2>Доп. услуги</h2>
+            <span class="meta" id="extra-services-meta"></span>
+          </div>
+          <div id="extra-services-table"></div>
+        </div>
+
+        <div class="panel" data-overview-section="services">
           <div class="panel-title">
             <h2>Топ услуг</h2>
             <span class="meta" id="services-meta"></span>
@@ -671,7 +1196,7 @@
           <div class="chart-box short"><canvas id="services-chart"></canvas></div>
         </div>
 
-        <div class="panel wide">
+        <div class="panel wide" data-overview-section="services">
           <div class="panel-title">
             <h2>Услуги с максимальной выручкой</h2>
             <span class="meta" id="table-meta"></span>
@@ -706,6 +1231,8 @@
         <button type="button" id="plan-load">Обновить</button>
       </section>
 
+      <div class="plan-insights" id="plan-insights"></div>
+
       <div class="panel wide">
         <div class="panel-title">
           <h2>План / факт</h2>
@@ -713,6 +1240,184 @@
         </div>
         <div id="plan-fact-table"></div>
       </div>
+    </section>
+
+    <section class="view" id="plan-settings-view" data-view="planSettings">
+      <section class="toolbar plan-settings-toolbar" aria-label="Фильтры установки планов">
+        <label>
+          Месяц
+          <input type="month" id="plan-settings-month" />
+        </label>
+        <button type="button" id="plan-settings-load">Загрузить</button>
+        <button type="button" class="secondary" id="plan-settings-copy">Скопировать прошлый месяц</button>
+        <button type="button" class="secondary" id="plan-settings-reset">Сбросить изменения</button>
+        <div class="plan-settings-status">
+          <span id="plan-settings-dirty" class="plan-settings-dirty">Есть несохранённые изменения</span>
+          <span id="plan-settings-saved">Последнее сохранение: нет</span>
+        </div>
+      </section>
+
+      <div class="panel wide">
+        <div class="panel-title">
+          <h2>Настройки филиалов</h2>
+          <span class="meta" id="plan-settings-branch-meta"></span>
+        </div>
+        <div id="plan-settings-branches"></div>
+      </div>
+
+      <div class="panel wide review-fact-panel">
+        <div class="panel-title">
+          <h2>Планы сотрудников</h2>
+          <span class="meta" id="plan-settings-staff-meta"></span>
+        </div>
+        <div id="plan-settings-staff"></div>
+        <div class="plan-settings-actions">
+          <a class="tab" href="#review-facts" data-view-link="reviewFacts">Отзывы факт</a>
+          <button type="button" id="plan-settings-save">Сохранить</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="review-facts-view" data-view="reviewFacts">
+      <section class="toolbar" aria-label="Фильтры факта отзывов">
+        <label>
+          С
+          <input type="date" id="review-fact-start" />
+        </label>
+        <label>
+          По
+          <input type="date" id="review-fact-end" />
+        </label>
+        <label>
+          Филиал
+          <select id="review-fact-branch">
+            <option value="">Все филиалы</option>
+          </select>
+        </label>
+        <label>
+          Сотрудник
+          <select id="review-fact-staff">
+            <option value="">Все сотрудники</option>
+          </select>
+        </label>
+        <button type="button" id="review-fact-load">Обновить</button>
+      </section>
+
+      <div class="panel wide review-fact-panel">
+        <div class="panel-title">
+          <h2>Отзывы факт</h2>
+          <span class="meta" id="review-fact-meta"></span>
+        </div>
+        <div id="review-fact-editor"></div>
+        <div class="review-fact-actions">
+          <button type="button" id="review-fact-save">Сохранить факт</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="reports-view" data-view="reports">
+      <section class="toolbar reports-toolbar" id="reports-catalog-toolbar" aria-label="Фильтры каталога отчетов">
+        <label>
+          Поиск
+          <input type="search" id="reports-search" placeholder="Название или ID отчета" autocomplete="off" />
+        </label>
+        <label>
+          Группа
+          <select id="reports-group">
+            <option value="">Все группы</option>
+          </select>
+        </label>
+        <label>
+          Статус
+          <select id="reports-status">
+            <option value="">Все статусы</option>
+          </select>
+        </label>
+        <label>
+          Роль
+          <select id="reports-role">
+            <option value="">Все роли</option>
+          </select>
+        </label>
+        <label>
+          Тема
+          <select id="reports-theme">
+            <option value="">Все темы</option>
+          </select>
+        </label>
+        <label class="checkline">
+          <input type="checkbox" id="reports-favorites" />
+          Избранное
+        </label>
+        <button type="button" class="secondary" id="reports-reset">Сбросить</button>
+      </section>
+
+      <div class="panel wide" id="reports-catalog-panel">
+        <div class="panel-title">
+          <h2>Каталог отчетов</h2>
+          <span class="meta" id="reports-count"></span>
+        </div>
+        <div id="reports-catalog"></div>
+      </div>
+
+      <section class="reports-viewer" id="reports-viewer" aria-live="polite">
+        <div class="reports-viewer__head">
+          <div>
+            <h2 id="reports-viewer-title">Отчет</h2>
+            <p class="subhead" id="reports-viewer-subtitle"></p>
+          </div>
+          <button type="button" class="secondary" id="reports-viewer-back">К каталогу</button>
+        </div>
+
+        <section class="report-filter-row" aria-label="Фильтры отчета">
+          <label>
+            С
+            <input type="date" id="report-start" />
+          </label>
+          <label>
+            По
+            <input type="date" id="report-end" />
+          </label>
+          <label>
+            Филиал
+            <select id="report-branch">
+              <option value="">Все филиалы</option>
+            </select>
+          </label>
+          <label>
+            Сотрудник
+            <select id="report-staff">
+              <option value="">Все сотрудники</option>
+            </select>
+          </label>
+          <label>
+            Гранулярность
+            <select id="report-granularity">
+              <option value="day">День</option>
+              <option value="week">Неделя</option>
+              <option value="month">Месяц</option>
+            </select>
+          </label>
+          <button type="button" id="report-refresh">Обновить</button>
+          <button type="button" class="secondary" id="report-data-labels" aria-pressed="false">Значения</button>
+          <div class="report-compare-row">
+            <label class="checkline">
+              <input type="checkbox" id="report-compare-enabled" />
+              Сравнить период
+            </label>
+            <label>
+              Сравнить с
+              <input type="date" id="report-compare-start" />
+            </label>
+            <label>
+              Сравнить по
+              <input type="date" id="report-compare-end" />
+            </label>
+          </div>
+        </section>
+
+        <div id="reports-report-content"></div>
+      </section>
     </section>
   </main>
   <script type="module" src="/src/main.js"></script>

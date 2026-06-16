@@ -1,5 +1,7 @@
 .DS_Store
 .env
+Silver Stratum Plan Reader.json
+secrets/*.json
 .git
 .venv
 __pycache__/

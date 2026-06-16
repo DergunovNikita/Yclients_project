@@ -31,7 +31,7 @@ fi
 echo "Deploying $local_rev -> $remote_rev"
 git reset --hard "origin/$BRANCH"
 
-docker compose build api worker migrate
+APP_REVISION="$remote_rev" docker compose build api worker migrate
 docker compose run --rm migrate
 docker compose up -d api worker
 

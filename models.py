@@ -532,6 +532,92 @@ class PlanMetric(Base):
     )
 
 
+class PlanBranchSetting(Base):
+    """Monthly branch coefficients used to calculate plan metrics."""
+
+    __tablename__ = 'plan_branch_settings'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    period_start = Column(Date, nullable=False, index=True)
+    period_end = Column(Date, nullable=False, index=True)
+    company_id = Column(Integer, ForeignKey('companies.id'), nullable=False, index=True)
+    wax_pct = Column(Float)
+    head_care_pct = Column(Float)
+    face_care_pct = Column(Float)
+    camouflage_pct = Column(Float)
+    cosmo_pct = Column(Float)
+    opz_pct = Column(Float)
+    cosmo_price = Column(Float)
+    updated_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        Index(
+            'uq_plan_branch_setting_period_company',
+            'period_start',
+            'period_end',
+            'company_id',
+            unique=True,
+        ),
+    )
+
+
+class PlanStaffInput(Base):
+    """Monthly staff inputs used to calculate plan metrics."""
+
+    __tablename__ = 'plan_staff_inputs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    period_start = Column(Date, nullable=False, index=True)
+    period_end = Column(Date, nullable=False, index=True)
+    company_id = Column(Integer, ForeignKey('companies.id'), nullable=False, index=True)
+    staff_id = Column(Integer, ForeignKey('staff.id'), nullable=False, index=True)
+    staff_category = Column(String, nullable=False, index=True)
+    clients = Column(Float)
+    avg_check_total = Column(Float)
+    reviews_qty = Column(Float)
+    cosmo_qty = Column(Float)
+    updated_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        Index(
+            'uq_plan_staff_input_period_company_staff',
+            'period_start',
+            'period_end',
+            'company_id',
+            'staff_id',
+            unique=True,
+        ),
+    )
+
+
+class ManualFactMetric(Base):
+    """Manually entered fact values for metrics unavailable from YClients."""
+
+    __tablename__ = 'manual_fact_metrics'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    period_start = Column(Date, nullable=False, index=True)
+    period_end = Column(Date, nullable=False, index=True)
+    company_id = Column(Integer, ForeignKey('companies.id'), nullable=False, index=True)
+    staff_id = Column(Integer, ForeignKey('staff.id'), nullable=False, index=True)
+    metric_code = Column(String, nullable=False, index=True)
+    value = Column(Float, nullable=False)
+    source = Column(String, default='dashboard')
+    updated_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        Index(
+            'uq_manual_fact_metric_period_company_staff_metric',
+            'period_start',
+            'period_end',
+            'company_id',
+            'staff_id',
+            'metric_code',
+            unique=True,
+        ),
+    )
+
+
 class PortalAccount(Base):
     """Logical owner account for the product portal (future multi-tenant)."""
 

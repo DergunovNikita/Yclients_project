@@ -17,7 +17,10 @@ from models import (
     GoodCategoryCatalog,
     GoodTransaction,
     Group,
+    ManualFactMetric,
+    PlanBranchSetting,
     PlanMetric,
+    PlanStaffInput,
     PortalEmailToken,
     PortalUser,
     PortalUserBranch,
@@ -65,6 +68,9 @@ PUBLIC_TABLES = [
     Comment.__table__,
     StaffSchedule.__table__,
     PlanMetric.__table__,
+    PlanBranchSetting.__table__,
+    PlanStaffInput.__table__,
+    ManualFactMetric.__table__,
 ]
 
 

@@ -28,29 +28,6 @@
 
 Каталог [`web/`](web/) содержит Vite + Chart.js frontend для локальной разработки и сборки статического интерфейса. Backend отдает JSON-данные через FastAPI.
 
-Импорт плановых данных поддерживает CSV-источники, заданные через переменные окружения:
-
-```env
-PLAN_SHEET_CSV_URL=https://docs.google.com/spreadsheets/d/<spreadsheet_id>/export?format=csv&gid=0
-SERVICES_SHEET_CSV_URL=https://docs.google.com/spreadsheets/d/<spreadsheet_id>/gviz/tq?tqx=out:csv&sheet=services
-```
-
-Реальные URL, ID таблиц, production-домены, IP-адреса и runbook развертывания не должны попадать в публичный репозиторий. Храните их в `.env`, секретах CI/CD или приватной operational-документации.
-
-## Public Repository Policy
-
-Этот репозиторий может быть публичным, поэтому в нем намеренно не документируются:
-
-- production hosts, IP-адреса, DNS и routing-схемы;
-- SSH/systemd/nginx runbooks;
-- реальные Google Sheets IDs и URL с бизнес-данными;
-- значения секретов и production environment variables.
-
-Перед коммитом проверяйте diff и CI secrets scan.
-
-Подробные operational-инструкции держите локально в `docs/private/`. Этот путь
-добавлен в `.gitignore`, поэтому личные runbook-файлы не должны попадать в
-публичный GitHub.
 
 ## Быстрый старт
 
@@ -119,17 +96,33 @@ curl http://127.0.0.1:8000/health
 
 ## Тесты
 
+Локальное окружение проекта уже содержит Python tooling и Node.js в `.venv/bin`.
+Для ручных команд в текущем shell:
+
+```bash
+source scripts/dev-env.sh
+node --version
+npm --version
+pytest --version
+```
+
+Полная проверка backend + frontend build:
+
+```bash
+./scripts/check.sh
+```
+
 Локальные unit/API тесты:
 
 ```bash
-pytest tests/test_sync_parsing.py tests/test_api.py tests/test_dashboard_api.py
+./scripts/check.sh tests/test_sync_parsing.py tests/test_api.py tests/test_dashboard_api.py
 ```
 
 Postgres integration tests:
 
 ```bash
 TEST_DATABASE_URL=postgresql+psycopg2://postgres:changeme@127.0.0.1:5432/yclients_test \
-pytest tests/test_postgres_integration.py
+./scripts/check.sh tests/test_postgres_integration.py
 ```
 
 ## Примечания

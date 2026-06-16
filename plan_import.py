@@ -54,9 +54,10 @@ METRIC_COLUMN_ALIASES = {
     'opz_qty': ('опз, шт', 'опз шт', 'opz_qty'),
     'opz_pct': ('опз,%', 'опз %', 'опз процент', 'opz_pct'),
     'extra_services_pct': ('% доп.услуг', 'доп.услуг,%', 'доп услуги %', 'extra_services_pct'),
+    'reviews_qty': ('отзывы', 'отзывы план', 'кол-во отзывов', 'количество отзывов', 'reviews_qty'),
 }
 
-RETIRED_PLAN_METRIC_CODES = {'reviews_qty'}
+RETIRED_PLAN_METRIC_CODES: set[str] = set()
 PLAN_FACT_METRIC_CODES = {metric['code'] for metric in PLAN_FACT_METRICS}
 
 PERIOD_START_ALIASES = ('period_start', 'date_from', 'start_date', 'начало периода', 'с')

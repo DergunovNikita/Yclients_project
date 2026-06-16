@@ -2,5 +2,9 @@
   "installCommand": "cd web && npm install",
   "buildCommand": "cd web && npm run build",
   "outputDirectory": "web/dist",
-  "framework": null
+  "framework": null,
+  "rewrites": [
+    { "source": "/reports", "destination": "/index.html" },
+    { "source": "/reports/:path*", "destination": "/index.html" }
+  ]
 }
