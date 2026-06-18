@@ -712,6 +712,88 @@ VIEWS = [
     LEFT JOIN staff s ON s.id = gt.master_id
     ORDER BY gt.id ASC
     """,
+
+    # ----------------------------------------------------------------
+    # 22. Компоненты общего среднего чека для Metabase.
+    # SUM(revenue) / COUNT(DISTINCT denominator_key) за выбранный период.
+    # ----------------------------------------------------------------
+    """
+    CREATE OR REPLACE VIEW v_average_check_components AS
+    WITH allowed_finance AS (
+        SELECT ft.*
+        FROM financial_transactions ft
+        LEFT JOIN account_catalog acc
+          ON acc.company_id = ft.company_id
+         AND acc.account_id = ft.account_id
+        WHERE ft.amount > 0
+          AND LOWER(COALESCE(acc.title, '')) NOT LIKE '%бонус%'
+          AND LOWER(COALESCE(acc.title, '')) NOT LIKE '%скид%'
+          AND LOWER(COALESCE(acc.title, '')) NOT LIKE '%лояльн%'
+          AND LOWER(COALESCE(acc.title, '')) NOT LIKE '%сертификат%'
+    ),
+    income AS (
+        SELECT
+            ft.company_id,
+            ft.date::date AS event_date,
+            CASE
+                WHEN ft.sold_item_type = 'service' THEN 'service_revenue'
+                WHEN ft.sold_item_type = 'goods_transaction' THEN 'goods_revenue'
+                WHEN ft.sold_item_type IN ('client_account', 'personal_account', 'account_replenishment')
+                  OR LOWER(COALESCE(ft.expense_title, '')) LIKE '%пополн%'
+                  OR LOWER(COALESCE(ft.expense_title, '')) LIKE '%личн%'
+                  OR LOWER(COALESCE(ft.expense_title, '')) LIKE '%депозит%'
+                THEN 'topup_revenue'
+                ELSE 'unclassified_income'
+            END AS component,
+            CASE
+                WHEN ft.sold_item_type IN ('service', 'goods_transaction')
+                  OR ft.sold_item_type IN ('client_account', 'personal_account', 'account_replenishment')
+                  OR LOWER(COALESCE(ft.expense_title, '')) LIKE '%пополн%'
+                  OR LOWER(COALESCE(ft.expense_title, '')) LIKE '%личн%'
+                  OR LOWER(COALESCE(ft.expense_title, '')) LIKE '%депозит%'
+                THEN ft.amount ELSE 0
+            END AS revenue,
+            NULL::text AS denominator_key,
+            ft.id AS source_id
+        FROM allowed_finance ft
+        LEFT JOIN appointments a ON a.id = ft.record_id
+        WHERE COALESCE(ft.sold_item_type, '') <> 'service' OR a.attendance = 1
+    ),
+    visit_denominator AS (
+        SELECT
+            a.company_id,
+            a.date::date AS event_date,
+            CASE WHEN a.client_id IS NULL
+                THEN 'appointment_without_client'
+                ELSE 'unique_client'
+            END AS component,
+            0::double precision AS revenue,
+            CASE WHEN a.client_id IS NULL
+                THEN 'appointment:' || a.company_id || ':' || a.id
+                ELSE 'client:' || a.client_id
+            END AS denominator_key,
+            a.id AS source_id
+        FROM appointments a
+        WHERE a.attendance = 1
+    ),
+    goods_denominator AS (
+        SELECT DISTINCT
+            gt.company_id,
+            gt.date::date AS event_date,
+            'goods_check'::text AS component,
+            0::double precision AS revenue,
+            'goods:' || gt.company_id || ':' || gt.document_id AS denominator_key,
+            gt.document_id AS source_id
+        FROM goods_transactions gt
+        WHERE gt.type_id = 1
+          AND gt.document_id IS NOT NULL
+    )
+    SELECT * FROM income
+    UNION ALL
+    SELECT * FROM visit_denominator
+    UNION ALL
+    SELECT * FROM goods_denominator
+    """,
 ]
 
 LEGACY_VIEWS = [

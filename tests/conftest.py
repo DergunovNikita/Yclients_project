@@ -33,6 +33,7 @@ from models import (
     Storage,
     AccountCatalog,
     StorageCatalog,
+    SyncSourceState,
     Transaction,
     Base,
 )
@@ -61,6 +62,7 @@ PUBLIC_TABLES = [
     Appointment.__table__,
     Transaction.__table__,
     FinancialTransaction.__table__,
+    SyncSourceState.__table__,
     GoodTransaction.__table__,
     Comment.__table__,
     StaffSchedule.__table__,

@@ -28,6 +28,7 @@ const els = {
   extraServicesTable: document.getElementById('extra-services-table'),
   revenueChart: document.getElementById('revenue-chart'),
   appointmentsChart: document.getElementById('appointments-chart'),
+  opzChart: document.getElementById('opz-chart'),
   servicesChart: document.getElementById('services-chart'),
   overviewView: document.getElementById('overview-view'),
   planView: document.getElementById('plan-view'),
@@ -77,6 +78,7 @@ const filterEls = {
 const charts = {
   revenue: null,
   appointments: null,
+  opz: null,
   services: null,
   selectedStaffPlan: null,
   goodsKpi: null,
@@ -351,7 +353,9 @@ function renderKpi(summary) {
       deltaValue: revenue.appointments_change_pct,
     },
     {
-      label: 'Средний чек общий',
+      label: averageCheck.source_status === 'partial'
+        ? 'Средний чек общий (предварительно)'
+        : 'Средний чек общий',
       value: formatMoney(averageCheck.total),
       delta: formatPct(averageCheck.total_change_pct),
       deltaValue: averageCheck.total_change_pct,
@@ -418,6 +422,18 @@ function renderKpi(summary) {
 function renderVisitMetrics(summary) {
   const visitMetrics = summary.visit_metrics || {};
   const cards = [
+    {
+      label: 'Количество ОПЗ',
+      value: formatNumber(visitMetrics.opz_qty),
+      delta: formatPct(visitMetrics.opz_qty_change_pct),
+      deltaValue: visitMetrics.opz_qty_change_pct,
+    },
+    {
+      label: 'Доля ОПЗ от визитов',
+      value: formatMetricValue(visitMetrics.opz_pct, 'percent'),
+      delta: formatPct(visitMetrics.opz_pct_change_pct),
+      deltaValue: visitMetrics.opz_pct_change_pct,
+    },
     {
       label: 'Доп. услуги от посещений',
       value: formatMetricValue(visitMetrics.extra_services_per_appointment_pct, 'percent'),
@@ -549,6 +565,50 @@ function renderAppointmentsChart(daily) {
       responsive: true,
       maintainAspectRatio: false,
       scales: { y: { beginAtZero: true } },
+    },
+  });
+}
+
+function renderOpzChart(daily) {
+  destroyChart('opz');
+  charts.opz = new Chart(els.opzChart, {
+    type: 'bar',
+    data: {
+      labels: daily.map((item) => item.date),
+      datasets: [
+        {
+          label: 'Количество ОПЗ',
+          data: daily.map((item) => item.opz_qty || 0),
+          backgroundColor: '#7c3aed',
+          borderRadius: 4,
+          yAxisID: 'y',
+        },
+        {
+          type: 'line',
+          label: 'Доля от завершённых визитов',
+          data: daily.map((item) => item.opz_pct || 0),
+          borderColor: '#ea580c',
+          backgroundColor: '#ea580c',
+          tension: 0.25,
+          pointRadius: 2,
+          yAxisID: 'y1',
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        y: { beginAtZero: true, title: { display: true, text: 'ОПЗ' } },
+        y1: {
+          beginAtZero: true,
+          position: 'right',
+          grid: { drawOnChartArea: false },
+          ticks: { callback: (value) => `${formatNumber(value)}%` },
+          title: { display: true, text: '%' },
+        },
+      },
     },
   });
 }
@@ -993,10 +1053,12 @@ function renderPlanFact(planFact) {
 }
 
 function renderPlanSettingInput(scope, row, field) {
+  const isPercent = ['wax_pct', 'head_care_pct', 'face_care_pct', 'camouflage_pct', 'cosmo_pct', 'opz_pct'].includes(field);
   return `
     <input
-      type="text"
+      type="${isPercent ? 'number' : 'text'}"
       inputmode="decimal"
+      ${isPercent ? 'min="1" max="100" step="0.1"' : ''}
       data-plan-${scope}
       data-company-id="${escapeHtml(row.company_id)}"
       ${row.staff_id ? `data-staff-id="${escapeHtml(row.staff_id)}"` : ''}
@@ -1226,9 +1288,8 @@ async function reloadPlanSettingsMonth() {
 
 function renderReviewFactEditor(data) {
   reviewFactRows = data?.rows || [];
-  const days = data?.days || [];
   const totalValue = data?.total_value || 0;
-  els.reviewFactMeta.textContent = `${reviewFactRows.length} администраторов · ${days.length} дней · ${formatNumber(totalValue)} отзывов`;
+  els.reviewFactMeta.textContent = `${reviewFactRows.length} администраторов · ${formatNumber(totalValue)} отзывов`;
 
   if (!reviewFactRows.length) {
     els.reviewFactEditor.innerHTML = '<div class="empty compact">Нет активных администраторов</div>';
@@ -1244,38 +1305,27 @@ function renderReviewFactEditor(data) {
           <tr>
             <th>Филиал</th>
             <th>Администратор</th>
-            ${days.map((day) => `<th class="number review-fact-day">${escapeHtml(formatShortDate(day))}</th>`).join('')}
-            <th class="number">Итого</th>
+            <th class="number">Отзывы факт</th>
           </tr>
         </thead>
         <tbody>
           ${reviewFactRows
             .map((row) => {
-              const valuesByDate = Object.fromEntries((row.values || []).map((item) => [item.date, item]));
               return `
                 <tr>
                   <td>${escapeHtml(row.company_title || `Филиал ${row.company_id}`)}</td>
                   <td>${escapeHtml(row.staff_name)}</td>
-                  ${days
-                    .map((day) => {
-                      const item = valuesByDate[day] || {};
-                      return `
-                        <td class="number review-fact-day">
-                          <input
-                            type="number"
-                            min="0"
-                            step="1"
-                            inputmode="numeric"
-                            data-company-id="${escapeHtml(row.company_id)}"
-                            data-staff-id="${escapeHtml(row.staff_id)}"
-                            data-date="${escapeHtml(day)}"
-                            value="${escapeHtml(formatInputNumber(item.value))}"
-                          />
-                        </td>
-                      `;
-                    })
-                    .join('')}
-                  <td class="number readonly">${escapeHtml(formatNumber(row.value || 0))}</td>
+                  <td class="number">
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      inputmode="numeric"
+                      data-company-id="${escapeHtml(row.company_id)}"
+                      data-staff-id="${escapeHtml(row.staff_id)}"
+                      value="${escapeHtml(formatInputNumber(row.value))}"
+                    />
+                  </td>
                 </tr>
               `;
             })
@@ -1294,13 +1344,12 @@ async function loadReviewFactEditor() {
 
 function reviewFactPayload() {
   const filter = filterEls.reviewFacts;
-  const items = [...els.reviewFactEditor.querySelectorAll('input[data-staff-id][data-date]')].map((input) => {
+  const items = [...els.reviewFactEditor.querySelectorAll('input[data-staff-id]')].map((input) => {
     const rawValue = input.value.trim().replace(',', '.');
     if (rawValue === '') {
       return {
         company_id: Number(input.dataset.companyId),
         staff_id: Number(input.dataset.staffId),
-        date: input.dataset.date,
         value: null,
       };
     }
@@ -1311,7 +1360,6 @@ function reviewFactPayload() {
     return {
       company_id: Number(input.dataset.companyId),
       staff_id: Number(input.dataset.staffId),
-      date: input.dataset.date,
       value,
     };
   });
@@ -1355,6 +1403,7 @@ function renderBundle(bundle) {
   renderAppointmentsMetrics(summary);
   renderRevenueChart(daily);
   renderAppointmentsChart(daily);
+  renderOpzChart(daily);
   renderServicesChart(services.slice(0, 8));
   renderServicesTable(services);
   renderExtraServicesTable(extraServices);

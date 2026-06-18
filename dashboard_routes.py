@@ -46,7 +46,6 @@ router = APIRouter()
 class ManualReviewFactItem(BaseModel):
     company_id: int
     staff_id: int
-    date: date
     value: float | None = None
 
 

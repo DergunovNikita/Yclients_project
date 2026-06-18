@@ -26,6 +26,7 @@ PLAN_FACT_METRICS: tuple[dict[str, str], ...] = (
 RAW_PLAN_FACT_CODES = {
     'revenue',
     'clients',
+    'avg_check_denominator',
     'wax_qty',
     'camouflage_qty',
     'face_care_qty',

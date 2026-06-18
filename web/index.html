@@ -524,19 +524,13 @@
     }
 
     .review-fact-scroll table {
-      min-width: 760px;
+      min-width: 520px;
     }
 
     .review-fact-table input {
       max-width: 72px;
       margin-left: auto;
       text-align: right;
-    }
-
-    .review-fact-table th.review-fact-day,
-    .review-fact-table td.review-fact-day {
-      min-width: 82px;
-      white-space: nowrap;
     }
 
     .review-fact-actions {
@@ -1096,6 +1090,13 @@
           <div class="appointments-warning" id="appointments-warning" role="status"></div>
           <section class="appointments-metrics" id="appointments-metrics" aria-label="Статусы записей"></section>
           <div class="chart-box short"><canvas id="appointments-chart"></canvas></div>
+        </div>
+
+        <div class="panel wide" data-overview-section="appointments">
+          <div class="panel-title">
+            <h2>ОПЗ и доля от завершённых визитов</h2>
+          </div>
+          <div class="chart-box"><canvas id="opz-chart"></canvas></div>
         </div>
 
         <div class="panel wide" data-overview-section="services">

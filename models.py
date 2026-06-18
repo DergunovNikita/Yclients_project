@@ -314,6 +314,7 @@ class FinancialTransaction(Base):
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer)
     expense_id = Column(Integer)
+    expense_title = Column(String)
     date = Column(DateTime, index=True)
     amount = Column(Float)
     comment = Column(Text)
@@ -325,6 +326,18 @@ class FinancialTransaction(Base):
     sold_item_id = Column(Integer)
     sold_item_type = Column(String)
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
+
+
+class SyncSourceState(Base):
+    """Successful coverage of a detailed upstream source for a company."""
+
+    __tablename__ = 'sync_source_states'
+
+    company_id = Column(Integer, ForeignKey('companies.id'), primary_key=True)
+    source = Column(String, primary_key=True)
+    period_start = Column(Date, nullable=False)
+    period_end = Column(Date, nullable=False)
+    synced_at = Column(DateTime, nullable=False)
 
 
 class GoodTransaction(Base):

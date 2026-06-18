@@ -537,6 +537,7 @@ async def api_financial_transactions(
         "id": item.id,
         "document_id": item.document_id,
         "expense_id": item.expense_id,
+        "expense_title": item.expense_title,
         "date": serialize_value(item.date),
         "amount": item.amount,
         "comment": item.comment,

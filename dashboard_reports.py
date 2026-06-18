@@ -650,6 +650,13 @@ async def _financial_payload(
     revenue = summary.get('revenue', {})
     avg = summary.get('average_check', {})
     visits = summary.get('visit_metrics', {})
+    base['average_check_source_status'] = avg.get('source_status')
+    base['missing_sources'] = list(avg.get('missing_components') or [])
+    base['notes'].append({
+        'kind': 'formula',
+        'title': 'Средний чек общий',
+        'text': avg.get('formula'),
+    })
     base['cards'] = [
         _card('Выручка', revenue.get('total', 0), MONEY_FORMAT),
         _card('Услуги', revenue.get('service_revenue', 0), MONEY_FORMAT),
@@ -692,7 +699,12 @@ async def _financial_payload(
         ),
         _services_table('top_services', 'Услуги', services),
     ]
-    base['raw'] = {'summary': summary, 'daily': daily, 'top_services': services}
+    base['raw'] = {
+        'summary': summary,
+        'average_check': avg,
+        'daily': daily,
+        'top_services': services,
+    }
     return base
 
 

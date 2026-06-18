@@ -1,8 +1,25 @@
+from datetime import date
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from models import Base, Company, GoodTransaction, Group, Service, ServiceCatalog, Staff
-from sync_pipeline import sync_goods_transactions, sync_services, sync_staff
+from models import (
+    Base,
+    Company,
+    FinancialTransaction,
+    GoodTransaction,
+    Group,
+    Service,
+    ServiceCatalog,
+    Staff,
+    SyncSourceState,
+)
+from sync_pipeline import (
+    sync_financial_transactions,
+    sync_goods_transactions,
+    sync_services,
+    sync_staff,
+)
 
 
 class FakeYClientsAPI:
@@ -27,6 +44,57 @@ class FakeGoodsTransactionsAPI:
 
     def get_goods_transactions(self, company_id, start_date=None, end_date=None):
         return self._txns
+
+
+class FakeFinancialTransactionsAPI:
+    def __init__(self, txns):
+        self._txns = txns
+
+    def get_financial_transactions(self, company_id, start_date=None, end_date=None):
+        return self._txns
+
+
+def test_sync_financial_transactions_persists_expense_article_and_source_coverage():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            FinancialTransaction.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.commit()
+
+        api = FakeFinancialTransactionsAPI([{
+            'id': 10,
+            'date': '2025-01-10 12:00:00',
+            'amount': 500,
+            'expense': {'id': 7, 'title': 'Пополнение личного счета'},
+            'account': {'id': 1},
+        }])
+        assert sync_financial_transactions(
+            api, db, '1', start_date='2025-01-01', end_date='2025-01-31'
+        ) is True
+
+        transaction = db.get(FinancialTransaction, 10)
+        assert transaction.expense_id == 7
+        assert transaction.expense_title == 'Пополнение личного счета'
+        state = db.get(
+            SyncSourceState,
+            {'company_id': 1, 'source': 'financial_transactions_detail'},
+        )
+        assert state.period_start == date(2025, 1, 1)
+        assert state.period_end == date(2025, 1, 31)
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_sync_staff_marks_missing_staff_as_fired():
