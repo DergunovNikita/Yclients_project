@@ -672,7 +672,7 @@ async def api_stats(db: AsyncSession = Depends(get_async_db)):
         return r.scalar_one()
 
     attended_result = await db.execute(
-        select(func.count()).where(Appointment.attendance > 0)
+        select(func.count()).where(Appointment.attendance == 1)
     )
     appointments_total = await count_of(Appointment)
 

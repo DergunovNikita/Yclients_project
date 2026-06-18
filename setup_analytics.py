@@ -21,7 +21,7 @@ VIEWS = [
             'service'::text                             AS source
         FROM financial_transactions ft
         JOIN appointments a ON a.id = ft.record_id
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
           AND ft.sold_item_type = 'service'
         UNION ALL
         SELECT
@@ -39,7 +39,7 @@ VIEWS = [
             COUNT(DISTINCT a.id)                        AS appointments_count,
             COUNT(DISTINCT a.client_id)                 AS unique_clients
         FROM appointments a
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
         GROUP BY a.date::date
     ),
     service_before_discount AS (
@@ -48,7 +48,7 @@ VIEWS = [
             COALESCE(SUM(t.first_cost * t.amount), 0)   AS revenue_before_discount
         FROM appointments a
         LEFT JOIN transactions t ON t.appointment_id = a.id
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
         GROUP BY a.date::date
     )
     SELECT
@@ -81,7 +81,7 @@ VIEWS = [
             'service'::text                             AS source
         FROM financial_transactions ft
         JOIN appointments a ON a.id = ft.record_id
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
           AND ft.sold_item_type = 'service'
         UNION ALL
         SELECT
@@ -124,6 +124,7 @@ VIEWS = [
         LEFT JOIN service_catalog svc
             ON  svc.company_id = a.company_id
             AND svc.service_id = t.service_id
+        WHERE a.attendance = 1
         GROUP BY a.company_id, t.service_id, COALESCE(NULLIF(t.service_title, ''), svc.title)::varchar
     ),
     paid AS (
@@ -133,7 +134,7 @@ VIEWS = [
             COALESCE(SUM(ft.amount), 0)                 AS total_revenue
         FROM financial_transactions ft
         JOIN appointments a ON a.id = ft.record_id
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
           AND ft.sold_item_type = 'service'
         GROUP BY a.company_id, ft.sold_item_id
     )
@@ -184,7 +185,7 @@ VIEWS = [
         LEFT JOIN financial_transactions ft
             ON  ft.record_id = a.id
             AND ft.sold_item_type = 'service'
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
         GROUP BY a.client_id
     ),
     goods_spent AS (
@@ -232,7 +233,7 @@ VIEWS = [
             'service'::text                             AS source
         FROM financial_transactions ft
         JOIN appointments a ON a.id = ft.record_id
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
           AND ft.sold_item_type = 'service'
         UNION ALL
         SELECT
@@ -265,13 +266,16 @@ VIEWS = [
     SELECT
         a.date                                          AS visit_date,
         COUNT(*)                                        AS total_records,
-        COUNT(*) FILTER (WHERE a.attendance > 0)        AS attended,
+        COUNT(*) FILTER (WHERE a.attendance = 1)        AS attended,
         COUNT(*) FILTER (WHERE a.attendance = -1)       AS no_show,
-        COUNT(*) FILTER (WHERE a.attendance = 0)        AS pending,
+        COUNT(*) FILTER (WHERE a.attendance IN (0, 2))  AS pending,
         ROUND(
-            100.0 * COUNT(*) FILTER (WHERE a.attendance > 0) / NULLIF(COUNT(*), 0),
+            100.0 * COUNT(*) FILTER (WHERE a.attendance = 1) / NULLIF(COUNT(*), 0),
             1
-        )                                               AS attendance_rate_pct
+        )                                               AS attendance_rate_pct,
+        COUNT(*)                                        AS available_records,
+        COUNT(*) FILTER (WHERE a.attendance = 2)        AS confirmed,
+        'local_available_records'::text                 AS data_scope
     FROM appointments a
     GROUP BY a.date
     ORDER BY a.date ASC
@@ -584,7 +588,8 @@ VIEWS = [
         cl.name                                         AS client_name,
         a.attendance,
         CASE
-            WHEN a.attendance > 0 THEN 'Пришел'
+            WHEN a.attendance = 1 THEN 'Пришел'
+            WHEN a.attendance = 2 THEN 'Подтвердил'
             WHEN a.attendance = 0 THEN 'Ожидается'
             WHEN a.attendance = -1 THEN 'Не пришел'
             ELSE 'Другое'

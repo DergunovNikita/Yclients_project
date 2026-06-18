@@ -48,6 +48,7 @@ ADMIN_PLACEHOLDER_STAFF_PREFIX = 'администратор'
 PLAN_SETTINGS_SOURCE = 'dashboard_plan_settings'
 MANUAL_REVIEW_FACT_MAX_DAYS = 31
 GOODS_KPI_CODES = ('wax_qty', 'camouflage_qty', 'face_care_qty', 'head_care_qty')
+COMPLETED_ATTENDANCE = 1
 
 WAX_TITLE_PARTS = ('воск',)
 CAMOUFLAGE_TITLE_PARTS = ('камуфляж',)
@@ -213,6 +214,17 @@ async def _fetch_appointments_breakdown(
     return _ready_appointments_breakdown(counts)
 
 
+async def fetch_appointments_breakdown(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: Optional[int] = None,
+    staff_id: Optional[int] = None,
+) -> dict[str, Any]:
+    company_ids = await _appointment_company_ids(db, company_id, staff_id)
+    return await _fetch_appointments_breakdown(company_ids, start, end, staff_id)
+
+
 def _is_waitlist_staff_name(value: Any) -> bool:
     return str(value or '').strip().casefold() == WAITLIST_STAFF_NAME
 
@@ -263,7 +275,7 @@ def _appt_revenue_filters(
     created_user_id: Optional[int] = None,
 ):
     parts = [
-        Appointment.attendance > 0,
+        Appointment.attendance == COMPLETED_ATTENDANCE,
         Appointment.date >= start,
         Appointment.date <= end,
     ]
@@ -320,7 +332,7 @@ def _service_paid_filters(
 ):
     parts = [
         FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
-        Appointment.attendance > 0,
+        Appointment.attendance == COMPLETED_ATTENDANCE,
         Appointment.date >= start,
         Appointment.date <= end,
     ]
@@ -608,14 +620,48 @@ async def fetch_summary(
     appointments_task = asyncio.create_task(
         _fetch_appointments_breakdown(appointment_company_ids, start, end, staff_id)
     )
+    previous_appointments_task = asyncio.create_task(
+        _fetch_appointments_breakdown(
+            appointment_company_ids,
+            prev_dr.start,
+            prev_dr.end,
+            staff_id,
+        )
+    )
 
     cur = await _revenue_block(db, current_dr, company_id, staff_id)
     prev = await _revenue_block(db, prev_dr, company_id, staff_id)
+    appointments_breakdown = await appointments_task
+    previous_appointments_breakdown = await previous_appointments_task
+    local_completed = int(cur['appointments'] or 0)
+    exact_completed = appointments_breakdown.get('completed')
+    appointments_breakdown = {
+        **appointments_breakdown,
+        'local_completed': local_completed,
+        'completed_difference': (
+            int(exact_completed) - local_completed
+            if appointments_breakdown['source_status'] == 'ready'
+            else None
+        ),
+        'is_consistent': (
+            int(exact_completed) == local_completed
+            if appointments_breakdown['source_status'] == 'ready'
+            else None
+        ),
+    }
 
     cur_rev = cur['revenue']
     prev_rev = prev['revenue']
-    cur_appointments = float(cur['appointments'] or 0)
-    prev_appointments = float(prev['appointments'] or 0)
+    cur_appointments = float(
+        appointments_breakdown['completed']
+        if appointments_breakdown['source_status'] == 'ready'
+        else local_completed
+    )
+    prev_appointments = float(
+        previous_appointments_breakdown['completed']
+        if previous_appointments_breakdown['source_status'] == 'ready'
+        else prev['appointments']
+    )
     cur_avg_total = _safe_div(cur_rev, cur_appointments)
     prev_avg_total = _safe_div(prev_rev, prev_appointments)
     cur_avg_services = _safe_div(cur['service_revenue'], cur_appointments)
@@ -651,8 +697,6 @@ async def fetch_summary(
         prev_unique_clients,
     )
 
-    appointments_breakdown = await appointments_task
-
     return {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
         'previous_period': {'start': prev_dr.start.isoformat(), 'end': prev_dr.end.isoformat()},
@@ -683,9 +727,9 @@ async def fetch_summary(
             'extra_service_count_change_pct': _pct_change(
                 float(cur['extra_service_count']), float(prev['extra_service_count'])
             ),
-            'appointments': cur['appointments'],
+            'appointments': int(cur_appointments),
             'appointments_change_pct': _pct_change(
-                float(cur['appointments']), float(prev['appointments'])
+                cur_appointments, prev_appointments
             ),
             'extra_service_appointments': cur['extra_service_appointments'],
             'unique_clients': cur['unique_clients'],
@@ -732,7 +776,7 @@ async def fetch_summary(
                 cur_avg_extra_services,
                 prev_avg_extra_services,
             ),
-            'appointments': cur['appointments'],
+            'appointments': int(cur_appointments),
             'extra_service_appointments': cur['extra_service_appointments'],
         },
         'appointments_breakdown': appointments_breakdown,
@@ -1077,7 +1121,7 @@ async def _opz_events(
     client_ids = sorted({candidate.client_id for candidate in candidates if candidate.client_id is not None})
     visit_filters = [
         Appointment.company_id == company_id,
-        Appointment.attendance > 0,
+        Appointment.attendance == COMPLETED_ATTENDANCE,
         Appointment.client_id.in_(client_ids),
         Appointment.date.is_not(None),
         Appointment.date <= end,
@@ -1277,7 +1321,7 @@ async def _admin_clients_by_finished_appointments(
         Appointment.company_id == company_id,
         Appointment.date >= start,
         Appointment.date <= end,
-        Appointment.attendance > 0,
+        Appointment.attendance == COMPLETED_ATTENDANCE,
     ]
     if barber_staff_ids:
         appointment_filters.append(Appointment.staff_id.in_(barber_staff_ids))

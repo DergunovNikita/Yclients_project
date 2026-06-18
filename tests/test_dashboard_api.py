@@ -2604,9 +2604,9 @@ async def test_plan_fact_admin_clients_do_not_duplicate_overlapping_shifts(async
         for group in groups
         if group['category'] == 'administrator'
     }
-    assert barber_clients == 3.0
+    assert barber_clients == 2.0
     assert sum(admin_clients_by_staff.values()) == barber_clients
-    assert admin_clients_by_staff == {2: 2.0, 3: 1.0}
+    assert admin_clients_by_staff == {2: 1.0, 3: 1.0}
 
 
 @pytest.mark.asyncio

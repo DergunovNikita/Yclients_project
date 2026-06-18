@@ -11,7 +11,15 @@ from dashboard_service import (
     _fetch_appointments_breakdown,
     _ready_appointments_breakdown,
 )
-from models import Company, Group, Staff
+from models import (
+    Appointment,
+    Company,
+    FinancialTransaction,
+    Group,
+    Service,
+    Staff,
+    Transaction,
+)
 
 
 def test_appointment_shares_are_integer_and_sum_to_100():
@@ -168,4 +176,167 @@ async def test_dashboard_summary_exposes_exact_appointment_contract(async_sessio
         'shares_total_pct': 100,
         'attended': 6,
         'pending': 1,
+        'local_completed': 0,
+        'completed_difference': 6,
+        'is_consistent': False,
     }
+
+
+@pytest.mark.asyncio
+async def test_confirmed_appointment_is_not_counted_as_completed_visit(async_session, monkeypatch):
+    async_session.add(Group(id=1, title='G'))
+    async_session.add(Company(id=1, title='One', group_id=1))
+    async_session.add(Staff(id=1, name='Master', company_id=1, fired=0))
+    async_session.add(Service(id=10, title='Cut', company_id=1))
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2026, 6, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=2,
+            date=date(2026, 6, 10),
+            attendance=2,
+        ),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Transaction(
+            id=1,
+            appointment_id=1,
+            service_id=10,
+            service_title='Cut',
+            cost=1000,
+            amount=1,
+            company_id=1,
+        ),
+        Transaction(
+            id=2,
+            appointment_id=2,
+            service_id=10,
+            service_title='Cut',
+            cost=1000,
+            amount=1,
+            company_id=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            date=date(2026, 6, 10),
+            amount=1000,
+            record_id=1,
+            sold_item_id=10,
+            sold_item_type='service',
+            company_id=1,
+        ),
+    ])
+    await async_session.commit()
+
+    async def fake_record_stats(company_ids, start, end, staff_id):
+        if start == date(2026, 6, 1):
+            return {'total': 2, 'cancelled': 0, 'completed': 1, 'incomplete': 1}
+        return {'total': 0, 'cancelled': 0, 'completed': 0, 'incomplete': 0}
+
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', fake_record_stats)
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/dashboard/bundle',
+            params={
+                'start_date': '2026-06-01',
+                'end_date': '2026-06-18',
+                'company_id': 1,
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    data = response.json()['data']
+    assert data['summary']['revenue']['appointments'] == 1
+    assert data['summary']['appointments_breakdown']['completed'] == 1
+    assert data['summary']['appointments_breakdown']['incomplete'] == 1
+    assert data['summary']['appointments_breakdown']['local_completed'] == 1
+    assert data['summary']['appointments_breakdown']['completed_difference'] == 0
+    assert data['summary']['appointments_breakdown']['is_consistent'] is True
+    assert sum(item['appointments'] for item in data['revenue_daily']) == 1
+    assert data['summary']['revenue']['service_count'] == 1
+    assert data['top_services'][0]['sold'] == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_report_uses_exact_aggregate_counts(async_session, monkeypatch):
+    async_session.add(Group(id=1, title='G'))
+    async_session.add(Company(id=1, title='One', group_id=1))
+    async_session.add(Staff(id=1, name='Master', company_id=1, fired=0))
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            date=date(2026, 6, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            date=date(2026, 6, 10),
+            attendance=2,
+        ),
+        Appointment(
+            id=3,
+            company_id=1,
+            staff_id=1,
+            date=date(2026, 6, 10),
+            attendance=-1,
+        ),
+    ])
+    await async_session.commit()
+
+    async def fake_record_stats(company_ids, start, end, staff_id):
+        return {'total': 10, 'cancelled': 7, 'completed': 1, 'incomplete': 2}
+
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', fake_record_stats)
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'cancellation_analysis',
+                'start_date': '2026-06-01',
+                'end_date': '2026-06-18',
+                'company_id': 1,
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    data = response.json()['data']
+    assert [card['value'] for card in data['cards']] == [10, 1, 7, 2]
+    assert data['raw']['by_period'][0]['completed'] == 1
+    assert data['raw']['by_period'][0]['records'] == 3
+    assert data['raw']['exact_aggregates']['total'] == 10
+    assert data['raw']['local_available_aggregates'] == {
+        'available_records': 3,
+        'completed': 1,
+        'no_show': 1,
+    }
+    assert data['notes'][0]['title'] == 'Состав детализации'
