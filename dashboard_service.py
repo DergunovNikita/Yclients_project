@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from calendar import monthrange
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from sqlalchemy import String, and_, case, cast, delete, func, or_, select
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import yclients_analytics
 from models import (
     Appointment,
     Company,
@@ -120,6 +122,95 @@ def _pct_change(current: float, previous: float) -> Optional[float]:
 
 def _safe_div(numerator: float, denominator: float) -> float:
     return float(numerator or 0) / float(denominator or 0) if denominator else 0.0
+
+
+def _appointment_shares(counts: dict[str, int]) -> dict[str, int]:
+    total = counts['total']
+    fields = ('cancelled', 'completed', 'incomplete')
+    if total == 0:
+        return {field: 0 for field in fields}
+
+    exact = {field: 100.0 * counts[field] / total for field in fields}
+    shares = {field: math.floor(exact[field]) for field in fields}
+    remainder = 100 - sum(shares.values())
+    ranked = sorted(
+        fields,
+        key=lambda field: (-(exact[field] - shares[field]), fields.index(field)),
+    )
+    for field in ranked[:remainder]:
+        shares[field] += 1
+    return shares
+
+
+def _unavailable_appointments_breakdown() -> dict[str, Any]:
+    return {
+        'source_status': 'unavailable',
+        'total': None,
+        'cancelled': None,
+        'completed': None,
+        'incomplete': None,
+        'total_share_pct': None,
+        'cancelled_share_pct': None,
+        'completed_share_pct': None,
+        'incomplete_share_pct': None,
+        'shares_total_pct': None,
+        'attended': None,
+        'pending': None,
+    }
+
+
+def _ready_appointments_breakdown(counts: dict[str, int]) -> dict[str, Any]:
+    if any(counts[field] < 0 for field in ('total', 'cancelled', 'completed', 'incomplete')):
+        return _unavailable_appointments_breakdown()
+    if counts['cancelled'] + counts['completed'] + counts['incomplete'] != counts['total']:
+        return _unavailable_appointments_breakdown()
+
+    shares = _appointment_shares(counts)
+    shares_total = sum(shares.values()) if counts['total'] else 0
+    return {
+        'source_status': 'ready',
+        **counts,
+        'total_share_pct': 100 if counts['total'] else 0,
+        'cancelled_share_pct': shares['cancelled'],
+        'completed_share_pct': shares['completed'],
+        'incomplete_share_pct': shares['incomplete'],
+        'shares_total_pct': shares_total,
+        'attended': counts['completed'],
+        'pending': counts['incomplete'],
+    }
+
+
+async def _appointment_company_ids(
+    db: AsyncSession,
+    company_id: Optional[int],
+    staff_id: Optional[int],
+) -> list[int]:
+    if staff_id is not None:
+        staff_company_id = await db.scalar(
+            select(Staff.company_id).where(Staff.id == staff_id).limit(1)
+        )
+        return [int(staff_company_id)] if staff_company_id is not None else []
+    if company_id is not None:
+        return [int(company_id)]
+
+    allowed = await branch_company_ids(db)
+    if allowed is not None:
+        return [int(item) for item in allowed]
+    rows = (await db.execute(select(Company.id).order_by(Company.id.asc()))).scalars().all()
+    return [int(item) for item in rows]
+
+
+async def _fetch_appointments_breakdown(
+    company_ids: list[int],
+    start: date,
+    end: date,
+    staff_id: Optional[int],
+) -> dict[str, Any]:
+    try:
+        counts = await yclients_analytics.fetch_record_stats(company_ids, start, end, staff_id)
+    except yclients_analytics.YClientsAnalyticsError:
+        return _unavailable_appointments_breakdown()
+    return _ready_appointments_breakdown(counts)
 
 
 def _is_waitlist_staff_name(value: Any) -> bool:
@@ -513,6 +604,10 @@ async def fetch_summary(
 ) -> dict[str, Any]:
     current_dr = DateRange(start=start, end=end)
     prev_dr = current_dr.previous_period()
+    appointment_company_ids = await _appointment_company_ids(db, company_id, staff_id)
+    appointments_task = asyncio.create_task(
+        _fetch_appointments_breakdown(appointment_company_ids, start, end, staff_id)
+    )
 
     cur = await _revenue_block(db, current_dr, company_id, staff_id)
     prev = await _revenue_block(db, prev_dr, company_id, staff_id)
@@ -556,16 +651,7 @@ async def fetch_summary(
         prev_unique_clients,
     )
 
-    attended = func.sum(case((Appointment.attendance > 0, 1), else_=0))
-    cancelled = func.sum(case((Appointment.attendance == -1, 1), else_=0))
-    pending = func.sum(case((Appointment.attendance == 0, 1), else_=0))
-
-    att_stmt = (
-        select(attended, cancelled, pending)
-        .select_from(Appointment)
-        .where(_appt_all_filters(start, end, company_id, staff_id))
-    )
-    att_row = (await db.execute(att_stmt)).one()
+    appointments_breakdown = await appointments_task
 
     return {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
@@ -649,11 +735,7 @@ async def fetch_summary(
             'appointments': cur['appointments'],
             'extra_service_appointments': cur['extra_service_appointments'],
         },
-        'appointments_breakdown': {
-            'attended': int(att_row[0] or 0),
-            'cancelled': int(att_row[1] or 0),
-            'pending': int(att_row[2] or 0),
-        },
+        'appointments_breakdown': appointments_breakdown,
     }
 
 

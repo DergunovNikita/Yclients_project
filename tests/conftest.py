@@ -76,10 +76,14 @@ def isolate_api_auth(monkeypatch):
     """Keep tests independent from local .env API tokens."""
     import api
     import dashboard_routes
+    import dashboard_service
 
     monkeypatch.setattr(api, 'API_KEY', '')
     monkeypatch.setattr(api, 'SYNC_API_TOKEN', '')
     monkeypatch.setattr(dashboard_routes, 'SYNC_API_TOKEN', '')
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'PARTNER_TOKEN', '')
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'LOGIN', '')
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'PASSWORD', '')
 
 
 @pytest_asyncio.fixture

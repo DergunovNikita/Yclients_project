@@ -13,6 +13,8 @@ const els = {
   periodLabel: document.getElementById('period-label'),
   revenueMeta: document.getElementById('revenue-meta'),
   appointmentsMeta: document.getElementById('appointments-meta'),
+  appointmentsMetrics: document.getElementById('appointments-metrics'),
+  appointmentsWarning: document.getElementById('appointments-warning'),
   servicesMeta: document.getElementById('services-meta'),
   extraServicesMeta: document.getElementById('extra-services-meta'),
   planMeta: document.getElementById('plan-meta'),
@@ -443,6 +445,45 @@ function renderVisitMetrics(summary) {
   ];
 
   renderCards(els.visitMetrics, cards);
+}
+
+function renderAppointmentsMetrics(summary) {
+  const breakdown = summary.appointments_breakdown || {};
+  const ready = breakdown.source_status === 'ready';
+  const metricValue = (value) => (ready ? formatNumber(value) : 'Нет данных');
+  const metricShare = (value) => (ready ? `${formatNumber(value)}% от общего` : '');
+  const cards = [
+    {
+      label: 'Всего записей',
+      value: metricValue(breakdown.total),
+      delta: metricShare(breakdown.total_share_pct),
+      deltaValue: null,
+    },
+    {
+      label: 'Отменённые записи',
+      value: metricValue(breakdown.cancelled),
+      delta: metricShare(breakdown.cancelled_share_pct),
+      deltaValue: null,
+    },
+    {
+      label: 'Завершённые записи',
+      value: metricValue(breakdown.completed),
+      delta: metricShare(breakdown.completed_share_pct),
+      deltaValue: null,
+    },
+    {
+      label: 'Незавершённые записи',
+      value: metricValue(breakdown.incomplete),
+      delta: metricShare(breakdown.incomplete_share_pct),
+      deltaValue: null,
+    },
+  ];
+
+  renderCards(els.appointmentsMetrics, cards);
+  els.appointmentsWarning.textContent = ready
+    ? ''
+    : 'Точные метрики записей временно недоступны в YCLIENTS.';
+  els.appointmentsWarning.classList.toggle('visible', !ready);
 }
 
 function destroyChart(name) {
@@ -1311,6 +1352,7 @@ function renderBundle(bundle) {
   } = bundle;
   renderKpi(summary);
   renderVisitMetrics(summary);
+  renderAppointmentsMetrics(summary);
   renderRevenueChart(daily);
   renderAppointmentsChart(daily);
   renderServicesChart(services.slice(0, 8));
@@ -1319,7 +1361,10 @@ function renderBundle(bundle) {
 
   els.periodLabel.textContent = `${summary.period.start} .. ${summary.period.end}`;
   els.revenueMeta.textContent = `${daily.length} дней`;
-  els.appointmentsMeta.textContent = `${formatNumber(summary.revenue.appointments)} записей`;
+  const appointmentsBreakdown = summary.appointments_breakdown || {};
+  els.appointmentsMeta.textContent = appointmentsBreakdown.source_status === 'ready'
+    ? `${formatNumber(appointmentsBreakdown.total)} записей`
+    : 'Нет точных данных';
   els.servicesMeta.textContent = `${services.length} услуг`;
   els.extraServicesMeta.textContent = `${formatNumber(summary.revenue.extra_service_count)} оказано`;
   els.tableMeta.textContent = `${formatMoney(summary.revenue.total)} всего`;

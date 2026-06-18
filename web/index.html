@@ -221,6 +221,26 @@
       margin-bottom: 16px;
     }
 
+    .appointments-metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .appointments-warning {
+      display: none;
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      border: 1px solid #fcd34d;
+      border-radius: 6px;
+      background: #fffbeb;
+      color: #92400e;
+      font-size: 13px;
+    }
+
+    .appointments-warning.visible { display: block; }
+
     .card,
     .panel {
       border: 1px solid #dbe3ef;
@@ -942,6 +962,10 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
+      .appointments-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
       .grid {
         grid-template-columns: 1fr;
       }
@@ -961,6 +985,7 @@
       .plan-settings-toolbar,
       .kpi,
       .visit-metrics,
+      .appointments-metrics,
       .segmented {
         grid-template-columns: 1fr;
       }
@@ -1068,6 +1093,8 @@
             <h2>Записи по дням</h2>
             <span class="meta" id="appointments-meta"></span>
           </div>
+          <div class="appointments-warning" id="appointments-warning" role="status"></div>
+          <section class="appointments-metrics" id="appointments-metrics" aria-label="Статусы записей"></section>
           <div class="chart-box short"><canvas id="appointments-chart"></canvas></div>
         </div>
 
