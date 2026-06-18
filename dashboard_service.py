@@ -1939,32 +1939,6 @@ def _metric_plan_value(group: dict[str, Any], code: str) -> float | None:
     return None
 
 
-def _staff_total_for_aggregate(groups: list[dict[str, Any]], code: str) -> Optional[float]:
-    barber_groups = [group for group in groups if group.get('category') == 'barber']
-    admin_groups = [group for group in groups if group.get('category') == 'administrator']
-    if barber_groups:
-        return sum(_metric_fact_value(group, code) for group in barber_groups)
-    if admin_groups:
-        return sum(_metric_fact_value(group, code) for group in admin_groups)
-    return None
-
-
-def _normalize_aggregate_fact_from_staff(
-    fact_values: dict[str, float],
-    groups: list[dict[str, Any]],
-) -> dict[str, float]:
-    normalized = dict(fact_values)
-    changed = False
-    for code in ('clients', 'opz_qty'):
-        staff_total = _staff_total_for_aggregate(groups, code)
-        if staff_total is not None:
-            normalized[code] = staff_total
-            changed = True
-    if not changed:
-        return normalized
-    return _derive_metric_values(normalized, include_zero_derived=True, prefer_explicit=False)
-
-
 def _staff_rankings_payload(groups: list[dict[str, Any]], limit: int = 5) -> dict[str, list[dict[str, Any]]]:
     def ranking(metric_code: str) -> list[dict[str, Any]]:
         rows = [
@@ -2173,7 +2147,10 @@ async def _staff_plan_groups_for_branch(
     staff_id: Optional[int] = None,
     include_all_when_branch_planned: bool = False,
 ) -> list[dict[str, Any]]:
-    staff_rows = await _fetch_company_staff(db, branch_id, staff_id)
+    # Calculate administrator attribution against the same complete staff scope
+    # used by the branch view. Applying staff_id before attribution assigns every
+    # unclaimed event to the only remaining administrator and changes their fact.
+    staff_rows = await _fetch_company_staff(db, branch_id)
     staff_ids = [int(row.id) for row in staff_rows]
     plans_by_staff, categories_by_staff = await _plan_metric_components_by_staff(
         db,
@@ -2277,6 +2254,8 @@ async def _staff_plan_groups_for_branch(
                 metrics,
             ),
         })
+    if staff_id is not None:
+        return [group for group in groups if group.get('staff_id') == staff_id]
     return groups
 
 
@@ -3041,8 +3020,6 @@ async def fetch_plan_fact(
             staff_id,
             include_all_when_branch_planned=_has_plan_values(plans_by_company.get(branch_id, {})),
         )
-        if staff_id is None:
-            branch_fact = _normalize_aggregate_fact_from_staff(branch_fact, groups)
         parent_group = {
             'company_id': branch_id,
             'title': branch['title'],
@@ -3084,10 +3061,6 @@ async def fetch_plan_fact(
             branch_id,
             None,
             include_all_when_branch_planned=_has_plan_values(plans_by_company.get(branch_id, {})),
-        )
-        facts_by_company[branch_id] = _normalize_aggregate_fact_from_staff(
-            facts_by_company.get(branch_id, {}),
-            staff_groups_by_company.get(branch_id, []),
         )
 
     groups: list[dict[str, Any]] = []

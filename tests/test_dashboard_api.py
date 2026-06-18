@@ -1282,6 +1282,10 @@ async def test_dashboard_plan_fact_uses_plan_and_fact_formulas(async_session):
             '/dashboard/widget/plan_fact',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'staff_id': 1},
         )
+        r_selected_staff_summary = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'staff_id': 1},
+        )
         r_partial = await client.get(
             '/dashboard/widget/plan_fact',
             params={'start_date': '2025-01-15', 'end_date': '2025-01-20'},
@@ -1344,6 +1348,9 @@ async def test_dashboard_plan_fact_uses_plan_and_fact_formulas(async_session):
     assert selected_plan_rows['revenue']['status'] == 'bad'
     assert selected_plan_rows['clients']['plan'] == 2.0
     assert selected_plan_rows['clients']['fact'] == 2.0
+    selected_staff_summary = r_selected_staff_summary.json()['data']['visit_metrics']
+    assert selected_plan_rows['opz_qty']['fact'] == selected_staff_summary['opz_qty'] == 1.0
+    assert selected_plan_rows['opz_pct']['fact'] == selected_staff_summary['opz_pct'] == 50.0
 
     assert r_partial.status_code == 200
     partial_data = r_partial.json()['data']
@@ -2283,6 +2290,14 @@ async def test_admin_opz_distributes_unknown_creator_by_schedule(async_session):
             '/dashboard/widget/plan_fact',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
+        admin_a_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'staff_id': 2},
+        )
+        admin_b_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'staff_id': 3},
+        )
     app.dependency_overrides.clear()
 
     assert r.status_code == 200
@@ -2293,10 +2308,24 @@ async def test_admin_opz_distributes_unknown_creator_by_schedule(async_session):
         for group in groups
         if group['category'] == 'administrator'
     }
+    admin_opz_pct_by_staff = {
+        group['staff_id']: next(m for m in group['metrics'] if m['code'] == 'opz_pct')['fact']
+        for group in groups
+        if group['category'] == 'administrator'
+    }
     barber_opz = next(m for m in barber_group['metrics'] if m['code'] == 'opz_qty')['fact']
     assert barber_opz == 1.0
     assert admin_opz_by_staff == {2: 0.0, 3: 1.0}
     assert sum(admin_opz_by_staff.values()) == barber_opz
+
+    selected_admin_a = admin_a_response.json()['data']['selected_staff_plan']
+    selected_admin_b = admin_b_response.json()['data']['selected_staff_plan']
+    selected_admin_a_cells = {row['code']: row for row in selected_admin_a['metrics']}
+    selected_admin_b_cells = {row['code']: row for row in selected_admin_b['metrics']}
+    assert selected_admin_a_cells['opz_qty']['fact'] == admin_opz_by_staff[2] == 0.0
+    assert selected_admin_b_cells['opz_qty']['fact'] == admin_opz_by_staff[3] == 1.0
+    assert selected_admin_a_cells['opz_pct']['fact'] == admin_opz_pct_by_staff[2]
+    assert selected_admin_b_cells['opz_pct']['fact'] == admin_opz_pct_by_staff[3]
 
 
 async def _seed_plan_fact_normalization_case(async_session):
@@ -2379,7 +2408,7 @@ async def _seed_plan_fact_normalization_case(async_session):
 
 
 @pytest.mark.asyncio
-async def test_plan_fact_branch_totals_use_visible_staff_facts(async_session):
+async def test_plan_fact_branch_opz_matches_overview_even_with_hidden_staff(async_session):
     await _seed_plan_fact_normalization_case(async_session)
 
     async def override_db():
@@ -2392,39 +2421,24 @@ async def test_plan_fact_branch_totals_use_visible_staff_facts(async_session):
             '/dashboard/widget/plan_fact',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
+        overview = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
     app.dependency_overrides.clear()
 
     assert r.status_code == 200
     data = r.json()['data']
     branch_cells = {cell['code']: cell for cell in data['parent_group']['metrics']}
-    groups = data['groups']
-    barber_clients = sum(
-        next(m for m in group['metrics'] if m['code'] == 'clients')['fact']
-        for group in groups
-        if group['category'] == 'barber'
-    )
-    admin_clients = sum(
-        next(m for m in group['metrics'] if m['code'] == 'clients')['fact']
-        for group in groups
-        if group['category'] == 'administrator'
-    )
-    barber_opz = sum(
-        next(m for m in group['metrics'] if m['code'] == 'opz_qty')['fact']
-        for group in groups
-        if group['category'] == 'barber'
-    )
-    admin_opz = sum(
-        next(m for m in group['metrics'] if m['code'] == 'opz_qty')['fact']
-        for group in groups
-        if group['category'] == 'administrator'
-    )
+    overview_metrics = overview.json()['data']['visit_metrics']
 
-    assert branch_cells['clients']['fact'] == barber_clients == admin_clients == 1.0
-    assert branch_cells['opz_qty']['fact'] == barber_opz == admin_opz == 1.0
+    assert branch_cells['clients']['fact'] == 2.0
+    assert branch_cells['opz_qty']['fact'] == overview_metrics['opz_qty'] == 2.0
+    assert branch_cells['opz_pct']['fact'] == overview_metrics['opz_pct'] == 100.0
 
 
 @pytest.mark.asyncio
-async def test_plan_fact_network_branch_rows_use_normalized_staff_facts(async_session):
+async def test_plan_fact_network_opz_matches_overview_even_with_hidden_staff(async_session):
     await _seed_plan_fact_normalization_case(async_session)
 
     async def override_db():
@@ -2441,6 +2455,10 @@ async def test_plan_fact_network_branch_rows_use_normalized_staff_facts(async_se
             '/dashboard/widget/plan_fact',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
+        overview = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
     app.dependency_overrides.clear()
 
     assert branch_response.status_code == 200
@@ -2450,11 +2468,14 @@ async def test_plan_fact_network_branch_rows_use_normalized_staff_facts(async_se
     network_cells = {cell['code']: cell for cell in network_groups[0]['metrics']}
     network_branch = next(group for group in network_groups if group['scope'] == 'branch')
     network_branch_cells = {cell['code']: cell for cell in network_branch['metrics']}
+    overview_metrics = overview.json()['data']['visit_metrics']
 
-    assert network_branch_cells['clients']['fact'] == branch_cells['clients']['fact'] == 1.0
-    assert network_branch_cells['opz_qty']['fact'] == branch_cells['opz_qty']['fact'] == 1.0
-    assert network_cells['clients']['fact'] == 1.0
-    assert network_cells['opz_qty']['fact'] == 1.0
+    assert network_branch_cells['clients']['fact'] == branch_cells['clients']['fact'] == 2.0
+    assert network_branch_cells['opz_qty']['fact'] == branch_cells['opz_qty']['fact'] == 2.0
+    assert network_branch_cells['opz_pct']['fact'] == branch_cells['opz_pct']['fact'] == 100.0
+    assert network_cells['clients']['fact'] == 2.0
+    assert network_cells['opz_qty']['fact'] == overview_metrics['opz_qty'] == 2.0
+    assert network_cells['opz_pct']['fact'] == overview_metrics['opz_pct'] == 100.0
 
 
 @pytest.mark.asyncio

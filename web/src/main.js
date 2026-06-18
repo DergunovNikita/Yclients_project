@@ -867,6 +867,7 @@ function renderPlanInsights(planFact) {
   const rankings = planFact?.staff_rankings || {};
   const goodsKpis = planFact?.goods_kpi_execution || [];
   const selectedStaffPlan = planFact?.selected_staff_plan;
+  const hasSelectedStaff = Boolean(planFact?.selected_staff);
   const panels = [];
 
   if (selectedStaffPlan?.metrics?.length) {
@@ -881,24 +882,26 @@ function renderPlanInsights(planFact) {
     `);
   }
 
-  panels.push(`
-    <div class="panel">
-      <div class="panel-title">
-        <h2>Топ-5 по выручке</h2>
-        <span class="meta">${formatNumber(rankings.revenue_top?.length || 0)} сотрудников</span>
+  if (!hasSelectedStaff) {
+    panels.push(`
+      <div class="panel">
+        <div class="panel-title">
+          <h2>Топ-5 по выручке</h2>
+          <span class="meta">${formatNumber(rankings.revenue_top?.length || 0)} сотрудников</span>
+        </div>
+        ${renderRankingList(rankings.revenue_top || [], 'money')}
       </div>
-      ${renderRankingList(rankings.revenue_top || [], 'money')}
-    </div>
-  `);
-  panels.push(`
-    <div class="panel">
-      <div class="panel-title">
-        <h2>Топ-5 по СЧ</h2>
-        <span class="meta">${formatNumber(rankings.avg_check_top?.length || 0)} сотрудников</span>
+    `);
+    panels.push(`
+      <div class="panel">
+        <div class="panel-title">
+          <h2>Топ-5 по СЧ</h2>
+          <span class="meta">${formatNumber(rankings.avg_check_top?.length || 0)} сотрудников</span>
+        </div>
+        ${renderRankingList(rankings.avg_check_top || [], 'money')}
       </div>
-      ${renderRankingList(rankings.avg_check_top || [], 'money')}
-    </div>
-  `);
+    `);
+  }
 
   if (goodsKpis.length) {
     panels.push(`
@@ -1053,12 +1056,10 @@ function renderPlanFact(planFact) {
 }
 
 function renderPlanSettingInput(scope, row, field) {
-  const isPercent = ['wax_pct', 'head_care_pct', 'face_care_pct', 'camouflage_pct', 'cosmo_pct', 'opz_pct'].includes(field);
   return `
     <input
-      type="${isPercent ? 'number' : 'text'}"
+      type="text"
       inputmode="decimal"
-      ${isPercent ? 'min="1" max="100" step="0.1"' : ''}
       data-plan-${scope}
       data-company-id="${escapeHtml(row.company_id)}"
       ${row.staff_id ? `data-staff-id="${escapeHtml(row.staff_id)}"` : ''}
