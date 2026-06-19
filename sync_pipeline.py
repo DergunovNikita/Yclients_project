@@ -412,6 +412,22 @@ def sync_services(api: YClientsAPI, db, company_id: str):
     try:
         cid = int(company_id)
         now = datetime.now()
+        category_by_service_id = {}
+        if not any(service.get('category') for service in services):
+            category_rows = db.query(ServiceCategoryCatalog).filter(
+                ServiceCategoryCatalog.company_id == cid,
+            ).all()
+            for category in category_rows:
+                category_services = api.get_services(company_id, category_id=category.category_id) or []
+                for category_service in category_services:
+                    category_service_id = category_service.get('id')
+                    if category_service_id is None:
+                        continue
+                    category_by_service_id[category_service_id] = {
+                        'id': category.category_id,
+                        'title': category.title,
+                    }
+
         existing_services = load_existing_map(
             db,
             Service,
@@ -434,6 +450,9 @@ def sync_services(api: YClientsAPI, db, company_id: str):
             if 'category' in service_data and service_data['category']:
                 category_id = service_data['category'].get('id')
                 category_title = service_data['category'].get('title')
+            elif service_id in category_by_service_id:
+                category_id = category_by_service_id[service_id].get('id')
+                category_title = category_by_service_id[service_id].get('title')
 
             catalog_obj = existing_catalog.get(service_id)
             if not catalog_obj:

@@ -1385,8 +1385,6 @@ function renderServiceCatalog(rows) {
             <th>Категория</th>
             <th class="number">ID</th>
             <th>Название</th>
-            <th class="number">Цена</th>
-            <th class="number">Мин</th>
             <th>Доп услуга</th>
             <th>KPI-группа</th>
             <th>Обновлено</th>
@@ -1399,8 +1397,6 @@ function renderServiceCatalog(rows) {
               <td>${escapeHtml(row.category_title || '')}</td>
               <td class="number readonly">${escapeHtml(row.service_id)}</td>
               <td>${escapeHtml(row.title)}</td>
-              <td class="number">${row.price_min === null || row.price_min === undefined ? '' : formatMoney(row.price_min)}</td>
-              <td class="number">${row.duration || ''}</td>
               <td>
                 <input
                   class="service-extra-input"

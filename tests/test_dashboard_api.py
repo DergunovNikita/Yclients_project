@@ -3248,6 +3248,15 @@ async def test_dashboard_services_api_updates_extra_label_and_metrics(async_sess
         )
     )
     async_session.add(
+        ServiceCatalog(
+            company_id=1,
+            service_id=20,
+            title='Unused legacy service',
+            category_title='Care',
+            updated_at=datetime(2025, 1, 1, 0, 0, 0),
+        )
+    )
+    async_session.add(
         Appointment(
             id=1,
             company_id=1,
@@ -3281,6 +3290,7 @@ async def test_dashboard_services_api_updates_extra_label_and_metrics(async_sess
         listed = await client.get('/dashboard/services', params={'company_id': 1})
         assert listed.status_code == 200
         row = listed.json()['data']['rows'][0]
+        assert [item['service_id'] for item in listed.json()['data']['rows']] == [10]
         assert row['service_id'] == 10
         assert row['is_extra'] is False
 
@@ -3336,6 +3346,8 @@ async def test_services_sheet_import_does_not_remove_dashboard_labels(async_sess
 async def test_dashboard_service_kpi_groups_and_single_assignment(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add(Client(id=1, name='Client', company_id=1))
     async_session.add(
         ServiceCatalog(
             company_id=1,
@@ -3345,6 +3357,18 @@ async def test_dashboard_service_kpi_groups_and_single_assignment(async_session)
             updated_at=datetime(2025, 1, 1, 0, 0, 0),
         )
     )
+    async_session.add(
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 12, 0, 0),
+            attendance=1,
+        )
+    )
+    async_session.add(Transaction(id=1, appointment_id=1, company_id=1, service_id=10, service_title='Black Mask', amount=1))
     await async_session.commit()
 
     async def override_db():

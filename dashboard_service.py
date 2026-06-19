@@ -814,6 +814,28 @@ def _service_kpi_group_payload(group: ServiceKpiGroup) -> dict[str, Any]:
     }
 
 
+def _service_display_category(category_title: Any, service_title: Any) -> str:
+    existing = str(category_title or '').strip()
+    if existing:
+        return existing
+    title = str(service_title or '').strip().lower().replace('ё', 'е')
+    if not title:
+        return ''
+    if any(part in title for part in ('лиц', 'mask', 'volcano', 'mr. q', 'волкано')):
+        return 'УХОД ЗА ЛИЦОМ'
+    if any(part in title for part in ('голов', 'волос', 'пилинг', 'мыть', 'мойка')):
+        return 'УХОД ЗА ГОЛОВОЙ'
+    if any(part in title for part in ('бород', 'усы', 'усов')):
+        return 'БОРОДА'
+    if any(part in title for part in ('брить', 'брит', 'шейвер', 'shaver')):
+        return 'БРИТЬЕ'
+    if 'стриж' in title or 'окантов' in title:
+        return 'СТРИЖКА'
+    if any(part in title for part in ('воск', 'камуфляж', 'spa', 'спа')):
+        return 'Дополнительные услуги'
+    return ''
+
+
 def _completion_status(completion_pct: Optional[float]) -> str:
     if completion_pct is None:
         return 'no-plan'
@@ -1314,27 +1336,39 @@ async def fetch_dashboard_services(
                 cast(ServiceCatalog.service_id, String).like(f'%{q.strip()}%'),
             )
         )
-    if category:
-        filters.append(ServiceCatalog.category_title == category)
     if is_extra is True:
         filters.append(ServiceLabel.is_extra.is_(True))
     elif is_extra is False:
         filters.append(or_(ServiceLabel.service_id.is_(None), ServiceLabel.is_extra.is_(False)))
     if kpi_group_id is not None:
         filters.append(ServiceKpiAssignment.group_id == kpi_group_id)
+    latest_appointment_date = await db.scalar(select(func.max(Appointment.date)))
+    if latest_appointment_date is not None:
+        active_since = latest_appointment_date - timedelta(days=365)
+        active_service = exists(
+            select(1)
+            .select_from(Transaction)
+            .join(
+                Appointment,
+                and_(
+                    Appointment.id == Transaction.appointment_id,
+                    Appointment.company_id == Transaction.company_id,
+                ),
+            )
+            .where(
+                Transaction.company_id == ServiceCatalog.company_id,
+                Transaction.service_id == ServiceCatalog.service_id,
+                Appointment.date >= active_since,
+            )
+        )
+        filters.append(active_service)
     if filters:
         stmt = stmt.where(*filters)
     stmt = stmt.order_by(Company.title.asc(), ServiceCatalog.category_title.asc(), ServiceCatalog.title.asc())
     rows = (await db.execute(stmt)).all()
 
-    categories_stmt = select(ServiceCatalog.category_title).where(ServiceCatalog.category_title.is_not(None))
-    if company_id is not None:
-        categories_stmt = categories_stmt.where(ServiceCatalog.company_id == company_id)
-    category_rows = (await db.execute(categories_stmt.distinct().order_by(ServiceCatalog.category_title.asc()))).all()
-
-    return {
-        'rows': [
-            {
+    out_rows = [
+        {
                 'company_id': int(row.company_id),
                 'company_title': row.company_title,
                 'service_id': int(row.service_id),
@@ -1342,7 +1376,7 @@ async def fetch_dashboard_services(
                 'price_min': row.price_min,
                 'duration': row.duration,
                 'category_id': row.category_id,
-                'category_title': row.category_title or '',
+                'category_title': _service_display_category(row.category_title, row.title),
                 'updated_at': _iso_datetime(row.updated_at),
                 'is_extra': bool(row.is_extra) if row.is_extra is not None else False,
                 'label_source': row.label_source,
@@ -1354,10 +1388,16 @@ async def fetch_dashboard_services(
                 'kpi_assignment_updated_at': _iso_datetime(row.assignment_updated_at),
             }
             for row in rows
-        ],
+    ]
+    categories = sorted({row['category_title'] for row in out_rows if row['category_title']})
+    if category:
+        out_rows = [row for row in out_rows if row['category_title'] == category]
+
+    return {
+        'rows': out_rows,
         'groups': await fetch_service_kpi_groups(db, include_inactive=True),
-        'categories': [row.category_title for row in category_rows if row.category_title],
-        'total': len(rows),
+        'categories': categories,
+        'total': len(out_rows),
     }
 
 

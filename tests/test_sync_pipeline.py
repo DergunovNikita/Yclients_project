@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -11,6 +11,7 @@ from models import (
     Group,
     Service,
     ServiceCatalog,
+    ServiceCategoryCatalog,
     Staff,
     SyncSourceState,
 )
@@ -31,10 +32,13 @@ class FakeYClientsAPI:
 
 
 class FakeServicesAPI:
-    def __init__(self, services):
+    def __init__(self, services, services_by_category=None):
         self._services = services
+        self._services_by_category = services_by_category or {}
 
-    def get_services(self, company_id):
+    def get_services(self, company_id, staff_id=None, category_id=None):
+        if category_id is not None:
+            return self._services_by_category.get(category_id, [])
         return self._services
 
 
@@ -165,6 +169,40 @@ def test_sync_services_writes_shared_ids_to_branch_scoped_catalog():
             (1, 10, 'Воск'),
             (2, 10, 'Воск'),
         ]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_services_fills_category_from_category_filtered_services():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Service.__table__,
+            ServiceCatalog.__table__,
+            ServiceCategoryCatalog.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon 1', group_id=1))
+        db.add(ServiceCategoryCatalog(company_id=1, category_id=100, title='Уход', updated_at=datetime(2025, 1, 1, 0, 0, 0)))
+        db.commit()
+
+        api = FakeServicesAPI(
+            [{'id': 10, 'title': 'Воск', 'price_min': 500.0, 'duration': 900}],
+            services_by_category={100: [{'id': 10, 'title': 'Воск'}]},
+        )
+        assert sync_services(api, db, '1') is True
+
+        row = db.get(ServiceCatalog, {'company_id': 1, 'service_id': 10})
+        assert row.category_id == 100
+        assert row.category_title == 'Уход'
     finally:
         db.close()
         engine.dispose()
