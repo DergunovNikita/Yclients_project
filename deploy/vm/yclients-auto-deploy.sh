@@ -50,12 +50,24 @@ health_interval_seconds="${HEALTH_INTERVAL_SECONDS:-2}"
 for attempt in $(seq 1 "$health_retries"); do
   if curl -fsS "$health_url" >/dev/null; then
     echo "API health check passed"
-    echo "Deploy completed: $remote_rev"
-    exit 0
+    break
+  fi
+  if [ "$attempt" -eq "$health_retries" ]; then
+    echo "API did not become healthy after $health_retries attempts: $health_url" >&2
+    exit 1
   fi
   echo "Waiting for API health ($attempt/$health_retries): $health_url"
   sleep "$health_interval_seconds"
 done
 
-echo "API did not become healthy after $health_retries attempts: $health_url" >&2
-exit 1
+if [ -n "${PORTAL_ADMIN_EMAIL:-}" ] && [ -n "${PORTAL_ADMIN_PASSWORD:-}" ]; then
+  echo "Ensuring portal super_admin (${PORTAL_ADMIN_EMAIL})..."
+  docker compose run --rm --no-deps --entrypoint python api create_portal_admin.py \
+    --email "$PORTAL_ADMIN_EMAIL" \
+    --password "$PORTAL_ADMIN_PASSWORD" \
+    --full-name "${PORTAL_ADMIN_NAME:-Portal Admin}" \
+    --assign-all-branches
+fi
+
+echo "Deploy completed: $remote_rev"
+exit 0
