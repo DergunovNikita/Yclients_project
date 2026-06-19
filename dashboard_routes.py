@@ -22,6 +22,13 @@ from dashboard_service import (
     fetch_plan_fact,
     fetch_plan_settings,
     fetch_revenue_daily,
+    fetch_dashboard_services,
+    fetch_service_kpi_groups,
+    save_service_label,
+    create_service_kpi_group,
+    update_service_kpi_group,
+    archive_service_kpi_group,
+    save_service_kpi_assignment,
     save_plan_settings,
     save_manual_review_facts,
     fetch_staff,
@@ -82,6 +89,22 @@ class PlanSettingsPayload(BaseModel):
     month: str
     branches: list[PlanSettingsBranchPayload]
     staff: list[PlanSettingsStaffPayload]
+
+
+class ServiceLabelPayload(BaseModel):
+    is_extra: bool
+
+
+class ServiceKpiGroupPayload(BaseModel):
+    title: str | None = None
+    code: str | None = None
+    description: str | None = None
+    sort_order: int | None = None
+    is_active: bool | None = None
+
+
+class ServiceKpiAssignmentPayload(BaseModel):
+    group_id: int | None = None
 
 
 def _parse_range(start: date, end: date) -> tuple[date, date]:
@@ -159,6 +182,114 @@ async def dashboard_staff_directory_csv(
         media_type='text/csv; charset=utf-8',
         headers={'Content-Disposition': 'inline; filename=staff_directory.csv'},
     )
+
+
+@router.get('/services')
+async def dashboard_services(
+    company_id: int | None = Query(None),
+    q: str | None = Query(None),
+    category: str | None = Query(None),
+    is_extra: bool | None = Query(None),
+    kpi_group_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Current branch service catalog with dashboard-maintained labels."""
+    return {
+        'success': True,
+        'data': await fetch_dashboard_services(
+            db,
+            company_id=company_id,
+            q=q,
+            category=category,
+            is_extra=is_extra,
+            kpi_group_id=kpi_group_id,
+        ),
+    }
+
+
+@router.get('/services/kpi_groups')
+async def dashboard_service_kpi_groups(db: AsyncSession = Depends(get_async_db)):
+    return {'success': True, 'data': await fetch_service_kpi_groups(db, include_inactive=True)}
+
+
+@router.post('/services/kpi_groups')
+async def dashboard_service_kpi_group_create(
+    payload: ServiceKpiGroupPayload,
+    db: AsyncSession = Depends(get_async_db),
+):
+    try:
+        data = await create_service_kpi_group(
+            db,
+            title=payload.title or '',
+            code=payload.code,
+            description=payload.description,
+            sort_order=payload.sort_order,
+            is_active=True if payload.is_active is None else payload.is_active,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
+
+
+@router.patch('/services/kpi_groups/{group_id}')
+async def dashboard_service_kpi_group_update(
+    group_id: int,
+    payload: ServiceKpiGroupPayload,
+    db: AsyncSession = Depends(get_async_db),
+):
+    try:
+        data = await update_service_kpi_group(
+            db,
+            group_id,
+            title=payload.title,
+            code=payload.code,
+            description=payload.description,
+            sort_order=payload.sort_order,
+            is_active=payload.is_active,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
+
+
+@router.delete('/services/kpi_groups/{group_id}')
+async def dashboard_service_kpi_group_delete(
+    group_id: int,
+    db: AsyncSession = Depends(get_async_db),
+):
+    try:
+        data = await archive_service_kpi_group(db, group_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
+
+
+@router.patch('/services/{company_id}/{service_id}/labels')
+async def dashboard_service_label_save(
+    company_id: int,
+    service_id: int,
+    payload: ServiceLabelPayload,
+    db: AsyncSession = Depends(get_async_db),
+):
+    try:
+        data = await save_service_label(db, company_id, service_id, is_extra=payload.is_extra)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
+
+
+@router.patch('/services/{company_id}/{service_id}/kpi_group')
+async def dashboard_service_kpi_assignment_save(
+    company_id: int,
+    service_id: int,
+    payload: ServiceKpiAssignmentPayload,
+    db: AsyncSession = Depends(get_async_db),
+):
+    try:
+        data = await save_service_kpi_assignment(db, company_id, service_id, group_id=payload.group_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
 
 
 @router.get('/reports')

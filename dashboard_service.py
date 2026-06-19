@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any, Optional
 
-from sqlalchemy import String, and_, case, cast, delete, func, or_, select
+from sqlalchemy import String, and_, case, cast, delete, exists, func, or_, select
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +27,9 @@ from models import (
     PlanStaffInput,
     PortalBranch,
     ServiceCatalog,
+    Service,
+    ServiceKpiAssignment,
+    ServiceKpiGroup,
     ServiceLabel,
     Staff,
     StaffSchedule,
@@ -57,8 +61,27 @@ NON_CASH_ACCOUNT_MARKERS = ('бонус', 'скид', 'лояльн', 'серт�
 
 WAX_TITLE_PARTS = ('воск',)
 CAMOUFLAGE_TITLE_PARTS = ('камуфляж',)
-FACE_CARE_TITLE_PARTS = ('spa volcano', 'спа volcano', 'black mask')
-HEAD_CARE_TITLE_PARTS = ('пилинг', 'компл. мойка', 'уход за гол')
+FACE_CARE_TITLE_PARTS = (
+    'spa volcano',
+    'спа volcano',
+    'black mask',
+    'спа для лица',
+    'для лица',
+    'уход за кожей лица',
+    'уход за бородой и кожей лица',
+    'кожей лица',
+)
+HEAD_CARE_TITLE_PARTS = (
+    'пилинг',
+    'компл. мойка',
+    'комплексное мытье головы',
+    'комплексное мытьё головы',
+    'мытье головы',
+    'мытьё головы',
+    'уход за гол',
+    'уход за кожей головы',
+    'кожей головы',
+)
 
 BRANCH_SETTING_FIELDS = (
     'wax_pct',
@@ -366,8 +389,24 @@ def _goods_paid_filters(
     if company_id is not None:
         parts.append(FinancialTransaction.company_id == company_id)
     if staff_id is not None:
-        parts.append(FinancialTransaction.master_id == staff_id)
+        parts.append(_financial_staff_attribution_condition(staff_id))
     return and_(*parts)
+
+
+def _financial_staff_attribution_condition(staff_id: int):
+    """Prefer the payment master, falling back to the linked visit master."""
+    return or_(
+        FinancialTransaction.master_id == staff_id,
+        and_(
+            FinancialTransaction.master_id.is_(None),
+            exists(
+                select(1).where(
+                    Appointment.id == FinancialTransaction.record_id,
+                    Appointment.staff_id == staff_id,
+                )
+            ),
+        ),
+    )
 
 
 async def _goods_paid_revenue_total(
@@ -554,12 +593,21 @@ async def _average_check_block(
         direct_payment_filters.append(FinancialTransaction.company_id == company_id)
     elif company_ids is not None:
         direct_payment_filters.append(FinancialTransaction.company_id.in_(company_ids))
-    if staff_id is not None and created_user_id is None:
-        direct_payment_filters.append(FinancialTransaction.master_id == staff_id)
-    for name, condition in (
-        ('goods_revenue', FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE),
-        ('topup_revenue', _personal_account_condition()),
+    for name, condition, staff_condition in (
+        (
+            'goods_revenue',
+            FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
+            _financial_staff_attribution_condition(staff_id) if staff_id is not None else None,
+        ),
+        (
+            'topup_revenue',
+            _personal_account_condition(),
+            FinancialTransaction.master_id == staff_id if staff_id is not None else None,
+        ),
     ):
+        metric_filters = [*direct_payment_filters, condition]
+        if staff_condition is not None and created_user_id is None:
+            metric_filters.append(staff_condition)
         classified_revenue[name] = float(
             await db.scalar(
                 select(func.coalesce(func.sum(FinancialTransaction.amount), 0.0))
@@ -571,11 +619,14 @@ async def _average_check_block(
                         AccountCatalog.account_id == FinancialTransaction.account_id,
                     ),
                 )
-                .where(*direct_payment_filters, condition)
+                .where(*metric_filters)
             )
             or 0
         )
 
+    unclassified_filters = list(direct_payment_filters)
+    if staff_id is not None and created_user_id is None:
+        unclassified_filters.append(FinancialTransaction.master_id == staff_id)
     known_condition = or_(
         func.coalesce(FinancialTransaction.sold_item_type, '') == SERVICE_SOLD_ITEM_TYPE,
         func.coalesce(FinancialTransaction.sold_item_type, '') == GOODS_SOLD_ITEM_TYPE,
@@ -592,7 +643,7 @@ async def _average_check_block(
                     AccountCatalog.account_id == FinancialTransaction.account_id,
                 ),
             )
-            .where(*direct_payment_filters, ~known_condition)
+            .where(*unclassified_filters, ~known_condition)
         )
         or 0
     )
@@ -744,6 +795,23 @@ def _round_optional(value: Optional[float]) -> Optional[float]:
     if value is None:
         return None
     return round(float(value), 2)
+
+
+def _iso_datetime(value: Any) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _service_kpi_group_payload(group: ServiceKpiGroup) -> dict[str, Any]:
+    return {
+        'id': group.id,
+        'code': group.code,
+        'title': group.title,
+        'description': group.description or '',
+        'is_active': bool(group.is_active),
+        'sort_order': int(group.sort_order or 0),
+        'created_at': _iso_datetime(group.created_at),
+        'updated_at': _iso_datetime(group.updated_at),
+    }
 
 
 def _completion_status(completion_pct: Optional[float]) -> str:
@@ -1138,6 +1206,322 @@ async def fetch_revenue_daily(
         }
         for d, v in sorted(by_date.items(), key=lambda kv: kv[0])
     ]
+
+
+def _normalize_service_group_code(value: Any) -> str:
+    text = str(value or '').strip().lower()
+    text = re.sub(r'[^a-z0-9_]+', '_', text)
+    text = re.sub(r'_+', '_', text).strip('_')
+    return text[:80]
+
+
+async def _unique_service_group_code(
+    db: AsyncSession,
+    raw_code: Any,
+    *,
+    ignore_group_id: int | None = None,
+) -> str:
+    base = _normalize_service_group_code(raw_code) or 'kpi_group'
+    candidate = base
+    suffix = 2
+    while True:
+        stmt = select(ServiceKpiGroup.id).where(ServiceKpiGroup.code == candidate)
+        if ignore_group_id is not None:
+            stmt = stmt.where(ServiceKpiGroup.id != ignore_group_id)
+        existing = await db.scalar(stmt.limit(1))
+        if existing is None:
+            return candidate
+        candidate = f'{base}_{suffix}'
+        suffix += 1
+
+
+async def _service_catalog_row(
+    db: AsyncSession,
+    company_id: int,
+    service_id: int,
+) -> ServiceCatalog | None:
+    return await db.get(ServiceCatalog, {'company_id': company_id, 'service_id': service_id})
+
+
+async def fetch_service_kpi_groups(
+    db: AsyncSession,
+    *,
+    include_inactive: bool = True,
+) -> list[dict[str, Any]]:
+    stmt = select(ServiceKpiGroup)
+    if not include_inactive:
+        stmt = stmt.where(ServiceKpiGroup.is_active.is_(True))
+    stmt = stmt.order_by(
+        ServiceKpiGroup.is_active.desc(),
+        ServiceKpiGroup.sort_order.asc(),
+        ServiceKpiGroup.title.asc(),
+        ServiceKpiGroup.id.asc(),
+    )
+    return [_service_kpi_group_payload(group) for group in (await db.execute(stmt)).scalars().all()]
+
+
+async def fetch_dashboard_services(
+    db: AsyncSession,
+    *,
+    company_id: int | None = None,
+    q: str | None = None,
+    category: str | None = None,
+    is_extra: bool | None = None,
+    kpi_group_id: int | None = None,
+) -> dict[str, Any]:
+    label_join = and_(
+        ServiceLabel.company_id == ServiceCatalog.company_id,
+        ServiceLabel.service_id == ServiceCatalog.service_id,
+    )
+    assignment_join = and_(
+        ServiceKpiAssignment.company_id == ServiceCatalog.company_id,
+        ServiceKpiAssignment.service_id == ServiceCatalog.service_id,
+    )
+    stmt = (
+        select(
+            ServiceCatalog.company_id,
+            Company.title.label('company_title'),
+            ServiceCatalog.service_id,
+            ServiceCatalog.title,
+            ServiceCatalog.price_min,
+            ServiceCatalog.duration,
+            ServiceCatalog.category_id,
+            ServiceCatalog.category_title,
+            ServiceCatalog.updated_at,
+            ServiceLabel.is_extra,
+            ServiceLabel.source.label('label_source'),
+            ServiceLabel.updated_at.label('label_updated_at'),
+            ServiceKpiAssignment.group_id,
+            ServiceKpiAssignment.updated_at.label('assignment_updated_at'),
+            ServiceKpiGroup.code.label('group_code'),
+            ServiceKpiGroup.title.label('group_title'),
+            ServiceKpiGroup.is_active.label('group_is_active'),
+        )
+        .select_from(ServiceCatalog)
+        .join(Company, Company.id == ServiceCatalog.company_id)
+        .outerjoin(ServiceLabel, label_join)
+        .outerjoin(ServiceKpiAssignment, assignment_join)
+        .outerjoin(ServiceKpiGroup, ServiceKpiGroup.id == ServiceKpiAssignment.group_id)
+    )
+    filters = []
+    if company_id is not None:
+        filters.append(ServiceCatalog.company_id == company_id)
+    if q:
+        needle = f'%{q.strip().lower()}%'
+        filters.append(
+            or_(
+                func.lower(ServiceCatalog.title).like(needle),
+                cast(ServiceCatalog.service_id, String).like(f'%{q.strip()}%'),
+            )
+        )
+    if category:
+        filters.append(ServiceCatalog.category_title == category)
+    if is_extra is True:
+        filters.append(ServiceLabel.is_extra.is_(True))
+    elif is_extra is False:
+        filters.append(or_(ServiceLabel.service_id.is_(None), ServiceLabel.is_extra.is_(False)))
+    if kpi_group_id is not None:
+        filters.append(ServiceKpiAssignment.group_id == kpi_group_id)
+    if filters:
+        stmt = stmt.where(*filters)
+    stmt = stmt.order_by(Company.title.asc(), ServiceCatalog.category_title.asc(), ServiceCatalog.title.asc())
+    rows = (await db.execute(stmt)).all()
+
+    categories_stmt = select(ServiceCatalog.category_title).where(ServiceCatalog.category_title.is_not(None))
+    if company_id is not None:
+        categories_stmt = categories_stmt.where(ServiceCatalog.company_id == company_id)
+    category_rows = (await db.execute(categories_stmt.distinct().order_by(ServiceCatalog.category_title.asc()))).all()
+
+    return {
+        'rows': [
+            {
+                'company_id': int(row.company_id),
+                'company_title': row.company_title,
+                'service_id': int(row.service_id),
+                'title': row.title or '',
+                'price_min': row.price_min,
+                'duration': row.duration,
+                'category_id': row.category_id,
+                'category_title': row.category_title or '',
+                'updated_at': _iso_datetime(row.updated_at),
+                'is_extra': bool(row.is_extra) if row.is_extra is not None else False,
+                'label_source': row.label_source,
+                'label_updated_at': _iso_datetime(row.label_updated_at),
+                'kpi_group_id': row.group_id,
+                'kpi_group_code': row.group_code,
+                'kpi_group_title': row.group_title,
+                'kpi_group_is_active': bool(row.group_is_active) if row.group_is_active is not None else None,
+                'kpi_assignment_updated_at': _iso_datetime(row.assignment_updated_at),
+            }
+            for row in rows
+        ],
+        'groups': await fetch_service_kpi_groups(db, include_inactive=True),
+        'categories': [row.category_title for row in category_rows if row.category_title],
+        'total': len(rows),
+    }
+
+
+async def save_service_label(
+    db: AsyncSession,
+    company_id: int,
+    service_id: int,
+    *,
+    is_extra: bool,
+) -> dict[str, Any]:
+    catalog = await _service_catalog_row(db, company_id, service_id)
+    if catalog is None:
+        raise ValueError('unknown service for company')
+
+    now = datetime.utcnow()
+    if is_extra:
+        legacy_service = await db.get(Service, service_id)
+        if legacy_service is None:
+            db.add(
+                Service(
+                    id=service_id,
+                    title=catalog.title,
+                    price_min=catalog.price_min,
+                    duration=catalog.duration,
+                    category_title=catalog.category_title,
+                    company_id=company_id,
+                )
+            )
+            await db.flush()
+
+        label = await db.get(ServiceLabel, {'company_id': company_id, 'service_id': service_id})
+        if label is None:
+            db.add(
+                ServiceLabel(
+                    company_id=company_id,
+                    service_id=service_id,
+                    is_extra=True,
+                    source='dashboard',
+                    updated_at=now,
+                )
+            )
+        else:
+            label.is_extra = True
+            label.source = 'dashboard'
+            label.updated_at = now
+    else:
+        await db.execute(
+            delete(ServiceLabel).where(
+                ServiceLabel.company_id == company_id,
+                ServiceLabel.service_id == service_id,
+            )
+        )
+
+    await db.commit()
+    return await fetch_dashboard_services(db, company_id=company_id, q=str(service_id))
+
+
+async def create_service_kpi_group(
+    db: AsyncSession,
+    *,
+    title: str,
+    code: str | None = None,
+    description: str | None = None,
+    sort_order: int | None = None,
+    is_active: bool = True,
+) -> dict[str, Any]:
+    clean_title = str(title or '').strip()
+    if not clean_title:
+        raise ValueError('title is required')
+    now = datetime.utcnow()
+    group = ServiceKpiGroup(
+        code=await _unique_service_group_code(db, code or clean_title),
+        title=clean_title,
+        description=str(description or '').strip() or None,
+        sort_order=int(sort_order or 0),
+        is_active=bool(is_active),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(group)
+    await db.commit()
+    await db.refresh(group)
+    return _service_kpi_group_payload(group)
+
+
+async def update_service_kpi_group(
+    db: AsyncSession,
+    group_id: int,
+    *,
+    title: str | None = None,
+    code: str | None = None,
+    description: str | None = None,
+    sort_order: int | None = None,
+    is_active: bool | None = None,
+) -> dict[str, Any]:
+    group = await db.get(ServiceKpiGroup, group_id)
+    if group is None:
+        raise ValueError('unknown KPI group')
+    if title is not None:
+        clean_title = str(title or '').strip()
+        if not clean_title:
+            raise ValueError('title is required')
+        group.title = clean_title
+    if code is not None:
+        group.code = await _unique_service_group_code(db, code, ignore_group_id=group_id)
+    if description is not None:
+        group.description = str(description or '').strip() or None
+    if sort_order is not None:
+        group.sort_order = int(sort_order or 0)
+    if is_active is not None:
+        group.is_active = bool(is_active)
+    group.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(group)
+    return _service_kpi_group_payload(group)
+
+
+async def archive_service_kpi_group(db: AsyncSession, group_id: int) -> dict[str, Any]:
+    return await update_service_kpi_group(db, group_id, is_active=False)
+
+
+async def save_service_kpi_assignment(
+    db: AsyncSession,
+    company_id: int,
+    service_id: int,
+    *,
+    group_id: int | None,
+) -> dict[str, Any]:
+    catalog = await _service_catalog_row(db, company_id, service_id)
+    if catalog is None:
+        raise ValueError('unknown service for company')
+
+    if group_id is None:
+        await db.execute(
+            delete(ServiceKpiAssignment).where(
+                ServiceKpiAssignment.company_id == company_id,
+                ServiceKpiAssignment.service_id == service_id,
+            )
+        )
+        await db.commit()
+        return await fetch_dashboard_services(db, company_id=company_id, q=str(service_id))
+
+    group = await db.get(ServiceKpiGroup, group_id)
+    if group is None or not group.is_active:
+        raise ValueError('unknown active KPI group')
+
+    assignment = await db.get(ServiceKpiAssignment, {'company_id': company_id, 'service_id': service_id})
+    now = datetime.utcnow()
+    if assignment is None:
+        db.add(
+            ServiceKpiAssignment(
+                company_id=company_id,
+                service_id=service_id,
+                group_id=group_id,
+                source='dashboard',
+                updated_at=now,
+            )
+        )
+    else:
+        assignment.group_id = group_id
+        assignment.source = 'dashboard'
+        assignment.updated_at = now
+    await db.commit()
+    return await fetch_dashboard_services(db, company_id=company_id, q=str(service_id))
 
 
 async def fetch_top_services(

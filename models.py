@@ -5,6 +5,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     JSON,
@@ -108,6 +109,42 @@ class ServiceLabel(Base):
     is_extra = Column(Boolean, nullable=False, default=False)
     source = Column(String, default='google_sheet')
     updated_at = Column(DateTime, nullable=False)
+
+
+class ServiceKpiGroup(Base):
+    """Dashboard-maintained service groups for KPI calculations."""
+
+    __tablename__ = 'service_kpi_groups'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String, nullable=False, unique=True, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+
+class ServiceKpiAssignment(Base):
+    """Branch-scoped assignment of a current YClients service to one KPI group."""
+
+    __tablename__ = 'service_kpi_assignments'
+
+    company_id = Column(Integer, ForeignKey('companies.id'), primary_key=True)
+    service_id = Column(Integer, primary_key=True)
+    group_id = Column(Integer, ForeignKey('service_kpi_groups.id'), nullable=False, index=True)
+    source = Column(String, default='dashboard')
+    updated_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['company_id', 'service_id'],
+            ['service_catalog.company_id', 'service_catalog.service_id'],
+            ondelete='CASCADE',
+        ),
+        Index('ix_service_kpi_assignments_service_id', 'service_id'),
+    )
 
 
 class StaffPosition(Base):

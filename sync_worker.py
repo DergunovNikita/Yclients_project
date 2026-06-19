@@ -115,7 +115,6 @@ def process_next_job() -> bool:
     db = database.get_db()
     jobs = SyncJobService()
     try:
-        run_services_label_sync_if_due(db)
         job = jobs.claim_next_job(db)
         if job is None:
             return False
