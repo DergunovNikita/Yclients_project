@@ -5,6 +5,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     JSON,
@@ -108,6 +109,42 @@ class ServiceLabel(Base):
     is_extra = Column(Boolean, nullable=False, default=False)
     source = Column(String, default='google_sheet')
     updated_at = Column(DateTime, nullable=False)
+
+
+class ServiceKpiGroup(Base):
+    """Dashboard-maintained service groups for KPI calculations."""
+
+    __tablename__ = 'service_kpi_groups'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String, nullable=False, unique=True, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+
+class ServiceKpiAssignment(Base):
+    """Branch-scoped assignment of a current YClients service to one KPI group."""
+
+    __tablename__ = 'service_kpi_assignments'
+
+    company_id = Column(Integer, ForeignKey('companies.id'), primary_key=True)
+    service_id = Column(Integer, primary_key=True)
+    group_id = Column(Integer, ForeignKey('service_kpi_groups.id'), nullable=False, index=True)
+    source = Column(String, default='dashboard')
+    updated_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['company_id', 'service_id'],
+            ['service_catalog.company_id', 'service_catalog.service_id'],
+            ondelete='CASCADE',
+        ),
+        Index('ix_service_kpi_assignments_service_id', 'service_id'),
+    )
 
 
 class StaffPosition(Base):
@@ -315,6 +352,7 @@ class FinancialTransaction(Base):
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer)
     expense_id = Column(Integer)
+    expense_title = Column(String)
     date = Column(DateTime, index=True)
     amount = Column(Float)
     comment = Column(Text)
@@ -326,6 +364,18 @@ class FinancialTransaction(Base):
     sold_item_id = Column(Integer)
     sold_item_type = Column(String)
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
+
+
+class SyncSourceState(Base):
+    """Successful coverage of a detailed upstream source for a company."""
+
+    __tablename__ = 'sync_source_states'
+
+    company_id = Column(Integer, ForeignKey('companies.id'), primary_key=True)
+    source = Column(String, primary_key=True)
+    period_start = Column(Date, nullable=False)
+    period_end = Column(Date, nullable=False)
+    synced_at = Column(DateTime, nullable=False)
 
 
 class GoodTransaction(Base):

@@ -26,6 +26,8 @@ from models import (
     PortalUserBranch,
     Service,
     ServiceCatalog,
+    ServiceKpiAssignment,
+    ServiceKpiGroup,
     ServiceCategory,
     ServiceCategoryCatalog,
     ServiceLabel,
@@ -36,6 +38,7 @@ from models import (
     Storage,
     AccountCatalog,
     StorageCatalog,
+    SyncSourceState,
     Transaction,
     Base,
 )
@@ -49,6 +52,8 @@ PUBLIC_TABLES = [
     Service.__table__,
     ServiceCatalog.__table__,
     ServiceLabel.__table__,
+    ServiceKpiGroup.__table__,
+    ServiceKpiAssignment.__table__,
     StaffPosition.__table__,
     StaffPositionCatalog.__table__,
     Staff.__table__,
@@ -64,6 +69,7 @@ PUBLIC_TABLES = [
     Appointment.__table__,
     Transaction.__table__,
     FinancialTransaction.__table__,
+    SyncSourceState.__table__,
     GoodTransaction.__table__,
     Comment.__table__,
     StaffSchedule.__table__,
@@ -80,12 +86,16 @@ def isolate_api_auth(monkeypatch):
     import api
     import auth_deps
     import dashboard_routes
+    import dashboard_service
 
     monkeypatch.setattr(api, 'API_KEY', '')
     monkeypatch.setattr(api, 'SYNC_API_TOKEN', '')
     monkeypatch.setattr(auth_deps, 'API_KEY', '')
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
     monkeypatch.setattr(dashboard_routes, 'SYNC_API_TOKEN', '')
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'PARTNER_TOKEN', '')
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'LOGIN', '')
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'PASSWORD', '')
 
 
 @pytest_asyncio.fixture

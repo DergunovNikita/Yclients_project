@@ -318,6 +318,26 @@
       margin-bottom: 16px;
     }
 
+    .appointments-metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .appointments-warning {
+      display: none;
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      border: 1px solid #fcd34d;
+      border-radius: 6px;
+      background: #fffbeb;
+      color: #92400e;
+      font-size: 13px;
+    }
+
+    .appointments-warning.visible { display: block; }
+
     .card,
     .panel {
       border: 1px solid #dbe3ef;
@@ -601,19 +621,13 @@
     }
 
     .review-fact-scroll table {
-      min-width: 760px;
+      min-width: 520px;
     }
 
     .review-fact-table input {
       max-width: 72px;
       margin-left: auto;
       text-align: right;
-    }
-
-    .review-fact-table th.review-fact-day,
-    .review-fact-table td.review-fact-day {
-      min-width: 82px;
-      white-space: nowrap;
     }
 
     .review-fact-actions {
@@ -662,6 +676,50 @@
     .plan-settings-table .readonly {
       color: #64748b;
       white-space: nowrap;
+    }
+
+    .services-toolbar {
+      grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) minmax(160px, 1fr) minmax(180px, 1.2fr) auto auto;
+    }
+
+    .checkline {
+      min-height: 40px;
+      flex-direction: row;
+      align-items: center;
+      text-transform: none;
+      font-size: 13px;
+      color: #334155;
+    }
+
+    .checkline input {
+      width: auto;
+      min-height: auto;
+    }
+
+    .service-table input[type="checkbox"] {
+      width: auto;
+      min-height: auto;
+    }
+
+    .service-table select {
+      min-width: 170px;
+    }
+
+    .service-group-create {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) minmax(140px, .7fr) minmax(220px, 1.2fr) auto;
+      gap: 10px;
+      align-items: end;
+      margin-bottom: 12px;
+    }
+
+    .service-group-table input {
+      min-width: 90px;
+    }
+
+    .service-group-table .service-group-active {
+      width: auto;
+      min-height: auto;
     }
 
     button.secondary {
@@ -1027,6 +1085,11 @@
         grid-template-columns: 1fr 1fr;
       }
 
+      .services-toolbar,
+      .service-group-create {
+        grid-template-columns: 1fr 1fr;
+      }
+
       .toolbar button {
         grid-column: 1 / -1;
       }
@@ -1036,6 +1099,10 @@
       }
 
       .visit-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .appointments-metrics {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
@@ -1058,6 +1125,7 @@
       .plan-settings-toolbar,
       .kpi,
       .visit-metrics,
+      .appointments-metrics,
       .segmented {
         grid-template-columns: 1fr;
       }
@@ -1115,6 +1183,7 @@
       <a class="tab active" href="#overview" data-view-link="overview">Обзор</a>
       <a class="tab" href="#plan-fact" data-view-link="plan">План / факт</a>
       <a class="tab" href="#plan-settings" data-view-link="planSettings">Установка планов</a>
+      <a class="tab" href="#services" data-view-link="serviceManagement">Услуги</a>
       <a class="tab" href="#review-facts" data-view-link="reviewFacts">Отзывы факт</a>
       <a class="tab" href="/reports" data-view-link="reports">Отчеты</a>
     </nav>
@@ -1177,7 +1246,16 @@
             <h2>Записи по дням</h2>
             <span class="meta" id="appointments-meta"></span>
           </div>
+          <div class="appointments-warning" id="appointments-warning" role="status"></div>
+          <section class="appointments-metrics" id="appointments-metrics" aria-label="Статусы записей"></section>
           <div class="chart-box short"><canvas id="appointments-chart"></canvas></div>
+        </div>
+
+        <div class="panel wide" data-overview-section="appointments">
+          <div class="panel-title">
+            <h2>ОПЗ и доля от завершённых визитов</h2>
+          </div>
+          <div class="chart-box"><canvas id="opz-chart"></canvas></div>
         </div>
 
         <div class="panel wide" data-overview-section="services">
@@ -1275,6 +1353,74 @@
           <a class="tab" href="#review-facts" data-view-link="reviewFacts">Отзывы факт</a>
           <button type="button" id="plan-settings-save">Сохранить</button>
         </div>
+      </div>
+    </section>
+
+    <section class="view" id="service-management-view" data-view="serviceManagement">
+      <section class="toolbar services-toolbar" aria-label="Фильтры услуг">
+        <label>
+          Филиал
+          <select id="service-filter-branch">
+            <option value="">Все филиалы</option>
+          </select>
+        </label>
+        <label>
+          Категория
+          <select id="service-filter-category">
+            <option value="">Все категории</option>
+          </select>
+        </label>
+        <label>
+          KPI-группа
+          <select id="service-filter-group">
+            <option value="">Все группы</option>
+          </select>
+        </label>
+        <label>
+          Поиск
+          <input type="search" id="service-filter-query" placeholder="Название или ID" />
+        </label>
+        <label class="checkline">
+          <input type="checkbox" id="service-filter-extra" />
+          Только доп. услуги
+        </label>
+        <button type="button" id="service-filter-load">Обновить</button>
+      </section>
+
+      <div class="panel wide">
+        <div class="panel-title">
+          <h2>Актуальные услуги</h2>
+          <span class="meta" id="service-catalog-meta"></span>
+        </div>
+        <div id="service-catalog-table"></div>
+        <div class="plan-settings-actions">
+          <span id="service-management-dirty" class="plan-settings-dirty">Есть несохранённые изменения</span>
+          <button type="button" class="secondary" id="service-management-reset">Сбросить изменения</button>
+          <button type="button" id="service-management-save">Сохранить</button>
+        </div>
+      </div>
+
+      <div class="panel wide">
+        <div class="panel-title">
+          <h2>KPI-группы услуг</h2>
+          <span class="meta" id="service-kpi-groups-meta"></span>
+        </div>
+        <div class="service-group-create">
+          <label>
+            Название
+            <input type="text" id="service-group-title" />
+          </label>
+          <label>
+            Код
+            <input type="text" id="service-group-code" placeholder="auto" />
+          </label>
+          <label>
+            Описание
+            <input type="text" id="service-group-description" />
+          </label>
+          <button type="button" id="service-group-add">Добавить</button>
+        </div>
+        <div id="service-kpi-groups-table"></div>
       </div>
     </section>
 

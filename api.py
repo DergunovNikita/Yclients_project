@@ -550,6 +550,7 @@ async def api_financial_transactions(
         "id": item.id,
         "document_id": item.document_id,
         "expense_id": item.expense_id,
+        "expense_title": item.expense_title,
         "date": serialize_value(item.date),
         "amount": item.amount,
         "comment": item.comment,
@@ -685,7 +686,7 @@ async def api_stats(db: AsyncSession = Depends(get_async_db)):
         return r.scalar_one()
 
     attended_result = await db.execute(
-        select(func.count()).where(Appointment.attendance > 0)
+        select(func.count()).where(Appointment.attendance == 1)
     )
     appointments_total = await count_of(Appointment)
 

@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
+import re
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any, Optional
 
-from sqlalchemy import String, and_, case, cast, delete, func, or_, select
+from sqlalchemy import String, and_, case, cast, delete, exists, func, or_, select
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import yclients_analytics
 from models import (
+    AccountCatalog,
     Appointment,
     Company,
     FinancialTransaction,
@@ -23,9 +27,13 @@ from models import (
     PlanStaffInput,
     PortalBranch,
     ServiceCatalog,
+    Service,
+    ServiceKpiAssignment,
+    ServiceKpiGroup,
     ServiceLabel,
     Staff,
     StaffSchedule,
+    SyncSourceState,
     Transaction,
 )
 from plan_config import (
@@ -44,13 +52,36 @@ GOODS_SOLD_ITEM_TYPE = 'goods_transaction'
 WAITLIST_STAFF_NAME = 'лист ожидания'
 ADMIN_PLACEHOLDER_STAFF_PREFIX = 'администратор'
 PLAN_SETTINGS_SOURCE = 'dashboard_plan_settings'
-MANUAL_REVIEW_FACT_MAX_DAYS = 31
 GOODS_KPI_CODES = ('wax_qty', 'camouflage_qty', 'face_care_qty', 'head_care_qty')
+COMPLETED_ATTENDANCE = 1
+PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
+PERSONAL_ACCOUNT_TYPES = ('client_account', 'personal_account', 'account_replenishment')
+PERSONAL_ACCOUNT_EXPENSE_MARKERS = ('пополн', 'личн', 'депозит')
+NON_CASH_ACCOUNT_MARKERS = ('бонус', 'скид', 'лояльн', 'сертификат')
 
 WAX_TITLE_PARTS = ('воск',)
 CAMOUFLAGE_TITLE_PARTS = ('камуфляж',)
-FACE_CARE_TITLE_PARTS = ('spa volcano', 'спа volcano', 'black mask')
-HEAD_CARE_TITLE_PARTS = ('пилинг', 'компл. мойка', 'уход за гол')
+FACE_CARE_TITLE_PARTS = (
+    'spa volcano',
+    'спа volcano',
+    'black mask',
+    'спа для лица',
+    'для лица',
+    'уход за кожей лица',
+    'уход за бородой и кожей лица',
+    'кожей лица',
+)
+HEAD_CARE_TITLE_PARTS = (
+    'пилинг',
+    'компл. мойка',
+    'комплексное мытье головы',
+    'комплексное мытьё головы',
+    'мытье головы',
+    'мытьё головы',
+    'уход за гол',
+    'уход за кожей головы',
+    'кожей головы',
+)
 
 BRANCH_SETTING_FIELDS = (
     'wax_pct',
@@ -122,6 +153,106 @@ def _safe_div(numerator: float, denominator: float) -> float:
     return float(numerator or 0) / float(denominator or 0) if denominator else 0.0
 
 
+def _appointment_shares(counts: dict[str, int]) -> dict[str, int]:
+    total = counts['total']
+    fields = ('cancelled', 'completed', 'incomplete')
+    if total == 0:
+        return {field: 0 for field in fields}
+
+    exact = {field: 100.0 * counts[field] / total for field in fields}
+    shares = {field: math.floor(exact[field]) for field in fields}
+    remainder = 100 - sum(shares.values())
+    ranked = sorted(
+        fields,
+        key=lambda field: (-(exact[field] - shares[field]), fields.index(field)),
+    )
+    for field in ranked[:remainder]:
+        shares[field] += 1
+    return shares
+
+
+def _unavailable_appointments_breakdown() -> dict[str, Any]:
+    return {
+        'source_status': 'unavailable',
+        'total': None,
+        'cancelled': None,
+        'completed': None,
+        'incomplete': None,
+        'total_share_pct': None,
+        'cancelled_share_pct': None,
+        'completed_share_pct': None,
+        'incomplete_share_pct': None,
+        'shares_total_pct': None,
+        'attended': None,
+        'pending': None,
+    }
+
+
+def _ready_appointments_breakdown(counts: dict[str, int]) -> dict[str, Any]:
+    if any(counts[field] < 0 for field in ('total', 'cancelled', 'completed', 'incomplete')):
+        return _unavailable_appointments_breakdown()
+    if counts['cancelled'] + counts['completed'] + counts['incomplete'] != counts['total']:
+        return _unavailable_appointments_breakdown()
+
+    shares = _appointment_shares(counts)
+    shares_total = sum(shares.values()) if counts['total'] else 0
+    return {
+        'source_status': 'ready',
+        **counts,
+        'total_share_pct': 100 if counts['total'] else 0,
+        'cancelled_share_pct': shares['cancelled'],
+        'completed_share_pct': shares['completed'],
+        'incomplete_share_pct': shares['incomplete'],
+        'shares_total_pct': shares_total,
+        'attended': counts['completed'],
+        'pending': counts['incomplete'],
+    }
+
+
+async def _appointment_company_ids(
+    db: AsyncSession,
+    company_id: Optional[int],
+    staff_id: Optional[int],
+) -> list[int]:
+    if staff_id is not None:
+        staff_company_id = await db.scalar(
+            select(Staff.company_id).where(Staff.id == staff_id).limit(1)
+        )
+        return [int(staff_company_id)] if staff_company_id is not None else []
+    if company_id is not None:
+        return [int(company_id)]
+
+    allowed = await branch_company_ids(db)
+    if allowed is not None:
+        return [int(item) for item in allowed]
+    rows = (await db.execute(select(Company.id).order_by(Company.id.asc()))).scalars().all()
+    return [int(item) for item in rows]
+
+
+async def _fetch_appointments_breakdown(
+    company_ids: list[int],
+    start: date,
+    end: date,
+    staff_id: Optional[int],
+) -> dict[str, Any]:
+    try:
+        counts = await yclients_analytics.fetch_record_stats(company_ids, start, end, staff_id)
+    except yclients_analytics.YClientsAnalyticsError:
+        return _unavailable_appointments_breakdown()
+    return _ready_appointments_breakdown(counts)
+
+
+async def fetch_appointments_breakdown(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: Optional[int] = None,
+    staff_id: Optional[int] = None,
+) -> dict[str, Any]:
+    company_ids = await _appointment_company_ids(db, company_id, staff_id)
+    return await _fetch_appointments_breakdown(company_ids, start, end, staff_id)
+
+
 def _is_waitlist_staff_name(value: Any) -> bool:
     return str(value or '').strip().casefold() == WAITLIST_STAFF_NAME
 
@@ -181,7 +312,7 @@ def _appt_revenue_filters(
     allowed_company_ids: Optional[list[int]] = None,
 ):
     parts = [
-        Appointment.attendance > 0,
+        Appointment.attendance == COMPLETED_ATTENDANCE,
         Appointment.date >= start,
         Appointment.date <= end,
     ]
@@ -244,9 +375,10 @@ def _service_paid_filters(
 ):
     parts = [
         FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
-        Appointment.attendance > 0,
-        Appointment.date >= start,
-        Appointment.date <= end,
+        Appointment.attendance == COMPLETED_ATTENDANCE,
+        FinancialTransaction.amount > 0,
+        func.date(FinancialTransaction.date) >= start,
+        func.date(FinancialTransaction.date) <= end,
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -267,6 +399,7 @@ def _goods_paid_filters(
 ):
     parts = [
         FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
+        FinancialTransaction.amount > 0,
         func.date(FinancialTransaction.date) >= start,
         func.date(FinancialTransaction.date) <= end,
     ]
@@ -274,8 +407,24 @@ def _goods_paid_filters(
     if scope is not None:
         parts.append(scope)
     if staff_id is not None:
-        parts.append(FinancialTransaction.master_id == staff_id)
+        parts.append(_financial_staff_attribution_condition(staff_id))
     return and_(*parts)
+
+
+def _financial_staff_attribution_condition(staff_id: int):
+    """Prefer the payment master, falling back to the linked visit master."""
+    return or_(
+        FinancialTransaction.master_id == staff_id,
+        and_(
+            FinancialTransaction.master_id.is_(None),
+            exists(
+                select(1).where(
+                    Appointment.id == FinancialTransaction.record_id,
+                    Appointment.staff_id == staff_id,
+                )
+            ),
+        ),
+    )
 
 
 async def _goods_paid_revenue_total(
@@ -310,6 +459,249 @@ async def _goods_sold_count(
     )
     row = (await db.execute(stmt)).one()
     return float(row.qty or 0)
+
+
+def _physical_account_condition():
+    title = func.coalesce(AccountCatalog.title, '')
+    excluded = [
+        or_(
+            title.like(f'%{marker}%'),
+            title.like(f'%{marker.capitalize()}%'),
+        )
+        for marker in NON_CASH_ACCOUNT_MARKERS
+    ]
+    return and_(*[~condition for condition in excluded])
+
+
+def _personal_account_condition():
+    expense_title = func.coalesce(FinancialTransaction.expense_title, '')
+    return or_(
+        func.coalesce(FinancialTransaction.sold_item_type, '').in_(PERSONAL_ACCOUNT_TYPES),
+        *[
+            or_(
+                expense_title.like(f'%{marker}%'),
+                expense_title.like(f'%{marker.capitalize()}%'),
+            )
+            for marker in PERSONAL_ACCOUNT_EXPENSE_MARKERS
+        ],
+    )
+
+
+async def _source_coverage_status(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: Optional[int],
+    staff_id: Optional[int],
+    company_ids_override: Optional[list[int]] = None,
+) -> tuple[str, list[str]]:
+    company_ids = (
+        company_ids_override
+        if company_ids_override is not None
+        else await _appointment_company_ids(db, company_id, staff_id)
+    )
+    if not company_ids:
+        return 'partial', ['personal_account_topups']
+    covered = await db.scalar(
+        select(func.count())
+        .select_from(SyncSourceState)
+        .where(
+            SyncSourceState.company_id.in_(company_ids),
+            SyncSourceState.source == PERSONAL_ACCOUNT_SOURCE,
+            SyncSourceState.period_start <= start,
+            SyncSourceState.period_end >= end,
+        )
+    )
+    if int(covered or 0) == len(company_ids):
+        return 'ready', []
+    return 'partial', ['personal_account_topups']
+
+
+async def _average_check_block(
+    db: AsyncSession,
+    dr: DateRange,
+    company_id: Optional[int],
+    staff_id: Optional[int] = None,
+    created_user_id: Optional[int] = None,
+    company_ids: Optional[list[int]] = None,
+) -> dict[str, Any]:
+    visit_filters = [
+        Appointment.attendance == COMPLETED_ATTENDANCE,
+        Appointment.date >= dr.start,
+        Appointment.date <= dr.end,
+    ]
+    if company_id is not None:
+        visit_filters.append(Appointment.company_id == company_id)
+    elif company_ids is not None:
+        visit_filters.append(Appointment.company_id.in_(company_ids))
+    if created_user_id is not None:
+        visit_filters.append(Appointment.created_user_id == created_user_id)
+    elif staff_id is not None:
+        visit_filters.append(Appointment.staff_id == staff_id)
+
+    visit_row = (
+        await db.execute(
+            select(
+                func.count(func.distinct(Appointment.client_id)).label('unique_clients'),
+                func.coalesce(
+                    func.sum(case((Appointment.client_id.is_(None), 1), else_=0)),
+                    0,
+                ).label('appointments_without_client'),
+            ).where(*visit_filters)
+        )
+    ).one()
+
+    goods_filters = [
+        GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
+        GoodTransaction.document_id.is_not(None),
+        func.date(GoodTransaction.date) >= dr.start,
+        func.date(GoodTransaction.date) <= dr.end,
+    ]
+    if company_id is not None:
+        goods_filters.append(GoodTransaction.company_id == company_id)
+    elif company_ids is not None:
+        goods_filters.append(GoodTransaction.company_id.in_(company_ids))
+    if staff_id is not None and created_user_id is None:
+        goods_filters.append(GoodTransaction.master_id == staff_id)
+    goods_checks = int(
+        await db.scalar(
+            select(func.count(func.distinct(GoodTransaction.document_id))).where(*goods_filters)
+        )
+        or 0
+    )
+
+    base_payment_filters = [
+        FinancialTransaction.amount > 0,
+        func.date(FinancialTransaction.date) >= dr.start,
+        func.date(FinancialTransaction.date) <= dr.end,
+        _physical_account_condition(),
+    ]
+
+    service_filters = [
+        *base_payment_filters,
+        FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
+        Appointment.attendance == COMPLETED_ATTENDANCE,
+    ]
+    if company_id is not None:
+        service_filters.append(Appointment.company_id == company_id)
+    elif company_ids is not None:
+        service_filters.append(Appointment.company_id.in_(company_ids))
+    if created_user_id is not None:
+        service_filters.append(Appointment.created_user_id == created_user_id)
+    elif staff_id is not None:
+        service_filters.append(Appointment.staff_id == staff_id)
+    service_revenue = float(
+        await db.scalar(
+            select(func.coalesce(func.sum(FinancialTransaction.amount), 0.0))
+            .select_from(FinancialTransaction)
+            .join(Appointment, Appointment.id == FinancialTransaction.record_id)
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(*service_filters)
+        )
+        or 0
+    )
+
+    classified_revenue = {}
+    direct_payment_filters = list(base_payment_filters)
+    if company_id is not None:
+        direct_payment_filters.append(FinancialTransaction.company_id == company_id)
+    elif company_ids is not None:
+        direct_payment_filters.append(FinancialTransaction.company_id.in_(company_ids))
+    for name, condition, staff_condition in (
+        (
+            'goods_revenue',
+            FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
+            _financial_staff_attribution_condition(staff_id) if staff_id is not None else None,
+        ),
+        (
+            'topup_revenue',
+            _personal_account_condition(),
+            FinancialTransaction.master_id == staff_id if staff_id is not None else None,
+        ),
+    ):
+        metric_filters = [*direct_payment_filters, condition]
+        if staff_condition is not None and created_user_id is None:
+            metric_filters.append(staff_condition)
+        classified_revenue[name] = float(
+            await db.scalar(
+                select(func.coalesce(func.sum(FinancialTransaction.amount), 0.0))
+                .select_from(FinancialTransaction)
+                .outerjoin(
+                    AccountCatalog,
+                    and_(
+                        AccountCatalog.company_id == FinancialTransaction.company_id,
+                        AccountCatalog.account_id == FinancialTransaction.account_id,
+                    ),
+                )
+                .where(*metric_filters)
+            )
+            or 0
+        )
+
+    unclassified_filters = list(direct_payment_filters)
+    if staff_id is not None and created_user_id is None:
+        unclassified_filters.append(FinancialTransaction.master_id == staff_id)
+    known_condition = or_(
+        func.coalesce(FinancialTransaction.sold_item_type, '') == SERVICE_SOLD_ITEM_TYPE,
+        func.coalesce(FinancialTransaction.sold_item_type, '') == GOODS_SOLD_ITEM_TYPE,
+        _personal_account_condition(),
+    )
+    unclassified_operations = int(
+        await db.scalar(
+            select(func.count(FinancialTransaction.id))
+            .select_from(FinancialTransaction)
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(*unclassified_filters, ~known_condition)
+        )
+        or 0
+    )
+
+    unique_clients = int(visit_row.unique_clients or 0)
+    appointments_without_client = int(visit_row.appointments_without_client or 0)
+    numerator = (
+        service_revenue
+        + classified_revenue['goods_revenue']
+        + classified_revenue['topup_revenue']
+    )
+    denominator = unique_clients + appointments_without_client + goods_checks
+    source_status, missing_components = await _source_coverage_status(
+        db,
+        dr.start,
+        dr.end,
+        company_id,
+        staff_id,
+        company_ids_override=company_ids,
+    )
+    return {
+        'source_status': source_status,
+        'missing_components': missing_components,
+        'service_revenue': service_revenue,
+        'goods_revenue': classified_revenue['goods_revenue'],
+        'topup_revenue': classified_revenue['topup_revenue'],
+        'unique_clients': unique_clients,
+        'appointments_without_client': appointments_without_client,
+        'goods_checks': goods_checks,
+        'numerator': numerator,
+        'denominator': denominator,
+        'formula': (
+            'income / (unique_completed_clients + '
+            'completed_appointments_without_client + goods_checks)'
+        ),
+        'unclassified_operations': unclassified_operations,
+        'total': _safe_div(numerator, denominator),
+    }
 
 
 def _title_matches(title_expr, parts: tuple[str, ...]):
@@ -374,10 +766,15 @@ def _derive_metric_values(
     out = {code: float(value) for code, value in values.items() if value is not None}
 
     clients = out.get('clients', 0.0)
+    avg_check_denominator = out.get('avg_check_denominator', clients)
     if (not prefer_explicit or 'avg_check_total' not in out) and (
         include_zero_derived or {'revenue', 'clients'} <= out.keys()
     ):
-        out['avg_check_total'] = out.get('revenue', 0.0) / clients if clients else 0.0
+        out['avg_check_total'] = (
+            out.get('revenue', 0.0) / avg_check_denominator
+            if avg_check_denominator
+            else 0.0
+        )
 
     if (not prefer_explicit or 'opz_pct' not in out) and (
         include_zero_derived or {'opz_qty', 'clients'} <= out.keys()
@@ -418,6 +815,45 @@ def _round_optional(value: Optional[float]) -> Optional[float]:
     if value is None:
         return None
     return round(float(value), 2)
+
+
+def _iso_datetime(value: Any) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _service_kpi_group_payload(group: ServiceKpiGroup) -> dict[str, Any]:
+    return {
+        'id': group.id,
+        'code': group.code,
+        'title': group.title,
+        'description': group.description or '',
+        'is_active': bool(group.is_active),
+        'sort_order': int(group.sort_order or 0),
+        'created_at': _iso_datetime(group.created_at),
+        'updated_at': _iso_datetime(group.updated_at),
+    }
+
+
+def _service_display_category(category_title: Any, service_title: Any) -> str:
+    existing = str(category_title or '').strip()
+    if existing:
+        return existing
+    title = str(service_title or '').strip().lower().replace('ё', 'е')
+    if not title:
+        return ''
+    if any(part in title for part in ('лиц', 'mask', 'volcano', 'mr. q', 'волкано')):
+        return 'УХОД ЗА ЛИЦОМ'
+    if any(part in title for part in ('голов', 'волос', 'пилинг', 'мыть', 'мойка')):
+        return 'УХОД ЗА ГОЛОВОЙ'
+    if any(part in title for part in ('бород', 'усы', 'усов')):
+        return 'БОРОДА'
+    if any(part in title for part in ('брить', 'брит', 'шейвер', 'shaver')):
+        return 'БРИТЬЕ'
+    if 'стриж' in title or 'окантов' in title:
+        return 'СТРИЖКА'
+    if any(part in title for part in ('воск', 'камуфляж', 'spa', 'спа')):
+        return 'Дополнительные услуги'
+    return ''
 
 
 def _completion_status(completion_pct: Optional[float]) -> str:
@@ -545,16 +981,80 @@ async def fetch_summary(
 ) -> dict[str, Any]:
     current_dr = DateRange(start=start, end=end)
     prev_dr = current_dr.previous_period()
+    appointment_company_ids = await _appointment_company_ids(db, company_id, staff_id)
+    if allowed_company_ids is not None:
+        allowed_set = {int(item) for item in allowed_company_ids}
+        appointment_company_ids = [item for item in appointment_company_ids if item in allowed_set]
+    appointments_task = asyncio.create_task(
+        _fetch_appointments_breakdown(appointment_company_ids, start, end, staff_id)
+    )
+    previous_appointments_task = asyncio.create_task(
+        _fetch_appointments_breakdown(
+            appointment_company_ids,
+            prev_dr.start,
+            prev_dr.end,
+            staff_id,
+        )
+    )
 
     cur = await _revenue_block(db, current_dr, company_id, staff_id, allowed_company_ids=allowed_company_ids)
     prev = await _revenue_block(db, prev_dr, company_id, staff_id, allowed_company_ids=allowed_company_ids)
+    cur_opz_qty = await _opz_count_scope(
+        db, start, end, company_id, staff_id, company_ids=appointment_company_ids
+    )
+    prev_opz_qty = await _opz_count_scope(
+        db,
+        prev_dr.start,
+        prev_dr.end,
+        company_id,
+        staff_id,
+        company_ids=appointment_company_ids,
+    )
+    avg_company_ids = appointment_company_ids if company_id is None else None
+    cur_average_check = await _average_check_block(
+        db, current_dr, company_id, staff_id, company_ids=avg_company_ids
+    )
+    prev_average_check = await _average_check_block(
+        db, prev_dr, company_id, staff_id, company_ids=avg_company_ids
+    )
+    for block, average_check in ((cur, cur_average_check), (prev, prev_average_check)):
+        block['service_revenue'] = average_check['service_revenue']
+        block['goods_revenue'] = average_check['goods_revenue']
+        block['topup_revenue'] = average_check['topup_revenue']
+        block['revenue'] = average_check['numerator']
+    appointments_breakdown = await appointments_task
+    previous_appointments_breakdown = await previous_appointments_task
+    local_completed = int(cur['appointments'] or 0)
+    exact_completed = appointments_breakdown.get('completed')
+    appointments_breakdown = {
+        **appointments_breakdown,
+        'local_completed': local_completed,
+        'completed_difference': (
+            int(exact_completed) - local_completed
+            if appointments_breakdown['source_status'] == 'ready'
+            else None
+        ),
+        'is_consistent': (
+            int(exact_completed) == local_completed
+            if appointments_breakdown['source_status'] == 'ready'
+            else None
+        ),
+    }
 
     cur_rev = cur['revenue']
     prev_rev = prev['revenue']
-    cur_appointments = float(cur['appointments'] or 0)
-    prev_appointments = float(prev['appointments'] or 0)
-    cur_avg_total = _safe_div(cur_rev, cur_appointments)
-    prev_avg_total = _safe_div(prev_rev, prev_appointments)
+    cur_appointments = float(
+        appointments_breakdown['completed']
+        if appointments_breakdown['source_status'] == 'ready'
+        else local_completed
+    )
+    prev_appointments = float(
+        previous_appointments_breakdown['completed']
+        if previous_appointments_breakdown['source_status'] == 'ready'
+        else prev['appointments']
+    )
+    cur_avg_total = float(cur_average_check['total'])
+    prev_avg_total = float(prev_average_check['total'])
     cur_avg_services = _safe_div(cur['service_revenue'], cur_appointments)
     prev_avg_services = _safe_div(prev['service_revenue'], prev_appointments)
     cur_avg_goods = _safe_div(cur['goods_revenue'], float(cur['goods_count'] or 0))
@@ -587,17 +1087,8 @@ async def fetch_summary(
         float(prev['extra_service_clients'] or 0),
         prev_unique_clients,
     )
-
-    attended = func.sum(case((Appointment.attendance > 0, 1), else_=0))
-    cancelled = func.sum(case((Appointment.attendance == -1, 1), else_=0))
-    pending = func.sum(case((Appointment.attendance == 0, 1), else_=0))
-
-    att_stmt = (
-        select(attended, cancelled, pending)
-        .select_from(Appointment)
-        .where(_appt_all_filters(start, end, company_id, staff_id, allowed_company_ids))
-    )
-    att_row = (await db.execute(att_stmt)).one()
+    cur_opz_pct = 100.0 * _safe_div(cur_opz_qty, float(cur['appointments'] or 0))
+    prev_opz_pct = 100.0 * _safe_div(prev_opz_qty, float(prev['appointments'] or 0))
 
     return {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
@@ -606,6 +1097,7 @@ async def fetch_summary(
             'total': cur_rev,
             'service_revenue': cur['service_revenue'],
             'goods_revenue': cur['goods_revenue'],
+            'topup_revenue': cur['topup_revenue'],
             'extra_service_revenue': cur['extra_service_revenue'],
             'change_pct': _pct_change(cur_rev, prev_rev),
             'service_revenue_change_pct': _pct_change(
@@ -613,6 +1105,9 @@ async def fetch_summary(
             ),
             'goods_revenue_change_pct': _pct_change(
                 float(cur['goods_revenue']), float(prev['goods_revenue'])
+            ),
+            'topup_revenue_change_pct': _pct_change(
+                float(cur['topup_revenue']), float(prev['topup_revenue'])
             ),
             'extra_service_revenue_change_pct': _pct_change(
                 float(cur['extra_service_revenue']), float(prev['extra_service_revenue'])
@@ -629,9 +1124,9 @@ async def fetch_summary(
             'extra_service_count_change_pct': _pct_change(
                 float(cur['extra_service_count']), float(prev['extra_service_count'])
             ),
-            'appointments': cur['appointments'],
+            'appointments': int(cur_appointments),
             'appointments_change_pct': _pct_change(
-                float(cur['appointments']), float(prev['appointments'])
+                cur_appointments, prev_appointments
             ),
             'extra_service_appointments': cur['extra_service_appointments'],
             'unique_clients': cur['unique_clients'],
@@ -644,6 +1139,10 @@ async def fetch_summary(
             ),
         },
         'visit_metrics': {
+            'opz_qty': cur_opz_qty,
+            'opz_qty_change_pct': _pct_change(cur_opz_qty, prev_opz_qty),
+            'opz_pct': cur_opz_pct,
+            'opz_pct_change_pct': _pct_change(cur_opz_pct, prev_opz_pct),
             'extra_services_per_appointment_pct': cur_extra_services_per_appointment_pct,
             'extra_services_per_appointment_pct_change_pct': _pct_change(
                 cur_extra_services_per_appointment_pct,
@@ -667,6 +1166,7 @@ async def fetch_summary(
             ),
         },
         'average_check': {
+            **cur_average_check,
             'total': cur_avg_total,
             'services': cur_avg_services,
             'goods': cur_avg_goods,
@@ -678,14 +1178,15 @@ async def fetch_summary(
                 cur_avg_extra_services,
                 prev_avg_extra_services,
             ),
-            'appointments': cur['appointments'],
+            'appointments': int(cur_appointments),
             'extra_service_appointments': cur['extra_service_appointments'],
+            'specialized_formulas': {
+                'services': 'service_revenue / completed_appointments',
+                'goods': 'goods_revenue / goods_units',
+                'extra_services': 'extra_service_revenue / extra_service_units',
+            },
         },
-        'appointments_breakdown': {
-            'attended': int(att_row[0] or 0),
-            'cancelled': int(att_row[1] or 0),
-            'pending': int(att_row[2] or 0),
-        },
+        'appointments_breakdown': appointments_breakdown,
     }
 
 
@@ -732,20 +1233,32 @@ async def fetch_revenue_daily(
     svc_rows = (await db.execute(svc_stmt)).all()
     appt_rows = (await db.execute(appt_stmt)).all()
     goods_rows = (await db.execute(goods_stmt)).all()
+    company_ids = await _appointment_company_ids(db, company_id, staff_id)
+    opz_by_date: dict[date, int] = {}
+    for item_company_id in company_ids:
+        events = await _opz_events(db, start, end, item_company_id)
+        if staff_id is not None:
+            events = [event for event in events if event.barber_staff_id == staff_id]
+        for event in events:
+            event_date = event.create_date.date()
+            opz_by_date[event_date] = opz_by_date.get(event_date, 0) + 1
 
     by_date: dict[date, dict[str, float | int]] = {}
     for r in svc_rows:
         day = _coerce_date(r.d)
-        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'appointments': 0})
+        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
         by_date[day]['service_revenue'] = float(r.revenue or 0)
     for r in appt_rows:
         day = _coerce_date(r.d)
-        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'appointments': 0})
+        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
         by_date[day]['appointments'] = int(r.appointments or 0)
     for r in goods_rows:
         day = _coerce_date(r.d)
-        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'appointments': 0})
+        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
         by_date[day]['goods_revenue'] = float(r.revenue or 0)
+    for day, opz_qty in opz_by_date.items():
+        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
+        by_date[day]['opz_qty'] = opz_qty
 
     return [
         {
@@ -754,9 +1267,345 @@ async def fetch_revenue_daily(
             'service_revenue': float(v['service_revenue']),
             'goods_revenue': float(v['goods_revenue']),
             'appointments': int(v['appointments']),
+            'opz_qty': int(v['opz_qty']),
+            'opz_pct': 100.0 * _safe_div(float(v['opz_qty']), float(v['appointments'])),
         }
         for d, v in sorted(by_date.items(), key=lambda kv: kv[0])
     ]
+
+
+def _normalize_service_group_code(value: Any) -> str:
+    text = str(value or '').strip().lower()
+    text = re.sub(r'[^a-z0-9_]+', '_', text)
+    text = re.sub(r'_+', '_', text).strip('_')
+    return text[:80]
+
+
+async def _unique_service_group_code(
+    db: AsyncSession,
+    raw_code: Any,
+    *,
+    ignore_group_id: int | None = None,
+) -> str:
+    base = _normalize_service_group_code(raw_code) or 'kpi_group'
+    candidate = base
+    suffix = 2
+    while True:
+        stmt = select(ServiceKpiGroup.id).where(ServiceKpiGroup.code == candidate)
+        if ignore_group_id is not None:
+            stmt = stmt.where(ServiceKpiGroup.id != ignore_group_id)
+        existing = await db.scalar(stmt.limit(1))
+        if existing is None:
+            return candidate
+        candidate = f'{base}_{suffix}'
+        suffix += 1
+
+
+async def _service_catalog_row(
+    db: AsyncSession,
+    company_id: int,
+    service_id: int,
+) -> ServiceCatalog | None:
+    return await db.get(ServiceCatalog, {'company_id': company_id, 'service_id': service_id})
+
+
+async def fetch_service_kpi_groups(
+    db: AsyncSession,
+    *,
+    include_inactive: bool = True,
+) -> list[dict[str, Any]]:
+    stmt = select(ServiceKpiGroup)
+    if not include_inactive:
+        stmt = stmt.where(ServiceKpiGroup.is_active.is_(True))
+    stmt = stmt.order_by(
+        ServiceKpiGroup.is_active.desc(),
+        ServiceKpiGroup.sort_order.asc(),
+        ServiceKpiGroup.title.asc(),
+        ServiceKpiGroup.id.asc(),
+    )
+    return [_service_kpi_group_payload(group) for group in (await db.execute(stmt)).scalars().all()]
+
+
+async def fetch_dashboard_services(
+    db: AsyncSession,
+    *,
+    company_id: int | None = None,
+    q: str | None = None,
+    category: str | None = None,
+    is_extra: bool | None = None,
+    kpi_group_id: int | None = None,
+) -> dict[str, Any]:
+    label_join = and_(
+        ServiceLabel.company_id == ServiceCatalog.company_id,
+        ServiceLabel.service_id == ServiceCatalog.service_id,
+    )
+    assignment_join = and_(
+        ServiceKpiAssignment.company_id == ServiceCatalog.company_id,
+        ServiceKpiAssignment.service_id == ServiceCatalog.service_id,
+    )
+    stmt = (
+        select(
+            ServiceCatalog.company_id,
+            Company.title.label('company_title'),
+            ServiceCatalog.service_id,
+            ServiceCatalog.title,
+            ServiceCatalog.price_min,
+            ServiceCatalog.duration,
+            ServiceCatalog.category_id,
+            ServiceCatalog.category_title,
+            ServiceCatalog.updated_at,
+            ServiceLabel.is_extra,
+            ServiceLabel.source.label('label_source'),
+            ServiceLabel.updated_at.label('label_updated_at'),
+            ServiceKpiAssignment.group_id,
+            ServiceKpiAssignment.updated_at.label('assignment_updated_at'),
+            ServiceKpiGroup.code.label('group_code'),
+            ServiceKpiGroup.title.label('group_title'),
+            ServiceKpiGroup.is_active.label('group_is_active'),
+        )
+        .select_from(ServiceCatalog)
+        .join(Company, Company.id == ServiceCatalog.company_id)
+        .outerjoin(ServiceLabel, label_join)
+        .outerjoin(ServiceKpiAssignment, assignment_join)
+        .outerjoin(ServiceKpiGroup, ServiceKpiGroup.id == ServiceKpiAssignment.group_id)
+    )
+    filters = []
+    if company_id is not None:
+        filters.append(ServiceCatalog.company_id == company_id)
+    if q:
+        needle = f'%{q.strip().lower()}%'
+        filters.append(
+            or_(
+                func.lower(ServiceCatalog.title).like(needle),
+                cast(ServiceCatalog.service_id, String).like(f'%{q.strip()}%'),
+            )
+        )
+    if is_extra is True:
+        filters.append(ServiceLabel.is_extra.is_(True))
+    elif is_extra is False:
+        filters.append(or_(ServiceLabel.service_id.is_(None), ServiceLabel.is_extra.is_(False)))
+    if kpi_group_id is not None:
+        filters.append(ServiceKpiAssignment.group_id == kpi_group_id)
+    latest_appointment_date = await db.scalar(select(func.max(Appointment.date)))
+    if latest_appointment_date is not None:
+        active_since = latest_appointment_date - timedelta(days=365)
+        active_service = exists(
+            select(1)
+            .select_from(Transaction)
+            .join(
+                Appointment,
+                and_(
+                    Appointment.id == Transaction.appointment_id,
+                    Appointment.company_id == Transaction.company_id,
+                ),
+            )
+            .where(
+                Transaction.company_id == ServiceCatalog.company_id,
+                Transaction.service_id == ServiceCatalog.service_id,
+                Appointment.date >= active_since,
+            )
+        )
+        filters.append(active_service)
+    if filters:
+        stmt = stmt.where(*filters)
+    stmt = stmt.order_by(Company.title.asc(), ServiceCatalog.category_title.asc(), ServiceCatalog.title.asc())
+    rows = (await db.execute(stmt)).all()
+
+    out_rows = [
+        {
+                'company_id': int(row.company_id),
+                'company_title': row.company_title,
+                'service_id': int(row.service_id),
+                'title': row.title or '',
+                'price_min': row.price_min,
+                'duration': row.duration,
+                'category_id': row.category_id,
+                'category_title': _service_display_category(row.category_title, row.title),
+                'updated_at': _iso_datetime(row.updated_at),
+                'is_extra': bool(row.is_extra) if row.is_extra is not None else False,
+                'label_source': row.label_source,
+                'label_updated_at': _iso_datetime(row.label_updated_at),
+                'kpi_group_id': row.group_id,
+                'kpi_group_code': row.group_code,
+                'kpi_group_title': row.group_title,
+                'kpi_group_is_active': bool(row.group_is_active) if row.group_is_active is not None else None,
+                'kpi_assignment_updated_at': _iso_datetime(row.assignment_updated_at),
+            }
+            for row in rows
+    ]
+    categories = sorted({row['category_title'] for row in out_rows if row['category_title']})
+    if category:
+        out_rows = [row for row in out_rows if row['category_title'] == category]
+
+    return {
+        'rows': out_rows,
+        'groups': await fetch_service_kpi_groups(db, include_inactive=True),
+        'categories': categories,
+        'total': len(out_rows),
+    }
+
+
+async def save_service_label(
+    db: AsyncSession,
+    company_id: int,
+    service_id: int,
+    *,
+    is_extra: bool,
+) -> dict[str, Any]:
+    catalog = await _service_catalog_row(db, company_id, service_id)
+    if catalog is None:
+        raise ValueError('unknown service for company')
+
+    now = datetime.utcnow()
+    if is_extra:
+        legacy_service = await db.get(Service, service_id)
+        if legacy_service is None:
+            db.add(
+                Service(
+                    id=service_id,
+                    title=catalog.title,
+                    price_min=catalog.price_min,
+                    duration=catalog.duration,
+                    category_title=catalog.category_title,
+                    company_id=company_id,
+                )
+            )
+            await db.flush()
+
+        label = await db.get(ServiceLabel, {'company_id': company_id, 'service_id': service_id})
+        if label is None:
+            db.add(
+                ServiceLabel(
+                    company_id=company_id,
+                    service_id=service_id,
+                    is_extra=True,
+                    source='dashboard',
+                    updated_at=now,
+                )
+            )
+        else:
+            label.is_extra = True
+            label.source = 'dashboard'
+            label.updated_at = now
+    else:
+        await db.execute(
+            delete(ServiceLabel).where(
+                ServiceLabel.company_id == company_id,
+                ServiceLabel.service_id == service_id,
+            )
+        )
+
+    await db.commit()
+    return await fetch_dashboard_services(db, company_id=company_id, q=str(service_id))
+
+
+async def create_service_kpi_group(
+    db: AsyncSession,
+    *,
+    title: str,
+    code: str | None = None,
+    description: str | None = None,
+    sort_order: int | None = None,
+    is_active: bool = True,
+) -> dict[str, Any]:
+    clean_title = str(title or '').strip()
+    if not clean_title:
+        raise ValueError('title is required')
+    now = datetime.utcnow()
+    group = ServiceKpiGroup(
+        code=await _unique_service_group_code(db, code or clean_title),
+        title=clean_title,
+        description=str(description or '').strip() or None,
+        sort_order=int(sort_order or 0),
+        is_active=bool(is_active),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(group)
+    await db.commit()
+    await db.refresh(group)
+    return _service_kpi_group_payload(group)
+
+
+async def update_service_kpi_group(
+    db: AsyncSession,
+    group_id: int,
+    *,
+    title: str | None = None,
+    code: str | None = None,
+    description: str | None = None,
+    sort_order: int | None = None,
+    is_active: bool | None = None,
+) -> dict[str, Any]:
+    group = await db.get(ServiceKpiGroup, group_id)
+    if group is None:
+        raise ValueError('unknown KPI group')
+    if title is not None:
+        clean_title = str(title or '').strip()
+        if not clean_title:
+            raise ValueError('title is required')
+        group.title = clean_title
+    if code is not None:
+        group.code = await _unique_service_group_code(db, code, ignore_group_id=group_id)
+    if description is not None:
+        group.description = str(description or '').strip() or None
+    if sort_order is not None:
+        group.sort_order = int(sort_order or 0)
+    if is_active is not None:
+        group.is_active = bool(is_active)
+    group.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(group)
+    return _service_kpi_group_payload(group)
+
+
+async def archive_service_kpi_group(db: AsyncSession, group_id: int) -> dict[str, Any]:
+    return await update_service_kpi_group(db, group_id, is_active=False)
+
+
+async def save_service_kpi_assignment(
+    db: AsyncSession,
+    company_id: int,
+    service_id: int,
+    *,
+    group_id: int | None,
+) -> dict[str, Any]:
+    catalog = await _service_catalog_row(db, company_id, service_id)
+    if catalog is None:
+        raise ValueError('unknown service for company')
+
+    if group_id is None:
+        await db.execute(
+            delete(ServiceKpiAssignment).where(
+                ServiceKpiAssignment.company_id == company_id,
+                ServiceKpiAssignment.service_id == service_id,
+            )
+        )
+        await db.commit()
+        return await fetch_dashboard_services(db, company_id=company_id, q=str(service_id))
+
+    group = await db.get(ServiceKpiGroup, group_id)
+    if group is None or not group.is_active:
+        raise ValueError('unknown active KPI group')
+
+    assignment = await db.get(ServiceKpiAssignment, {'company_id': company_id, 'service_id': service_id})
+    now = datetime.utcnow()
+    if assignment is None:
+        db.add(
+            ServiceKpiAssignment(
+                company_id=company_id,
+                service_id=service_id,
+                group_id=group_id,
+                source='dashboard',
+                updated_at=now,
+            )
+        )
+    else:
+        assignment.group_id = group_id
+        assignment.source = 'dashboard'
+        assignment.updated_at = now
+    await db.commit()
+    return await fetch_dashboard_services(db, company_id=company_id, q=str(service_id))
 
 
 async def fetch_top_services(
@@ -1030,7 +1879,7 @@ async def _opz_events(
     client_ids = sorted({candidate.client_id for candidate in candidates if candidate.client_id is not None})
     visit_filters = [
         Appointment.company_id == company_id,
-        Appointment.attendance > 0,
+        Appointment.attendance == COMPLETED_ATTENDANCE,
         Appointment.client_id.in_(client_ids),
         Appointment.date.is_not(None),
         Appointment.date <= end,
@@ -1110,6 +1959,22 @@ async def _opz_count(
     if staff_id is not None:
         events = [event for event in events if event.barber_staff_id == staff_id]
     return float(len(events))
+
+
+async def _opz_count_scope(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: Optional[int],
+    staff_id: Optional[int],
+    company_ids: Optional[list[int]] = None,
+) -> float:
+    if company_ids is None:
+        company_ids = await _appointment_company_ids(db, company_id, staff_id)
+    total = 0.0
+    for item_company_id in company_ids:
+        total += await _opz_count(db, start, end, item_company_id, staff_id=staff_id)
+    return total
 
 
 async def _admin_event_counts(
@@ -1230,7 +2095,7 @@ async def _admin_clients_by_finished_appointments(
         Appointment.company_id == company_id,
         Appointment.date >= start,
         Appointment.date <= end,
-        Appointment.attendance > 0,
+        Appointment.attendance == COMPLETED_ATTENDANCE,
     ]
     if barber_staff_ids:
         appointment_filters.append(Appointment.staff_id.in_(barber_staff_ids))
@@ -1273,20 +2138,33 @@ async def _fact_metric_components(
     clients_override: Optional[float] = None,
     opz_override: Optional[float] = None,
 ) -> dict[str, float]:
-    revenue = await _revenue_block(
+    average_check = await _average_check_block(
         db,
         DateRange(start, end),
         company_id,
         staff_id,
         created_user_id=created_user_id,
-        include_goods=False,
     )
     opz_staff_id = None if created_user_id is not None else staff_id
     goods_metrics = await _goods_sales_metrics(db, start, end, company_id, staff_id)
-    clients_count = float(clients_override) if clients_override is not None else float(revenue['appointments'] or 0)
+    clients_count = float(clients_override) if clients_override is not None else float(
+        await db.scalar(
+            select(func.count(func.distinct(Appointment.id))).where(
+                _appt_revenue_filters(
+                    start,
+                    end,
+                    company_id,
+                    staff_id,
+                    created_user_id=created_user_id,
+                )
+            )
+        )
+        or 0
+    )
     values: dict[str, float] = {
-        'revenue': float(revenue['revenue'] or 0) + float(goods_metrics.get('cosmo_sum') or 0),
+        'revenue': float(average_check['numerator'] or 0),
         'clients': clients_count,
+        'avg_check_denominator': float(average_check['denominator'] or 0),
         'opz_qty': (
             float(opz_override)
             if opz_override is not None
@@ -1383,8 +2261,7 @@ async def _manual_review_fact_values_by_staff(
         )
         .where(
             ManualFactMetric.period_start >= start,
-            ManualFactMetric.period_start <= end,
-            ManualFactMetric.period_end == ManualFactMetric.period_start,
+            ManualFactMetric.period_end <= end,
             ManualFactMetric.company_id == company_id,
             ManualFactMetric.staff_id.in_(staff_ids),
             ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
@@ -1410,8 +2287,7 @@ async def _manual_review_fact_values_by_company(
         )
         .where(
             ManualFactMetric.period_start >= start,
-            ManualFactMetric.period_start <= end,
-            ManualFactMetric.period_end == ManualFactMetric.period_start,
+            ManualFactMetric.period_end <= end,
             ManualFactMetric.company_id.in_(company_ids),
             ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
         )
@@ -1533,32 +2409,6 @@ def _metric_plan_value(group: dict[str, Any], code: str) -> float | None:
             value = cell.get('plan')
             return None if value is None else float(value or 0.0)
     return None
-
-
-def _staff_total_for_aggregate(groups: list[dict[str, Any]], code: str) -> Optional[float]:
-    barber_groups = [group for group in groups if group.get('category') == 'barber']
-    admin_groups = [group for group in groups if group.get('category') == 'administrator']
-    if barber_groups:
-        return sum(_metric_fact_value(group, code) for group in barber_groups)
-    if admin_groups:
-        return sum(_metric_fact_value(group, code) for group in admin_groups)
-    return None
-
-
-def _normalize_aggregate_fact_from_staff(
-    fact_values: dict[str, float],
-    groups: list[dict[str, Any]],
-) -> dict[str, float]:
-    normalized = dict(fact_values)
-    changed = False
-    for code in ('clients', 'opz_qty'):
-        staff_total = _staff_total_for_aggregate(groups, code)
-        if staff_total is not None:
-            normalized[code] = staff_total
-            changed = True
-    if not changed:
-        return normalized
-    return _derive_metric_values(normalized, include_zero_derived=True, prefer_explicit=False)
 
 
 def _staff_rankings_payload(groups: list[dict[str, Any]], limit: int = 5) -> dict[str, list[dict[str, Any]]]:
@@ -1769,7 +2619,10 @@ async def _staff_plan_groups_for_branch(
     staff_id: Optional[int] = None,
     include_all_when_branch_planned: bool = False,
 ) -> list[dict[str, Any]]:
-    staff_rows = await _fetch_company_staff(db, branch_id, staff_id)
+    # Calculate administrator attribution against the same complete staff scope
+    # used by the branch view. Applying staff_id before attribution assigns every
+    # unclaimed event to the only remaining administrator and changes their fact.
+    staff_rows = await _fetch_company_staff(db, branch_id)
     staff_ids = [int(row.id) for row in staff_rows]
     plans_by_staff, categories_by_staff = await _plan_metric_components_by_staff(
         db,
@@ -1873,6 +2726,8 @@ async def _staff_plan_groups_for_branch(
                 metrics,
             ),
         })
+    if staff_id is not None:
+        return [group for group in groups if group.get('staff_id') == staff_id]
     return groups
 
 
@@ -1958,10 +2813,12 @@ def _parse_setting_number(value: Any, field: str, *, percent: bool = False) -> f
             raise ValueError(f'{field} must be a number') from None
     if not math.isfinite(number):
         raise ValueError(f'{field} must be a finite number')
+    if percent:
+        if number < 1 or number > 100:
+            raise ValueError(f'{field} must be between 1 and 100')
+        return number / 100.0
     if number < 0:
         raise ValueError(f'{field} cannot be negative')
-    if percent and number > 1:
-        raise ValueError(f'{field} must be between 0 and 1')
     return number
 
 
@@ -1976,7 +2833,15 @@ def _setting_has_values(values: dict[str, float | None], fields: tuple[str, ...]
 
 def _payload_branch_setting(branch: dict[str, Any], setting: PlanBranchSetting | None) -> dict[str, Any]:
     values = {
-        field: _round_optional(getattr(setting, field, None)) if setting is not None else None
+        field: (
+            _round_optional(
+                float(getattr(setting, field)) * 100.0
+                if field in PERCENT_SETTING_FIELDS and getattr(setting, field, None) is not None
+                else getattr(setting, field, None)
+            )
+            if setting is not None
+            else None
+        )
         for field in BRANCH_SETTING_FIELDS
     }
     return {
@@ -2147,7 +3012,24 @@ async def fetch_plan_settings(
         for staff in staff_rows
         if any(int(branch['id']) == int(staff['company_id']) for branch in branches)
     ]
-    branch_metrics, staff_metrics = _calculate_plan_settings_metrics(payload_branches, payload_staff)
+    calculation_branches = [
+        {
+            **branch,
+            **{
+                field: (
+                    float(branch[field]) / 100.0
+                    if branch.get(field) is not None
+                    else None
+                )
+                for field in PERCENT_SETTING_FIELDS
+            },
+        }
+        for branch in payload_branches
+    ]
+    branch_metrics, staff_metrics = _calculate_plan_settings_metrics(
+        calculation_branches,
+        payload_staff,
+    )
     saved_at_candidates = [
         value
         for row in [*branch_settings.values(), *staff_inputs.values()]
@@ -2373,35 +3255,15 @@ def _is_manual_review_admin_row(row: Any) -> bool:
     )
 
 
-def _manual_review_days(start: date, end: date) -> list[date]:
-    days_count = (end - start).days + 1
-    if days_count > MANUAL_REVIEW_FACT_MAX_DAYS:
-        raise ValueError(f'reviews fact period cannot exceed {MANUAL_REVIEW_FACT_MAX_DAYS} days')
-    return [start + timedelta(days=offset) for offset in range(days_count)]
-
-
 def _manual_review_payload_row(
     row: Any,
-    days: list[date],
-    values_by_key: dict[tuple[int, int, date], ManualFactMetric],
+    values_by_staff: dict[tuple[int, int], list[ManualFactMetric]],
 ) -> dict[str, Any]:
     company_id = int(row.company_id)
     staff_id = int(row.staff_id)
-    daily_values = []
-    updated_at_values = []
-    total_value = 0.0
-
-    for day in days:
-        item = values_by_key.get((company_id, staff_id, day))
-        value = _round_optional(item.value) if item is not None else None
-        if value is not None:
-            total_value += float(value or 0.0)
-            updated_at_values.append(item.updated_at)
-        daily_values.append({
-            'date': day.isoformat(),
-            'value': value,
-            'updated_at': item.updated_at.isoformat() if item is not None else None,
-        })
+    items = values_by_staff.get((company_id, staff_id), [])
+    total_value = sum(float(item.value or 0.0) for item in items)
+    updated_at_values = [item.updated_at for item in items if item.updated_at is not None]
 
     return {
         'company_id': company_id,
@@ -2411,7 +3273,6 @@ def _manual_review_payload_row(
         'position': row.position,
         'value': _round_optional(total_value) or 0.0,
         'updated_at': max(updated_at_values).isoformat() if updated_at_values else None,
-        'values': daily_values,
     }
 
 
@@ -2422,7 +3283,6 @@ async def fetch_manual_review_facts(
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
 ) -> dict[str, Any]:
-    days = _manual_review_days(start, end)
     branches = await fetch_branches(db)
     if company_id is not None:
         branches = [branch for branch in branches if int(branch['id']) == company_id]
@@ -2430,7 +3290,6 @@ async def fetch_manual_review_facts(
     if not company_ids:
         return {
             'period': {'start': start.isoformat(), 'end': end.isoformat()},
-            'days': [day.isoformat() for day in days],
             'metric_code': REVIEWS_QTY_CODE,
             'total_value': 0.0,
             'rows': [],
@@ -2460,29 +3319,28 @@ async def fetch_manual_review_facts(
         if _is_manual_review_admin_row(row)
     ]
     staff_ids = [int(row.staff_id) for row in rows]
-    values_by_key: dict[tuple[int, int, date], ManualFactMetric] = {}
+    values_by_staff: dict[tuple[int, int], list[ManualFactMetric]] = {}
     if staff_ids:
         manual_rows = (
             await db.execute(
                 select(ManualFactMetric).where(
                     ManualFactMetric.period_start >= start,
-                    ManualFactMetric.period_start <= end,
-                    ManualFactMetric.period_end == ManualFactMetric.period_start,
+                    ManualFactMetric.period_end <= end,
                     ManualFactMetric.company_id.in_(company_ids),
                     ManualFactMetric.staff_id.in_(staff_ids),
                     ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
                 )
             )
         ).scalars().all()
-        values_by_key = {
-            (int(row.company_id), int(row.staff_id), row.period_start): row
-            for row in manual_rows
-        }
+        for item in manual_rows:
+            values_by_staff.setdefault(
+                (int(item.company_id), int(item.staff_id)),
+                [],
+            ).append(item)
 
-    payload_rows = [_manual_review_payload_row(row, days, values_by_key) for row in rows]
+    payload_rows = [_manual_review_payload_row(row, values_by_staff) for row in rows]
     return {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
-        'days': [day.isoformat() for day in days],
         'metric_code': REVIEWS_QTY_CODE,
         'total_value': _round_optional(sum(float(row['value'] or 0.0) for row in payload_rows)) or 0.0,
         'rows': payload_rows,
@@ -2497,26 +3355,15 @@ async def save_manual_review_facts(
     staff_id: Optional[int],
     items: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    _manual_review_days(start, end)
     scoped_company_id = int(company_id) if company_id is not None else None
     scoped_staff_id = int(staff_id) if staff_id is not None else None
-    normalized_items: dict[tuple[int, int, date], float | None] = {}
+    normalized_items: dict[tuple[int, int], float | None] = {}
     for item in items:
         try:
             item_company_id = int(item.get('company_id'))
             item_staff_id = int(item.get('staff_id'))
         except (TypeError, ValueError):
             raise ValueError('company_id and staff_id are required for every row') from None
-        raw_date = item.get('date')
-        if isinstance(raw_date, date):
-            item_date = raw_date
-        else:
-            try:
-                item_date = datetime.strptime(str(raw_date or ''), '%Y-%m-%d').date()
-            except ValueError:
-                raise ValueError(f'invalid reviews fact date for staff {item_staff_id}') from None
-        if item_date < start or item_date > end:
-            raise ValueError(f'reviews fact date must be within selected period for staff {item_staff_id}')
         if scoped_company_id is not None and item_company_id != scoped_company_id:
             raise ValueError(f'staff {item_staff_id} does not belong to selected company {scoped_company_id}')
         if scoped_staff_id is not None and item_staff_id != scoped_staff_id:
@@ -2532,18 +3379,18 @@ async def save_manual_review_facts(
                 raise ValueError(f'invalid reviews fact for staff {item_staff_id}') from None
             if value < 0:
                 raise ValueError(f'reviews fact cannot be negative for staff {item_staff_id}')
-        normalized_items[(item_company_id, item_staff_id, item_date)] = value
+        normalized_items[(item_company_id, item_staff_id)] = value
 
     if not normalized_items:
         return await fetch_manual_review_facts(db, start, end, scoped_company_id, scoped_staff_id)
 
     allowed_company_ids = await branch_company_ids(db)
     if allowed_company_ids is not None:
-        invalid_company_ids = sorted({company_id for company_id, _, _ in normalized_items} - set(allowed_company_ids))
+        invalid_company_ids = sorted({company_id for company_id, _ in normalized_items} - set(allowed_company_ids))
         if invalid_company_ids:
             raise ValueError(f'company is not allowed: {invalid_company_ids[0]}')
 
-    staff_ids = sorted({staff_id for _, staff_id, _ in normalized_items})
+    staff_ids = sorted({staff_id for _, staff_id in normalized_items})
     staff_rows = (
         await db.execute(
             select(Staff.id, Staff.name, Staff.position, Staff.company_id, Staff.fired)
@@ -2558,18 +3405,18 @@ async def save_manual_review_facts(
         for row in staff_rows
         if _is_manual_review_admin_row(row)
     }
-    item_staff_keys = {(company_id, staff_id) for company_id, staff_id, _ in normalized_items}
+    item_staff_keys = set(normalized_items)
     invalid_keys = sorted(item_staff_keys - valid_staff_keys)
     if invalid_keys:
         invalid_company_id, invalid_staff_id = invalid_keys[0]
         raise ValueError(f'staff {invalid_staff_id} is not an active administrator in company {invalid_company_id}')
 
     now = datetime.now()
-    for (item_company_id, item_staff_id, item_date), value in normalized_items.items():
+    for (item_company_id, item_staff_id), value in normalized_items.items():
         await db.execute(
             delete(ManualFactMetric).where(
-                ManualFactMetric.period_start == item_date,
-                ManualFactMetric.period_end == item_date,
+                ManualFactMetric.period_start >= start,
+                ManualFactMetric.period_end <= end,
                 ManualFactMetric.company_id == item_company_id,
                 ManualFactMetric.staff_id == item_staff_id,
                 ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
@@ -2579,8 +3426,8 @@ async def save_manual_review_facts(
             continue
         db.add(
             ManualFactMetric(
-                period_start=item_date,
-                period_end=item_date,
+                period_start=start,
+                period_end=end,
                 company_id=item_company_id,
                 staff_id=item_staff_id,
                 metric_code=REVIEWS_QTY_CODE,
@@ -2658,8 +3505,6 @@ async def fetch_plan_fact(
             staff_id,
             include_all_when_branch_planned=_has_plan_values(plans_by_company.get(branch_id, {})),
         )
-        if staff_id is None:
-            branch_fact = _normalize_aggregate_fact_from_staff(branch_fact, groups)
         parent_group = {
             'company_id': branch_id,
             'title': branch['title'],
@@ -2702,15 +3547,24 @@ async def fetch_plan_fact(
             None,
             include_all_when_branch_planned=_has_plan_values(plans_by_company.get(branch_id, {})),
         )
-        facts_by_company[branch_id] = _normalize_aggregate_fact_from_staff(
-            facts_by_company.get(branch_id, {}),
-            staff_groups_by_company.get(branch_id, []),
-        )
 
     groups: list[dict[str, Any]] = []
     if company_id is None and company_ids:
         network_plan = _sum_metric_components([plans_by_company.get(branch_id, {}) for branch_id in company_ids])
         network_fact = _sum_metric_components([facts_by_company.get(branch_id, {}) for branch_id in company_ids])
+        network_average_check = await _average_check_block(
+            db,
+            DateRange(start, end),
+            None,
+            company_ids=company_ids,
+        )
+        network_fact['revenue'] = float(network_average_check['numerator'] or 0.0)
+        network_fact['avg_check_denominator'] = float(network_average_check['denominator'] or 0.0)
+        network_fact = _derive_metric_values(
+            network_fact,
+            include_zero_derived=True,
+            prefer_explicit=False,
+        )
         groups.append({
             'company_id': None,
             'title': 'Сеть',

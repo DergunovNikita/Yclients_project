@@ -21,6 +21,8 @@ const els = {
   periodLabel: document.getElementById('period-label'),
   revenueMeta: document.getElementById('revenue-meta'),
   appointmentsMeta: document.getElementById('appointments-meta'),
+  appointmentsMetrics: document.getElementById('appointments-metrics'),
+  appointmentsWarning: document.getElementById('appointments-warning'),
   servicesMeta: document.getElementById('services-meta'),
   extraServicesMeta: document.getElementById('extra-services-meta'),
   planMeta: document.getElementById('plan-meta'),
@@ -34,10 +36,12 @@ const els = {
   extraServicesTable: document.getElementById('extra-services-table'),
   revenueChart: document.getElementById('revenue-chart'),
   appointmentsChart: document.getElementById('appointments-chart'),
+  opzChart: document.getElementById('opz-chart'),
   servicesChart: document.getElementById('services-chart'),
   overviewView: document.getElementById('overview-view'),
   planView: document.getElementById('plan-view'),
   planSettingsView: document.getElementById('plan-settings-view'),
+  serviceManagementView: document.getElementById('service-management-view'),
   reviewFactsView: document.getElementById('review-facts-view'),
   reportsView: document.getElementById('reports-view'),
   viewLinks: [...document.querySelectorAll('[data-view-link]')],
@@ -52,6 +56,23 @@ const els = {
   planSettingsStaffMeta: document.getElementById('plan-settings-staff-meta'),
   planSettingsBranches: document.getElementById('plan-settings-branches'),
   planSettingsStaff: document.getElementById('plan-settings-staff'),
+  serviceFilterBranch: document.getElementById('service-filter-branch'),
+  serviceFilterCategory: document.getElementById('service-filter-category'),
+  serviceFilterGroup: document.getElementById('service-filter-group'),
+  serviceFilterQuery: document.getElementById('service-filter-query'),
+  serviceFilterExtra: document.getElementById('service-filter-extra'),
+  serviceFilterLoad: document.getElementById('service-filter-load'),
+  serviceCatalogMeta: document.getElementById('service-catalog-meta'),
+  serviceCatalogTable: document.getElementById('service-catalog-table'),
+  serviceManagementDirty: document.getElementById('service-management-dirty'),
+  serviceManagementReset: document.getElementById('service-management-reset'),
+  serviceManagementSave: document.getElementById('service-management-save'),
+  serviceKpiGroupsMeta: document.getElementById('service-kpi-groups-meta'),
+  serviceKpiGroupsTable: document.getElementById('service-kpi-groups-table'),
+  serviceGroupTitle: document.getElementById('service-group-title'),
+  serviceGroupCode: document.getElementById('service-group-code'),
+  serviceGroupDescription: document.getElementById('service-group-description'),
+  serviceGroupAdd: document.getElementById('service-group-add'),
   overviewPresetButtons: [...document.querySelectorAll('[data-overview-preset]')],
   overviewJumpButtons: [...document.querySelectorAll('[data-overview-jump]')],
 };
@@ -89,6 +110,7 @@ Object.values(filterEls).forEach((filter) => {
 const charts = {
   revenue: null,
   appointments: null,
+  opz: null,
   services: null,
   selectedStaffPlan: null,
   goodsKpi: null,
@@ -104,6 +126,10 @@ let planSettingsSavedSnapshot = '';
 let planSettingsDirty = false;
 let planSettingsLoadedMonth = '';
 let allowDirtyPlanSettingsNavigation = false;
+let serviceManagementData = { rows: [], groups: [], categories: [] };
+let serviceManagementSavedData = null;
+let serviceManagementSavedSnapshot = '';
+let serviceManagementDirty = false;
 let reportsController = null;
 
 const ADMIN_HIDDEN_METRIC_CODES = new Set(['revenue', 'avg_check_total']);
@@ -244,15 +270,15 @@ async function fetchJson(path, params) {
   );
 }
 
-async function postJson(path, body) {
+async function requestJson(path, { method = 'GET', body = null } = {}) {
   const errors = [];
   for (const url of apiUrlCandidates(path)) {
     let response;
     try {
       response = await fetch(url, {
-        method: 'POST',
+        method,
         headers: { ...headers(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: body === null ? undefined : JSON.stringify(body),
       });
     } catch (error) {
       errors.push(`${url}\n${error.message}`);
@@ -274,6 +300,14 @@ async function postJson(path, body) {
   throw new Error(
     `Не удалось подключиться к API.\n\n${errors.join('\n\n')}\n\nПроверь, что локальный API открыт в браузере по http://127.0.0.1:8000/health или http://localhost:8000/health.`,
   );
+}
+
+async function postJson(path, body) {
+  return requestJson(path, { method: 'POST', body });
+}
+
+async function patchJson(path, body) {
+  return requestJson(path, { method: 'PATCH', body });
 }
 
 function defaultDates(filter) {
@@ -369,7 +403,9 @@ function renderKpi(summary) {
       deltaValue: revenue.appointments_change_pct,
     },
     {
-      label: 'Средний чек общий',
+      label: averageCheck.source_status === 'partial'
+        ? 'Средний чек общий (предварительно)'
+        : 'Средний чек общий',
       value: formatMoney(averageCheck.total),
       delta: formatPct(averageCheck.total_change_pct),
       deltaValue: averageCheck.total_change_pct,
@@ -437,6 +473,18 @@ function renderVisitMetrics(summary) {
   const visitMetrics = summary.visit_metrics || {};
   const cards = [
     {
+      label: 'Количество ОПЗ',
+      value: formatNumber(visitMetrics.opz_qty),
+      delta: formatPct(visitMetrics.opz_qty_change_pct),
+      deltaValue: visitMetrics.opz_qty_change_pct,
+    },
+    {
+      label: 'Доля ОПЗ от визитов',
+      value: formatMetricValue(visitMetrics.opz_pct, 'percent'),
+      delta: formatPct(visitMetrics.opz_pct_change_pct),
+      deltaValue: visitMetrics.opz_pct_change_pct,
+    },
+    {
       label: 'Доп. услуги от посещений',
       value: formatMetricValue(visitMetrics.extra_services_per_appointment_pct, 'percent'),
       delta: formatPct(visitMetrics.extra_services_per_appointment_pct_change_pct),
@@ -463,6 +511,45 @@ function renderVisitMetrics(summary) {
   ];
 
   renderCards(els.visitMetrics, cards);
+}
+
+function renderAppointmentsMetrics(summary) {
+  const breakdown = summary.appointments_breakdown || {};
+  const ready = breakdown.source_status === 'ready';
+  const metricValue = (value) => (ready ? formatNumber(value) : 'Нет данных');
+  const metricShare = (value) => (ready ? `${formatNumber(value)}% от общего` : '');
+  const cards = [
+    {
+      label: 'Всего записей',
+      value: metricValue(breakdown.total),
+      delta: metricShare(breakdown.total_share_pct),
+      deltaValue: null,
+    },
+    {
+      label: 'Отменённые записи',
+      value: metricValue(breakdown.cancelled),
+      delta: metricShare(breakdown.cancelled_share_pct),
+      deltaValue: null,
+    },
+    {
+      label: 'Завершённые записи',
+      value: metricValue(breakdown.completed),
+      delta: metricShare(breakdown.completed_share_pct),
+      deltaValue: null,
+    },
+    {
+      label: 'Незавершённые записи',
+      value: metricValue(breakdown.incomplete),
+      delta: metricShare(breakdown.incomplete_share_pct),
+      deltaValue: null,
+    },
+  ];
+
+  renderCards(els.appointmentsMetrics, cards);
+  els.appointmentsWarning.textContent = ready
+    ? ''
+    : 'Точные метрики записей временно недоступны в YCLIENTS.';
+  els.appointmentsWarning.classList.toggle('visible', !ready);
 }
 
 function destroyChart(name) {
@@ -528,6 +615,50 @@ function renderAppointmentsChart(daily) {
       responsive: true,
       maintainAspectRatio: false,
       scales: { y: { beginAtZero: true } },
+    },
+  });
+}
+
+function renderOpzChart(daily) {
+  destroyChart('opz');
+  charts.opz = new Chart(els.opzChart, {
+    type: 'bar',
+    data: {
+      labels: daily.map((item) => item.date),
+      datasets: [
+        {
+          label: 'Количество ОПЗ',
+          data: daily.map((item) => item.opz_qty || 0),
+          backgroundColor: '#7c3aed',
+          borderRadius: 4,
+          yAxisID: 'y',
+        },
+        {
+          type: 'line',
+          label: 'Доля от завершённых визитов',
+          data: daily.map((item) => item.opz_pct || 0),
+          borderColor: '#ea580c',
+          backgroundColor: '#ea580c',
+          tension: 0.25,
+          pointRadius: 2,
+          yAxisID: 'y1',
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        y: { beginAtZero: true, title: { display: true, text: 'ОПЗ' } },
+        y1: {
+          beginAtZero: true,
+          position: 'right',
+          grid: { drawOnChartArea: false },
+          ticks: { callback: (value) => `${formatNumber(value)}%` },
+          title: { display: true, text: '%' },
+        },
+      },
     },
   });
 }
@@ -786,6 +917,7 @@ function renderPlanInsights(planFact) {
   const rankings = planFact?.staff_rankings || {};
   const goodsKpis = planFact?.goods_kpi_execution || [];
   const selectedStaffPlan = planFact?.selected_staff_plan;
+  const hasSelectedStaff = Boolean(planFact?.selected_staff);
   const panels = [];
 
   if (selectedStaffPlan?.metrics?.length) {
@@ -800,24 +932,26 @@ function renderPlanInsights(planFact) {
     `);
   }
 
-  panels.push(`
-    <div class="panel">
-      <div class="panel-title">
-        <h2>Топ-5 по выручке</h2>
-        <span class="meta">${formatNumber(rankings.revenue_top?.length || 0)} сотрудников</span>
+  if (!hasSelectedStaff) {
+    panels.push(`
+      <div class="panel">
+        <div class="panel-title">
+          <h2>Топ-5 по выручке</h2>
+          <span class="meta">${formatNumber(rankings.revenue_top?.length || 0)} сотрудников</span>
+        </div>
+        ${renderRankingList(rankings.revenue_top || [], 'money')}
       </div>
-      ${renderRankingList(rankings.revenue_top || [], 'money')}
-    </div>
-  `);
-  panels.push(`
-    <div class="panel">
-      <div class="panel-title">
-        <h2>Топ-5 по СЧ</h2>
-        <span class="meta">${formatNumber(rankings.avg_check_top?.length || 0)} сотрудников</span>
+    `);
+    panels.push(`
+      <div class="panel">
+        <div class="panel-title">
+          <h2>Топ-5 по СЧ</h2>
+          <span class="meta">${formatNumber(rankings.avg_check_top?.length || 0)} сотрудников</span>
+        </div>
+        ${renderRankingList(rankings.avg_check_top || [], 'money')}
       </div>
-      ${renderRankingList(rankings.avg_check_top || [], 'money')}
-    </div>
-  `);
+    `);
+  }
 
   if (goodsKpis.length) {
     panels.push(`
@@ -1147,6 +1281,10 @@ function confirmDiscardPlanSettings() {
   return !planSettingsDirty || window.confirm('Есть несохранённые изменения. Перейти без сохранения?');
 }
 
+function confirmDiscardServiceManagement() {
+  return !serviceManagementDirty || window.confirm('Есть несохранённые изменения в услугах. Перейти без сохранения?');
+}
+
 function setPlanSettingsLoading(isLoading) {
   els.planSettingsLoad.disabled = isLoading;
   els.planSettingsCopy.disabled = isLoading;
@@ -1203,11 +1341,300 @@ async function reloadPlanSettingsMonth() {
   await loadPlanSettings({ month: els.planSettingsMonth.value || currentMonthValue() });
 }
 
+function renderServiceBranchOptions() {
+  const selected = els.serviceFilterBranch.value;
+  els.serviceFilterBranch.innerHTML = '<option value="">Все филиалы</option>';
+  branchOptions.forEach((branch) => {
+    const option = document.createElement('option');
+    option.value = branch.id;
+    option.textContent = branch.title;
+    els.serviceFilterBranch.appendChild(option);
+  });
+  els.serviceFilterBranch.value = branchOptions.some((branch) => String(branch.id) === selected) ? selected : '';
+}
+
+function renderServiceFilterOptions(data) {
+  const selectedCategory = els.serviceFilterCategory.value;
+  els.serviceFilterCategory.innerHTML = '<option value="">Все категории</option>';
+  (data.categories || []).forEach((category) => {
+    const option = document.createElement('option');
+    option.value = category;
+    option.textContent = category;
+    els.serviceFilterCategory.appendChild(option);
+  });
+  els.serviceFilterCategory.value = (data.categories || []).includes(selectedCategory) ? selectedCategory : '';
+
+  const selectedGroup = els.serviceFilterGroup.value;
+  els.serviceFilterGroup.innerHTML = '<option value="">Все группы</option>';
+  (data.groups || []).forEach((group) => {
+    const option = document.createElement('option');
+    option.value = group.id;
+    option.textContent = group.is_active ? group.title : `${group.title} (архив)`;
+    els.serviceFilterGroup.appendChild(option);
+  });
+  els.serviceFilterGroup.value = (data.groups || []).some((group) => String(group.id) === selectedGroup) ? selectedGroup : '';
+}
+
+function serviceGroupOptionsHtml(selectedGroupId) {
+  const groups = serviceManagementData.groups || [];
+  const selected = selectedGroupId === null || selectedGroupId === undefined ? '' : String(selectedGroupId);
+  const assignedInactive = groups.find((group) => String(group.id) === selected && !group.is_active);
+  const activeGroups = groups.filter((group) => group.is_active);
+  const options = ['<option value="">Без группы</option>'];
+  activeGroups.forEach((group) => {
+    options.push(`<option value="${escapeHtml(group.id)}" ${String(group.id) === selected ? 'selected' : ''}>${escapeHtml(group.title)}</option>`);
+  });
+  if (assignedInactive) {
+    options.push(`<option value="${escapeHtml(assignedInactive.id)}" selected disabled>${escapeHtml(assignedInactive.title)} (архив)</option>`);
+  }
+  return options.join('');
+}
+
+function renderServiceCatalog(rows) {
+  els.serviceCatalogMeta.textContent = `${rows.length} услуг`;
+  if (!rows.length) {
+    els.serviceCatalogTable.innerHTML = '<div class="empty compact">Нет услуг по выбранным фильтрам</div>';
+    return;
+  }
+  els.serviceCatalogTable.innerHTML = `
+    <div class="table-scroll">
+      <table class="service-table">
+        <thead>
+          <tr>
+            <th>Филиал</th>
+            <th>Категория</th>
+            <th class="number">ID</th>
+            <th>Название</th>
+            <th>Доп услуга</th>
+            <th>KPI-группа</th>
+            <th>Обновлено</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((row) => `
+            <tr>
+              <td>${escapeHtml(row.company_title || `Филиал ${row.company_id}`)}</td>
+              <td>${escapeHtml(row.category_title || '')}</td>
+              <td class="number readonly">${escapeHtml(row.service_id)}</td>
+              <td>${escapeHtml(row.title)}</td>
+              <td>
+                <input
+                  class="service-extra-input"
+                  type="checkbox"
+                  data-company-id="${escapeHtml(row.company_id)}"
+                  data-service-id="${escapeHtml(row.service_id)}"
+                  ${row.is_extra ? 'checked' : ''}
+                />
+              </td>
+              <td>
+                <select
+                  class="service-group-select"
+                  data-company-id="${escapeHtml(row.company_id)}"
+                  data-service-id="${escapeHtml(row.service_id)}"
+                >
+                  ${serviceGroupOptionsHtml(row.kpi_group_id)}
+                </select>
+              </td>
+              <td>${escapeHtml(formatMoscowDateTime(row.label_updated_at || row.kpi_assignment_updated_at || row.updated_at) || '')}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderServiceKpiGroups(groups) {
+  els.serviceKpiGroupsMeta.textContent = `${groups.length} групп`;
+  if (!groups.length) {
+    els.serviceKpiGroupsTable.innerHTML = '<div class="empty compact">Нет KPI-групп</div>';
+    return;
+  }
+  els.serviceKpiGroupsTable.innerHTML = `
+    <div class="table-scroll">
+      <table class="service-group-table">
+        <thead>
+          <tr>
+            <th>Название</th>
+            <th>Код</th>
+            <th>Описание</th>
+            <th class="number">Порядок</th>
+            <th>Активна</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${groups.map((group) => `
+            <tr data-service-group-row data-group-id="${escapeHtml(group.id)}">
+              <td><input type="text" data-group-field="title" value="${escapeHtml(group.title)}" /></td>
+              <td><input type="text" data-group-field="code" value="${escapeHtml(group.code)}" /></td>
+              <td><input type="text" data-group-field="description" value="${escapeHtml(group.description || '')}" /></td>
+              <td class="number"><input type="number" data-group-field="sort_order" value="${escapeHtml(group.sort_order || 0)}" /></td>
+              <td><input class="service-group-active" type="checkbox" data-group-field="is_active" ${group.is_active ? 'checked' : ''} /></td>
+              <td class="number"><button type="button" class="secondary" data-service-group-archive>В архив</button></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function collectServiceManagementPayload() {
+  const groupSelects = new Map(
+    [...els.serviceCatalogTable.querySelectorAll('.service-group-select')].map((select) => [
+      `${select.dataset.companyId}:${select.dataset.serviceId}`,
+      select.value ? Number(select.value) : null,
+    ]),
+  );
+  const rows = [...els.serviceCatalogTable.querySelectorAll('.service-extra-input')].map((input) => {
+    const key = `${input.dataset.companyId}:${input.dataset.serviceId}`;
+    return {
+      company_id: Number(input.dataset.companyId),
+      service_id: Number(input.dataset.serviceId),
+      is_extra: input.checked,
+      kpi_group_id: groupSelects.get(key) ?? null,
+    };
+  });
+  const groups = [...els.serviceKpiGroupsTable.querySelectorAll('[data-service-group-row]')].map((row) => {
+    const value = (field) => row.querySelector(`[data-group-field="${field}"]`);
+    return {
+      id: Number(row.dataset.groupId),
+      title: value('title')?.value.trim() || '',
+      code: value('code')?.value.trim() || '',
+      description: value('description')?.value.trim() || '',
+      sort_order: Number(value('sort_order')?.value || 0),
+      is_active: Boolean(value('is_active')?.checked),
+    };
+  });
+  return { rows, groups };
+}
+
+function setServiceManagementDirty(isDirty) {
+  serviceManagementDirty = isDirty;
+  els.serviceManagementDirty.classList.toggle('visible', isDirty);
+  els.serviceManagementSave.disabled = !serviceManagementData;
+  els.serviceManagementReset.disabled = !isDirty || !serviceManagementSavedData;
+}
+
+function updateServiceManagementDirtyFromForm() {
+  setServiceManagementDirty(JSON.stringify(collectServiceManagementPayload()) !== serviceManagementSavedSnapshot);
+}
+
+function renderServiceManagement(data, { updateSnapshot = true } = {}) {
+  serviceManagementData = data || { rows: [], groups: [], categories: [] };
+  renderServiceFilterOptions(serviceManagementData);
+  renderServiceCatalog(serviceManagementData.rows || []);
+  renderServiceKpiGroups(serviceManagementData.groups || []);
+  if (updateSnapshot) {
+    serviceManagementSavedData = JSON.parse(JSON.stringify(serviceManagementData));
+    serviceManagementSavedSnapshot = JSON.stringify(collectServiceManagementPayload());
+    setServiceManagementDirty(false);
+  } else {
+    updateServiceManagementDirtyFromForm();
+  }
+}
+
+function serviceManagementParams() {
+  return {
+    company_id: els.serviceFilterBranch.value,
+    category: els.serviceFilterCategory.value,
+    kpi_group_id: els.serviceFilterGroup.value,
+    q: els.serviceFilterQuery.value.trim(),
+    is_extra: els.serviceFilterExtra.checked ? true : undefined,
+  };
+}
+
+function setServiceManagementLoading(isLoading) {
+  els.serviceFilterLoad.disabled = isLoading;
+  els.serviceManagementSave.disabled = isLoading || !serviceManagementData;
+  els.serviceManagementReset.disabled = isLoading || !serviceManagementDirty || !serviceManagementSavedData;
+  els.serviceGroupAdd.disabled = isLoading;
+  els.serviceFilterLoad.textContent = isLoading ? 'Загрузка' : 'Обновить';
+  els.serviceManagementSave.textContent = isLoading ? 'Сохранение' : 'Сохранить';
+}
+
+async function loadServiceManagement() {
+  clearError();
+  setServiceManagementLoading(true);
+  setApiState('API: загрузка', 'warn');
+  try {
+    const payload = await fetchJson('/dashboard/services', serviceManagementParams());
+    renderServiceManagement(payload.data);
+    setApiState('API: подключен', 'ok');
+    await loadSyncStatus();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setServiceManagementLoading(false);
+  }
+}
+
+async function saveServiceManagement() {
+  clearError();
+  setServiceManagementLoading(true);
+  setApiState('API: сохранение', 'warn');
+  const current = collectServiceManagementPayload();
+  const saved = serviceManagementSavedSnapshot ? JSON.parse(serviceManagementSavedSnapshot) : { rows: [], groups: [] };
+  const savedRows = new Map(saved.rows.map((row) => [`${row.company_id}:${row.service_id}`, row]));
+  const savedGroups = new Map(saved.groups.map((group) => [group.id, group]));
+  try {
+    for (const row of current.rows) {
+      const previous = savedRows.get(`${row.company_id}:${row.service_id}`);
+      if (!previous || previous.is_extra !== row.is_extra) {
+        await patchJson(`/dashboard/services/${row.company_id}/${row.service_id}/labels`, { is_extra: row.is_extra });
+      }
+      if (!previous || previous.kpi_group_id !== row.kpi_group_id) {
+        await patchJson(`/dashboard/services/${row.company_id}/${row.service_id}/kpi_group`, { group_id: row.kpi_group_id });
+      }
+    }
+    for (const group of current.groups) {
+      const previous = savedGroups.get(group.id);
+      if (!previous || JSON.stringify(previous) !== JSON.stringify(group)) {
+        await patchJson(`/dashboard/services/kpi_groups/${group.id}`, group);
+      }
+    }
+    await loadServiceManagement();
+    setApiState('API: подключен', 'ok');
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setServiceManagementLoading(false);
+  }
+}
+
+async function addServiceKpiGroup() {
+  clearError();
+  const title = els.serviceGroupTitle.value.trim();
+  if (!title) {
+    showError('Название KPI-группы обязательно');
+    return;
+  }
+  setServiceManagementLoading(true);
+  setApiState('API: сохранение', 'warn');
+  try {
+    await postJson('/dashboard/services/kpi_groups', {
+      title,
+      code: els.serviceGroupCode.value.trim() || null,
+      description: els.serviceGroupDescription.value.trim() || null,
+      is_active: true,
+    });
+    els.serviceGroupTitle.value = '';
+    els.serviceGroupCode.value = '';
+    els.serviceGroupDescription.value = '';
+    await loadServiceManagement();
+    setApiState('API: подключен', 'ok');
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setServiceManagementLoading(false);
+  }
+}
+
 function renderReviewFactEditor(data) {
   reviewFactRows = data?.rows || [];
-  const days = data?.days || [];
   const totalValue = data?.total_value || 0;
-  els.reviewFactMeta.textContent = `${reviewFactRows.length} администраторов · ${days.length} дней · ${formatNumber(totalValue)} отзывов`;
+  els.reviewFactMeta.textContent = `${reviewFactRows.length} администраторов · ${formatNumber(totalValue)} отзывов`;
 
   if (!reviewFactRows.length) {
     els.reviewFactEditor.innerHTML = '<div class="empty compact">Нет активных администраторов</div>';
@@ -1223,38 +1650,27 @@ function renderReviewFactEditor(data) {
           <tr>
             <th>Филиал</th>
             <th>Администратор</th>
-            ${days.map((day) => `<th class="number review-fact-day">${escapeHtml(formatShortDate(day))}</th>`).join('')}
-            <th class="number">Итого</th>
+            <th class="number">Отзывы факт</th>
           </tr>
         </thead>
         <tbody>
           ${reviewFactRows
             .map((row) => {
-              const valuesByDate = Object.fromEntries((row.values || []).map((item) => [item.date, item]));
               return `
                 <tr>
                   <td>${escapeHtml(row.company_title || `Филиал ${row.company_id}`)}</td>
                   <td>${escapeHtml(row.staff_name)}</td>
-                  ${days
-                    .map((day) => {
-                      const item = valuesByDate[day] || {};
-                      return `
-                        <td class="number review-fact-day">
-                          <input
-                            type="number"
-                            min="0"
-                            step="1"
-                            inputmode="numeric"
-                            data-company-id="${escapeHtml(row.company_id)}"
-                            data-staff-id="${escapeHtml(row.staff_id)}"
-                            data-date="${escapeHtml(day)}"
-                            value="${escapeHtml(formatInputNumber(item.value))}"
-                          />
-                        </td>
-                      `;
-                    })
-                    .join('')}
-                  <td class="number readonly">${escapeHtml(formatNumber(row.value || 0))}</td>
+                  <td class="number">
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      inputmode="numeric"
+                      data-company-id="${escapeHtml(row.company_id)}"
+                      data-staff-id="${escapeHtml(row.staff_id)}"
+                      value="${escapeHtml(formatInputNumber(row.value))}"
+                    />
+                  </td>
                 </tr>
               `;
             })
@@ -1273,13 +1689,12 @@ async function loadReviewFactEditor() {
 
 function reviewFactPayload() {
   const filter = filterEls.reviewFacts;
-  const items = [...els.reviewFactEditor.querySelectorAll('input[data-staff-id][data-date]')].map((input) => {
+  const items = [...els.reviewFactEditor.querySelectorAll('input[data-staff-id]')].map((input) => {
     const rawValue = input.value.trim().replace(',', '.');
     if (rawValue === '') {
       return {
         company_id: Number(input.dataset.companyId),
         staff_id: Number(input.dataset.staffId),
-        date: input.dataset.date,
         value: null,
       };
     }
@@ -1290,7 +1705,6 @@ function reviewFactPayload() {
     return {
       company_id: Number(input.dataset.companyId),
       staff_id: Number(input.dataset.staffId),
-      date: input.dataset.date,
       value,
     };
   });
@@ -1331,15 +1745,20 @@ function renderBundle(bundle) {
   } = bundle;
   renderKpi(summary);
   renderVisitMetrics(summary);
+  renderAppointmentsMetrics(summary);
   renderRevenueChart(daily);
   renderAppointmentsChart(daily);
+  renderOpzChart(daily);
   renderServicesChart(services.slice(0, 8));
   renderServicesTable(services);
   renderExtraServicesTable(extraServices);
 
   els.periodLabel.textContent = `${summary.period.start} .. ${summary.period.end}`;
   els.revenueMeta.textContent = `${daily.length} дней`;
-  els.appointmentsMeta.textContent = `${formatNumber(summary.revenue.appointments)} записей`;
+  const appointmentsBreakdown = summary.appointments_breakdown || {};
+  els.appointmentsMeta.textContent = appointmentsBreakdown.source_status === 'ready'
+    ? `${formatNumber(appointmentsBreakdown.total)} записей`
+    : 'Нет точных данных';
   els.servicesMeta.textContent = `${services.length} услуг`;
   els.extraServicesMeta.textContent = `${formatNumber(summary.revenue.extra_service_count)} оказано`;
   els.tableMeta.textContent = `${formatMoney(summary.revenue.total)} всего`;
@@ -1350,6 +1769,7 @@ async function loadBranches() {
     const payload = await fetchJson('/dashboard/branches');
     branchOptions = payload.data || [];
     Object.values(filterEls).forEach((filter) => renderBranchOptions(filter));
+    renderServiceBranchOptions();
   } catch (error) {
     showError(error.message);
   }
@@ -1425,6 +1845,7 @@ function viewFromLocation() {
   if (window.location.pathname.replace(/\/+$/, '') === '/reports' || window.location.pathname.startsWith('/reports/')) return 'reports';
   if (window.location.hash === '#plan-fact') return 'plan';
   if (window.location.hash === '#plan-settings') return 'planSettings';
+  if (window.location.hash === '#services') return 'serviceManagement';
   if (window.location.hash === '#review-facts') return 'reviewFacts';
   return 'overview';
 }
@@ -1434,6 +1855,7 @@ function setActiveView(view) {
   els.overviewView.classList.toggle('active', view === 'overview');
   els.planView.classList.toggle('active', view === 'plan');
   els.planSettingsView.classList.toggle('active', view === 'planSettings');
+  els.serviceManagementView.classList.toggle('active', view === 'serviceManagement');
   els.reviewFactsView.classList.toggle('active', view === 'reviewFacts');
   els.reportsView.classList.toggle('active', view === 'reports');
   els.viewLinks.forEach((link) => {
@@ -1443,6 +1865,7 @@ function setActiveView(view) {
     overview: 'Метрики по филиалам и услугам',
     plan: 'План/факт по филиалам и сотрудникам',
     planSettings: 'Установка планов по месяцам',
+    serviceManagement: 'Актуальные услуги и KPI-группы',
     reviewFacts: 'Ручной факт отзывов по администраторам',
     reports: 'Каталог отчетов и аналитика',
   };
@@ -1507,6 +1930,8 @@ async function loadCurrentView() {
     await loadPlanFact();
   } else if (activeView === 'planSettings') {
     await loadPlanSettings();
+  } else if (activeView === 'serviceManagement') {
+    await loadServiceManagement();
   } else if (activeView === 'reviewFacts') {
     await loadReviewFacts();
   } else if (activeView === 'reports') {
@@ -1539,6 +1964,7 @@ async function init() {
   els.planSettingsMonth.value = currentMonthValue();
   renderServicesTable([]);
   renderExtraServicesTable([]);
+  renderServiceManagement({ rows: [], groups: [], categories: [] });
   if (getToken()) {
     try {
       const me = await loadCurrentUser();
@@ -1619,12 +2045,41 @@ els.planSettingsReset.addEventListener('click', () => {
 els.planSettingsSave.addEventListener('click', () => savePlanSettings());
 els.planSettingsBranches.addEventListener('input', () => updatePlanSettingsDirtyFromForm());
 els.planSettingsStaff.addEventListener('input', () => updatePlanSettingsDirtyFromForm());
+els.serviceFilterLoad.addEventListener('click', () => loadServiceManagement());
+els.serviceFilterBranch.addEventListener('change', () => loadServiceManagement());
+els.serviceFilterCategory.addEventListener('change', () => loadServiceManagement());
+els.serviceFilterGroup.addEventListener('change', () => loadServiceManagement());
+els.serviceFilterExtra.addEventListener('change', () => loadServiceManagement());
+els.serviceFilterQuery.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') loadServiceManagement();
+});
+els.serviceCatalogTable.addEventListener('input', () => updateServiceManagementDirtyFromForm());
+els.serviceCatalogTable.addEventListener('change', () => updateServiceManagementDirtyFromForm());
+els.serviceKpiGroupsTable.addEventListener('input', () => updateServiceManagementDirtyFromForm());
+els.serviceKpiGroupsTable.addEventListener('change', () => updateServiceManagementDirtyFromForm());
+els.serviceKpiGroupsTable.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-service-group-archive]');
+  if (!button) return;
+  const row = button.closest('[data-service-group-row]');
+  const active = row?.querySelector('[data-group-field="is_active"]');
+  if (active) {
+    active.checked = false;
+    updateServiceManagementDirtyFromForm();
+  }
+});
+els.serviceManagementSave.addEventListener('click', () => saveServiceManagement());
+els.serviceManagementReset.addEventListener('click', () => {
+  if (serviceManagementSavedData) {
+    renderServiceManagement(JSON.parse(JSON.stringify(serviceManagementSavedData)));
+  }
+});
+els.serviceGroupAdd.addEventListener('click', () => addServiceKpiGroup());
 
 els.viewLinks.forEach((link) => {
   link.addEventListener('click', (event) => {
     const view = link.dataset.viewLink;
     if (!view) return;
-    if (!confirmDiscardPlanSettings()) {
+    if (!confirmDiscardPlanSettings() || !confirmDiscardServiceManagement()) {
       event.preventDefault();
       return;
     }
@@ -1637,6 +2092,7 @@ els.viewLinks.forEach((link) => {
       overview: '/#overview',
       plan: '/#plan-fact',
       planSettings: '/#plan-settings',
+      serviceManagement: '/#services',
       reviewFacts: '/#review-facts',
       reports: '/reports',
     };
@@ -1656,6 +2112,13 @@ window.addEventListener('hashchange', async () => {
     }
     setPlanSettingsDirty(false);
   }
+  if (serviceManagementDirty && activeView === 'serviceManagement' && nextView !== 'serviceManagement') {
+    if (!confirmDiscardServiceManagement()) {
+      window.location.hash = '#services';
+      return;
+    }
+    setServiceManagementDirty(false);
+  }
   allowDirtyPlanSettingsNavigation = false;
   setActiveView(nextView);
   await loadCurrentView();
@@ -1667,7 +2130,7 @@ window.addEventListener('popstate', async () => {
   await loadCurrentView();
 });
 window.addEventListener('beforeunload', (event) => {
-  if (!planSettingsDirty) return;
+  if (!planSettingsDirty && !serviceManagementDirty) return;
   event.preventDefault();
   event.returnValue = '';
 });

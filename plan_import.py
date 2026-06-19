@@ -880,17 +880,25 @@ async def import_services_sheet_csv(
         warnings.append('services sheet has no rows with extra-service marker; labels unchanged')
         return {'imported': 0, 'processed': 0, 'skipped': skipped, 'warnings': warnings}
 
-    await db.execute(delete(ServiceLabel))
     imported = 0
     for label in labels_by_service_key.values():
-        db.add(label)
+        existing_label = await db.get(
+            ServiceLabel,
+            {'service_id': label.service_id, 'company_id': label.company_id},
+        )
+        if existing_label is None:
+            db.add(label)
+        else:
+            existing_label.is_extra = True
+            existing_label.source = source
+            existing_label.updated_at = now
         imported += 1
     await db.commit()
     return {
         'imported': imported,
         'processed': processed_markers,
         'skipped': skipped,
-        'warnings': warnings,
+        'warnings': warnings + ['services sheet import does not remove labels missing from the sheet'],
     }
 
 

@@ -23,11 +23,12 @@ from models import (
     Appointment, Transaction, FinancialTransaction, GoodTransaction,
     Comment, StaffSchedule,
     AnalyticsOverall, AnalyticsDailyMetric, AnalyticsSourceMetric,
-    AnalyticsStatusMetric, ZReport, ZReportPayment, SyncState,
+    AnalyticsStatusMetric, ZReport, ZReportPayment, SyncState, SyncSourceState,
 )
 from sync_parsing import parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_time
 
 TRANSACTIONAL_STATE_KEY = 'transactions_last_success_date'
+PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
 
 
 def format_duration(seconds: float) -> str:
@@ -411,6 +412,22 @@ def sync_services(api: YClientsAPI, db, company_id: str):
     try:
         cid = int(company_id)
         now = datetime.now()
+        category_by_service_id = {}
+        if not any(service.get('category') for service in services):
+            category_rows = db.query(ServiceCategoryCatalog).filter(
+                ServiceCategoryCatalog.company_id == cid,
+            ).all()
+            for category in category_rows:
+                category_services = api.get_services(company_id, category_id=category.category_id) or []
+                for category_service in category_services:
+                    category_service_id = category_service.get('id')
+                    if category_service_id is None:
+                        continue
+                    category_by_service_id[category_service_id] = {
+                        'id': category.category_id,
+                        'title': category.title,
+                    }
+
         existing_services = load_existing_map(
             db,
             Service,
@@ -433,6 +450,9 @@ def sync_services(api: YClientsAPI, db, company_id: str):
             if 'category' in service_data and service_data['category']:
                 category_id = service_data['category'].get('id')
                 category_title = service_data['category'].get('title')
+            elif service_id in category_by_service_id:
+                category_id = category_by_service_id[service_id].get('id')
+                category_title = category_by_service_id[service_id].get('title')
 
             catalog_obj = existing_catalog.get(service_id)
             if not catalog_obj:
@@ -1099,9 +1119,11 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
     txns = api.get_financial_transactions(company_id,
                                           start_date=start_date,
                                           end_date=end_date)
+    if txns is None:
+        print("  Источник недоступен")
+        return False
     if not txns:
         print("  Нет данных")
-        return False
 
     print(f"  Найдено: {len(txns)}")
 
@@ -1123,12 +1145,14 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
             client = t.get('client') or {}
             master = t.get('master') or {}
             expense = t.get('expense') or {}
+            expense_title = expense.get('title') if isinstance(expense, dict) else None
 
             if not obj:
                 obj = FinancialTransaction(
                     id=tid,
                     document_id=t.get('document_id'),
                     expense_id=expense.get('id') if isinstance(expense, dict) else None,
+                    expense_title=expense_title,
                     date=parse_datetime(t.get('date')),
                     amount=t.get('amount'),
                     comment=t.get('comment'),
@@ -1146,6 +1170,7 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
             else:
                 obj.document_id = t.get('document_id')
                 obj.expense_id = expense.get('id') if isinstance(expense, dict) else None
+                obj.expense_title = expense_title
                 obj.date = parse_datetime(t.get('date'))
                 obj.amount = t.get('amount')
                 obj.comment = t.get('comment')
@@ -1156,6 +1181,25 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                 obj.visit_id = t.get('visit_id')
                 obj.sold_item_id = t.get('sold_item_id')
                 obj.sold_item_type = t.get('sold_item_type')
+
+        if start_date and end_date:
+            state = db.get(
+                SyncSourceState,
+                {'company_id': cid, 'source': PERSONAL_ACCOUNT_SOURCE},
+            )
+            if state is None:
+                state = SyncSourceState(
+                    company_id=cid,
+                    source=PERSONAL_ACCOUNT_SOURCE,
+                    period_start=parse_date(start_date),
+                    period_end=parse_date(end_date),
+                    synced_at=datetime.now(),
+                )
+                db.add(state)
+            else:
+                state.period_start = min(state.period_start, parse_date(start_date))
+                state.period_end = max(state.period_end, parse_date(end_date))
+                state.synced_at = datetime.now()
 
         db.commit()
         print(f"  ✓ Финансовые транзакции сохранены ({len(txns)} шт.)")

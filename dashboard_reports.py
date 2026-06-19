@@ -11,7 +11,9 @@ from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dashboard_service import (
+    COMPLETED_ATTENDANCE,
     fetch_extra_services,
+    fetch_appointments_breakdown,
     fetch_plan_fact,
     fetch_revenue_daily,
     fetch_summary,
@@ -598,7 +600,7 @@ def _appointment_conditions(
 ) -> list[Any]:
     conditions = [Appointment.date >= start, Appointment.date <= end]
     if attended_only:
-        conditions.append(Appointment.attendance > 0)
+        conditions.append(Appointment.attendance == COMPLETED_ATTENDANCE)
     if company_id is not None:
         conditions.append(Appointment.company_id == company_id)
     if staff_id is not None:
@@ -648,6 +650,13 @@ async def _financial_payload(
     revenue = summary.get('revenue', {})
     avg = summary.get('average_check', {})
     visits = summary.get('visit_metrics', {})
+    base['average_check_source_status'] = avg.get('source_status')
+    base['missing_sources'] = list(avg.get('missing_components') or [])
+    base['notes'].append({
+        'kind': 'formula',
+        'title': 'Средний чек общий',
+        'text': avg.get('formula'),
+    })
     base['cards'] = [
         _card('Выручка', revenue.get('total', 0), MONEY_FORMAT),
         _card('Услуги', revenue.get('service_revenue', 0), MONEY_FORMAT),
@@ -690,7 +699,12 @@ async def _financial_payload(
         ),
         _services_table('top_services', 'Услуги', services),
     ]
-    base['raw'] = {'summary': summary, 'daily': daily, 'top_services': services}
+    base['raw'] = {
+        'summary': summary,
+        'average_check': avg,
+        'daily': daily,
+        'top_services': services,
+    }
     return base
 
 
@@ -775,8 +789,16 @@ async def _staff_rows(
             func.min(Staff.name).label('staff_name'),
             func.min(Company.title).label('company_title'),
             func.count(func.distinct(Appointment.id)).label('appointments'),
-            func.count(func.distinct(case((Appointment.attendance > 0, Appointment.id)))).label('completed'),
-            func.count(func.distinct(case((Appointment.attendance <= 0, Appointment.id)))).label('not_completed'),
+            func.count(
+                func.distinct(
+                    case((Appointment.attendance == COMPLETED_ATTENDANCE, Appointment.id))
+                )
+            ).label('completed'),
+            func.count(
+                func.distinct(
+                    case((Appointment.attendance != COMPLETED_ATTENDANCE, Appointment.id))
+                )
+            ).label('not_completed'),
             func.count(func.distinct(Appointment.client_id)).label('clients'),
         )
         .outerjoin(Staff, Staff.id == Appointment.staff_id)
@@ -855,7 +877,7 @@ async def _staff_payload(
                 ('staff_name', 'Сотрудник', 'text'),
                 ('company_title', 'Филиал', 'text'),
                 ('completed', 'Завершено', NUMBER_FORMAT),
-                ('appointments', 'Всего записей', NUMBER_FORMAT),
+                ('appointments', 'Доступные записи', NUMBER_FORMAT),
                 ('clients', 'Клиентов', NUMBER_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
                 ('avg_check', 'Средний чек', MONEY_FORMAT),
@@ -990,7 +1012,10 @@ async def _last_staff_by_client(
 ) -> dict[int, dict[str, Any]]:
     if not client_ids:
         return {}
-    conditions = [Appointment.client_id.in_(client_ids), Appointment.attendance > 0]
+    conditions = [
+        Appointment.client_id.in_(client_ids),
+        Appointment.attendance == COMPLETED_ATTENDANCE,
+    ]
     if company_id is not None:
         conditions.append(Appointment.company_id == company_id)
     if staff_id is not None:
@@ -1225,7 +1250,7 @@ async def _operations_payload(
         staff_key = str(row.staff_id or 'none')
         by_staff[staff_key]['staff_name'] = row.name or 'Без мастера'
         by_staff[staff_key]['records'] += 1
-        if row.attendance and row.attendance > 0:
+        if row.attendance == COMPLETED_ATTENDANCE:
             by_hour[hour]['completed'] += 1
             by_period[period]['completed'] += 1
             by_staff[staff_key]['completed'] += 1
@@ -1236,15 +1261,41 @@ async def _operations_payload(
     hour_rows = [by_hour[key] for key in sorted(by_hour)]
     period_rows = [by_period[key] for key in sorted(by_period)]
     staff_rows = sorted(by_staff.values(), key=lambda item: item['records'], reverse=True)
-    total_records = sum(row['records'] for row in period_rows)
-    total_completed = sum(row['completed'] for row in period_rows)
-    total_cancelled = sum(row['cancelled'] for row in period_rows)
-    base['cards'] = [
-        _card('Всего записей', total_records, NUMBER_FORMAT),
-        _card('Завершено', total_completed, NUMBER_FORMAT),
-        _card('Отменено', total_cancelled, NUMBER_FORMAT),
-        _card('Доля отмен', 100.0 * total_cancelled / total_records if total_records else 0, PERCENT_FORMAT),
-    ]
+    local_totals = {
+        'available_records': sum(row['records'] for row in period_rows),
+        'completed': sum(row['completed'] for row in period_rows),
+        'no_show': sum(row['cancelled'] for row in period_rows),
+    }
+    exact = await fetch_appointments_breakdown(db, start, end, company_id, staff_id)
+    if exact['source_status'] == 'ready':
+        base['cards'] = [
+            _card('Всего записей', exact['total'], NUMBER_FORMAT),
+            _card('Завершено', exact['completed'], NUMBER_FORMAT),
+            _card('Отменено', exact['cancelled'], NUMBER_FORMAT),
+            _card('Незавершено', exact['incomplete'], NUMBER_FORMAT),
+        ]
+    else:
+        base['source_status'] = 'partial'
+        base['cards'] = [
+            _card('Всего записей', None, NUMBER_FORMAT),
+            _card('Завершено', None, NUMBER_FORMAT),
+            _card('Отменено', None, NUMBER_FORMAT),
+            _card('Незавершено', None, NUMBER_FORMAT),
+        ]
+        base['notes'].append({
+            'kind': 'warning',
+            'title': 'Точные агрегаты недоступны',
+            'text': 'YCLIENTS не вернул record_stats для выбранного периода.',
+        })
+    base['notes'].append({
+        'kind': 'info',
+        'title': 'Состав детализации',
+        'text': (
+            'Карточки рассчитаны по точным record_stats YCLIENTS. '
+            'Графики и таблица содержат только записи, доступные в локальной базе; '
+            'удаленные отмены невозможно распределить по часу и сотруднику.'
+        ),
+    })
     base['charts'] = [
         _chart(
             'records_by_period',
@@ -1252,9 +1303,9 @@ async def _operations_payload(
             'line',
             [row['period'] for row in period_rows],
             [
-                {'label': 'Записи', 'data': [row['records'] for row in period_rows], 'format': NUMBER_FORMAT},
+                {'label': 'Доступные записи', 'data': [row['records'] for row in period_rows], 'format': NUMBER_FORMAT},
                 {'label': 'Завершено', 'data': [row['completed'] for row in period_rows], 'format': NUMBER_FORMAT},
-                {'label': 'Отменено', 'data': [row['cancelled'] for row in period_rows], 'format': NUMBER_FORMAT},
+                {'label': 'Неявки', 'data': [row['cancelled'] for row in period_rows], 'format': NUMBER_FORMAT},
             ],
         ),
         _chart(
@@ -1271,14 +1322,20 @@ async def _operations_payload(
             'Записи по мастерам',
             [
                 ('staff_name', 'Мастер', 'text'),
-                ('records', 'Записи', NUMBER_FORMAT),
+                ('records', 'Доступные записи', NUMBER_FORMAT),
                 ('completed', 'Завершено', NUMBER_FORMAT),
-                ('cancelled', 'Отменено', NUMBER_FORMAT),
+                ('cancelled', 'Неявки', NUMBER_FORMAT),
             ],
             staff_rows,
         )
     ]
-    base['raw'] = {'by_period': period_rows, 'by_hour': hour_rows, 'by_staff': staff_rows}
+    base['raw'] = {
+        'exact_aggregates': exact,
+        'local_available_aggregates': local_totals,
+        'by_period': period_rows,
+        'by_hour': hour_rows,
+        'by_staff': staff_rows,
+    }
     return base
 
 

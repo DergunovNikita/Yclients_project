@@ -21,7 +21,7 @@ VIEWS = [
             'service'::text                             AS source
         FROM financial_transactions ft
         JOIN appointments a ON a.id = ft.record_id
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
           AND ft.sold_item_type = 'service'
         UNION ALL
         SELECT
@@ -39,7 +39,7 @@ VIEWS = [
             COUNT(DISTINCT a.id)                        AS appointments_count,
             COUNT(DISTINCT a.client_id)                 AS unique_clients
         FROM appointments a
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
         GROUP BY a.date::date
     ),
     service_before_discount AS (
@@ -48,7 +48,7 @@ VIEWS = [
             COALESCE(SUM(t.first_cost * t.amount), 0)   AS revenue_before_discount
         FROM appointments a
         LEFT JOIN transactions t ON t.appointment_id = a.id
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
         GROUP BY a.date::date
     )
     SELECT
@@ -81,7 +81,7 @@ VIEWS = [
             'service'::text                             AS source
         FROM financial_transactions ft
         JOIN appointments a ON a.id = ft.record_id
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
           AND ft.sold_item_type = 'service'
         UNION ALL
         SELECT
@@ -124,6 +124,7 @@ VIEWS = [
         LEFT JOIN service_catalog svc
             ON  svc.company_id = a.company_id
             AND svc.service_id = t.service_id
+        WHERE a.attendance = 1
         GROUP BY a.company_id, t.service_id, COALESCE(NULLIF(t.service_title, ''), svc.title)::varchar
     ),
     paid AS (
@@ -133,7 +134,7 @@ VIEWS = [
             COALESCE(SUM(ft.amount), 0)                 AS total_revenue
         FROM financial_transactions ft
         JOIN appointments a ON a.id = ft.record_id
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
           AND ft.sold_item_type = 'service'
         GROUP BY a.company_id, ft.sold_item_id
     )
@@ -184,7 +185,7 @@ VIEWS = [
         LEFT JOIN financial_transactions ft
             ON  ft.record_id = a.id
             AND ft.sold_item_type = 'service'
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
         GROUP BY a.client_id
     ),
     goods_spent AS (
@@ -232,7 +233,7 @@ VIEWS = [
             'service'::text                             AS source
         FROM financial_transactions ft
         JOIN appointments a ON a.id = ft.record_id
-        WHERE a.attendance > 0
+        WHERE a.attendance = 1
           AND ft.sold_item_type = 'service'
         UNION ALL
         SELECT
@@ -265,13 +266,16 @@ VIEWS = [
     SELECT
         a.date                                          AS visit_date,
         COUNT(*)                                        AS total_records,
-        COUNT(*) FILTER (WHERE a.attendance > 0)        AS attended,
+        COUNT(*) FILTER (WHERE a.attendance = 1)        AS attended,
         COUNT(*) FILTER (WHERE a.attendance = -1)       AS no_show,
-        COUNT(*) FILTER (WHERE a.attendance = 0)        AS pending,
+        COUNT(*) FILTER (WHERE a.attendance IN (0, 2))  AS pending,
         ROUND(
-            100.0 * COUNT(*) FILTER (WHERE a.attendance > 0) / NULLIF(COUNT(*), 0),
+            100.0 * COUNT(*) FILTER (WHERE a.attendance = 1) / NULLIF(COUNT(*), 0),
             1
-        )                                               AS attendance_rate_pct
+        )                                               AS attendance_rate_pct,
+        COUNT(*)                                        AS available_records,
+        COUNT(*) FILTER (WHERE a.attendance = 2)        AS confirmed,
+        'local_available_records'::text                 AS data_scope
     FROM appointments a
     GROUP BY a.date
     ORDER BY a.date ASC
@@ -584,7 +588,8 @@ VIEWS = [
         cl.name                                         AS client_name,
         a.attendance,
         CASE
-            WHEN a.attendance > 0 THEN 'Пришел'
+            WHEN a.attendance = 1 THEN 'Пришел'
+            WHEN a.attendance = 2 THEN 'Подтвердил'
             WHEN a.attendance = 0 THEN 'Ожидается'
             WHEN a.attendance = -1 THEN 'Не пришел'
             ELSE 'Другое'
@@ -706,6 +711,88 @@ VIEWS = [
     LEFT JOIN clients cl ON cl.id = gt.client_id
     LEFT JOIN staff s ON s.id = gt.master_id
     ORDER BY gt.id ASC
+    """,
+
+    # ----------------------------------------------------------------
+    # 22. Компоненты общего среднего чека для Metabase.
+    # SUM(revenue) / COUNT(DISTINCT denominator_key) за выбранный период.
+    # ----------------------------------------------------------------
+    """
+    CREATE OR REPLACE VIEW v_average_check_components AS
+    WITH allowed_finance AS (
+        SELECT ft.*
+        FROM financial_transactions ft
+        LEFT JOIN account_catalog acc
+          ON acc.company_id = ft.company_id
+         AND acc.account_id = ft.account_id
+        WHERE ft.amount > 0
+          AND LOWER(COALESCE(acc.title, '')) NOT LIKE '%бонус%'
+          AND LOWER(COALESCE(acc.title, '')) NOT LIKE '%скид%'
+          AND LOWER(COALESCE(acc.title, '')) NOT LIKE '%лояльн%'
+          AND LOWER(COALESCE(acc.title, '')) NOT LIKE '%сертификат%'
+    ),
+    income AS (
+        SELECT
+            ft.company_id,
+            ft.date::date AS event_date,
+            CASE
+                WHEN ft.sold_item_type = 'service' THEN 'service_revenue'
+                WHEN ft.sold_item_type = 'goods_transaction' THEN 'goods_revenue'
+                WHEN ft.sold_item_type IN ('client_account', 'personal_account', 'account_replenishment')
+                  OR LOWER(COALESCE(ft.expense_title, '')) LIKE '%пополн%'
+                  OR LOWER(COALESCE(ft.expense_title, '')) LIKE '%личн%'
+                  OR LOWER(COALESCE(ft.expense_title, '')) LIKE '%депозит%'
+                THEN 'topup_revenue'
+                ELSE 'unclassified_income'
+            END AS component,
+            CASE
+                WHEN ft.sold_item_type IN ('service', 'goods_transaction')
+                  OR ft.sold_item_type IN ('client_account', 'personal_account', 'account_replenishment')
+                  OR LOWER(COALESCE(ft.expense_title, '')) LIKE '%пополн%'
+                  OR LOWER(COALESCE(ft.expense_title, '')) LIKE '%личн%'
+                  OR LOWER(COALESCE(ft.expense_title, '')) LIKE '%депозит%'
+                THEN ft.amount ELSE 0
+            END AS revenue,
+            NULL::text AS denominator_key,
+            ft.id AS source_id
+        FROM allowed_finance ft
+        LEFT JOIN appointments a ON a.id = ft.record_id
+        WHERE COALESCE(ft.sold_item_type, '') <> 'service' OR a.attendance = 1
+    ),
+    visit_denominator AS (
+        SELECT
+            a.company_id,
+            a.date::date AS event_date,
+            CASE WHEN a.client_id IS NULL
+                THEN 'appointment_without_client'
+                ELSE 'unique_client'
+            END AS component,
+            0::double precision AS revenue,
+            CASE WHEN a.client_id IS NULL
+                THEN 'appointment:' || a.company_id || ':' || a.id
+                ELSE 'client:' || a.client_id
+            END AS denominator_key,
+            a.id AS source_id
+        FROM appointments a
+        WHERE a.attendance = 1
+    ),
+    goods_denominator AS (
+        SELECT DISTINCT
+            gt.company_id,
+            gt.date::date AS event_date,
+            'goods_check'::text AS component,
+            0::double precision AS revenue,
+            'goods:' || gt.company_id || ':' || gt.document_id AS denominator_key,
+            gt.document_id AS source_id
+        FROM goods_transactions gt
+        WHERE gt.type_id = 1
+          AND gt.document_id IS NOT NULL
+    )
+    SELECT * FROM income
+    UNION ALL
+    SELECT * FROM visit_denominator
+    UNION ALL
+    SELECT * FROM goods_denominator
     """,
 ]
 
