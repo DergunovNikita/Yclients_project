@@ -76,6 +76,11 @@ ensure_portal_admin() {
 
 if [ -n "${PORTAL_ADMIN_PASSWORD:-}" ]; then
   ensure_portal_admin "${PORTAL_ADMIN_EMAIL:-}" "${PORTAL_ADMIN_NAME:-Portal Admin}"
+  if [ "${PORTAL_CREATE_DERGUNOV_ADMIN:-true}" = "true" ]; then
+    ensure_portal_admin \
+      "${PORTAL_DERGUNOV_ADMIN_EMAIL:-dergunovnt@yandex.ru}" \
+      "${PORTAL_DERGUNOV_ADMIN_NAME:-Nikita Super Admin}"
+  fi
   if [ -n "${PORTAL_EXTRA_ADMIN_EMAILS:-}" ]; then
     IFS=',' read -ra extra_admin_emails <<< "$PORTAL_EXTRA_ADMIN_EMAILS"
     for extra_admin_email in "${extra_admin_emails[@]}"; do
