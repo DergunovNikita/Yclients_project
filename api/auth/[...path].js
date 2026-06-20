@@ -6,7 +6,7 @@ function buildTargetUrl(req) {
   if (path && !path.startsWith('auth/')) {
     path = `auth/${path}`;
   }
-  const target = new URL(`/${path}`, vmOrigin());
+  const target = new URL(`/dashboard/${path}`, vmOrigin());
   target.search = incoming.search;
   return target;
 }

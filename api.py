@@ -111,6 +111,7 @@ if _cors_origins:
     )
 
 app.include_router(auth_router, prefix='/auth', tags=['auth'])
+app.include_router(auth_router, prefix='/dashboard/auth', tags=['auth'])
 app.include_router(dashboard_router, prefix='/dashboard', tags=['dashboard'])
 
 

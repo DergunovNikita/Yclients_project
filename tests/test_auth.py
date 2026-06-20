@@ -79,6 +79,26 @@ async def test_login_and_me(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dashboard_auth_alias_login(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        login = await client.post(
+            '/dashboard/auth/login',
+            json={'email': 'admin@example.com', 'password': 'Admin12345!'},
+        )
+        assert login.status_code == 200
+        assert login.json()['data']['user']['role'] == 'super_admin'
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
 async def test_branch_user_cannot_access_other_branch(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     token = create_access_token(2, 'manager')

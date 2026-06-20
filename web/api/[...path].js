@@ -11,7 +11,8 @@ function buildTargetUrl(req) {
     return null;
   }
 
-  const target = new URL(`/${path}`, vmOrigin());
+  const targetPath = path.startsWith('auth/') ? `dashboard/${path}` : path;
+  const target = new URL(`/${targetPath}`, vmOrigin());
   target.search = incoming.search;
   return target;
 }

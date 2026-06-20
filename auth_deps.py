@@ -23,6 +23,11 @@ OPEN_PATH_PREFIXES = (
     '/auth/verify-email',
     '/auth/forgot-password',
     '/auth/reset-password',
+    '/dashboard/auth/register',
+    '/dashboard/auth/login',
+    '/dashboard/auth/verify-email',
+    '/dashboard/auth/forgot-password',
+    '/dashboard/auth/reset-password',
 )
 
 
