@@ -278,6 +278,7 @@ async function requestJson(path, { method = 'GET', body = null } = {}) {
       response = await fetch(url, {
         method,
         headers: { ...headers(), 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json' },
         body: body === null ? undefined : JSON.stringify(body),
       });
     } catch (error) {

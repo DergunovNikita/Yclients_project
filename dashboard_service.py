@@ -1002,6 +1002,9 @@ async def fetch_summary(
     cur_opz_qty = await _opz_count_scope(
         db, start, end, company_id, staff_id, company_ids=appointment_company_ids
     )
+    cur = await _revenue_block(db, current_dr, company_id, staff_id)
+    prev = await _revenue_block(db, prev_dr, company_id, staff_id)
+    cur_opz_qty = await _opz_count_scope(db, start, end, company_id, staff_id)
     prev_opz_qty = await _opz_count_scope(
         db,
         prev_dr.start,
@@ -1017,6 +1020,9 @@ async def fetch_summary(
     prev_average_check = await _average_check_block(
         db, prev_dr, company_id, staff_id, company_ids=avg_company_ids
     )
+    )
+    cur_average_check = await _average_check_block(db, current_dr, company_id, staff_id)
+    prev_average_check = await _average_check_block(db, prev_dr, company_id, staff_id)
     for block, average_check in ((cur, cur_average_check), (prev, prev_average_check)):
         block['service_revenue'] = average_check['service_revenue']
         block['goods_revenue'] = average_check['goods_revenue']
@@ -1971,6 +1977,8 @@ async def _opz_count_scope(
 ) -> float:
     if company_ids is None:
         company_ids = await _appointment_company_ids(db, company_id, staff_id)
+) -> float:
+    company_ids = await _appointment_company_ids(db, company_id, staff_id)
     total = 0.0
     for item_company_id in company_ids:
         total += await _opz_count(db, start, end, item_company_id, staff_id=staff_id)
