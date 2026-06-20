@@ -24,12 +24,11 @@ local_rev="$(git rev-parse HEAD)"
 remote_rev="$(git rev-parse "origin/$BRANCH")"
 
 if [ "$local_rev" = "$remote_rev" ]; then
-  echo "Already up to date: $local_rev"
-  exit 0
+  echo "Repository already at $local_rev; rebuilding and restarting services"
+else
+  echo "Deploying $local_rev -> $remote_rev"
+  git reset --hard "origin/$BRANCH"
 fi
-
-echo "Deploying $local_rev -> $remote_rev"
-git reset --hard "origin/$BRANCH"
 
 APP_REVISION="$remote_rev" docker compose build api worker migrate
 docker compose run --rm migrate
