@@ -39,7 +39,7 @@ from auth_service import (
     verify_password,
 )
 from database import get_async_db
-from models import Company, PortalUser, Staff
+from models import Company, PortalUser, Staff, YClientsCredential
 from portal_account_provision import provision_all_unlinked_staff, provision_staff_account
 from portal_staff_sync import (
     deactivate_portal_user_staff,
@@ -47,6 +47,15 @@ from portal_staff_sync import (
     portal_user_syncs_to_staff,
     sync_all_portal_users_staff,
     sync_portal_user_staff,
+)
+from yclients_api import YClientsAPI
+from yclients_credentials import (
+    CredentialsConfigError,
+    decrypted_credential,
+    list_credential_payloads,
+    new_credential,
+    set_credential_companies,
+    update_credential_secrets,
 )
 
 router = APIRouter()
@@ -92,6 +101,7 @@ class DistributeCredentialsRequest(BaseModel):
 
 
 class AdminUserUpdateRequest(BaseModel):
+    email: EmailStr | None = None
     role: str | None = None
     is_active: bool | None = None
     full_name: str | None = None
@@ -110,6 +120,30 @@ class AdminStaffUpdateRequest(BaseModel):
     full_name: str = Field(min_length=1, max_length=255)
     company_id: int
     position: str | None = Field(default=None, max_length=255)
+
+
+class YClientsCredentialCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    partner_token: str = Field(min_length=1, max_length=4096)
+    login: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=255)
+    is_active: bool = True
+    company_ids: list[int] = Field(default_factory=list)
+
+
+class YClientsCredentialUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    partner_token: str | None = Field(default=None, min_length=1, max_length=4096)
+    login: str | None = Field(default=None, min_length=1, max_length=255)
+    password: str | None = Field(default=None, min_length=1, max_length=255)
+    is_active: bool | None = None
+    company_ids: list[int] | None = None
+
+
+class YClientsCredentialTestRequest(BaseModel):
+    partner_token: str | None = Field(default=None, min_length=1, max_length=4096)
+    login: str | None = Field(default=None, min_length=1, max_length=255)
+    password: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 def _user_payload(
@@ -301,6 +335,26 @@ async def _validate_company_ids_exist(db: AsyncSession, company_ids: list[int]) 
         raise HTTPException(status_code=400, detail=f'Unknown company ids: {sorted(missing)}')
 
 
+def _credentials_config_error(exc: CredentialsConfigError) -> HTTPException:
+    return HTTPException(status_code=500, detail=str(exc))
+
+
+async def _load_credential(db: AsyncSession, credential_id: int) -> YClientsCredential:
+    credential = (
+        await db.execute(select(YClientsCredential).where(YClientsCredential.id == credential_id))
+    ).scalar_one_or_none()
+    if credential is None:
+        raise HTTPException(status_code=404, detail='YClients credentials not found')
+    return credential
+
+
+def _test_yclients_credentials(partner_token: str, login: str, password: str) -> dict:
+    api = YClientsAPI(partner_token, login, password)
+    if not api.authenticate():
+        raise HTTPException(status_code=400, detail='YClients authentication failed')
+    return {'success': True, 'message': 'YClients credentials are valid'}
+
+
 @router.get('/admin/meta')
 async def admin_meta(
     actor: PortalUser = Depends(require_roles(*USER_MANAGER_ROLES)),
@@ -442,6 +496,18 @@ async def admin_update_user(
         user.is_active = body.is_active
     if body.full_name is not None:
         user.full_name = body.full_name
+    if body.email is not None:
+        email = normalize_email(body.email)
+        if not email:
+            raise HTTPException(status_code=400, detail='Email must not be empty')
+        if email != user.email:
+            existing = (
+                await db.execute(select(PortalUser).where(PortalUser.email == email))
+            ).scalar_one_or_none()
+            if existing is not None:
+                raise HTTPException(status_code=409, detail='Email already registered')
+            user.email = email
+            user.email_verified_at = datetime.utcnow()
 
     if body.company_ids is not None:
         await _validate_company_ids_exist(db, body.company_ids)
@@ -451,6 +517,108 @@ async def admin_update_user(
     await sync_portal_user_staff(db, user, branch_ids)
     await db.commit()
     return {'success': True, 'data': _user_payload(user, branch_ids, manageable=None)}
+
+
+@router.get('/admin/yclients-credentials')
+async def admin_list_yclients_credentials(
+    _actor: PortalUser = Depends(require_roles('super_admin')),
+    db: AsyncSession = Depends(get_async_db),
+):
+    return {'success': True, 'data': await list_credential_payloads(db)}
+
+
+@router.post('/admin/yclients-credentials')
+async def admin_create_yclients_credentials(
+    body: YClientsCredentialCreateRequest,
+    _actor: PortalUser = Depends(require_roles('super_admin')),
+    db: AsyncSession = Depends(get_async_db),
+):
+    try:
+        credential = new_credential(
+            body.title,
+            body.partner_token,
+            body.login,
+            body.password,
+            body.is_active,
+        )
+    except CredentialsConfigError as exc:
+        raise _credentials_config_error(exc) from exc
+
+    db.add(credential)
+    await db.flush()
+    try:
+        await set_credential_companies(db, credential.id, body.company_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    payloads = await list_credential_payloads(db)
+    created_payload = next((item for item in payloads if item['id'] == credential.id), None)
+    return {'success': True, 'data': created_payload}
+
+
+@router.patch('/admin/yclients-credentials/{credential_id}')
+async def admin_update_yclients_credentials(
+    credential_id: int,
+    body: YClientsCredentialUpdateRequest,
+    _actor: PortalUser = Depends(require_roles('super_admin')),
+    db: AsyncSession = Depends(get_async_db),
+):
+    credential = await _load_credential(db, credential_id)
+    try:
+        update_credential_secrets(
+            credential,
+            title=body.title,
+            partner_token=body.partner_token,
+            login=body.login,
+            password=body.password,
+            is_active=body.is_active,
+        )
+    except CredentialsConfigError as exc:
+        raise _credentials_config_error(exc) from exc
+
+    if body.company_ids is not None:
+        try:
+            await set_credential_companies(db, credential.id, body.company_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return {'success': True, 'data': await list_credential_payloads(db)}
+
+
+@router.delete('/admin/yclients-credentials/{credential_id}')
+async def admin_delete_yclients_credentials(
+    credential_id: int,
+    _actor: PortalUser = Depends(require_roles('super_admin')),
+    db: AsyncSession = Depends(get_async_db),
+):
+    credential = await _load_credential(db, credential_id)
+    await db.delete(credential)
+    await db.commit()
+    return {'success': True, 'message': 'YClients credentials deleted'}
+
+
+@router.post('/admin/yclients-credentials/{credential_id}/test')
+async def admin_test_saved_yclients_credentials(
+    credential_id: int,
+    _actor: PortalUser = Depends(require_roles('super_admin')),
+    db: AsyncSession = Depends(get_async_db),
+):
+    credential = await _load_credential(db, credential_id)
+    try:
+        value = decrypted_credential(credential)
+    except CredentialsConfigError as exc:
+        raise _credentials_config_error(exc) from exc
+    return _test_yclients_credentials(value.partner_token, value.login, value.password)
+
+
+@router.post('/admin/yclients-credentials/test')
+async def admin_test_yclients_credentials_payload(
+    body: YClientsCredentialTestRequest,
+    _actor: PortalUser = Depends(require_roles('super_admin')),
+):
+    if not (body.partner_token and body.login and body.password):
+        raise HTTPException(status_code=400, detail='partner_token, login and password are required')
+    return _test_yclients_credentials(body.partner_token, body.login, body.password)
 
 
 @router.delete('/admin/users/{user_id}')

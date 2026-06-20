@@ -4,6 +4,8 @@
   "framework": null,
   "installCommand": "npm install",
   "rewrites": [
+    { "source": "/auth/:path*", "destination": "/api/auth/:path*" },
+    { "source": "/dashboard/:path*", "destination": "/api/dashboard/:path*" },
     { "source": "/reports", "destination": "/index.html" },
     { "source": "/reports/:path*", "destination": "/index.html" }
   ]

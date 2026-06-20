@@ -24,6 +24,8 @@ from models import (
     PortalEmailToken,
     PortalUser,
     PortalUserBranch,
+    YClientsCredential,
+    YClientsCredentialCompany,
     Service,
     ServiceCatalog,
     ServiceKpiAssignment,
@@ -107,6 +109,8 @@ async def async_session() -> AsyncGenerator[AsyncSession, None]:
             PortalUser.__table__,
             PortalUserBranch.__table__,
             PortalEmailToken.__table__,
+            YClientsCredential.__table__,
+            YClientsCredentialCompany.__table__,
         ])
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:

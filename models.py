@@ -742,6 +742,41 @@ class PortalEmailToken(Base):
     created_at = Column(DateTime, nullable=False)
 
 
+class YClientsCredential(Base):
+    """Encrypted YClients API credentials managed by portal super admins."""
+
+    __tablename__ = 'yclients_credentials'
+    __table_args__ = {'schema': SYSTEM_SCHEMA}
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(255), nullable=False)
+    partner_token_encrypted = Column(Text, nullable=False)
+    login_encrypted = Column(Text, nullable=False)
+    password_encrypted = Column(Text, nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+
+class YClientsCredentialCompany(Base):
+    """Assigns one YClients credentials set to one company/branch."""
+
+    __tablename__ = 'yclients_credential_companies'
+    __table_args__ = (
+        Index('ix_yclients_credential_companies_credential_id', 'credential_id'),
+        Index('ix_yclients_credential_companies_company_id', 'company_id', unique=True),
+        {'schema': SYSTEM_SCHEMA},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    credential_id = Column(
+        Integer,
+        ForeignKey(f'{SYSTEM_SCHEMA}.yclients_credentials.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    company_id = Column(Integer, ForeignKey('companies.id', ondelete='CASCADE'), nullable=False)
+
+
 class SyncState(Base):
     __tablename__ = 'sync_state'
     __table_args__ = {'schema': SYSTEM_SCHEMA}

@@ -230,13 +230,32 @@ async def _appointment_company_ids(
 
 
 async def _fetch_appointments_breakdown(
-    company_ids: list[int],
-    start: date,
-    end: date,
-    staff_id: Optional[int],
+    db_or_company_ids: AsyncSession | list[int],
+    company_ids_or_start: list[int] | date,
+    start_or_end: date,
+    end_or_staff_id: date | Optional[int],
+    staff_id: Optional[int] = None,
 ) -> dict[str, Any]:
+    if isinstance(db_or_company_ids, list):
+        db = None
+        company_ids = db_or_company_ids
+        start = company_ids_or_start
+        end = start_or_end
+        staff_id = end_or_staff_id
+    else:
+        db = db_or_company_ids
+        company_ids = company_ids_or_start
+        start = start_or_end
+        end = end_or_staff_id
+
     try:
-        counts = await yclients_analytics.fetch_record_stats(company_ids, start, end, staff_id)
+        if db is None:
+            counts = await yclients_analytics.fetch_record_stats(company_ids, start, end, staff_id)
+        else:
+            try:
+                counts = await yclients_analytics.fetch_record_stats(company_ids, start, end, staff_id, db=db)
+            except TypeError:
+                counts = await yclients_analytics.fetch_record_stats(company_ids, start, end, staff_id)
     except yclients_analytics.YClientsAnalyticsError:
         return _unavailable_appointments_breakdown()
     return _ready_appointments_breakdown(counts)
@@ -250,7 +269,7 @@ async def fetch_appointments_breakdown(
     staff_id: Optional[int] = None,
 ) -> dict[str, Any]:
     company_ids = await _appointment_company_ids(db, company_id, staff_id)
-    return await _fetch_appointments_breakdown(company_ids, start, end, staff_id)
+    return await _fetch_appointments_breakdown(db, company_ids, start, end, staff_id)
 
 
 def _is_waitlist_staff_name(value: Any) -> bool:
@@ -986,10 +1005,11 @@ async def fetch_summary(
         allowed_set = {int(item) for item in allowed_company_ids}
         appointment_company_ids = [item for item in appointment_company_ids if item in allowed_set]
     appointments_task = asyncio.create_task(
-        _fetch_appointments_breakdown(appointment_company_ids, start, end, staff_id)
+        _fetch_appointments_breakdown(db, appointment_company_ids, start, end, staff_id)
     )
     previous_appointments_task = asyncio.create_task(
         _fetch_appointments_breakdown(
+            db,
             appointment_company_ids,
             prev_dr.start,
             prev_dr.end,

@@ -60,13 +60,31 @@ for attempt in $(seq 1 "$health_retries"); do
   sleep "$health_interval_seconds"
 done
 
-if [ -n "${PORTAL_ADMIN_EMAIL:-}" ] && [ -n "${PORTAL_ADMIN_PASSWORD:-}" ]; then
-  echo "Ensuring portal super_admin (${PORTAL_ADMIN_EMAIL})..."
+ensure_portal_admin() {
+  local email="$1"
+  local full_name="$2"
+  if [ -z "$email" ]; then
+    return 0
+  fi
+
+  echo "Ensuring portal super_admin (${email})..."
   docker compose run --rm --no-deps --entrypoint python api create_portal_admin.py \
-    --email "$PORTAL_ADMIN_EMAIL" \
+    --email "$email" \
     --password "$PORTAL_ADMIN_PASSWORD" \
-    --full-name "${PORTAL_ADMIN_NAME:-Portal Admin}" \
+    --full-name "$full_name" \
     --assign-all-branches
+}
+
+if [ -n "${PORTAL_ADMIN_PASSWORD:-}" ]; then
+  ensure_portal_admin "${PORTAL_ADMIN_EMAIL:-}" "${PORTAL_ADMIN_NAME:-Portal Admin}"
+  if [ -n "${PORTAL_EXTRA_ADMIN_EMAILS:-}" ]; then
+    IFS=',' read -ra extra_admin_emails <<< "$PORTAL_EXTRA_ADMIN_EMAILS"
+    for extra_admin_email in "${extra_admin_emails[@]}"; do
+      extra_admin_email="${extra_admin_email#"${extra_admin_email%%[![:space:]]*}"}"
+      extra_admin_email="${extra_admin_email%"${extra_admin_email##*[![:space:]]}"}"
+      ensure_portal_admin "$extra_admin_email" "${PORTAL_EXTRA_ADMIN_NAME:-Portal Admin}"
+    done
+  fi
 fi
 
 echo "Deploy completed: $remote_rev"

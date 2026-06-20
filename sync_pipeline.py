@@ -13,6 +13,7 @@ from config import (
     YCLIENTS_RETRY_TOTAL, YCLIENTS_RETRY_BACKOFF,
 )
 from yclients_api import YClientsAPI
+from yclients_credentials import load_credentials_for_companies_sync
 from database import init_database
 from models import (
     Group, Company,
@@ -1793,6 +1794,35 @@ def execute_sync(mode: str = 'incremental', end_date: date | None = None):
 
         companies_count = len(target_companies)
         print(f"✓ Найдено филиалов для синхронизации: {companies_count}")
+        credentials_by_company, _fallback_credentials = load_credentials_for_companies_sync(
+            db,
+            [int(company.id) for company in target_companies],
+        )
+        api_cache: dict[int | str, YClientsAPI] = {'env': api}
+
+        def api_for_company(company: Company) -> YClientsAPI | None:
+            credential = credentials_by_company.get(int(company.id))
+            if credential is None or credential.is_fallback:
+                return api
+            cache_key = int(credential.id) if credential.id is not None else 'env'
+            cached = api_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            credential_api = YClientsAPI(
+                credential.partner_token,
+                credential.login,
+                credential.password,
+                request_delay=YCLIENTS_REQUEST_DELAY,
+                timeout=YCLIENTS_TIMEOUT,
+                retry_total=YCLIENTS_RETRY_TOTAL,
+                retry_backoff=YCLIENTS_RETRY_BACKOFF,
+            )
+            print(f"Авторизация credentials: {credential.title}")
+            if not credential_api.authenticate():
+                print(f"! Не удалось авторизовать credentials для филиала {format_company_label(company)}")
+                return None
+            api_cache[cache_key] = credential_api
+            return credential_api
 
         company_steps = [
             ("Категории услуг", sync_service_categories, {}),
@@ -1836,6 +1866,15 @@ def execute_sync(mode: str = 'incremental', end_date: date | None = None):
         for company in target_companies:
             company_id = str(company.id)
             company_label = format_company_label(company)
+            company_api = api_for_company(company)
+            if company_api is None:
+                step_results.append({
+                    'name': f"Credentials auth [{company_label}]",
+                    'key': 'credentials_auth',
+                    'success': False,
+                    'elapsed': 0.0,
+                })
+                continue
 
             print(f"\n{'─' * 60}")
             print(f"Филиал: {company_label}")
@@ -1855,7 +1894,7 @@ def execute_sync(mode: str = 'incremental', end_date: date | None = None):
                     step_results,
                     f"{name} [{company_label}]",
                     fn,
-                    api,
+                    company_api,
                     db,
                     company_id,
                     step_key=name,
@@ -1868,7 +1907,7 @@ def execute_sync(mode: str = 'incremental', end_date: date | None = None):
                     step_results,
                     f"{name} [{company_label}]",
                     fn,
-                    api,
+                    company_api,
                     db,
                     company_id,
                     step_key=name,

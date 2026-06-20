@@ -7,6 +7,7 @@ from datetime import date
 from typing import Any, Iterable
 
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import (
     LOGIN,
@@ -14,6 +15,7 @@ from config import (
     PASSWORD,
     YCLIENTS_TIMEOUT,
 )
+from yclients_credentials import YClientsCredentialValue, load_credentials_for_companies_async
 
 YCLIENTS_BASE_URL = 'https://api.yclients.com/api/v1'
 MAX_CONCURRENT_ANALYTICS_REQUESTS = 4
@@ -23,11 +25,18 @@ class YClientsAnalyticsError(RuntimeError):
     """Raised when exact appointment analytics cannot be loaded or validated."""
 
 
-def _required_credentials() -> tuple[str, str, str]:
+def _required_credentials() -> YClientsCredentialValue:
     credentials = (PARTNER_TOKEN.strip(), LOGIN.strip(), PASSWORD.strip())
     if not all(credentials):
         raise YClientsAnalyticsError('YClients credentials are not configured')
-    return credentials
+    return YClientsCredentialValue(
+        id=None,
+        title='Environment credentials',
+        partner_token=credentials[0],
+        login=credentials[1],
+        password=credentials[2],
+        is_fallback=True,
+    )
 
 
 def _coerce_count(record_stats: dict[str, Any], field: str) -> int:
@@ -58,16 +67,15 @@ def _parse_record_stats(payload: Any) -> dict[str, int]:
     }
 
 
-async def _authenticate(client: httpx.AsyncClient) -> str:
-    partner_token, login, password = _required_credentials()
+async def _authenticate(client: httpx.AsyncClient, credentials: YClientsCredentialValue) -> str:
     response = await client.post(
         f'{YCLIENTS_BASE_URL}/auth',
         headers={
-            'Authorization': f'Bearer {partner_token}',
+            'Authorization': f'Bearer {credentials.partner_token}',
             'Accept': 'application/vnd.yclients.v2+json',
             'Content-Type': 'application/json',
         },
-        json={'login': login, 'password': password},
+        json={'login': credentials.login, 'password': credentials.password},
     )
     response.raise_for_status()
     payload = response.json()
@@ -80,36 +88,63 @@ async def _authenticate(client: httpx.AsyncClient) -> str:
     return str(user_token)
 
 
+def _group_company_credentials(
+    credential_by_company: dict[int, YClientsCredentialValue],
+    company_ids: list[int],
+    fallback: YClientsCredentialValue | None,
+) -> dict[int | None, tuple[YClientsCredentialValue, list[int]]]:
+    groups: dict[int | None, tuple[YClientsCredentialValue, list[int]]] = {}
+    for company_id in company_ids:
+        credentials = credential_by_company.get(company_id) or fallback
+        if credentials is None:
+            raise YClientsAnalyticsError('YClients credentials are not configured')
+        key = credentials.id if credentials.id is not None else None
+        if key not in groups:
+            groups[key] = (credentials, [])
+        groups[key][1].append(company_id)
+    return groups
+
+
 async def fetch_record_stats(
     company_ids: Iterable[int],
     start: date,
     end: date,
     staff_id: int | None = None,
+    db: AsyncSession | None = None,
 ) -> dict[str, int]:
     """Load exact record_stats and sum them across the requested companies."""
     normalized_company_ids = list(dict.fromkeys(int(company_id) for company_id in company_ids))
     if not normalized_company_ids:
         return {'completed': 0, 'incomplete': 0, 'cancelled': 0, 'total': 0}
 
+    if db is not None:
+        credential_by_company, fallback = await load_credentials_for_companies_async(db, normalized_company_ids)
+    else:
+        fallback = _required_credentials()
+        credential_by_company = {company_id: fallback for company_id in normalized_company_ids}
+    credential_groups = _group_company_credentials(credential_by_company, normalized_company_ids, fallback)
+
     timeout = httpx.Timeout(max(1.0, float(YCLIENTS_TIMEOUT)))
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            user_token = await _authenticate(client)
-            partner_token, _, _ = _required_credentials()
-            headers = {
-                'Authorization': f'Bearer {partner_token}, User {user_token}',
-                'Accept': 'application/vnd.yclients.v2+json',
-                'Content-Type': 'application/json',
-            }
             semaphore = asyncio.Semaphore(MAX_CONCURRENT_ANALYTICS_REQUESTS)
 
-            async def load_company(company_id: int) -> dict[str, int]:
+            async def load_company(
+                company_id: int,
+                credentials: YClientsCredentialValue,
+                user_token: str,
+            ) -> dict[str, int]:
                 params: dict[str, Any] = {
                     'date_from': start.isoformat(),
                     'date_to': end.isoformat(),
                 }
                 if staff_id is not None:
                     params['staff_id'] = int(staff_id)
+                headers = {
+                    'Authorization': f'Bearer {credentials.partner_token}, User {user_token}',
+                    'Accept': 'application/vnd.yclients.v2+json',
+                    'Content-Type': 'application/json',
+                }
                 async with semaphore:
                     response = await client.get(
                         f'{YCLIENTS_BASE_URL}/company/{company_id}/analytics/overall/',
@@ -119,9 +154,14 @@ async def fetch_record_stats(
                 response.raise_for_status()
                 return _parse_record_stats(response.json())
 
-            rows = await asyncio.gather(
-                *(load_company(company_id) for company_id in normalized_company_ids)
-            )
+            rows = []
+            for credentials, grouped_company_ids in credential_groups.values():
+                user_token = await _authenticate(client, credentials)
+                rows.extend(
+                    await asyncio.gather(
+                        *(load_company(company_id, credentials, user_token) for company_id in grouped_company_ids)
+                    )
+                )
     except (httpx.HTTPError, ValueError, TypeError) as exc:
         raise YClientsAnalyticsError('Unable to load YClients appointment analytics') from exc
 

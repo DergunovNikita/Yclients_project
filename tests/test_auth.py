@@ -164,6 +164,62 @@ async def test_super_admin_creates_manager(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_super_admin_updates_user_email_login(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    token = create_access_token(1, 'super_admin')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        updated = await client.patch(
+            '/auth/admin/users/2',
+            headers={'Authorization': f'Bearer {token}'},
+            json={'email': 'New.Manager@Example.COM', 'full_name': 'Manager Renamed'},
+        )
+        assert updated.status_code == 200
+        assert updated.json()['data']['email'] == 'new.manager@example.com'
+        assert updated.json()['data']['email_verified'] is True
+
+        old_login = await client.post(
+            '/auth/login',
+            json={'email': 'manager@example.com', 'password': 'Manager12345!'},
+        )
+        assert old_login.status_code == 401
+
+        new_login = await client.post(
+            '/auth/login',
+            json={'email': 'new.manager@example.com', 'password': 'Manager12345!'},
+        )
+        assert new_login.status_code == 200
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_super_admin_update_user_email_rejects_duplicate(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    token = create_access_token(1, 'super_admin')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        updated = await client.patch(
+            '/auth/admin/users/2',
+            headers={'Authorization': f'Bearer {token}'},
+            json={'email': 'branch@example.com'},
+        )
+        assert updated.status_code == 409
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
 async def test_branch_admin_creates_viewer_in_own_branch(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     token = create_access_token(3, 'branch_admin')
@@ -309,6 +365,96 @@ async def test_manager_cannot_create_or_update_users(auth_db, monkeypatch):
         )
         assert self_row is not None
         assert self_row['manageable'] is False
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_super_admin_manages_yclients_credentials(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
+    token = create_access_token(1, 'super_admin')
+
+    class FakeYClientsAPI:
+        def __init__(self, partner_token, login, password):
+            self.partner_token = partner_token
+            self.login = login
+            self.password = password
+
+        def authenticate(self):
+            return self.partner_token == 'partner' and self.login == 'login' and self.password == 'password'
+
+    monkeypatch.setattr('auth_routes.YClientsAPI', FakeYClientsAPI)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        created = await client.post(
+            '/auth/admin/yclients-credentials',
+            headers={'Authorization': f'Bearer {token}'},
+            json={
+                'title': 'Main credential',
+                'partner_token': 'partner',
+                'login': 'login',
+                'password': 'password',
+                'company_ids': [1],
+            },
+        )
+        assert created.status_code == 200
+        data = created.json()['data']
+        assert data['title'] == 'Main credential'
+        assert data['company_ids'] == [1]
+        assert data['has_partner_token'] is True
+        assert data['has_login'] is True
+        assert data['has_password'] is True
+        assert 'partner_token' not in data
+        assert 'password' not in data
+
+        checked = await client.post(
+            f"/auth/admin/yclients-credentials/{data['id']}/test",
+            headers={'Authorization': f'Bearer {token}'},
+        )
+        assert checked.status_code == 200
+
+        updated = await client.patch(
+            f"/auth/admin/yclients-credentials/{data['id']}",
+            headers={'Authorization': f'Bearer {token}'},
+            json={'title': 'Updated credential', 'company_ids': [2], 'is_active': True},
+        )
+        assert updated.status_code == 200
+        updated_row = next(item for item in updated.json()['data'] if item['id'] == data['id'])
+        assert updated_row['title'] == 'Updated credential'
+        assert updated_row['company_ids'] == [2]
+
+        checked_after_update = await client.post(
+            f"/auth/admin/yclients-credentials/{data['id']}/test",
+            headers={'Authorization': f'Bearer {token}'},
+        )
+        assert checked_after_update.status_code == 200
+
+        listed = await client.get('/auth/admin/yclients-credentials', headers={'Authorization': f'Bearer {token}'})
+        assert listed.status_code == 200
+        assert listed.json()['data'][0]['company_ids'] == [2]
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_branch_admin_cannot_manage_yclients_credentials(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    token = create_access_token(3, 'branch_admin')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        listed = await client.get('/auth/admin/yclients-credentials', headers={'Authorization': f'Bearer {token}'})
+        assert listed.status_code == 403
 
     app.dependency_overrides.clear()
 

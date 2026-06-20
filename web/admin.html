@@ -85,6 +85,42 @@
         </table>
       </div>
     </section>
+
+    <section class="admin-card" id="yclients-credentials-section" hidden>
+      <div class="admin-card__header admin-card__header--stacked">
+        <div>
+          <h2>YClients credentials</h2>
+          <p class="admin-card__hint">Секреты сохраняются в зашифрованном виде. После сохранения токены и пароли не отображаются.</p>
+        </div>
+      </div>
+      <div class="alert error" id="yclients-credentials-error" hidden></div>
+      <form class="admin-toolbar admin-toolbar--create" id="yclients-credentials-form">
+        <label>Название<input type="text" id="yclients-credential-title" required autocomplete="off" placeholder="Основная сеть" /></label>
+        <label>Partner token<input type="password" id="yclients-credential-partner-token" autocomplete="off" /></label>
+        <label>YClients login<input type="text" id="yclients-credential-login" autocomplete="off" /></label>
+        <label>YClients password<input type="password" id="yclients-credential-password" autocomplete="off" /></label>
+        <label>Филиалы<select id="yclients-credential-branches" multiple></select></label>
+        <label class="admin-checkbox"><input type="checkbox" id="yclients-credential-active" checked /> Активен</label>
+        <button type="button" class="btn btn--ghost" id="test-yclients-credential-draft">Проверить</button>
+        <button type="button" class="btn btn--ghost" id="cancel-yclients-credential-edit" hidden>Отмена</button>
+        <button type="submit" class="btn btn--primary" id="save-yclients-credential">Сохранить</button>
+      </form>
+      <div class="admin-table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Название</th>
+              <th>Статус</th>
+              <th>Филиалы</th>
+              <th>Секреты</th>
+              <th>Действия</th>
+            </tr>
+          </thead>
+          <tbody id="yclients-credentials-body"></tbody>
+        </table>
+      </div>
+    </section>
   </main>
 
   <div class="admin-modal" id="credentials-modal" hidden>
@@ -136,7 +172,7 @@
       </header>
       <div class="alert error" id="edit-error" hidden></div>
       <form class="admin-toolbar admin-toolbar--create" id="edit-user-form">
-        <label>Email<input type="email" id="edit-email" readonly /></label>
+        <label>Email<input type="email" id="edit-email" required autocomplete="off" /></label>
         <label>Имя<input type="text" id="edit-name" autocomplete="off" placeholder="Иван Иванов" /></label>
         <label>Роль<select id="edit-role-select"></select></label>
         <label>Филиалы<select id="edit-branch-select" multiple></select></label>

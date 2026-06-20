@@ -26,6 +26,19 @@ const provisionAccountsBtn = document.getElementById('provision-accounts');
 const initialPasswordsSection = document.getElementById('initial-passwords-section');
 const initialPasswordsBody = document.getElementById('initial-passwords-body');
 const initialPasswordsSearch = document.getElementById('initial-passwords-search');
+const yclientsCredentialsSection = document.getElementById('yclients-credentials-section');
+const yclientsCredentialsBody = document.getElementById('yclients-credentials-body');
+const yclientsCredentialsError = document.getElementById('yclients-credentials-error');
+const yclientsCredentialsForm = document.getElementById('yclients-credentials-form');
+const yclientsCredentialTitle = document.getElementById('yclients-credential-title');
+const yclientsCredentialPartnerToken = document.getElementById('yclients-credential-partner-token');
+const yclientsCredentialLogin = document.getElementById('yclients-credential-login');
+const yclientsCredentialPassword = document.getElementById('yclients-credential-password');
+const yclientsCredentialBranchSelect = document.getElementById('yclients-credential-branches');
+const yclientsCredentialActive = document.getElementById('yclients-credential-active');
+const testYclientsCredentialDraftBtn = document.getElementById('test-yclients-credential-draft');
+const cancelYclientsCredentialEditBtn = document.getElementById('cancel-yclients-credential-edit');
+const saveYclientsCredentialBtn = document.getElementById('save-yclients-credential');
 const createForm = document.getElementById('create-user-form');
 const editForm = document.getElementById('edit-user-form');
 const editStaffForm = document.getElementById('edit-staff-form');
@@ -52,6 +65,7 @@ const createBranchDropdown = enhanceSelect(createBranchSelect, { placeholder: '�
 const editRoleDropdown = enhanceSelect(editRoleSelect, { placeholder: 'Выберите роль' });
 const editBranchDropdown = enhanceSelect(editBranchSelect, { placeholder: 'Выберите филиалы' });
 const editStaffBranchDropdown = enhanceSelect(editStaffBranchSelect, { placeholder: 'Выберите филиал' });
+const yclientsCredentialBranchDropdown = enhanceSelect(yclientsCredentialBranchSelect, { placeholder: 'Выберите филиалы' });
 
 const ROLE_LABELS = {
   viewer: 'viewer — только просмотр',
@@ -72,6 +86,8 @@ let editingUserId = null;
 let editingStaffId = null;
 let pendingDelete = null;
 let initialPasswords = [];
+let yclientsCredentials = [];
+let editingYclientsCredentialId = null;
 let currentCredentialsItems = [];
 
 function hideAlerts() {
@@ -165,6 +181,10 @@ function canManageUsers() {
   return ADMIN_ROLES.has(currentUserRole || adminMeta?.role);
 }
 
+function canManageYclientsCredentials() {
+  return (currentUserRole || adminMeta?.role) === 'super_admin';
+}
+
 function applyAdminMeta() {
   const canManage = canManageUsers();
   const roles = canManage ? adminMeta?.assignable_roles || [] : [];
@@ -180,6 +200,10 @@ function applyAdminMeta() {
   if (provisionAccountsBtn) {
     provisionAccountsBtn.hidden = !canManage;
   }
+  if (yclientsCredentialsSection) {
+    yclientsCredentialsSection.hidden = !canManageYclientsCredentials();
+  }
+  renderBranchOptions(yclientsCredentialBranchSelect, yclientsCredentialBranchDropdown);
   if (users.length) {
     renderUsers();
   }
@@ -579,6 +603,91 @@ async function loadInitialPasswords() {
   renderInitialPasswordsTable();
 }
 
+function hideYclientsCredentialsError() {
+  if (yclientsCredentialsError) {
+    yclientsCredentialsError.hidden = true;
+  }
+}
+
+function showYclientsCredentialsError(message) {
+  if (yclientsCredentialsError) {
+    yclientsCredentialsError.textContent = message;
+    yclientsCredentialsError.hidden = false;
+  }
+}
+
+function renderYclientsCredentialsTable() {
+  if (!canManageYclientsCredentials()) {
+    yclientsCredentialsSection.hidden = true;
+    return;
+  }
+  yclientsCredentialsSection.hidden = false;
+  yclientsCredentialsBody.innerHTML = yclientsCredentials.length
+    ? yclientsCredentials
+        .map((credential) => {
+          const secretStatus = [
+            credential.has_partner_token ? 'token' : null,
+            credential.has_login ? 'login' : null,
+            credential.has_password ? 'password' : null,
+          ].filter(Boolean).join(', ');
+          return `
+      <tr>
+        <td>${credential.id}</td>
+        <td>${escapeHtml(credential.title)}</td>
+        <td><span class="status-dot ${credential.is_active ? 'ok' : ''}">${credential.is_active ? 'активен' : 'выключен'}</span></td>
+        <td>${branchTitles(credential.company_ids)}</td>
+        <td>${escapeHtml(secretStatus || '—')}</td>
+        <td class="admin-table__cell-actions">
+          <button type="button" class="btn btn--ghost btn--small" data-edit-yclients-credential="${credential.id}">Редактировать</button>
+          <button type="button" class="btn btn--ghost btn--small" data-test-yclients-credential="${credential.id}">Проверить</button>
+          <button type="button" class="btn btn--ghost btn--small" data-delete-yclients-credential="${credential.id}">Удалить</button>
+        </td>
+      </tr>`;
+        })
+        .join('')
+    : '<tr><td colspan="6" class="admin-table__empty">Credentials ещё не добавлены</td></tr>';
+}
+
+async function loadYclientsCredentials() {
+  if (!canManageYclientsCredentials()) return;
+  const payload = await authFetch('/auth/admin/yclients-credentials');
+  yclientsCredentials = payload.data || [];
+  renderYclientsCredentialsTable();
+}
+
+function resetYclientsCredentialForm() {
+  editingYclientsCredentialId = null;
+  yclientsCredentialsForm?.reset();
+  if (yclientsCredentialActive) {
+    yclientsCredentialActive.checked = true;
+  }
+  renderBranchOptions(yclientsCredentialBranchSelect, yclientsCredentialBranchDropdown);
+  if (cancelYclientsCredentialEditBtn) {
+    cancelYclientsCredentialEditBtn.hidden = true;
+  }
+  if (saveYclientsCredentialBtn) {
+    saveYclientsCredentialBtn.textContent = 'Сохранить';
+  }
+}
+
+function editYclientsCredential(credentialId) {
+  const credential = yclientsCredentials.find((item) => item.id === credentialId);
+  if (!credential) return;
+  editingYclientsCredentialId = credentialId;
+  hideYclientsCredentialsError();
+  yclientsCredentialTitle.value = credential.title || '';
+  yclientsCredentialPartnerToken.value = '';
+  yclientsCredentialLogin.value = '';
+  yclientsCredentialPassword.value = '';
+  yclientsCredentialActive.checked = Boolean(credential.is_active);
+  renderBranchOptions(yclientsCredentialBranchSelect, yclientsCredentialBranchDropdown, credential.company_ids || []);
+  if (cancelYclientsCredentialEditBtn) {
+    cancelYclientsCredentialEditBtn.hidden = false;
+  }
+  saveYclientsCredentialBtn.textContent = 'Обновить';
+  yclientsCredentialTitle.focus();
+}
+
 async function loadUsers() {
   const payload = await authFetch('/auth/admin/users');
   users = payload.data || [];
@@ -781,6 +890,7 @@ editForm.addEventListener('submit', async (event) => {
     await authFetch(`/auth/admin/users/${editingUserId}`, {
       method: 'PATCH',
       body: JSON.stringify({
+        email: editEmail.value.trim(),
         full_name: editName.value.trim() || null,
         role: editRoleSelect.value,
         company_ids,
@@ -794,6 +904,111 @@ editForm.addEventListener('submit', async (event) => {
   } finally {
     saveBtn.disabled = false;
     saveBtn.classList.remove('is-loading');
+  }
+});
+
+async function testDraftYclientsCredential() {
+  hideYclientsCredentialsError();
+  testYclientsCredentialDraftBtn.disabled = true;
+  testYclientsCredentialDraftBtn.classList.add('is-loading');
+  try {
+    await authFetch('/auth/admin/yclients-credentials/test', {
+      method: 'POST',
+      body: JSON.stringify({
+        partner_token: yclientsCredentialPartnerToken.value.trim(),
+        login: yclientsCredentialLogin.value.trim(),
+        password: yclientsCredentialPassword.value,
+      }),
+    });
+    showSuccess('YClients credentials корректны');
+  } catch (error) {
+    showYclientsCredentialsError(error.message);
+  } finally {
+    testYclientsCredentialDraftBtn.disabled = false;
+    testYclientsCredentialDraftBtn.classList.remove('is-loading');
+  }
+}
+
+async function saveYclientsCredential(event) {
+  event.preventDefault();
+  hideYclientsCredentialsError();
+  saveYclientsCredentialBtn.disabled = true;
+  saveYclientsCredentialBtn.classList.add('is-loading');
+  try {
+    const company_ids = Array.from(yclientsCredentialBranchSelect.selectedOptions)
+      .map((option) => Number(option.value));
+    const body = {
+      title: yclientsCredentialTitle.value.trim(),
+      is_active: yclientsCredentialActive.checked,
+      company_ids,
+    };
+    if (yclientsCredentialPartnerToken.value.trim()) {
+      body.partner_token = yclientsCredentialPartnerToken.value.trim();
+    }
+    if (yclientsCredentialLogin.value.trim()) {
+      body.login = yclientsCredentialLogin.value.trim();
+    }
+    if (yclientsCredentialPassword.value) {
+      body.password = yclientsCredentialPassword.value;
+    }
+    if (!editingYclientsCredentialId && (!body.partner_token || !body.login || !body.password)) {
+      throw new Error('Для нового credentials нужны partner token, login и password');
+    }
+    const editedCredentialId = editingYclientsCredentialId;
+    const url = editedCredentialId
+      ? `/auth/admin/yclients-credentials/${editedCredentialId}`
+      : '/auth/admin/yclients-credentials';
+    await authFetch(url, {
+      method: editedCredentialId ? 'PATCH' : 'POST',
+      body: JSON.stringify(body),
+    });
+    resetYclientsCredentialForm();
+    showSuccess(editedCredentialId ? 'YClients credentials обновлены' : 'YClients credentials сохранены');
+    await loadYclientsCredentials();
+  } catch (error) {
+    showYclientsCredentialsError(error.message);
+  } finally {
+    saveYclientsCredentialBtn.disabled = false;
+    saveYclientsCredentialBtn.classList.remove('is-loading');
+  }
+}
+
+yclientsCredentialsBody?.addEventListener('click', async (event) => {
+  const editBtn = event.target.closest('[data-edit-yclients-credential]');
+  const testBtn = event.target.closest('[data-test-yclients-credential]');
+  const deleteBtn = event.target.closest('[data-delete-yclients-credential]');
+  if (editBtn) {
+    editYclientsCredential(Number(editBtn.dataset.editYclientsCredential));
+    return;
+  }
+  if (testBtn) {
+    hideYclientsCredentialsError();
+    testBtn.disabled = true;
+    try {
+      await authFetch(`/auth/admin/yclients-credentials/${testBtn.dataset.testYclientsCredential}/test`, {
+        method: 'POST',
+      });
+      showSuccess('YClients credentials корректны');
+    } catch (error) {
+      showYclientsCredentialsError(error.message);
+    } finally {
+      testBtn.disabled = false;
+    }
+  }
+  if (deleteBtn) {
+    hideYclientsCredentialsError();
+    deleteBtn.disabled = true;
+    try {
+      await authFetch(`/auth/admin/yclients-credentials/${deleteBtn.dataset.deleteYclientsCredential}`, {
+        method: 'DELETE',
+      });
+      showSuccess('YClients credentials удалены');
+      await loadYclientsCredentials();
+    } catch (error) {
+      showYclientsCredentialsError(error.message);
+    } finally {
+      deleteBtn.disabled = false;
+    }
   }
 });
 
@@ -830,6 +1045,9 @@ createForm.addEventListener('submit', async (event) => {
 
 initialPasswordsSearch?.addEventListener('input', renderInitialPasswordsTable);
 usersSearch?.addEventListener('input', renderUsers);
+yclientsCredentialsForm?.addEventListener('submit', saveYclientsCredential);
+testYclientsCredentialDraftBtn?.addEventListener('click', testDraftYclientsCredential);
+cancelYclientsCredentialEditBtn?.addEventListener('click', resetYclientsCredentialForm);
 document.getElementById('open-create-user').addEventListener('click', openCreateModal);
 provisionAccountsBtn?.addEventListener('click', provisionAllAccounts);
 document.getElementById('close-create-user').addEventListener('click', closeCreateModal);
@@ -877,7 +1095,8 @@ async function init() {
       return;
     }
     await loadAdminMeta();
-    await Promise.all([loadBranches(), loadUsers(), loadInitialPasswords()]);
+    await loadBranches();
+    await Promise.all([loadUsers(), loadInitialPasswords(), loadYclientsCredentials()]);
   } catch (error) {
     if (!getToken()) {
       logout();
