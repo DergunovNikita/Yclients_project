@@ -7,7 +7,7 @@ def main():
     if not database.test_connection():
         return 1
     run_migrations(build_database_url(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD))
-    print("✓ Миграции применены")
+    print("Migrations applied OK")
     return 0
 
 

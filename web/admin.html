@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Управление пользователями</title>
+  <link rel="stylesheet" href="/src/auth.css" />
+</head>
+<body class="admin-page">
+  <header class="admin-topbar">
+    <div class="admin-topbar__brand">
+      <span class="admin-topbar__brand-mark">Y</span>
+      <span>YClients Portal</span>
+    </div>
+    <div class="admin-topbar__nav">
+      <button type="button" class="btn btn--ghost" id="back-profile">К личному кабинету</button>
+    </div>
+  </header>
+
+  <main class="admin-shell">
+    <header class="admin-header">
+      <div>
+        <span class="auth-card__eyebrow" id="admin-role-label">Admin</span>
+        <h1>Пользователи платформы</h1>
+        <p class="auth-subhead">Список пользователей вашего ранга и ниже. В фильтре «Работник» на дашборде появляются пользователи с назначенным филиалом (кроме super_admin).</p>
+      </div>
+    </header>
+
+    <div class="alert error" id="error" hidden></div>
+    <div class="alert success" id="success" hidden></div>
+
+    <section class="admin-card">
+      <div class="admin-card__header">
+        <label class="admin-search admin-search--header">
+          <span class="visually-hidden">Поиск пользователя</span>
+          <input type="search" id="users-search" placeholder="Поиск пользователя…" autocomplete="off" />
+        </label>
+        <div class="admin-card__header-actions">
+          <button type="button" class="btn btn--ghost" id="provision-accounts" hidden>Создать аккаунты для всех без входа</button>
+          <button type="button" class="btn btn--primary" id="open-create-user">Создать пользователя</button>
+        </div>
+      </div>
+      <div class="admin-table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Email</th>
+              <th>Имя</th>
+              <th>Роль</th>
+              <th>Подтверждение</th>
+              <th>Филиалы</th>
+              <th>Действия</th>
+            </tr>
+          </thead>
+          <tbody id="users-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="admin-card" id="initial-passwords-section" hidden>
+      <div class="admin-card__header admin-card__header--stacked">
+        <div>
+          <h2>Первичные пароли</h2>
+          <p class="admin-card__hint">Логин — email пользователя. Пароль исчезает из списка после смены пользователем.</p>
+        </div>
+        <label class="admin-search">
+          <span class="admin-search__label">Поиск</span>
+          <input type="search" id="initial-passwords-search" placeholder="Email, имя, филиал, роль…" autocomplete="off" />
+        </label>
+      </div>
+      <div class="admin-table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Логин (email)</th>
+              <th>Имя</th>
+              <th>Роль</th>
+              <th>Филиалы</th>
+              <th>Пароль</th>
+            </tr>
+          </thead>
+          <tbody id="initial-passwords-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div class="admin-modal" id="credentials-modal" hidden>
+    <div class="admin-modal__backdrop" data-close-modal="credentials"></div>
+    <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="credentials-title">
+      <header class="admin-modal__header">
+        <h2 id="credentials-title">Данные для входа</h2>
+        <button type="button" class="admin-modal__close" id="close-credentials" aria-label="Закрыть">×</button>
+      </header>
+      <div class="alert error" id="credentials-error" hidden></div>
+      <div class="alert success" id="credentials-success" hidden></div>
+      <div class="admin-modal__message" id="credentials-message"></div>
+      <div class="admin-modal__actions admin-modal__actions--center">
+        <button type="button" class="btn btn--ghost" id="save-credentials-excel">Сохранить Excel</button>
+        <button type="button" class="btn btn--ghost" id="distribute-credentials">Разослать</button>
+        <button type="button" class="btn btn--primary" id="close-credentials-btn">Готово</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="admin-modal" id="create-user-modal" hidden>
+    <div class="admin-modal__backdrop" data-close-modal="create"></div>
+    <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="create-user-title">
+      <header class="admin-modal__header">
+        <h2 id="create-user-title">Новый пользователь</h2>
+        <button type="button" class="admin-modal__close" id="close-create-user" aria-label="Закрыть">×</button>
+      </header>
+      <div class="alert error" id="create-error" hidden></div>
+      <form class="admin-toolbar admin-toolbar--create" id="create-user-form">
+        <label>Email<input type="email" id="create-email" required autocomplete="off" placeholder="user@company.com" /></label>
+        <label>Пароль<input type="password" id="create-password" required minlength="8" autocomplete="new-password" placeholder="минимум 8 символов" /></label>
+        <label>Имя<input type="text" id="create-name" autocomplete="off" placeholder="Иван Иванов" /></label>
+        <label>Роль<select id="create-role-select"></select></label>
+        <label>Филиалы<select id="create-branch-select" multiple></select></label>
+        <div class="admin-modal__actions">
+          <button type="button" class="btn btn--ghost" id="cancel-create-user">Отмена</button>
+          <button type="submit" class="btn btn--primary" id="create-user">Создать</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="admin-modal" id="edit-user-modal" hidden>
+    <div class="admin-modal__backdrop" data-close-modal="edit"></div>
+    <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="edit-user-title">
+      <header class="admin-modal__header">
+        <h2 id="edit-user-title">Редактирование пользователя</h2>
+        <button type="button" class="admin-modal__close" id="close-edit-user" aria-label="Закрыть">×</button>
+      </header>
+      <div class="alert error" id="edit-error" hidden></div>
+      <form class="admin-toolbar admin-toolbar--create" id="edit-user-form">
+        <label>Email<input type="email" id="edit-email" readonly /></label>
+        <label>Имя<input type="text" id="edit-name" autocomplete="off" placeholder="Иван Иванов" /></label>
+        <label>Роль<select id="edit-role-select"></select></label>
+        <label>Филиалы<select id="edit-branch-select" multiple></select></label>
+        <div class="admin-modal__actions">
+          <button type="button" class="btn btn--ghost" id="cancel-edit-user">Отмена</button>
+          <button type="submit" class="btn btn--primary" id="save-user">Сохранить</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="admin-modal" id="edit-staff-modal" hidden>
+    <div class="admin-modal__backdrop" data-close-modal="edit-staff"></div>
+    <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="edit-staff-title">
+      <header class="admin-modal__header">
+        <h2 id="edit-staff-title">Редактирование работника</h2>
+        <button type="button" class="admin-modal__close" id="close-edit-staff" aria-label="Закрыть">×</button>
+      </header>
+      <div class="alert error" id="edit-staff-error" hidden></div>
+      <form class="admin-toolbar admin-toolbar--create" id="edit-staff-form">
+        <label>Имя<input type="text" id="edit-staff-name" required autocomplete="off" placeholder="Иван Иванов" /></label>
+        <label>Должность<input type="text" id="edit-staff-position" autocomplete="off" placeholder="Мастер" /></label>
+        <label>Филиал<select id="edit-staff-branch-select"></select></label>
+        <div class="admin-modal__actions">
+          <button type="button" class="btn btn--ghost" id="cancel-edit-staff">Отмена</button>
+          <button type="submit" class="btn btn--primary" id="save-staff">Сохранить</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="admin-modal" id="delete-confirm-modal" hidden>
+    <div class="admin-modal__backdrop" data-close-modal="delete"></div>
+    <div class="admin-modal__dialog admin-modal__dialog--confirm" role="dialog" aria-modal="true" aria-labelledby="delete-confirm-title">
+      <header class="admin-modal__header">
+        <h2 id="delete-confirm-title">Подтверждение удаления</h2>
+        <button type="button" class="admin-modal__close" id="close-delete-confirm" aria-label="Закрыть">×</button>
+      </header>
+      <div class="admin-modal__message" id="delete-confirm-message"></div>
+      <div class="admin-modal__actions admin-modal__actions--center">
+        <button type="button" class="btn btn--ghost" id="cancel-delete-confirm">Отмена</button>
+        <button type="button" class="btn btn--danger admin-modal__confirm-delete" id="confirm-delete">Удалить</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/admin.js"></script>
+</body>
+</html>

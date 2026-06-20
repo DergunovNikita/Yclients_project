@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Личный кабинет — YClients Portal</title>
+  <link rel="stylesheet" href="/src/auth.css" />
+</head>
+<body class="admin-page profile-page">
+  <header class="admin-topbar">
+    <div class="admin-topbar__brand">
+      <span class="admin-topbar__brand-mark">Y</span>
+      <span>YClients Portal</span>
+    </div>
+    <div class="admin-topbar__nav">
+      <button type="button" class="btn btn--ghost" id="back-dashboard">К дашборду</button>
+    </div>
+  </header>
+
+  <main class="admin-shell profile-shell">
+    <section class="profile-card">
+      <div class="profile-card__top">
+        <div class="profile-card__avatar" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="12" cy="8" r="4"></circle>
+            <path d="M5 20c0-3.3 3.1-5 7-5s7 1.7 7 5"></path>
+          </svg>
+        </div>
+        <button type="button" class="btn btn--danger btn--sm profile-card__logout" id="logout">Выйти из аккаунта</button>
+      </div>
+      <span class="auth-card__eyebrow">Личный кабинет</span>
+      <div class="profile-card__identity">
+        <div class="profile-card__identity-text">
+          <h1 id="profile-name">Здравствуйте!</h1>
+          <p class="auth-subhead" id="profile-email"></p>
+          <p class="profile-card__role" id="profile-role"></p>
+        </div>
+        <button type="button" class="btn btn--ghost btn--sm profile-card__change-password" id="open-change-password">Сменить пароль</button>
+      </div>
+
+      <div class="profile-card__actions">
+        <a href="/admin.html" class="btn btn--ghost" id="manage-users" hidden>Редактирование пользователей</a>
+      </div>
+    </section>
+  </main>
+
+  <div class="admin-modal" id="change-password-modal" hidden>
+    <div class="admin-modal__backdrop" data-close-modal="change-password"></div>
+    <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="change-password-title">
+      <header class="admin-modal__header">
+        <h2 id="change-password-title">Смена пароля</h2>
+        <button type="button" class="admin-modal__close" id="close-change-password" aria-label="Закрыть">×</button>
+      </header>
+      <div class="alert error" id="password-error" hidden></div>
+      <div class="alert success" id="password-success" hidden></div>
+      <form id="change-password-form" class="admin-toolbar admin-toolbar--create profile-password__form">
+        <label>Текущий пароль<input type="password" id="current-password" required minlength="1" autocomplete="current-password" /></label>
+        <label>Новый пароль<input type="password" id="new-password" required minlength="8" autocomplete="new-password" placeholder="минимум 8 символов" /></label>
+        <label>Повторите новый пароль<input type="password" id="confirm-password" required minlength="8" autocomplete="new-password" /></label>
+        <div class="admin-modal__actions">
+          <button type="button" class="btn btn--ghost" id="cancel-change-password">Отмена</button>
+          <button type="submit" class="btn btn--primary" id="change-password-btn">Сменить пароль</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <script type="module" src="/src/profile.js"></script>
+</body>
+</html>

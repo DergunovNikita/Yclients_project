@@ -102,3 +102,30 @@ SERVICES_SHEET_NAME = os.getenv('SERVICES_SHEET_NAME', 'services')
 # ============================================================================
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
+
+# ============================================================================
+# Portal auth (personal cabinets)
+# ============================================================================
+AUTH_JWT_SECRET = os.getenv('AUTH_JWT_SECRET', 'change_me_local_jwt_secret')
+AUTH_JWT_EXPIRE_MINUTES = _get_int('AUTH_JWT_EXPIRE_MINUTES', 60 * 24 * 7)
+AUTH_REQUIRE_LOGIN = _get_bool('AUTH_REQUIRE_LOGIN', not bool(API_KEY))
+AUTH_EMAIL_VERIFY_REQUIRED = _get_bool('AUTH_EMAIL_VERIFY_REQUIRED', True)
+APP_PUBLIC_URL = os.getenv('APP_PUBLIC_URL', 'http://127.0.0.1:5173')
+SMTP_HOST = os.getenv('SMTP_HOST', '').strip()
+SMTP_PORT = _get_int('SMTP_PORT', 587)
+SMTP_USER = os.getenv('SMTP_USER', '').strip()
+SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
+SMTP_FROM = os.getenv('SMTP_FROM', '').strip()
+SMTP_USE_TLS = _get_bool('SMTP_USE_TLS', True)
+SMTP_USE_SSL = _get_bool('SMTP_USE_SSL', SMTP_PORT == 465)
+
+
+def smtp_is_configured() -> bool:
+    return bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD)
+
+
+_console_email_env = os.getenv('AUTH_CONSOLE_EMAIL')
+if _console_email_env is None:
+    AUTH_CONSOLE_EMAIL = not smtp_is_configured()
+else:
+    AUTH_CONSOLE_EMAIL = _get_bool('AUTH_CONSOLE_EMAIL', True)

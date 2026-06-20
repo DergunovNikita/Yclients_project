@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Подтверждение email</title>
+  <link rel="stylesheet" href="/src/auth.css" />
+</head>
+<body class="auth-page auth-page--verify">
+  <div class="auth-layout">
+    <aside class="auth-brand">
+      <div class="auth-brand__logo">
+        <span class="auth-brand__mark">Y</span>
+        <span>YClients Portal</span>
+      </div>
+      <div class="auth-brand__content">
+        <h2>Подтверждение email</h2>
+        <p>Это нужно один раз, чтобы защитить ваш аккаунт и включить вход в систему.</p>
+      </div>
+    </aside>
+
+    <main class="auth-panel">
+      <section class="auth-card">
+        <div class="auth-mobile-logo">
+          <span class="auth-brand__mark">Y</span>
+          <span>YClients Portal</span>
+        </div>
+        <span class="auth-card__eyebrow">Почта</span>
+        <h1>Подтверждаем email</h1>
+        <p class="auth-subhead">Пожалуйста, подождите — проверяем ссылку из письма…</p>
+
+        <div class="alert error" id="error" hidden></div>
+        <div class="alert success" id="success" hidden></div>
+
+        <p class="auth-links">
+          <a href="/login.html">Перейти ко входу</a>
+        </p>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/src/verify-email.js"></script>
+</body>
+</html>

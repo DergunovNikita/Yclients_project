@@ -14,6 +14,8 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_deps import get_dashboard_access
+from auth_scope import AccessContext, query_scope
 from config import SYNC_API_TOKEN
 from dashboard_service import (
     fetch_branches,
@@ -118,6 +120,11 @@ def _require_sync_token(x_sync_token: str | None) -> None:
         raise HTTPException(status_code=401, detail='Invalid sync token')
 
 
+def _require_sync_access(ctx: AccessContext) -> None:
+    if ctx.user_id is not None and ctx.role != 'super_admin':
+        raise HTTPException(status_code=403, detail='Sync operations require super_admin role')
+
+
 async def _validate_dashboard_scope(
     db: AsyncSession,
     company_id: int | None,
@@ -141,27 +148,54 @@ async def _validate_dashboard_scope(
 
 
 @router.get('/branches')
-async def dashboard_branches(db: AsyncSession = Depends(get_async_db)):
-    """Companies available as salon branches (filtered when system.portal_branches is populated)."""
-    return {'success': True, 'data': await fetch_branches(db)}
+async def dashboard_branches(
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    if ctx.full_access:
+        branch_ids, force_allowed = None, False
+    else:
+        branch_ids, force_allowed = ctx.company_ids or [], True
+    return {
+        'success': True,
+        'data': await fetch_branches(db, branch_ids, force_allowed=force_allowed),
+    }
 
 
 @router.get('/staff')
 async def dashboard_staff(
     company_id: int | None = Query(None, description='Optional YClients company (salon) id'),
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    """Active staff available for dashboard filters."""
-    return {'success': True, 'data': await fetch_staff(db, company_id)}
+    scope = query_scope(ctx, company_id)
+    return {
+        'success': True,
+        'data': await fetch_staff(
+            db,
+            scope['company_id'],
+            allowed_company_ids=scope['branch_ids'],
+            force_allowed=scope['force_allowed'],
+        ),
+    }
 
 
 @router.get('/staff_directory.csv')
 async def dashboard_staff_directory_csv(
     include_fired: bool = Query(False, description='Include fired/stale staff when true'),
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    """CSV staff directory for Google Sheets IMPORTDATA."""
-    rows = await fetch_staff_directory(db, include_fired)
+    if ctx.user_id is not None and ctx.role not in {'super_admin', 'branch_admin'}:
+        raise HTTPException(status_code=403, detail='Staff directory export requires admin role')
+
+    branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
+    rows = await fetch_staff_directory(
+        db,
+        include_fired,
+        allowed_company_ids=branch_ids,
+        force_allowed=force_allowed,
+    )
     columns = [
         'company_id',
         'company_title',
@@ -336,8 +370,10 @@ async def dashboard_report_data(
 
 
 @router.get('/widget/sync_status')
-async def dashboard_widget_sync_status(db: AsyncSession = Depends(get_async_db)):
-    """Read-only sync + queue snapshot for dashboard UX (API key only, no sync token)."""
+async def dashboard_widget_sync_status(
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
     sync_payload = await asyncio.to_thread(get_sync_status)
     queue = await SyncJobService().async_get_status_payload(db)
     return {'success': True, 'data': {'sync': sync_payload, 'queue': queue}}
@@ -350,9 +386,21 @@ async def dashboard_widget_summary(
     company_id: int | None = Query(None, description='Optional YClients company (salon) id'),
     staff_id: int | None = Query(None, description='Optional active staff id'),
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
-    return {'success': True, 'data': await fetch_summary(db, start, end, company_id, staff_id)}
+    scope = query_scope(ctx, company_id)
+    return {
+        'success': True,
+        'data': await fetch_summary(
+            db,
+            start,
+            end,
+            scope['company_id'],
+            staff_id,
+            allowed_company_ids=scope['allowed_company_ids'],
+        ),
+    }
 
 
 @router.get('/widget/revenue_daily')
@@ -362,9 +410,21 @@ async def dashboard_widget_revenue_daily(
     company_id: int | None = Query(None),
     staff_id: int | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
-    return {'success': True, 'data': await fetch_revenue_daily(db, start, end, company_id, staff_id)}
+    scope = query_scope(ctx, company_id)
+    return {
+        'success': True,
+        'data': await fetch_revenue_daily(
+            db,
+            start,
+            end,
+            scope['company_id'],
+            staff_id,
+            allowed_company_ids=scope['allowed_company_ids'],
+        ),
+    }
 
 
 @router.get('/widget/top_services')
@@ -375,9 +435,22 @@ async def dashboard_widget_top_services(
     staff_id: int | None = Query(None),
     limit: int = Query(10, ge=1, le=50),
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
-    return {'success': True, 'data': await fetch_top_services(db, start, end, company_id, limit, staff_id)}
+    scope = query_scope(ctx, company_id)
+    return {
+        'success': True,
+        'data': await fetch_top_services(
+            db,
+            start,
+            end,
+            scope['company_id'],
+            limit,
+            staff_id,
+            allowed_company_ids=scope['allowed_company_ids'],
+        ),
+    }
 
 
 @router.get('/widget/extra_services')
@@ -388,9 +461,22 @@ async def dashboard_widget_extra_services(
     staff_id: int | None = Query(None),
     limit: int | None = Query(None, ge=1, le=1000),
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
-    return {'success': True, 'data': await fetch_extra_services(db, start, end, company_id, limit, staff_id)}
+    scope = query_scope(ctx, company_id)
+    return {
+        'success': True,
+        'data': await fetch_extra_services(
+            db,
+            start,
+            end,
+            scope['company_id'],
+            limit,
+            staff_id,
+            allowed_company_ids=scope['allowed_company_ids'],
+        ),
+    }
 
 
 @router.get('/widget/plan_fact')
@@ -400,9 +486,23 @@ async def dashboard_widget_plan_fact(
     company_id: int | None = Query(None),
     staff_id: int | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
-    return {'success': True, 'data': await fetch_plan_fact(db, start, end, company_id, staff_id)}
+    scope = query_scope(ctx, company_id)
+    branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
+    return {
+        'success': True,
+        'data': await fetch_plan_fact(
+            db,
+            start,
+            end,
+            scope['company_id'],
+            staff_id,
+            allowed_company_ids=branch_ids,
+            force_allowed=force_allowed,
+        ),
+    }
 
 
 @router.get('/plan/settings')
@@ -475,8 +575,10 @@ async def dashboard_plan_reviews_fact_save(
 async def dashboard_plan_sync(
     x_sync_token: str | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
     _require_sync_token(x_sync_token)
+    _require_sync_access(ctx)
     return {'success': True, 'data': await import_plan_sheet_from_config(db)}
 
 
@@ -487,13 +589,44 @@ async def dashboard_bundle(
     company_id: int | None = Query(None),
     staff_id: int | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    """Single round-trip: summary + daily revenue + service breakdowns (sequential server-side)."""
     start, end = _parse_range(start_date, end_date)
-    summary = await fetch_summary(db, start, end, company_id, staff_id)
-    daily = await fetch_revenue_daily(db, start, end, company_id, staff_id)
-    services = await fetch_top_services(db, start, end, company_id, 10, staff_id)
-    extra_services = await fetch_extra_services(db, start, end, company_id, None, staff_id)
+    scope = query_scope(ctx, company_id)
+    summary = await fetch_summary(
+        db,
+        start,
+        end,
+        scope['company_id'],
+        staff_id,
+        allowed_company_ids=scope['allowed_company_ids'],
+    )
+    daily = await fetch_revenue_daily(
+        db,
+        start,
+        end,
+        scope['company_id'],
+        staff_id,
+        allowed_company_ids=scope['allowed_company_ids'],
+    )
+    services = await fetch_top_services(
+        db,
+        start,
+        end,
+        scope['company_id'],
+        10,
+        staff_id,
+        allowed_company_ids=scope['allowed_company_ids'],
+    )
+    extra_services = await fetch_extra_services(
+        db,
+        start,
+        end,
+        scope['company_id'],
+        None,
+        staff_id,
+        allowed_company_ids=scope['allowed_company_ids'],
+    )
     return {
         'success': True,
         'data': {

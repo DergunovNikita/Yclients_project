@@ -3,7 +3,8 @@ import { fileURLToPath } from 'node:url';
 
 import { defineConfig, loadEnv } from 'vite';
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const rootDir = fileURLToPath(new URL('.', import.meta.url));
+const repoRoot = resolve(dirname(rootDir), '..');
 
 export default defineConfig(({ mode }) => {
   const rootEnv = loadEnv(mode, repoRoot, '');
@@ -19,6 +20,21 @@ export default defineConfig(({ mode }) => {
   };
 
   return {
+    appType: 'mpa',
+    build: {
+      rollupOptions: {
+        input: {
+          main: resolve(rootDir, 'index.html'),
+          login: resolve(rootDir, 'login.html'),
+          register: resolve(rootDir, 'register.html'),
+          forgot: resolve(rootDir, 'forgot-password.html'),
+          reset: resolve(rootDir, 'reset-password.html'),
+          verify: resolve(rootDir, 'verify-email.html'),
+          profile: resolve(rootDir, 'profile.html'),
+          admin: resolve(rootDir, 'admin.html'),
+        },
+      },
+    },
     server: {
       port: 5173,
       proxy: {
@@ -26,6 +42,7 @@ export default defineConfig(({ mode }) => {
           ...apiProxy,
           rewrite: (path) => path.replace(/^\/api\/?/, '/'),
         },
+        '/auth': apiProxy,
         '/dashboard': apiProxy,
       },
     },

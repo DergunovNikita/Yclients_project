@@ -181,6 +181,7 @@ class Staff(Base):
     bookable = Column(Boolean, default=True)
     fired = Column(Integer, nullable=False, default=0, index=True)
     user_id = Column(Integer, index=True)
+    portal_user_id = Column(Integer, index=True)
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
 
     company = relationship("Company", back_populates="staff")
@@ -687,6 +688,58 @@ class PortalBranch(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), nullable=False)
     company_id = Column(Integer, ForeignKey('companies.id'), nullable=False)
+
+
+PORTAL_ROLES = ('super_admin', 'branch_admin', 'manager', 'viewer')
+
+
+class PortalUser(Base):
+    """Product portal user account (login + role-based access)."""
+
+    __tablename__ = 'portal_users'
+    __table_args__ = {'schema': SYSTEM_SCHEMA}
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(String(255), nullable=False, unique=True)
+    password_hash = Column(String(255), nullable=False)
+    full_name = Column(String(255))
+    role = Column(String(32), nullable=False, default='viewer', index=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    email_verified_at = Column(DateTime)
+    initial_password = Column(String(128))
+    password_changed_at = Column(DateTime)
+    created_at = Column(DateTime, nullable=False)
+    last_login_at = Column(DateTime)
+
+
+class PortalUserBranch(Base):
+    """Branch (company) access granted to a portal user."""
+
+    __tablename__ = 'portal_user_branches'
+    __table_args__ = (
+        Index('ix_portal_user_branches_user_id', 'user_id'),
+        Index('ix_portal_user_branches_company_id', 'company_id'),
+        {'schema': SYSTEM_SCHEMA},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_users.id', ondelete='CASCADE'), nullable=False)
+    company_id = Column(Integer, ForeignKey('companies.id', ondelete='CASCADE'), nullable=False)
+
+
+class PortalEmailToken(Base):
+    """One-time tokens for email verification and password reset."""
+
+    __tablename__ = 'portal_email_tokens'
+    __table_args__ = {'schema': SYSTEM_SCHEMA}
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_users.id', ondelete='CASCADE'), nullable=False, index=True)
+    token_hash = Column(String(64), nullable=False, unique=True)
+    purpose = Column(String(16), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime)
+    created_at = Column(DateTime, nullable=False)
 
 
 class SyncState(Base):

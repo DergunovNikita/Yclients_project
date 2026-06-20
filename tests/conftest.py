@@ -21,6 +21,9 @@ from models import (
     PlanBranchSetting,
     PlanMetric,
     PlanStaffInput,
+    PortalEmailToken,
+    PortalUser,
+    PortalUserBranch,
     Service,
     ServiceCatalog,
     ServiceKpiAssignment,
@@ -81,11 +84,14 @@ PUBLIC_TABLES = [
 def isolate_api_auth(monkeypatch):
     """Keep tests independent from local .env API tokens."""
     import api
+    import auth_deps
     import dashboard_routes
     import dashboard_service
 
     monkeypatch.setattr(api, 'API_KEY', '')
     monkeypatch.setattr(api, 'SYNC_API_TOKEN', '')
+    monkeypatch.setattr(auth_deps, 'API_KEY', '')
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
     monkeypatch.setattr(dashboard_routes, 'SYNC_API_TOKEN', '')
     monkeypatch.setattr(dashboard_service.yclients_analytics, 'PARTNER_TOKEN', '')
     monkeypatch.setattr(dashboard_service.yclients_analytics, 'LOGIN', '')
@@ -96,7 +102,12 @@ def isolate_api_auth(monkeypatch):
 async def async_session() -> AsyncGenerator[AsyncSession, None]:
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all, tables=PUBLIC_TABLES)
+        await conn.execute(__import__('sqlalchemy').text("ATTACH DATABASE ':memory:' AS system"))
+        await conn.run_sync(Base.metadata.create_all, tables=PUBLIC_TABLES + [
+            PortalUser.__table__,
+            PortalUserBranch.__table__,
+            PortalEmailToken.__table__,
+        ])
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         yield session

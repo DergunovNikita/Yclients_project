@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Вход — YClients Portal</title>
+  <link rel="stylesheet" href="/src/auth.css" />
+</head>
+<body class="auth-page auth-page--login">
+  <div class="auth-layout">
+    <aside class="auth-brand">
+      <div class="auth-brand__logo">
+        <span class="auth-brand__mark">Y</span>
+        <span>YClients Portal</span>
+      </div>
+      <div class="auth-brand__content">
+        <h2>Аналитика сети в одном кабинете</h2>
+        <p>Выручка, план/факт и метрики филиалов — с доступом только к вашим точкам.</p>
+      </div>
+      <ul class="auth-brand__features">
+        <li>Роли и права по филиалам</li>
+        <li>Безопасный вход по email</li>
+        <li>Единый дашборд для всей сети</li>
+      </ul>
+    </aside>
+
+    <main class="auth-panel">
+      <section class="auth-card">
+        <div class="auth-mobile-logo">
+          <span class="auth-brand__mark">Y</span>
+          <span>YClients Portal</span>
+        </div>
+        <span class="auth-card__eyebrow">Личный кабинет</span>
+        <h1>Вход</h1>
+        <p class="auth-subhead">Введите email и пароль, чтобы открыть дашборд.</p>
+
+        <div class="alert error" id="error" hidden></div>
+
+        <form class="auth-form" id="auth-form">
+          <div class="field">
+            <label for="email">Email</label>
+            <input type="email" id="email" required autocomplete="username" placeholder="name@company.com" />
+          </div>
+          <div class="field">
+            <label for="password">Пароль</label>
+            <input type="password" id="password" required autocomplete="current-password" placeholder="••••••••" />
+          </div>
+          <button type="submit" class="btn btn--primary" id="submit">Войти</button>
+        </form>
+
+        <p class="auth-links">
+          <a href="/register.html">Создать аккаунт</a>
+          <a href="/forgot-password.html">Забыли пароль?</a>
+        </p>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/src/login.js"></script>
+</body>
+</html>

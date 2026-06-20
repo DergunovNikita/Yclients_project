@@ -11,6 +11,10 @@ from models import Company, GoodCatalog, GoodTransaction, Group, ServiceCatalog
 @pytest.mark.asyncio
 async def test_api_key_blocks_unauthorized_requests(async_session, monkeypatch):
     monkeypatch.setattr(api, 'API_KEY', 'secret123')
+    import auth_deps
+
+    monkeypatch.setattr(auth_deps, 'API_KEY', 'secret123')
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
 
     async def override_db():
         yield async_session
@@ -32,6 +36,8 @@ async def test_api_key_blocks_unauthorized_requests(async_session, monkeypatch):
 
     app.dependency_overrides.clear()
     monkeypatch.setattr(api, 'API_KEY', '')
+    monkeypatch.setattr(auth_deps, 'API_KEY', '')
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
 
 
 @pytest.mark.asyncio

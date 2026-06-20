@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 import api
+import auth_deps
 import plan_import
 from dashboard_service import fetch_plan_fact
 from plan_import import (
@@ -250,7 +251,7 @@ async def test_dashboard_report_data_missing_and_partial_sources(async_session):
 
 @pytest.mark.asyncio
 async def test_dashboard_bundle_requires_api_key(async_session, monkeypatch):
-    monkeypatch.setattr(api, 'API_KEY', 'k')
+    monkeypatch.setattr(auth_deps, 'API_KEY', 'k')
 
     async def override_db():
         yield async_session
@@ -278,7 +279,7 @@ async def test_dashboard_bundle_requires_api_key(async_session, monkeypatch):
         assert 'plan_fact' not in body['data']
 
     app.dependency_overrides.clear()
-    monkeypatch.setattr(api, 'API_KEY', '')
+    monkeypatch.setattr(auth_deps, 'API_KEY', '')
 
 
 @pytest.mark.asyncio

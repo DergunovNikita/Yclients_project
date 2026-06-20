@@ -1,8 +1,16 @@
 import Chart from 'chart.js/auto';
+import { enhanceSelect } from './customSelect.js';
+import { authHeaders, getToken, loadCurrentUser, logout } from './auth.js';
+
+if (!getToken() && !import.meta.env.VITE_API_KEY) {
+  window.location.href = '/login.html';
+}
 
 import { initReports } from './reports/index.js';
 
 const apiBase = import.meta.env.VITE_API_BASE || '';
+const apiKey = import.meta.env.VITE_API_KEY || '';
+let currentUser = null;
 
 const els = {
   kpi: document.getElementById('kpi'),
@@ -93,6 +101,12 @@ const filterEls = {
   },
 };
 
+const customFilterDropdowns = {};
+Object.values(filterEls).forEach((filter) => {
+  customFilterDropdowns[filter.branch.id] = enhanceSelect(filter.branch, { placeholder: 'Все филиалы' });
+  customFilterDropdowns[filter.staff.id] = enhanceSelect(filter.staff, { placeholder: 'Все работники' });
+});
+
 const charts = {
   revenue: null,
   appointments: null,
@@ -119,6 +133,12 @@ let serviceManagementDirty = false;
 let reportsController = null;
 
 const ADMIN_HIDDEN_METRIC_CODES = new Set(['revenue', 'avg_check_total']);
+
+function headers() {
+  const extra = {};
+  if (apiKey) extra['X-API-Key'] = apiKey;
+  return authHeaders(extra);
+}
 
 function apiUrl(path, params = {}) {
   const qs = new URLSearchParams();
@@ -227,7 +247,7 @@ async function fetchJson(path, params) {
   for (const url of apiUrlCandidates(path, params)) {
     let response;
     try {
-      response = await fetch(url);
+      response = await fetch(url, { headers: headers() });
     } catch (error) {
       errors.push(`${url}\n${error.message}`);
       continue;
@@ -257,6 +277,7 @@ async function requestJson(path, { method = 'GET', body = null } = {}) {
     try {
       response = await fetch(url, {
         method,
+        headers: { ...headers(), 'Content-Type': 'application/json' },
         headers: { 'Content-Type': 'application/json' },
         body: body === null ? undefined : JSON.stringify(body),
       });
@@ -1765,6 +1786,7 @@ function renderBranchOptions(filter) {
     filter.branch.appendChild(option);
   });
   filter.branch.value = branchOptions.some((branch) => String(branch.id) === selected) ? selected : '';
+  customFilterDropdowns[filter.branch.id]?.refresh();
 }
 
 async function loadStaff(filter) {
@@ -1785,6 +1807,7 @@ async function loadStaff(filter) {
       filter.staff.appendChild(option);
     });
     filter.staff.value = staffOptions.some((staff) => String(staff.id) === selected) ? selected : '';
+    customFilterDropdowns[filter.staff.id]?.refresh();
   } catch (error) {
     showError(error.message);
   }
@@ -1919,6 +1942,19 @@ async function loadCurrentView() {
   }
 }
 
+const ROLE_LABELS = {
+  super_admin: 'Super Admin — вся сеть',
+  branch_admin: 'Branch Admin — админ филиала',
+  manager: 'Manager — метрики филиала',
+  viewer: 'Viewer — только просмотр',
+};
+
+function accountDisplayName(user) {
+  const fullName = user?.full_name?.trim();
+  if (fullName) return fullName;
+  return user?.email?.split('@')[0] || '';
+}
+
 async function init() {
   reportsController = initReports({ clearError, showError, setApiState });
   Object.values(filterEls).forEach((filter) => defaultDates(filter));
@@ -1930,6 +1966,30 @@ async function init() {
   renderServicesTable([]);
   renderExtraServicesTable([]);
   renderServiceManagement({ rows: [], groups: [], categories: [] });
+  if (getToken()) {
+    try {
+      const me = await loadCurrentUser();
+      currentUser = me.data;
+      const profileLink = document.getElementById('user-profile-link');
+      const profileName = document.getElementById('user-profile-name');
+      const profileRole = document.getElementById('user-profile-role');
+      if (profileLink) {
+        profileLink.hidden = false;
+      }
+      if (profileName) {
+        profileName.textContent = accountDisplayName(me.data);
+      }
+      if (profileRole) {
+        profileRole.textContent = ROLE_LABELS[me.data.role] || me.data.role;
+      }
+    } catch {
+      logout();
+      return;
+    }
+  } else if (!apiKey) {
+    window.location.href = '/login.html';
+    return;
+  }
   await loadBranches();
   await Promise.all(Object.values(filterEls).map((filter) => loadStaff(filter)));
   setActiveView(viewFromLocation());

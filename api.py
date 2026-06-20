@@ -30,6 +30,7 @@ from config import (
     SYNC_API_TOKEN,
 )
 from dashboard_routes import router as dashboard_router
+from auth_routes import router as auth_router
 from database import get_async_db, init_async_database
 from models import (
     Account,
@@ -63,20 +64,31 @@ from sync_parsing import parse_date, parse_datetime_end, parse_datetime_start
 
 init_async_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
 
+try:
+    from auth_service import _email_delivery_mode
+
+    print(f'[auth] Email delivery: {_email_delivery_mode()}')
+except Exception:
+    pass
+
 MAX_PAGE_SIZE = 5000
 DEFAULT_PAGE_SIZE = 1000
 
 OPEN_PATHS = {"/health", "/openapi.json", "/docs", "/redoc"}
 
 
-def require_api_key(request: Request, x_api_key: str | None = Header(default=None)):
-    """Global auth: skip for health/docs, enforce when API_KEY is set."""
+async def require_api_key(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Global auth: open paths, JWT user, or API key when configured."""
+    from auth_deps import require_auth
+
     if request.url.path in OPEN_PATHS:
         return
-    if not API_KEY:
-        return
-    if x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    await require_auth(request, authorization, x_api_key, db)
 
 
 app = FastAPI(
@@ -98,6 +110,7 @@ if _cors_origins:
         allow_private_network=True,
     )
 
+app.include_router(auth_router, prefix='/auth', tags=['auth'])
 app.include_router(dashboard_router, prefix='/dashboard', tags=['dashboard'])
 
 

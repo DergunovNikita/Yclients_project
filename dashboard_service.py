@@ -269,6 +269,14 @@ def _coerce_date(value: Any) -> date:
     return date.fromisoformat(str(value)[:10])
 
 
+def _company_scope_clause(column, company_id: Optional[int], allowed_company_ids: Optional[list[int]]):
+    if company_id is not None:
+        return column == company_id
+    if allowed_company_ids is not None:
+        return column.in_(allowed_company_ids) if allowed_company_ids else column.in_([])
+    return None
+
+
 def _coerce_time(value: Any) -> time | None:
     if value is None:
         return None
@@ -301,14 +309,16 @@ def _appt_revenue_filters(
     company_id: Optional[int],
     staff_id: Optional[int] = None,
     created_user_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
 ):
     parts = [
         Appointment.attendance == COMPLETED_ATTENDANCE,
         Appointment.date >= start,
         Appointment.date <= end,
     ]
-    if company_id is not None:
-        parts.append(Appointment.company_id == company_id)
+    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        parts.append(scope)
     if created_user_id is not None:
         parts.append(Appointment.created_user_id == created_user_id)
     elif staff_id is not None:
@@ -321,13 +331,15 @@ def _appt_all_filters(
     end: date,
     company_id: Optional[int],
     staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
 ):
     parts = [
         Appointment.date >= start,
         Appointment.date <= end,
     ]
-    if company_id is not None:
-        parts.append(Appointment.company_id == company_id)
+    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        parts.append(scope)
     if staff_id is not None:
         parts.append(Appointment.staff_id == staff_id)
     return and_(*parts)
@@ -338,14 +350,16 @@ def _goods_revenue_filters(
     end: date,
     company_id: Optional[int],
     staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
 ):
     parts = [
         GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
         func.date(GoodTransaction.date) >= start,
         func.date(GoodTransaction.date) <= end,
     ]
-    if company_id is not None:
-        parts.append(GoodTransaction.company_id == company_id)
+    scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        parts.append(scope)
     if staff_id is not None:
         parts.append(GoodTransaction.master_id == staff_id)
     return and_(*parts)
@@ -357,6 +371,7 @@ def _service_paid_filters(
     company_id: Optional[int],
     staff_id: Optional[int] = None,
     created_user_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
 ):
     parts = [
         FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
@@ -365,8 +380,9 @@ def _service_paid_filters(
         func.date(FinancialTransaction.date) >= start,
         func.date(FinancialTransaction.date) <= end,
     ]
-    if company_id is not None:
-        parts.append(Appointment.company_id == company_id)
+    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        parts.append(scope)
     if created_user_id is not None:
         parts.append(Appointment.created_user_id == created_user_id)
     elif staff_id is not None:
@@ -379,6 +395,7 @@ def _goods_paid_filters(
     end: date,
     company_id: Optional[int],
     staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
 ):
     parts = [
         FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
@@ -386,8 +403,9 @@ def _goods_paid_filters(
         func.date(FinancialTransaction.date) >= start,
         func.date(FinancialTransaction.date) <= end,
     ]
-    if company_id is not None:
-        parts.append(FinancialTransaction.company_id == company_id)
+    scope = _company_scope_clause(FinancialTransaction.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        parts.append(scope)
     if staff_id is not None:
         parts.append(_financial_staff_attribution_condition(staff_id))
     return and_(*parts)
@@ -414,10 +432,11 @@ async def _goods_paid_revenue_total(
     dr: DateRange,
     company_id: Optional[int],
     staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
 ) -> float:
     stmt = (
         select(func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'))
-        .where(_goods_paid_filters(dr.start, dr.end, company_id, staff_id))
+        .where(_goods_paid_filters(dr.start, dr.end, company_id, staff_id, allowed_company_ids))
     )
     row = (await db.execute(stmt)).one()
     return float(row.revenue or 0)
@@ -428,6 +447,7 @@ async def _goods_sold_count(
     dr: DateRange,
     company_id: Optional[int],
     staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
 ) -> float:
     sold_qty = func.coalesce(
         func.sum(func.abs(func.coalesce(GoodTransaction.amount, 0.0))),
@@ -435,7 +455,7 @@ async def _goods_sold_count(
     )
     stmt = (
         select(sold_qty.label('qty'))
-        .where(_goods_revenue_filters(dr.start, dr.end, company_id, staff_id))
+        .where(_goods_revenue_filters(dr.start, dr.end, company_id, staff_id, allowed_company_ids))
     )
     row = (await db.execute(stmt)).one()
     return float(row.qty or 0)
@@ -853,6 +873,7 @@ async def _revenue_block(
     staff_id: Optional[int] = None,
     created_user_id: Optional[int] = None,
     include_goods: bool = True,
+    allowed_company_ids: Optional[list[int]] = None,
 ) -> dict[str, Any]:
     cond = _appt_revenue_filters(
         dr.start,
@@ -860,6 +881,7 @@ async def _revenue_block(
         company_id,
         staff_id,
         created_user_id=created_user_id,
+        allowed_company_ids=allowed_company_ids,
     )
     extra_appt = case(
         (ServiceLabel.is_extra.is_(True), Appointment.id),
@@ -916,6 +938,7 @@ async def _revenue_block(
                 company_id,
                 staff_id,
                 created_user_id=created_user_id,
+                allowed_company_ids=allowed_company_ids,
             )
         )
     )
@@ -923,8 +946,16 @@ async def _revenue_block(
     paid_row = (await db.execute(paid_stmt)).one()
     service_revenue = float(paid_row.revenue or 0)
     extra_service_revenue = float(paid_row.extra_service_revenue or 0)
-    goods_revenue = await _goods_paid_revenue_total(db, dr, company_id, staff_id) if include_goods else 0.0
-    goods_count = await _goods_sold_count(db, dr, company_id, staff_id) if include_goods else 0.0
+    goods_revenue = (
+        await _goods_paid_revenue_total(db, dr, company_id, staff_id, allowed_company_ids)
+        if include_goods
+        else 0.0
+    )
+    goods_count = (
+        await _goods_sold_count(db, dr, company_id, staff_id, allowed_company_ids)
+        if include_goods
+        else 0.0
+    )
     return {
         'revenue': service_revenue + goods_revenue,
         'service_revenue': service_revenue,
@@ -946,10 +977,14 @@ async def fetch_summary(
     end: date,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
 ) -> dict[str, Any]:
     current_dr = DateRange(start=start, end=end)
     prev_dr = current_dr.previous_period()
     appointment_company_ids = await _appointment_company_ids(db, company_id, staff_id)
+    if allowed_company_ids is not None:
+        allowed_set = {int(item) for item in allowed_company_ids}
+        appointment_company_ids = [item for item in appointment_company_ids if item in allowed_set]
     appointments_task = asyncio.create_task(
         _fetch_appointments_breakdown(appointment_company_ids, start, end, staff_id)
     )
@@ -962,6 +997,11 @@ async def fetch_summary(
         )
     )
 
+    cur = await _revenue_block(db, current_dr, company_id, staff_id, allowed_company_ids=allowed_company_ids)
+    prev = await _revenue_block(db, prev_dr, company_id, staff_id, allowed_company_ids=allowed_company_ids)
+    cur_opz_qty = await _opz_count_scope(
+        db, start, end, company_id, staff_id, company_ids=appointment_company_ids
+    )
     cur = await _revenue_block(db, current_dr, company_id, staff_id)
     prev = await _revenue_block(db, prev_dr, company_id, staff_id)
     cur_opz_qty = await _opz_count_scope(db, start, end, company_id, staff_id)
@@ -971,6 +1011,15 @@ async def fetch_summary(
         prev_dr.end,
         company_id,
         staff_id,
+        company_ids=appointment_company_ids,
+    )
+    avg_company_ids = appointment_company_ids if company_id is None else None
+    cur_average_check = await _average_check_block(
+        db, current_dr, company_id, staff_id, company_ids=avg_company_ids
+    )
+    prev_average_check = await _average_check_block(
+        db, prev_dr, company_id, staff_id, company_ids=avg_company_ids
+    )
     )
     cur_average_check = await _average_check_block(db, current_dr, company_id, staff_id)
     prev_average_check = await _average_check_block(db, prev_dr, company_id, staff_id)
@@ -1153,6 +1202,7 @@ async def fetch_revenue_daily(
     end: date,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
 ) -> list[dict[str, Any]]:
     svc_stmt = (
         select(
@@ -1162,7 +1212,7 @@ async def fetch_revenue_daily(
         .select_from(Appointment)
         .join(FinancialTransaction, FinancialTransaction.record_id == Appointment.id)
         .where(
-            _service_paid_filters(start, end, company_id, staff_id),
+            _service_paid_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids),
         )
         .group_by(Appointment.date)
     )
@@ -1172,7 +1222,7 @@ async def fetch_revenue_daily(
             func.count(func.distinct(Appointment.id)).label('appointments'),
         )
         .select_from(Appointment)
-        .where(_appt_revenue_filters(start, end, company_id, staff_id))
+        .where(_appt_revenue_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids))
         .group_by(Appointment.date)
     )
 
@@ -1182,7 +1232,7 @@ async def fetch_revenue_daily(
             goods_day.label('d'),
             func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
         )
-        .where(_goods_paid_filters(start, end, company_id, staff_id))
+        .where(_goods_paid_filters(start, end, company_id, staff_id, allowed_company_ids))
         .group_by(goods_day)
     )
 
@@ -1571,6 +1621,7 @@ async def fetch_top_services(
     company_id: Optional[int] = None,
     limit: int = 10,
     staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
 ) -> list[dict[str, Any]]:
     title_expr = func.trim(func.coalesce(func.nullif(Transaction.service_title, ''), ServiceCatalog.title, ''))
     group_key = _service_group_key(title_expr, Transaction.service_id)
@@ -1587,7 +1638,7 @@ async def fetch_top_services(
         .join(Appointment, Appointment.id == Transaction.appointment_id)
         .outerjoin(ServiceCatalog, _transaction_service_catalog_join())
         .where(
-            _appt_revenue_filters(start, end, company_id, staff_id),
+            _appt_revenue_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids),
         )
         .group_by(group_key)
     )
@@ -1628,7 +1679,7 @@ async def fetch_top_services(
             ),
         )
         .outerjoin(ServiceCatalog, _financial_service_catalog_join())
-        .where(_service_paid_filters(start, end, company_id, staff_id))
+        .where(_service_paid_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids))
         .group_by(paid_group_key)
         .order_by(paid_revenue.desc())
         .limit(limit)
@@ -1664,6 +1715,7 @@ async def fetch_extra_services(
     company_id: Optional[int] = None,
     limit: Optional[int] = None,
     staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
 ) -> list[dict[str, Any]]:
     title_expr = func.trim(func.coalesce(func.nullif(Transaction.service_title, ''), ServiceCatalog.title, ''))
     group_key = _service_group_key(title_expr, Transaction.service_id)
@@ -1681,7 +1733,7 @@ async def fetch_extra_services(
         .join(ServiceLabel, _transaction_service_label_join())
         .outerjoin(ServiceCatalog, _transaction_service_catalog_join())
         .where(
-            _appt_revenue_filters(start, end, company_id, staff_id),
+            _appt_revenue_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids),
             ServiceLabel.is_extra.is_(True),
         )
         .group_by(group_key)
@@ -1720,7 +1772,7 @@ async def fetch_extra_services(
         .join(ServiceLabel, _financial_service_label_join())
         .outerjoin(ServiceCatalog, _financial_service_catalog_join())
         .where(
-            _service_paid_filters(start, end, company_id, staff_id),
+            _service_paid_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids),
             ServiceLabel.is_extra.is_(True),
         )
         .group_by(paid_group_key)
@@ -1921,6 +1973,10 @@ async def _opz_count_scope(
     end: date,
     company_id: Optional[int],
     staff_id: Optional[int],
+    company_ids: Optional[list[int]] = None,
+) -> float:
+    if company_ids is None:
+        company_ids = await _appointment_company_ids(db, company_id, staff_id)
 ) -> float:
     company_ids = await _appointment_company_ids(db, company_id, staff_id)
     total = 0.0
@@ -2686,8 +2742,15 @@ async def _staff_plan_groups_for_branch(
 async def fetch_staff(
     db: AsyncSession,
     company_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
+    force_allowed: bool = False,
 ) -> list[dict[str, Any]]:
-    allowed = await branch_company_ids(db)
+    if force_allowed:
+        allowed = allowed_company_ids or []
+    elif allowed_company_ids is not None:
+        allowed = allowed_company_ids
+    else:
+        allowed = await branch_company_ids(db)
     stmt = (
         select(
             Staff.id,
@@ -3392,11 +3455,17 @@ async def fetch_plan_fact(
     end: date,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
+    force_allowed: bool = False,
 ) -> dict[str, Any]:
-    branches = await fetch_branches(db)
+    branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
     selected_staff: dict[str, Any] | None = None
     if staff_id is not None:
-        staff_rows = await fetch_staff(db)
+        staff_rows = await fetch_staff(
+            db,
+            allowed_company_ids=allowed_company_ids,
+            force_allowed=force_allowed,
+        )
         selected_staff = next((staff for staff in staff_rows if staff['id'] == staff_id), None)
         if selected_staff is not None:
             if company_id is None:
@@ -3554,8 +3623,18 @@ async def branch_company_ids(db: AsyncSession) -> Optional[list[int]]:
     return [row[0] for row in r.all()]
 
 
-async def fetch_staff_directory(db: AsyncSession, include_fired: bool = False) -> list[dict[str, Any]]:
-    allowed = await branch_company_ids(db)
+async def fetch_staff_directory(
+    db: AsyncSession,
+    include_fired: bool = False,
+    allowed_company_ids: Optional[list[int]] = None,
+    force_allowed: bool = False,
+) -> list[dict[str, Any]]:
+    if force_allowed:
+        allowed = allowed_company_ids or []
+    elif allowed_company_ids is not None:
+        allowed = allowed_company_ids
+    else:
+        allowed = await branch_company_ids(db)
     stmt = (
         select(
             Company.id.label('company_id'),
@@ -3597,8 +3676,17 @@ async def fetch_staff_directory(db: AsyncSession, include_fired: bool = False) -
     ]
 
 
-async def fetch_branches(db: AsyncSession) -> list[dict[str, Any]]:
-    allowed = await branch_company_ids(db)
+async def fetch_branches(
+    db: AsyncSession,
+    allowed_company_ids: Optional[list[int]] = None,
+    force_allowed: bool = False,
+) -> list[dict[str, Any]]:
+    if force_allowed:
+        allowed = allowed_company_ids or []
+    elif allowed_company_ids is not None:
+        allowed = allowed_company_ids
+    else:
+        allowed = await branch_company_ids(db)
     stmt = select(Company).order_by(Company.id.asc())
     if allowed is not None:
         stmt = stmt.where(Company.id.in_(allowed))

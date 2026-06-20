@@ -64,6 +64,79 @@
       font-size: 13px;
     }
 
+    .user-profile {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      margin-top: 2px;
+    }
+
+    .user-profile[hidden] {
+      display: none !important;
+    }
+
+    .user-profile__name {
+      color: #334155;
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1.3;
+      text-align: center;
+      max-width: 160px;
+    }
+
+    .user-profile__meta {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      max-width: 160px;
+    }
+
+    .user-profile__role {
+      color: #64748b;
+      font-size: 11px;
+      font-weight: 500;
+      line-height: 1.25;
+      text-align: center;
+    }
+
+    .user-menu {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 6px;
+      width: 100%;
+      min-width: 168px;
+      margin-top: 2px;
+    }
+
+    .user-icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      border: 1px solid #dbe3ef;
+      border-radius: 999px;
+      background: #ffffff;
+      color: #475569;
+      text-decoration: none;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .user-icon-btn:hover {
+      background: #f8fafc;
+      border-color: #94a3b8;
+      color: #0f766e;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
+    }
+
+    .user-icon-btn svg {
+      width: 20px;
+      height: 20px;
+    }
+
     .pill {
       display: inline-flex;
       align-items: center;
@@ -175,6 +248,30 @@
       border-radius: 6px;
       background: #ffffff;
       color: #172033;
+    }
+
+    .toolbar .custom-select {
+      width: 100%;
+      text-transform: none;
+      font-weight: 400;
+    }
+
+    .toolbar .custom-select__trigger {
+      min-height: 40px;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+
+    .toolbar .custom-select__option {
+      font-size: 12px;
+    }
+
+    .toolbar .custom-select__menu {
+      min-width: max(100%, 260px);
+    }
+
+    .toolbar .custom-select__search {
+      font-size: 12px;
     }
 
     button {
@@ -1067,6 +1164,18 @@
       <div class="status">
         <span class="pill warn" id="api-state">API: проверка</span>
         <span id="sync-state">данные актуальны: нет данных</span>
+        <div class="user-profile" id="user-profile-link" hidden>
+          <a href="/profile.html" class="user-icon-btn" aria-label="Личный кабинет">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <circle cx="12" cy="8" r="4"></circle>
+              <path d="M5 20c0-3.3 3.1-5 7-5s7 1.7 7 5"></path>
+            </svg>
+          </a>
+          <div class="user-profile__meta">
+            <span class="user-profile__name" id="user-profile-name"></span>
+            <span class="user-profile__role" id="user-profile-role"></span>
+          </div>
+        </div>
       </div>
     </section>
 

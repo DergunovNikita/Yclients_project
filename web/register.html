@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Регистрация — YClients Portal</title>
+  <link rel="stylesheet" href="/src/auth.css" />
+</head>
+<body class="auth-page auth-page--register">
+  <div class="auth-layout">
+    <aside class="auth-brand">
+      <div class="auth-brand__logo">
+        <span class="auth-brand__mark">Y</span>
+        <span>YClients Portal</span>
+      </div>
+      <div class="auth-brand__content">
+        <h2>Добро пожаловать в команду</h2>
+        <p>После регистрации подтвердите email. Доступ к филиалам назначит администратор сети.</p>
+      </div>
+      <ul class="auth-brand__features">
+        <li>Минимум 8 символов в пароле</li>
+        <li>Подтверждение по почте</li>
+        <li>Безопасное восстановление доступа</li>
+      </ul>
+    </aside>
+
+    <main class="auth-panel">
+      <section class="auth-card">
+        <div class="auth-mobile-logo">
+          <span class="auth-brand__mark">Y</span>
+          <span>YClients Portal</span>
+        </div>
+        <span class="auth-card__eyebrow">Новый аккаунт</span>
+        <h1>Регистрация</h1>
+        <p class="auth-subhead">Создайте профиль сотрудника. Роль и филиалы назначаются администратором.</p>
+
+        <div class="alert error" id="error" hidden></div>
+        <div class="alert success" id="success" hidden></div>
+
+        <form class="auth-form" id="auth-form">
+          <div class="field">
+            <label for="full_name">Имя</label>
+            <input type="text" id="full_name" autocomplete="name" placeholder="Иван Иванов" />
+          </div>
+          <div class="field">
+            <label for="email">Email</label>
+            <input type="email" id="email" required autocomplete="username" placeholder="name@company.com" />
+          </div>
+          <div class="field">
+            <label for="password">Пароль</label>
+            <input type="password" id="password" required minlength="8" autocomplete="new-password" placeholder="Не менее 8 символов" />
+          </div>
+          <button type="submit" class="btn btn--primary" id="submit">Создать аккаунт</button>
+        </form>
+
+        <p class="auth-links">
+          <a href="/login.html">Уже есть аккаунт? Войти</a>
+        </p>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/src/register.js"></script>
+</body>
+</html>

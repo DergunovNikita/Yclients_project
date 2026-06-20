@@ -1,56 +1,11 @@
-const HOP_BY_HOP_HEADERS = new Set([
-  'connection',
-  'keep-alive',
-  'proxy-authenticate',
-  'proxy-authorization',
-  'te',
-  'trailer',
-  'transfer-encoding',
-  'upgrade',
-]);
-
-function env(name) {
-  const value = process.env[name];
-  return value && value.trim() ? value.trim() : '';
-}
+import { proxyToVm, vmOrigin } from '../_proxy.js';
 
 function buildTargetUrl(req) {
-  const origin = env('VM_API_ORIGIN');
-  if (!origin) {
-    throw new Error('VM_API_ORIGIN is not configured');
-  }
-
   const incoming = new URL(req.url, `https://${req.headers.host}`);
   const path = incoming.pathname.replace(/^\/api\/?/, '');
-  const target = new URL(`/${path}`, origin.replace(/\/$/, ''));
+  const target = new URL(`/${path}`, vmOrigin());
   target.search = incoming.search;
   return target;
-}
-
-function forwardedHeaders(req) {
-  const headers = {};
-  for (const [name, value] of Object.entries(req.headers)) {
-    const lowerName = name.toLowerCase();
-    if (!HOP_BY_HOP_HEADERS.has(lowerName) && lowerName !== 'host') {
-      headers[name] = value;
-    }
-  }
-
-  const apiKey = env('VM_API_KEY') || env('API_KEY');
-  if (apiKey) {
-    headers['X-API-Key'] = apiKey;
-  }
-
-  return headers;
-}
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on('data', (chunk) => chunks.push(chunk));
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
-  });
 }
 
 export default async function handler(req, res) {
@@ -64,22 +19,5 @@ export default async function handler(req, res) {
     return;
   }
 
-  const method = req.method.toUpperCase();
-  const hasBody = method !== 'GET' && method !== 'HEAD';
-  const upstream = await fetch(target, {
-    method,
-    headers: forwardedHeaders(req),
-    body: hasBody ? await readBody(req) : undefined,
-    redirect: 'manual',
-  });
-
-  res.statusCode = upstream.status;
-  for (const [name, value] of upstream.headers.entries()) {
-    if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase())) {
-      res.setHeader(name, value);
-    }
-  }
-
-  const body = Buffer.from(await upstream.arrayBuffer());
-  res.end(body);
+  await proxyToVm(req, res, target);
 }
