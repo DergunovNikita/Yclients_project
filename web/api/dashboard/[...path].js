@@ -2,7 +2,7 @@ import { proxyToVm, vmOrigin } from '../_proxy.js';
 
 function buildTargetUrl(req) {
   const incoming = new URL(req.url, `https://${req.headers.host}`);
-  const path = incoming.pathname.replace(/^\/api\/?/, '');
+  const path = incoming.pathname.replace(/^\/api\/?/, '').replace(/^\/+/, '');
   const target = new URL(`/${path}`, vmOrigin());
   target.search = incoming.search;
   return target;

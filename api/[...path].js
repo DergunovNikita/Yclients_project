@@ -4,7 +4,7 @@ const ALLOWED_PREFIXES = ['auth', 'dashboard', 'health'];
 
 function buildTargetUrl(req) {
   const incoming = new URL(req.url, `https://${req.headers.host}`);
-  const path = incoming.pathname.replace(/^\/api\/?/, '');
+  const path = incoming.pathname.replace(/^\/api\/?/, '').replace(/^\/+/, '');
   const firstSegment = path.split('/')[0];
 
   if (!ALLOWED_PREFIXES.includes(firstSegment)) {
