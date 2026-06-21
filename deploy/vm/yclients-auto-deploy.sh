@@ -66,12 +66,11 @@ ensure_portal_admin() {
     return 0
   fi
 
-  echo "Ensuring portal super_admin (${email})..."
+  echo "Ensuring portal platform_admin (${email})..."
   docker compose run --rm --no-deps --entrypoint python api create_portal_admin.py \
     --email "$email" \
     --password "$PORTAL_ADMIN_PASSWORD" \
-    --full-name "$full_name" \
-    --assign-all-branches
+    --full-name "$full_name"
 }
 
 if [ -n "${PORTAL_ADMIN_PASSWORD:-}" ]; then

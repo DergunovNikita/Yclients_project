@@ -1,4 +1,4 @@
-"""Create or update a local super_admin portal user."""
+"""Create or update a local platform_admin portal user."""
 from __future__ import annotations
 
 import argparse
@@ -9,11 +9,11 @@ from sqlalchemy import delete, select
 from auth_service import hash_password, normalize_email
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from database import init_database
-from models import Company, PortalUser, PortalUserBranch
+from models import PortalUser, PortalUserBranch
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Create local super_admin portal user')
+    parser = argparse.ArgumentParser(description='Create local platform_admin portal user')
     parser.add_argument('--email', default='admin@local.dev')
     parser.add_argument('--password', default='Admin12345!')
     parser.add_argument('--full-name', default='Local Super Admin')
@@ -44,7 +44,7 @@ def main() -> int:
                 email=email,
                 password_hash=hash_password(args.password),
                 full_name=args.full_name,
-                role='super_admin',
+                role='platform_admin',
                 is_active=True,
                 email_verified_at=datetime.utcnow(),
                 created_at=datetime.utcnow(),
@@ -52,20 +52,20 @@ def main() -> int:
             db.add(user)
             db.commit()
             db.refresh(user)
-            print(f'Created super_admin user id={user.id} email={email}')
+            print(f'Created platform_admin user id={user.id} email={email}')
         else:
             user.password_hash = hash_password(args.password)
-            user.role = 'super_admin'
+            user.role = 'platform_admin'
+            user.portal_account_id = None
             user.is_active = True
             user.email_verified_at = user.email_verified_at or datetime.utcnow()
             user.full_name = args.full_name
             db.commit()
-            print(f'Updated super_admin user id={user.id} email={email}')
+            print(f'Updated platform_admin user id={user.id} email={email}')
 
         if args.assign_all_branches:
-            company_ids = [row[0] for row in db.execute(select(Company.id)).all()]
-            _set_user_branches(db, user.id, company_ids)
-            print(f'Assigned branches: {company_ids}')
+            _set_user_branches(db, user.id, [])
+            print('Ignored branch assignment for platform_admin')
 
         print('Login at http://127.0.0.1:5173/login.html')
         print(f'Email: {email}')

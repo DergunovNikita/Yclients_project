@@ -14,21 +14,38 @@ class AccessContext:
 
     user_id: int | None
     role: str | None
+    portal_account_id: int | None
+    is_platform_admin: bool
     full_access: bool
     company_ids: list[int] | None  # None = all branches; [] = none
 
     @classmethod
     def api_key(cls) -> AccessContext:
-        return cls(user_id=None, role=None, full_access=True, company_ids=None)
+        return cls(
+            user_id=None,
+            role=None,
+            portal_account_id=None,
+            is_platform_admin=False,
+            full_access=True,
+            company_ids=None,
+        )
 
     @classmethod
-    def from_user(cls, user_id: int, role: str, company_ids: list[int] | None) -> AccessContext:
-        full = role == 'super_admin'
+    def from_user(
+        cls,
+        user_id: int,
+        role: str,
+        portal_account_id: int | None,
+        company_ids: list[int] | None,
+    ) -> AccessContext:
+        is_platform_admin = role == 'platform_admin'
         return cls(
             user_id=user_id,
             role=role,
-            full_access=full,
-            company_ids=None if full else (company_ids or []),
+            portal_account_id=portal_account_id,
+            is_platform_admin=is_platform_admin,
+            full_access=False,
+            company_ids=company_ids or [],
         )
 
 

@@ -11,7 +11,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_service import generate_initial_password, hash_password, normalize_email, set_user_branches
-from models import PortalUser, Staff
+from models import PortalBranch, PortalUser, Staff
 
 _CYRILLIC_TO_LATIN = {
     'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e', 'ж': 'zh', 'з': 'z',
@@ -112,12 +112,21 @@ async def provision_staff_account(
     if not await _portal_user_id_is_available(db, staff.id):
         raise ValueError(f'Portal user id {staff.id} is already taken')
 
+    portal_account_id = (
+        await db.execute(
+            select(PortalBranch.portal_account_id).where(PortalBranch.company_id == staff.company_id)
+        )
+    ).scalar_one_or_none()
+    if portal_account_id is None:
+        raise ValueError(f'Staff company {staff.company_id} is not assigned to a tenant')
+
     login_email = await _unique_staff_email(db, staff, email)
     initial_password = password or generate_initial_password()
     now = datetime.utcnow()
 
     user = PortalUser(
         id=staff.id,
+        portal_account_id=int(portal_account_id),
         email=login_email,
         password_hash=hash_password(initial_password),
         full_name=staff.name,

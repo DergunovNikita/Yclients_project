@@ -28,7 +28,8 @@ from auth_service import (
     consume_email_token,
     create_access_token,
     hash_password,
-    load_user_branch_ids,
+    load_portal_account_branch_ids,
+    load_user_access_branch_ids,
     normalize_email,
     send_password_reset_email,
     send_account_credentials_email,
@@ -39,7 +40,7 @@ from auth_service import (
     verify_password,
 )
 from database import get_async_db
-from models import Company, PortalUser, Staff, YClientsCredential
+from models import Company, Group, PortalAccount, PortalBranch, PortalUser, Staff, YClientsCredential
 from portal_account_provision import provision_all_unlinked_staff, provision_staff_account
 from portal_staff_sync import (
     deactivate_portal_user_staff,
@@ -113,6 +114,7 @@ class AdminUserCreateRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     full_name: str | None = Field(default=None, max_length=255)
     role: str
+    portal_account_id: int | None = None
     company_ids: list[int] = Field(default_factory=list)
 
 
@@ -124,6 +126,7 @@ class AdminStaffUpdateRequest(BaseModel):
 
 class YClientsCredentialCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=255)
+    portal_account_id: int | None = None
     partner_token: str = Field(min_length=1, max_length=4096)
     login: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=1, max_length=255)
@@ -133,6 +136,7 @@ class YClientsCredentialCreateRequest(BaseModel):
 
 class YClientsCredentialUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
+    portal_account_id: int | None = None
     partner_token: str | None = Field(default=None, min_length=1, max_length=4096)
     login: str | None = Field(default=None, min_length=1, max_length=255)
     password: str | None = Field(default=None, min_length=1, max_length=255)
@@ -160,6 +164,7 @@ def _user_payload(
         'email': user.email,
         'full_name': user.full_name,
         'role': user.role,
+        'portal_account_id': user.portal_account_id,
         'is_active': user.is_active,
         'email_verified': user.email_verified_at is not None,
         'company_ids': branch_ids,
@@ -216,11 +221,19 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_async_d
     if existing is not None:
         raise HTTPException(status_code=409, detail='Email already registered')
 
+    account = PortalAccount(
+        label=(body.full_name or email).strip() or email,
+        created_at=datetime.utcnow(),
+    )
+    db.add(account)
+    await db.flush()
+
     user = PortalUser(
+        portal_account_id=account.id,
         email=email,
         password_hash=hash_password(body.password),
         full_name=body.full_name,
-        role='viewer',
+        role='owner',
         is_active=True,
         created_at=datetime.utcnow(),
     )
@@ -247,7 +260,7 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_async_db)):
 
     user.last_login_at = datetime.utcnow()
     await db.commit()
-    branch_ids = await load_user_branch_ids(db, user.id)
+    branch_ids = await load_user_access_branch_ids(db, user)
     token = create_access_token(user.id, user.role)
     return {
         'success': True,
@@ -264,7 +277,7 @@ async def me(
     user: PortalUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
-    branch_ids = await load_user_branch_ids(db, user.id)
+    branch_ids = await load_user_access_branch_ids(db, user)
     return {'success': True, 'data': _user_payload(user, branch_ids, manageable=None)}
 
 
@@ -321,9 +334,27 @@ async def change_password(
 
 
 async def _actor_branch_ids(db: AsyncSession, user: PortalUser) -> list[int]:
-    if user.role == 'super_admin':
-        return []
-    return await load_user_branch_ids(db, user.id)
+    return await load_user_access_branch_ids(db, user)
+
+
+def _same_tenant(actor: PortalUser, target: PortalUser) -> bool:
+    if actor.role == 'platform_admin':
+        return True
+    return actor.portal_account_id is not None and actor.portal_account_id == target.portal_account_id
+
+
+async def _validate_company_ids_in_scope(
+    db: AsyncSession,
+    actor: PortalUser,
+    company_ids: list[int],
+) -> None:
+    await _validate_company_ids_exist(db, company_ids)
+    if actor.role == 'platform_admin':
+        return
+    tenant_company_ids = set(await load_portal_account_branch_ids(db, actor.portal_account_id))
+    invalid = sorted(set(company_ids) - tenant_company_ids)
+    if invalid:
+        raise HTTPException(status_code=403, detail=f'Companies outside tenant: {invalid}')
 
 
 async def _validate_company_ids_exist(db: AsyncSession, company_ids: list[int]) -> None:
@@ -339,13 +370,45 @@ def _credentials_config_error(exc: CredentialsConfigError) -> HTTPException:
     return HTTPException(status_code=500, detail=str(exc))
 
 
-async def _load_credential(db: AsyncSession, credential_id: int) -> YClientsCredential:
+async def _load_credential(
+    db: AsyncSession,
+    credential_id: int,
+    actor: PortalUser | None = None,
+) -> YClientsCredential:
     credential = (
         await db.execute(select(YClientsCredential).where(YClientsCredential.id == credential_id))
     ).scalar_one_or_none()
     if credential is None:
         raise HTTPException(status_code=404, detail='YClients credentials not found')
+    if actor is not None and actor.role != 'platform_admin':
+        if credential.portal_account_id != actor.portal_account_id:
+            raise HTTPException(status_code=404, detail='YClients credentials not found')
     return credential
+
+
+def _credential_account_id(actor: PortalUser, requested: int | None = None) -> int:
+    if actor.role == 'platform_admin':
+        if requested is None:
+            raise HTTPException(status_code=400, detail='portal_account_id is required')
+        return requested
+    if actor.portal_account_id is None:
+        raise HTTPException(status_code=403, detail='Tenant account is required')
+    if requested is not None and requested != actor.portal_account_id:
+        raise HTTPException(status_code=403, detail='Cannot manage credentials for another tenant')
+    return actor.portal_account_id
+
+
+async def _validate_credential_companies(
+    db: AsyncSession,
+    portal_account_id: int,
+    company_ids: list[int],
+) -> None:
+    if not company_ids:
+        return
+    existing = set(await load_portal_account_branch_ids(db, portal_account_id))
+    missing = sorted(set(company_ids) - existing)
+    if missing:
+        raise HTTPException(status_code=403, detail=f'Companies outside tenant: {missing}')
 
 
 def _test_yclients_credentials(partner_token: str, login: str, password: str) -> dict:
@@ -353,6 +416,59 @@ def _test_yclients_credentials(partner_token: str, login: str, password: str) ->
     if not api.authenticate():
         raise HTTPException(status_code=400, detail='YClients authentication failed')
     return {'success': True, 'message': 'YClients credentials are valid'}
+
+
+async def _sync_credential_companies_from_yclients(
+    db: AsyncSession,
+    portal_account_id: int,
+    partner_token: str,
+    login: str,
+    password: str,
+) -> list[int]:
+    api = YClientsAPI(partner_token, login, password)
+    if not hasattr(api, 'get_groups'):
+        return []
+    groups = api.get_groups() or []
+    company_ids: list[int] = []
+    for group_data in groups:
+        group_id = group_data.get('id')
+        if group_id is None:
+            continue
+        group = await db.get(Group, int(group_id))
+        if group is None:
+            group = Group(id=int(group_id), title=group_data.get('title', ''), access=group_data.get('access'))
+            db.add(group)
+        else:
+            group.title = group_data.get('title', '')
+            group.access = group_data.get('access')
+
+        for company_data in group_data.get('companies') or []:
+            company_id = company_data.get('id')
+            if company_id is None:
+                continue
+            company_id = int(company_id)
+            company = await db.get(Company, company_id)
+            if company is None:
+                company = Company(
+                    id=company_id,
+                    title=company_data.get('title', ''),
+                    group_id=int(group_id),
+                )
+                db.add(company)
+            else:
+                company.title = company_data.get('title', '')
+                company.group_id = int(group_id)
+
+            existing_branch = (
+                await db.execute(select(PortalBranch).where(PortalBranch.company_id == company_id))
+            ).scalar_one_or_none()
+            if existing_branch is not None and existing_branch.portal_account_id != portal_account_id:
+                raise HTTPException(status_code=409, detail=f'Company {company_id} belongs to another tenant')
+            if existing_branch is None:
+                db.add(PortalBranch(portal_account_id=portal_account_id, company_id=company_id))
+            company_ids.append(company_id)
+    await db.flush()
+    return sorted(set(company_ids))
 
 
 @router.get('/admin/meta')
@@ -367,7 +483,8 @@ async def admin_meta(
             'role': actor.role,
             'can_manage_users': actor.role in USER_ADMIN_ROLES,
             'assignable_roles': assignable_roles(actor.role) if actor.role in USER_ADMIN_ROLES else [],
-            'company_ids': None if actor.role == 'super_admin' else branch_ids,
+            'portal_account_id': actor.portal_account_id,
+            'company_ids': None if actor.role == 'platform_admin' else branch_ids,
         },
     }
 
@@ -400,7 +517,9 @@ async def admin_list_users(
     show_passwords = actor.role in USER_ADMIN_ROLES
     staff_ids_by_user = await _load_staff_ids_by_portal_user(db, [user.id for user in users])
     for user in users:
-        branch_ids = await load_user_branch_ids(db, user.id)
+        if not _same_tenant(actor, user):
+            continue
+        branch_ids = await load_user_access_branch_ids(db, user)
         if can_list_user(actor.role, actor_branch_ids, user.role, branch_ids):
             manageable = user.id != actor.id and can_manage_user(
                 actor.role, actor_branch_ids, user.role, branch_ids
@@ -417,7 +536,7 @@ async def admin_list_users(
                 )
             )
 
-    allowed_staff_companies = None if actor.role == 'super_admin' else actor_branch_ids
+    allowed_staff_companies = None if actor.role == 'platform_admin' else actor_branch_ids
     for staff in await list_unlinked_staff(db, allowed_staff_companies):
         manageable = can_manage_staff(actor.role, actor_branch_ids, staff.company_id)
         payload.append(_staff_payload(staff, manageable=manageable))
@@ -433,7 +552,33 @@ async def admin_create_user(
     actor_branch_ids = await _actor_branch_ids(db, actor)
     assert_can_assign_role(actor.role, body.role)
     validate_company_ids_for_role(actor.role, actor_branch_ids, body.role, body.company_ids)
-    await _validate_company_ids_exist(db, body.company_ids)
+    await _validate_company_ids_in_scope(db, actor, body.company_ids)
+
+    portal_account_id = actor.portal_account_id
+    if actor.role == 'platform_admin':
+        if body.role == 'owner':
+            account = PortalAccount(
+                label=(body.full_name or body.email).strip(),
+                created_at=datetime.utcnow(),
+            )
+            db.add(account)
+            await db.flush()
+            portal_account_id = account.id
+        elif body.role == 'platform_admin':
+            portal_account_id = None
+        elif body.portal_account_id is not None:
+            account = await db.get(PortalAccount, body.portal_account_id)
+            if account is None:
+                raise HTTPException(status_code=400, detail='Unknown portal_account_id')
+            portal_account_id = account.id
+        else:
+            raise HTTPException(status_code=400, detail='portal_account_id is required for tenant users')
+
+    if body.company_ids and portal_account_id is not None:
+        tenant_company_ids = set(await load_portal_account_branch_ids(db, portal_account_id))
+        invalid = sorted(set(body.company_ids) - tenant_company_ids)
+        if invalid:
+            raise HTTPException(status_code=403, detail=f'Companies outside tenant: {invalid}')
 
     email = normalize_email(body.email)
     existing = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
@@ -441,6 +586,7 @@ async def admin_create_user(
         raise HTTPException(status_code=409, detail='Email already registered')
 
     user = PortalUser(
+        portal_account_id=portal_account_id,
         email=email,
         password_hash=hash_password(body.password),
         full_name=body.full_name,
@@ -458,7 +604,7 @@ async def admin_create_user(
     await sync_portal_user_staff(db, user, branch_ids)
     await db.commit()
     await db.refresh(user)
-    branch_ids = await load_user_branch_ids(db, user.id)
+    branch_ids = await load_user_access_branch_ids(db, user)
     return {
         'success': True,
         'data': _user_payload(user, branch_ids, manageable=None, show_initial_password=True),
@@ -477,9 +623,11 @@ async def admin_update_user(
         raise HTTPException(status_code=404, detail='User not found')
     if user.id == actor.id:
         raise HTTPException(status_code=403, detail='Cannot manage your own account here')
+    if not _same_tenant(actor, user):
+        raise HTTPException(status_code=403, detail='Cannot manage user from another tenant')
 
     actor_branch_ids = await _actor_branch_ids(db, actor)
-    current_branch_ids = await load_user_branch_ids(db, user.id)
+    current_branch_ids = await load_user_access_branch_ids(db, user)
     assert_can_manage_user(actor.role, actor_branch_ids, user.role, current_branch_ids)
 
     next_role = body.role if body.role is not None else user.role
@@ -510,10 +658,10 @@ async def admin_update_user(
             user.email_verified_at = datetime.utcnow()
 
     if body.company_ids is not None:
-        await _validate_company_ids_exist(db, body.company_ids)
+        await _validate_company_ids_in_scope(db, actor, body.company_ids)
         await set_user_branches(db, user.id, body.company_ids)
 
-    branch_ids = await load_user_branch_ids(db, user.id)
+    branch_ids = await load_user_access_branch_ids(db, user)
     await sync_portal_user_staff(db, user, branch_ids)
     await db.commit()
     return {'success': True, 'data': _user_payload(user, branch_ids, manageable=None)}
@@ -521,20 +669,33 @@ async def admin_update_user(
 
 @router.get('/admin/yclients-credentials')
 async def admin_list_yclients_credentials(
-    _actor: PortalUser = Depends(require_roles('super_admin')),
+    actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
     db: AsyncSession = Depends(get_async_db),
 ):
-    return {'success': True, 'data': await list_credential_payloads(db)}
+    portal_account_id = None if actor.role == 'platform_admin' else actor.portal_account_id
+    return {'success': True, 'data': await list_credential_payloads(db, portal_account_id)}
 
 
 @router.post('/admin/yclients-credentials')
 async def admin_create_yclients_credentials(
     body: YClientsCredentialCreateRequest,
-    _actor: PortalUser = Depends(require_roles('super_admin')),
+    actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
     db: AsyncSession = Depends(get_async_db),
 ):
+    portal_account_id = _credential_account_id(actor, body.portal_account_id)
+    company_ids = list(body.company_ids)
+    if not company_ids:
+        company_ids = await _sync_credential_companies_from_yclients(
+            db,
+            portal_account_id,
+            body.partner_token,
+            body.login,
+            body.password,
+        )
+    await _validate_credential_companies(db, portal_account_id, company_ids)
     try:
         credential = new_credential(
+            portal_account_id,
             body.title,
             body.partner_token,
             body.login,
@@ -547,11 +708,14 @@ async def admin_create_yclients_credentials(
     db.add(credential)
     await db.flush()
     try:
-        await set_credential_companies(db, credential.id, body.company_ids)
+        await set_credential_companies(db, credential.id, company_ids)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
-    payloads = await list_credential_payloads(db)
+    payloads = await list_credential_payloads(
+        db,
+        None if actor.role == 'platform_admin' else actor.portal_account_id,
+    )
     created_payload = next((item for item in payloads if item['id'] == credential.id), None)
     return {'success': True, 'data': created_payload}
 
@@ -560,10 +724,15 @@ async def admin_create_yclients_credentials(
 async def admin_update_yclients_credentials(
     credential_id: int,
     body: YClientsCredentialUpdateRequest,
-    _actor: PortalUser = Depends(require_roles('super_admin')),
+    actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
     db: AsyncSession = Depends(get_async_db),
 ):
-    credential = await _load_credential(db, credential_id)
+    credential = await _load_credential(db, credential_id, actor)
+    if body.portal_account_id is not None and body.portal_account_id != credential.portal_account_id:
+        if actor.role != 'platform_admin':
+            raise HTTPException(status_code=403, detail='Cannot move credentials between tenants')
+        await _validate_credential_companies(db, body.portal_account_id, body.company_ids or [])
+        credential.portal_account_id = body.portal_account_id
     try:
         update_credential_secrets(
             credential,
@@ -577,21 +746,25 @@ async def admin_update_yclients_credentials(
         raise _credentials_config_error(exc) from exc
 
     if body.company_ids is not None:
+        await _validate_credential_companies(db, credential.portal_account_id, body.company_ids)
         try:
             await set_credential_companies(db, credential.id, body.company_ids)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
-    return {'success': True, 'data': await list_credential_payloads(db)}
+    return {'success': True, 'data': await list_credential_payloads(
+        db,
+        None if actor.role == 'platform_admin' else actor.portal_account_id,
+    )}
 
 
 @router.delete('/admin/yclients-credentials/{credential_id}')
 async def admin_delete_yclients_credentials(
     credential_id: int,
-    _actor: PortalUser = Depends(require_roles('super_admin')),
+    actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
     db: AsyncSession = Depends(get_async_db),
 ):
-    credential = await _load_credential(db, credential_id)
+    credential = await _load_credential(db, credential_id, actor)
     await db.delete(credential)
     await db.commit()
     return {'success': True, 'message': 'YClients credentials deleted'}
@@ -600,10 +773,10 @@ async def admin_delete_yclients_credentials(
 @router.post('/admin/yclients-credentials/{credential_id}/test')
 async def admin_test_saved_yclients_credentials(
     credential_id: int,
-    _actor: PortalUser = Depends(require_roles('super_admin')),
+    actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
     db: AsyncSession = Depends(get_async_db),
 ):
-    credential = await _load_credential(db, credential_id)
+    credential = await _load_credential(db, credential_id, actor)
     try:
         value = decrypted_credential(credential)
     except CredentialsConfigError as exc:
@@ -614,7 +787,7 @@ async def admin_test_saved_yclients_credentials(
 @router.post('/admin/yclients-credentials/test')
 async def admin_test_yclients_credentials_payload(
     body: YClientsCredentialTestRequest,
-    _actor: PortalUser = Depends(require_roles('super_admin')),
+    _actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
 ):
     if not (body.partner_token and body.login and body.password):
         raise HTTPException(status_code=400, detail='partner_token, login and password are required')
@@ -634,7 +807,9 @@ async def admin_delete_user(
         raise HTTPException(status_code=403, detail='Cannot delete your own account')
 
     actor_branch_ids = await _actor_branch_ids(db, actor)
-    branch_ids = await load_user_branch_ids(db, user.id)
+    if not _same_tenant(actor, user):
+        raise HTTPException(status_code=403, detail='Cannot delete user from another tenant')
+    branch_ids = await load_user_access_branch_ids(db, user)
     assert_can_manage_user(actor.role, actor_branch_ids, user.role, branch_ids)
 
     await deactivate_portal_user_staff(db, user.id)
@@ -699,7 +874,7 @@ async def admin_provision_accounts(
     db: AsyncSession = Depends(get_async_db),
 ):
     actor_branch_ids = await _actor_branch_ids(db, actor)
-    allowed = None if actor.role == 'super_admin' else actor_branch_ids
+    allowed = None if actor.role == 'platform_admin' else actor_branch_ids
     created, errors = await provision_all_unlinked_staff(db, allowed)
     await db.commit()
     return {
@@ -756,7 +931,9 @@ async def admin_list_initial_passwords(
     payload = []
     staff_ids_by_user = await _load_staff_ids_by_portal_user(db, [user.id for user in users])
     for user in users:
-        branch_ids = await load_user_branch_ids(db, user.id)
+        if not _same_tenant(actor, user):
+            continue
+        branch_ids = await load_user_access_branch_ids(db, user)
         if not can_list_user(actor.role, actor_branch_ids, user.role, branch_ids):
             continue
         staff_id = staff_ids_by_user.get(user.id, user.id)
@@ -795,7 +972,10 @@ async def admin_distribute_credentials(
             errors.append({'user_id': user_id, 'reason': 'User not found'})
             continue
 
-        branch_ids = await load_user_branch_ids(db, user.id)
+        if not _same_tenant(actor, user):
+            errors.append({'user_id': user_id, 'email': user.email, 'reason': 'Access denied'})
+            continue
+        branch_ids = await load_user_access_branch_ids(db, user)
         if not can_manage_user(actor.role, actor_branch_ids, user.role, branch_ids):
             errors.append({'user_id': user_id, 'email': user.email, 'reason': 'Access denied'})
             continue

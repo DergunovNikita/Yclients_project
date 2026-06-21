@@ -31,6 +31,7 @@ from config import (
 )
 from dashboard_routes import router as dashboard_router
 from auth_routes import router as auth_router
+from auth_scope import AccessContext
 from database import get_async_db, init_async_database
 from models import (
     Account,
@@ -88,7 +89,7 @@ async def require_api_key(
 
     if request.url.path in OPEN_PATHS:
         return
-    await require_auth(request, authorization, x_api_key, db)
+    await require_auth(request, authorization, x_api_key=x_api_key, db=db)
 
 
 app = FastAPI(
@@ -135,6 +136,21 @@ def page_params(
     offset: int = Query(0, ge=0),
 ) -> tuple[int, int]:
     return limit, offset
+
+
+def request_access(request: Request) -> AccessContext | None:
+    return getattr(request.state, 'access', None)
+
+
+def apply_company_scope(stmt, column, company_id: Optional[int], ctx: AccessContext | None):
+    if ctx is None or ctx.full_access:
+        return stmt.where(column == company_id) if company_id is not None else stmt
+    allowed = ctx.company_ids or []
+    if company_id is not None:
+        if company_id not in allowed:
+            raise HTTPException(status_code=403, detail='Branch not allowed')
+        return stmt.where(column == company_id)
+    return stmt.where(column.in_(allowed))
 
 
 def build_page_response(total: int, limit: int, offset: int, data: list[dict[str, Any]]) -> dict[str, Any]:
@@ -223,12 +239,16 @@ async def api_groups(
 
 @app.get("/companies")
 async def api_companies(
+    request: Request,
     group_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
     stmt = select(Company)
+    ctx = request_access(request)
+    if ctx is not None and not ctx.full_access:
+        stmt = stmt.where(Company.id.in_(ctx.company_ids or []))
     if group_id is not None:
         stmt = stmt.where(Company.group_id == group_id)
     stmt = stmt.order_by(Company.id.asc())
@@ -239,14 +259,14 @@ async def api_companies(
 
 @app.get("/service_categories")
 async def api_service_categories(
+    request: Request,
     company_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
     stmt = select(ServiceCategoryCatalog)
-    if company_id is not None:
-        stmt = stmt.where(ServiceCategoryCatalog.company_id == company_id)
+    stmt = apply_company_scope(stmt, ServiceCategoryCatalog.company_id, company_id, request_access(request))
     stmt = stmt.order_by(ServiceCategoryCatalog.category_id.asc())
     total, items = await fetch_page(db, stmt, limit, offset)
     data = serialize_rows(items, lambda item: {
@@ -261,6 +281,7 @@ async def api_service_categories(
 
 @app.get("/services")
 async def api_services(
+    request: Request,
     company_id: Optional[int] = None,
     category: Optional[str] = None,
     min_price: Optional[float] = None,
@@ -270,8 +291,7 @@ async def api_services(
 ):
     limit, offset = pagination
     stmt = select(ServiceCatalog)
-    if company_id is not None:
-        stmt = stmt.where(ServiceCatalog.company_id == company_id)
+    stmt = apply_company_scope(stmt, ServiceCatalog.company_id, company_id, request_access(request))
     if category:
         stmt = stmt.where(ServiceCatalog.category_title == category)
     if min_price is not None:
@@ -294,14 +314,14 @@ async def api_services(
 
 @app.get("/staff_positions")
 async def api_staff_positions(
+    request: Request,
     company_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
     stmt = select(StaffPositionCatalog)
-    if company_id is not None:
-        stmt = stmt.where(StaffPositionCatalog.company_id == company_id)
+    stmt = apply_company_scope(stmt, StaffPositionCatalog.company_id, company_id, request_access(request))
     stmt = stmt.order_by(StaffPositionCatalog.position_id.asc())
     total, items = await fetch_page(db, stmt, limit, offset)
     data = serialize_rows(items, lambda item: {
@@ -314,14 +334,14 @@ async def api_staff_positions(
 
 @app.get("/staff")
 async def api_staff(
+    request: Request,
     company_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
     stmt = select(Staff)
-    if company_id is not None:
-        stmt = stmt.where(Staff.company_id == company_id)
+    stmt = apply_company_scope(stmt, Staff.company_id, company_id, request_access(request))
     stmt = stmt.order_by(Staff.id.asc())
     total, items = await fetch_page(db, stmt, limit, offset)
     data = serialize_rows(items, lambda item: {
@@ -340,6 +360,7 @@ async def api_staff(
 
 @app.get("/clients")
 async def api_clients(
+    request: Request,
     company_id: Optional[int] = None,
     min_visits: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
@@ -347,8 +368,7 @@ async def api_clients(
 ):
     limit, offset = pagination
     stmt = select(Client)
-    if company_id is not None:
-        stmt = stmt.where(Client.company_id == company_id)
+    stmt = apply_company_scope(stmt, Client.company_id, company_id, request_access(request))
     if min_visits is not None:
         stmt = stmt.where(Client.visits_count >= min_visits)
     stmt = stmt.order_by(Client.id.asc())
@@ -369,14 +389,14 @@ async def api_clients(
 
 @app.get("/accounts")
 async def api_accounts(
+    request: Request,
     company_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
     stmt = select(AccountCatalog)
-    if company_id is not None:
-        stmt = stmt.where(AccountCatalog.company_id == company_id)
+    stmt = apply_company_scope(stmt, AccountCatalog.company_id, company_id, request_access(request))
     stmt = stmt.order_by(AccountCatalog.account_id.asc())
     total, items = await fetch_page(db, stmt, limit, offset)
     data = serialize_rows(items, lambda item: {
@@ -391,14 +411,14 @@ async def api_accounts(
 
 @app.get("/storages")
 async def api_storages(
+    request: Request,
     company_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
     stmt = select(StorageCatalog)
-    if company_id is not None:
-        stmt = stmt.where(StorageCatalog.company_id == company_id)
+    stmt = apply_company_scope(stmt, StorageCatalog.company_id, company_id, request_access(request))
     stmt = stmt.order_by(StorageCatalog.storage_id.asc())
     total, items = await fetch_page(db, stmt, limit, offset)
     data = serialize_rows(items, lambda item: {
@@ -414,14 +434,14 @@ async def api_storages(
 
 @app.get("/good_categories")
 async def api_good_categories(
+    request: Request,
     company_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
     stmt = select(GoodCategoryCatalog)
-    if company_id is not None:
-        stmt = stmt.where(GoodCategoryCatalog.company_id == company_id)
+    stmt = apply_company_scope(stmt, GoodCategoryCatalog.company_id, company_id, request_access(request))
     stmt = stmt.order_by(GoodCategoryCatalog.category_id.asc())
     total, items = await fetch_page(db, stmt, limit, offset)
     data = serialize_rows(items, lambda item: {
@@ -435,6 +455,7 @@ async def api_good_categories(
 
 @app.get("/goods")
 async def api_goods(
+    request: Request,
     company_id: Optional[int] = None,
     category_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
@@ -442,8 +463,7 @@ async def api_goods(
 ):
     limit, offset = pagination
     stmt = select(GoodCatalog)
-    if company_id is not None:
-        stmt = stmt.where(GoodCatalog.company_id == company_id)
+    stmt = apply_company_scope(stmt, GoodCatalog.company_id, company_id, request_access(request))
     if category_id is not None:
         stmt = stmt.where(GoodCatalog.category_id == category_id)
     stmt = stmt.order_by(GoodCatalog.good_id.asc())
@@ -464,6 +484,7 @@ async def api_goods(
 
 @app.get("/appointments")
 async def api_appointments(
+    request: Request,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
     client_id: Optional[int] = None,
@@ -474,8 +495,7 @@ async def api_appointments(
 ):
     limit, offset = pagination
     stmt = select(Appointment)
-    if company_id is not None:
-        stmt = stmt.where(Appointment.company_id == company_id)
+    stmt = apply_company_scope(stmt, Appointment.company_id, company_id, request_access(request))
     if staff_id is not None:
         stmt = stmt.where(Appointment.staff_id == staff_id)
     if client_id is not None:
@@ -503,6 +523,7 @@ async def api_appointments(
 
 @app.get("/transactions")
 async def api_transactions(
+    request: Request,
     company_id: Optional[int] = None,
     appointment_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
@@ -510,8 +531,7 @@ async def api_transactions(
 ):
     limit, offset = pagination
     stmt = select(Transaction)
-    if company_id is not None:
-        stmt = stmt.where(Transaction.company_id == company_id)
+    stmt = apply_company_scope(stmt, Transaction.company_id, company_id, request_access(request))
     if appointment_id is not None:
         stmt = stmt.where(Transaction.appointment_id == appointment_id)
     stmt = stmt.order_by(Transaction.id.asc())
@@ -531,6 +551,7 @@ async def api_transactions(
 
 @app.get("/financial_transactions")
 async def api_financial_transactions(
+    request: Request,
     company_id: Optional[int] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
@@ -539,8 +560,7 @@ async def api_financial_transactions(
 ):
     limit, offset = pagination
     stmt = select(FinancialTransaction)
-    if company_id is not None:
-        stmt = stmt.where(FinancialTransaction.company_id == company_id)
+    stmt = apply_company_scope(stmt, FinancialTransaction.company_id, company_id, request_access(request))
     if date_from:
         stmt = stmt.where(FinancialTransaction.date >= parse_datetime_start(date_from))
     if date_to:
@@ -569,14 +589,14 @@ async def api_financial_transactions(
 
 @app.get("/goods_transactions")
 async def api_goods_transactions(
+    request: Request,
     company_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
     stmt = select(GoodTransaction)
-    if company_id is not None:
-        stmt = stmt.where(GoodTransaction.company_id == company_id)
+    stmt = apply_company_scope(stmt, GoodTransaction.company_id, company_id, request_access(request))
     stmt = stmt.order_by(GoodTransaction.id.asc())
     total, items = await fetch_page(db, stmt, limit, offset)
     data = serialize_rows(items, lambda item: {
@@ -601,6 +621,7 @@ async def api_goods_transactions(
 
 @app.get("/comments")
 async def api_comments(
+    request: Request,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
     min_rating: Optional[float] = None,
@@ -611,8 +632,7 @@ async def api_comments(
 ):
     limit, offset = pagination
     stmt = select(Comment)
-    if company_id is not None:
-        stmt = stmt.where(Comment.company_id == company_id)
+    stmt = apply_company_scope(stmt, Comment.company_id, company_id, request_access(request))
     if staff_id is not None:
         stmt = stmt.where(Comment.master_id == staff_id)
     if min_rating is not None:
@@ -640,6 +660,7 @@ async def api_comments(
 
 @app.get("/staff_schedules")
 async def api_staff_schedules(
+    request: Request,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
     date_from: Optional[str] = None,
@@ -649,8 +670,7 @@ async def api_staff_schedules(
 ):
     limit, offset = pagination
     stmt = select(StaffSchedule)
-    if company_id is not None:
-        stmt = stmt.where(StaffSchedule.company_id == company_id)
+    stmt = apply_company_scope(stmt, StaffSchedule.company_id, company_id, request_access(request))
     if staff_id is not None:
         stmt = stmt.where(StaffSchedule.staff_id == staff_id)
     if date_from:
@@ -671,23 +691,46 @@ async def api_staff_schedules(
 
 
 @app.get("/stats")
-async def api_stats(db: AsyncSession = Depends(get_async_db)):
+async def api_stats(request: Request, db: AsyncSession = Depends(get_async_db)):
+    ctx = request_access(request)
+    allowed = None if ctx is None or ctx.full_access else (ctx.company_ids or [])
     revenue_result = await db.execute(
-        select(func.sum(Transaction.cost * Transaction.amount))
+        apply_company_scope(
+            select(func.sum(Transaction.cost * Transaction.amount)),
+            Transaction.company_id,
+            None,
+            ctx,
+        )
     )
     revenue = revenue_result.scalar_one_or_none() or 0
 
     fin_result = await db.execute(
-        select(func.sum(FinancialTransaction.amount)).where(FinancialTransaction.amount > 0)
+        apply_company_scope(
+            select(func.sum(FinancialTransaction.amount)).where(FinancialTransaction.amount > 0),
+            FinancialTransaction.company_id,
+            None,
+            ctx,
+        )
     )
     fin_income = fin_result.scalar_one_or_none() or 0
 
     async def count_of(model):
-        r = await db.execute(select(func.count()).select_from(model))
+        stmt = select(func.count()).select_from(model)
+        company_column = getattr(model, 'company_id', None)
+        if allowed is not None and company_column is not None:
+            stmt = stmt.where(company_column.in_(allowed))
+        elif allowed is not None and model is Company:
+            stmt = stmt.where(Company.id.in_(allowed))
+        r = await db.execute(stmt)
         return r.scalar_one()
 
     attended_result = await db.execute(
-        select(func.count()).where(Appointment.attendance == 1)
+        apply_company_scope(
+            select(func.count()).where(Appointment.attendance == 1),
+            Appointment.company_id,
+            None,
+            ctx,
+        )
     )
     appointments_total = await count_of(Appointment)
 
@@ -781,7 +824,7 @@ TABLE_MAP = {
 }
 
 
-async def async_stream_csv_rows(db: AsyncSession, model):
+async def async_stream_csv_rows(db: AsyncSession, model, ctx: AccessContext | None = None):
     columns = [column.key for column in model.__table__.columns]
     buffer = io.StringIO()
     writer = csv.writer(buffer)
@@ -790,7 +833,17 @@ async def async_stream_csv_rows(db: AsyncSession, model):
     buffer.seek(0)
     buffer.truncate(0)
 
-    stmt = select(model).order_by(*model.__table__.primary_key.columns)
+    stmt = select(model)
+    company_column = getattr(model, 'company_id', None)
+    if ctx is not None and not ctx.full_access:
+        allowed = ctx.company_ids or []
+        if company_column is not None:
+            stmt = stmt.where(company_column.in_(allowed))
+        elif model is Company:
+            stmt = stmt.where(Company.id.in_(allowed))
+        else:
+            stmt = stmt.where(False)
+    stmt = stmt.order_by(*model.__table__.primary_key.columns)
     result = await db.stream(stmt)
     async for row in result.scalars():
         writer.writerow([serialize_value(getattr(row, column)) for column in columns])
@@ -800,7 +853,7 @@ async def async_stream_csv_rows(db: AsyncSession, model):
 
 
 @app.get("/export/csv/{table_name}")
-async def export_csv(table_name: str, db: AsyncSession = Depends(get_async_db)):
+async def export_csv(table_name: str, request: Request, db: AsyncSession = Depends(get_async_db)):
     model = TABLE_MAP.get(table_name)
     if model is None:
         raise HTTPException(
@@ -809,7 +862,7 @@ async def export_csv(table_name: str, db: AsyncSession = Depends(get_async_db)):
         )
 
     return StreamingResponse(
-        async_stream_csv_rows(db, model),
+        async_stream_csv_rows(db, model, request_access(request)),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename={table_name}.csv"},
     )

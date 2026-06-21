@@ -21,6 +21,8 @@ from models import (
     PlanBranchSetting,
     PlanMetric,
     PlanStaffInput,
+    PortalAccount,
+    PortalBranch,
     PortalEmailToken,
     PortalUser,
     PortalUserBranch,
@@ -106,6 +108,8 @@ async def async_session() -> AsyncGenerator[AsyncSession, None]:
     async with engine.begin() as conn:
         await conn.execute(__import__('sqlalchemy').text("ATTACH DATABASE ':memory:' AS system"))
         await conn.run_sync(Base.metadata.create_all, tables=PUBLIC_TABLES + [
+            PortalAccount.__table__,
+            PortalBranch.__table__,
             PortalUser.__table__,
             PortalUserBranch.__table__,
             PortalEmailToken.__table__,

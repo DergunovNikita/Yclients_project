@@ -463,6 +463,7 @@ async def fetch_report_data(
     compare_start: date | None = None,
     compare_end: date | None = None,
     compare_staff_id: int | None = None,
+    allowed_company_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     if report_id not in REPORT_REGISTRY:
         raise ValueError(f'unknown report_id: {report_id}')
@@ -473,7 +474,9 @@ async def fetch_report_data(
     if compare_start and compare_end and compare_start > compare_end:
         raise ValueError('compare_start_date must be <= compare_end_date')
 
-    data = await _fetch_report_payload(db, report_id, start, end, company_id, staff_id, granularity)
+    data = await _fetch_report_payload(
+        db, report_id, start, end, company_id, staff_id, granularity, allowed_company_ids
+    )
     if data['source_status'] == 'ready' and ((compare_start and compare_end) or compare_staff_id):
         cmp_start = compare_start or start
         cmp_end = compare_end or end
@@ -486,6 +489,7 @@ async def fetch_report_data(
             company_id,
             cmp_staff_id,
             granularity,
+            allowed_company_ids,
         )
         data['comparison'] = {
             'period': compare_data['period'],
@@ -505,6 +509,7 @@ async def _fetch_report_payload(
     company_id: int | None,
     staff_id: int | None,
     granularity: str,
+    allowed_company_ids: list[int] | None,
 ) -> dict[str, Any]:
     definition = REPORT_REGISTRY[report_id]
     base = {
@@ -524,22 +529,22 @@ async def _fetch_report_payload(
     if definition.status == 'planned':
         return _planned_payload(base, definition)
     if report_id == 'nps_dashboard':
-        return await _nps_payload(db, base, definition, start, end, company_id)
+        return await _nps_payload(db, base, definition, start, end, company_id, allowed_company_ids)
     if report_id in PLAN_REPORTS:
-        return await _plan_payload(db, base, start, end, company_id, staff_id)
+        return await _plan_payload(db, base, start, end, company_id, staff_id, allowed_company_ids)
     if report_id in GOODS_REPORTS:
-        return await _goods_payload(db, base, start, end, company_id, staff_id, granularity)
+        return await _goods_payload(db, base, start, end, company_id, staff_id, granularity, allowed_company_ids)
     if report_id in STAFF_REPORTS:
-        return await _staff_payload(db, base, start, end, company_id, staff_id)
+        return await _staff_payload(db, base, start, end, company_id, staff_id, allowed_company_ids)
     if report_id in SERVICE_REPORTS:
-        return await _services_payload(db, base, start, end, company_id, staff_id, granularity)
+        return await _services_payload(db, base, start, end, company_id, staff_id, granularity, allowed_company_ids)
     if report_id in CLIENT_REPORTS:
-        return await _clients_payload(db, base, start, end, company_id, staff_id)
+        return await _clients_payload(db, base, start, end, company_id, staff_id, allowed_company_ids)
     if report_id in CHURN_REPORTS:
-        return await _churn_payload(db, base, start, end, company_id, staff_id)
+        return await _churn_payload(db, base, start, end, company_id, staff_id, allowed_company_ids)
     if report_id in BOOKING_REPORTS:
-        return await _operations_payload(db, base, start, end, company_id, staff_id, granularity)
-    return await _financial_payload(db, base, start, end, company_id, staff_id, granularity)
+        return await _operations_payload(db, base, start, end, company_id, staff_id, granularity, allowed_company_ids)
+    return await _financial_payload(db, base, start, end, company_id, staff_id, granularity, allowed_company_ids)
 
 
 def _missing_payload(base: dict[str, Any], definition: ReportDefinition) -> dict[str, Any]:
@@ -597,12 +602,15 @@ def _appointment_conditions(
     staff_id: int | None,
     *,
     attended_only: bool = False,
+    allowed_company_ids: list[int] | None = None,
 ) -> list[Any]:
     conditions = [Appointment.date >= start, Appointment.date <= end]
     if attended_only:
         conditions.append(Appointment.attendance == COMPLETED_ATTENDANCE)
     if company_id is not None:
         conditions.append(Appointment.company_id == company_id)
+    elif allowed_company_ids is not None:
+        conditions.append(Appointment.company_id.in_(allowed_company_ids))
     if staff_id is not None:
         conditions.append(Appointment.staff_id == staff_id)
     return conditions
@@ -643,10 +651,14 @@ async def _financial_payload(
     company_id: int | None,
     staff_id: int | None,
     granularity: str,
+    allowed_company_ids: list[int] | None,
 ) -> dict[str, Any]:
-    summary = await fetch_summary(db, start, end, company_id, staff_id)
-    daily = _aggregate_daily(await fetch_revenue_daily(db, start, end, company_id, staff_id), granularity)
-    services = await fetch_top_services(db, start, end, company_id, 15, staff_id)
+    summary = await fetch_summary(db, start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids)
+    daily = _aggregate_daily(
+        await fetch_revenue_daily(db, start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids),
+        granularity,
+    )
+    services = await fetch_top_services(db, start, end, company_id, 15, staff_id, allowed_company_ids=allowed_company_ids)
     revenue = summary.get('revenue', {})
     avg = summary.get('average_check', {})
     visits = summary.get('visit_metrics', {})
@@ -738,9 +750,10 @@ async def _services_payload(
     company_id: int | None,
     staff_id: int | None,
     granularity: str,
+    allowed_company_ids: list[int] | None,
 ) -> dict[str, Any]:
-    services = await fetch_top_services(db, start, end, company_id, 25, staff_id)
-    extra = await fetch_extra_services(db, start, end, company_id, 25, staff_id)
+    services = await fetch_top_services(db, start, end, company_id, 25, staff_id, allowed_company_ids=allowed_company_ids)
+    extra = await fetch_extra_services(db, start, end, company_id, 25, staff_id, allowed_company_ids=allowed_company_ids)
     total_revenue = sum(float(row.get('revenue') or 0) for row in services)
     total_sold = sum(float(row.get('sold') or 0) for row in services)
     base['cards'] = [
@@ -782,6 +795,7 @@ async def _staff_rows(
     end: date,
     company_id: int | None,
     staff_id: int | None,
+    allowed_company_ids: list[int] | None,
 ) -> list[dict[str, Any]]:
     appt_stmt = (
         select(
@@ -803,7 +817,7 @@ async def _staff_rows(
         )
         .outerjoin(Staff, Staff.id == Appointment.staff_id)
         .outerjoin(Company, Company.id == Appointment.company_id)
-        .where(and_(*_appointment_conditions(start, end, company_id, staff_id)))
+        .where(and_(*_appointment_conditions(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids)))
         .group_by(Appointment.staff_id)
     )
     rev_stmt = (
@@ -812,7 +826,9 @@ async def _staff_rows(
             func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
         )
         .join(FinancialTransaction, FinancialTransaction.record_id == Appointment.id)
-        .where(and_(*_appointment_conditions(start, end, company_id, staff_id, attended_only=True)))
+        .where(and_(*_appointment_conditions(
+            start, end, company_id, staff_id, attended_only=True, allowed_company_ids=allowed_company_ids
+        )))
         .group_by(Appointment.staff_id)
     )
     appt_rows = (await db.execute(appt_stmt)).all()
@@ -843,8 +859,9 @@ async def _staff_payload(
     end: date,
     company_id: int | None,
     staff_id: int | None,
+    allowed_company_ids: list[int] | None,
 ) -> dict[str, Any]:
-    rows = await _staff_rows(db, start, end, company_id, staff_id)
+    rows = await _staff_rows(db, start, end, company_id, staff_id, allowed_company_ids)
     total_revenue = sum(row['revenue'] for row in rows)
     total_completed = sum(row['completed'] for row in rows)
     base['cards'] = [
@@ -895,6 +912,7 @@ async def _clients_rows(
     end: date,
     company_id: int | None,
     staff_id: int | None,
+    allowed_company_ids: list[int] | None,
 ) -> list[dict[str, Any]]:
     stmt = (
         select(
@@ -907,7 +925,9 @@ async def _clients_rows(
         )
         .outerjoin(Client, Client.id == Appointment.client_id)
         .outerjoin(FinancialTransaction, FinancialTransaction.record_id == Appointment.id)
-        .where(and_(*_appointment_conditions(start, end, company_id, staff_id, attended_only=True)))
+        .where(and_(*_appointment_conditions(
+            start, end, company_id, staff_id, attended_only=True, allowed_company_ids=allowed_company_ids
+        )))
         .group_by(Appointment.client_id)
     )
     rows = []
@@ -952,8 +972,9 @@ async def _clients_payload(
     end: date,
     company_id: int | None,
     staff_id: int | None,
+    allowed_company_ids: list[int] | None,
 ) -> dict[str, Any]:
-    rows = await _clients_rows(db, start, end, company_id, staff_id)
+    rows = await _clients_rows(db, start, end, company_id, staff_id, allowed_company_ids)
     total_revenue = sum(row['revenue'] for row in rows)
     total_visits = sum(row['visits'] for row in rows)
     avg_revenue = total_revenue / len(rows) if rows else 0.0
@@ -1009,6 +1030,7 @@ async def _last_staff_by_client(
     client_ids: list[int],
     company_id: int | None,
     staff_id: int | None,
+    allowed_company_ids: list[int] | None,
 ) -> dict[int, dict[str, Any]]:
     if not client_ids:
         return {}
@@ -1018,6 +1040,8 @@ async def _last_staff_by_client(
     ]
     if company_id is not None:
         conditions.append(Appointment.company_id == company_id)
+    elif allowed_company_ids is not None:
+        conditions.append(Appointment.company_id.in_(allowed_company_ids))
     if staff_id is not None:
         conditions.append(Appointment.staff_id == staff_id)
     stmt = (
@@ -1039,14 +1063,15 @@ async def _churn_payload(
     end: date,
     company_id: int | None,
     staff_id: int | None,
+    allowed_company_ids: list[int] | None,
 ) -> dict[str, Any]:
-    clients = await _clients_rows(db, date(2000, 1, 1), end, company_id, staff_id)
+    clients = await _clients_rows(db, date(2000, 1, 1), end, company_id, staff_id, allowed_company_ids)
     risk_rows = [
         row for row in clients
         if row.get('days_since_last_visit') is not None and int(row['days_since_last_visit']) >= 60
     ]
     client_ids = [int(row['client_id']) for row in risk_rows if row.get('client_id') is not None]
-    last_staff = await _last_staff_by_client(db, client_ids, company_id, staff_id)
+    last_staff = await _last_staff_by_client(db, client_ids, company_id, staff_id, allowed_company_ids)
     staff_losses: dict[str, dict[str, Any]] = defaultdict(lambda: {'staff_name': 'Без мастера', 'clients': 0, 'revenue': 0.0})
     for row in risk_rows:
         days = int(row['days_since_last_visit'])
@@ -1122,6 +1147,7 @@ async def _goods_payload(
     company_id: int | None,
     staff_id: int | None,
     granularity: str,
+    allowed_company_ids: list[int] | None,
 ) -> dict[str, Any]:
     conditions = [
         GoodTransaction.type_id == 1,
@@ -1130,6 +1156,8 @@ async def _goods_payload(
     ]
     if company_id is not None:
         conditions.append(GoodTransaction.company_id == company_id)
+    elif allowed_company_ids is not None:
+        conditions.append(GoodTransaction.company_id.in_(allowed_company_ids))
     if staff_id is not None:
         conditions.append(GoodTransaction.master_id == staff_id)
     stmt = (
@@ -1231,11 +1259,12 @@ async def _operations_payload(
     company_id: int | None,
     staff_id: int | None,
     granularity: str,
+    allowed_company_ids: list[int] | None,
 ) -> dict[str, Any]:
     stmt = (
         select(Appointment.id, Appointment.date, Appointment.datetime, Appointment.attendance, Appointment.staff_id, Staff.name)
         .outerjoin(Staff, Staff.id == Appointment.staff_id)
-        .where(and_(*_appointment_conditions(start, end, company_id, staff_id)))
+        .where(and_(*_appointment_conditions(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids)))
     )
     by_hour = defaultdict(lambda: {'hour': 0, 'records': 0, 'completed': 0, 'cancelled': 0})
     by_period = defaultdict(lambda: {'period': '', 'records': 0, 'completed': 0, 'cancelled': 0})
@@ -1266,7 +1295,14 @@ async def _operations_payload(
         'completed': sum(row['completed'] for row in period_rows),
         'no_show': sum(row['cancelled'] for row in period_rows),
     }
-    exact = await fetch_appointments_breakdown(db, start, end, company_id, staff_id)
+    exact = await fetch_appointments_breakdown(
+        db,
+        start,
+        end,
+        company_id,
+        staff_id,
+        allowed_company_ids=allowed_company_ids,
+    )
     if exact['source_status'] == 'ready':
         base['cards'] = [
             _card('Всего записей', exact['total'], NUMBER_FORMAT),
@@ -1346,8 +1382,17 @@ async def _plan_payload(
     end: date,
     company_id: int | None,
     staff_id: int | None,
+    allowed_company_ids: list[int] | None,
 ) -> dict[str, Any]:
-    plan = await fetch_plan_fact(db, start, end, company_id, staff_id)
+    plan = await fetch_plan_fact(
+        db,
+        start,
+        end,
+        company_id,
+        staff_id,
+        allowed_company_ids=allowed_company_ids,
+        force_allowed=allowed_company_ids is not None,
+    )
     rows = []
     for group in plan.get('groups', []):
         for metric in group.get('metrics', []):
@@ -1393,6 +1438,7 @@ async def _nps_payload(
     start: date,
     end: date,
     company_id: int | None,
+    allowed_company_ids: list[int] | None,
 ) -> dict[str, Any]:
     base['missing_sources'] = ['telegram_nps']
     conditions = [
@@ -1401,6 +1447,8 @@ async def _nps_payload(
     ]
     if company_id is not None:
         conditions.append(Comment.company_id == company_id)
+    elif allowed_company_ids is not None:
+        conditions.append(Comment.company_id.in_(allowed_company_ids))
     stmt = (
         select(Comment.rating, Comment.text, Comment.date, Comment.master_id, Staff.name.label('staff_name'))
         .outerjoin(Staff, Staff.id == Comment.master_id)

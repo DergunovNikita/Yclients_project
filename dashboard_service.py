@@ -213,14 +213,23 @@ async def _appointment_company_ids(
     db: AsyncSession,
     company_id: Optional[int],
     staff_id: Optional[int],
+    allowed_company_ids: Optional[list[int]] = None,
 ) -> list[int]:
+    allowed_set = set(allowed_company_ids or []) if allowed_company_ids is not None else None
     if staff_id is not None:
         staff_company_id = await db.scalar(
             select(Staff.company_id).where(Staff.id == staff_id).limit(1)
         )
+        if allowed_set is not None and staff_company_id not in allowed_set:
+            return []
         return [int(staff_company_id)] if staff_company_id is not None else []
     if company_id is not None:
+        if allowed_set is not None and company_id not in allowed_set:
+            return []
         return [int(company_id)]
+
+    if allowed_company_ids is not None:
+        return [int(item) for item in allowed_company_ids]
 
     allowed = await branch_company_ids(db)
     if allowed is not None:
@@ -267,8 +276,9 @@ async def fetch_appointments_breakdown(
     end: date,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
 ) -> dict[str, Any]:
-    company_ids = await _appointment_company_ids(db, company_id, staff_id)
+    company_ids = await _appointment_company_ids(db, company_id, staff_id, allowed_company_ids)
     return await _fetch_appointments_breakdown(db, company_ids, start, end, staff_id)
 
 
@@ -843,6 +853,7 @@ def _iso_datetime(value: Any) -> str | None:
 def _service_kpi_group_payload(group: ServiceKpiGroup) -> dict[str, Any]:
     return {
         'id': group.id,
+        'portal_account_id': group.portal_account_id,
         'code': group.code,
         'title': group.title,
         'description': group.description or '',
@@ -1305,13 +1316,17 @@ async def _unique_service_group_code(
     db: AsyncSession,
     raw_code: Any,
     *,
+    portal_account_id: int,
     ignore_group_id: int | None = None,
 ) -> str:
     base = _normalize_service_group_code(raw_code) or 'kpi_group'
     candidate = base
     suffix = 2
     while True:
-        stmt = select(ServiceKpiGroup.id).where(ServiceKpiGroup.code == candidate)
+        stmt = select(ServiceKpiGroup.id).where(
+            ServiceKpiGroup.portal_account_id == portal_account_id,
+            ServiceKpiGroup.code == candidate,
+        )
         if ignore_group_id is not None:
             stmt = stmt.where(ServiceKpiGroup.id != ignore_group_id)
         existing = await db.scalar(stmt.limit(1))
@@ -1332,9 +1347,12 @@ async def _service_catalog_row(
 async def fetch_service_kpi_groups(
     db: AsyncSession,
     *,
+    portal_account_id: int | None = None,
     include_inactive: bool = True,
 ) -> list[dict[str, Any]]:
     stmt = select(ServiceKpiGroup)
+    if portal_account_id is not None:
+        stmt = stmt.where(ServiceKpiGroup.portal_account_id == portal_account_id)
     if not include_inactive:
         stmt = stmt.where(ServiceKpiGroup.is_active.is_(True))
     stmt = stmt.order_by(
@@ -1354,6 +1372,8 @@ async def fetch_dashboard_services(
     category: str | None = None,
     is_extra: bool | None = None,
     kpi_group_id: int | None = None,
+    allowed_company_ids: list[int] | None = None,
+    portal_account_id: int | None = None,
 ) -> dict[str, Any]:
     label_join = and_(
         ServiceLabel.company_id == ServiceCatalog.company_id,
@@ -1392,6 +1412,8 @@ async def fetch_dashboard_services(
     filters = []
     if company_id is not None:
         filters.append(ServiceCatalog.company_id == company_id)
+    elif allowed_company_ids is not None:
+        filters.append(ServiceCatalog.company_id.in_(allowed_company_ids))
     if q:
         needle = f'%{q.strip().lower()}%'
         filters.append(
@@ -1459,7 +1481,11 @@ async def fetch_dashboard_services(
 
     return {
         'rows': out_rows,
-        'groups': await fetch_service_kpi_groups(db, include_inactive=True),
+        'groups': await fetch_service_kpi_groups(
+            db,
+            portal_account_id=portal_account_id,
+            include_inactive=True,
+        ),
         'categories': categories,
         'total': len(out_rows),
     }
@@ -1471,7 +1497,11 @@ async def save_service_label(
     service_id: int,
     *,
     is_extra: bool,
+    allowed_company_ids: list[int] | None = None,
+    portal_account_id: int | None = None,
 ) -> dict[str, Any]:
+    if allowed_company_ids is not None and company_id not in set(allowed_company_ids):
+        raise ValueError('company is not allowed')
     catalog = await _service_catalog_row(db, company_id, service_id)
     if catalog is None:
         raise ValueError('unknown service for company')
@@ -1516,12 +1546,19 @@ async def save_service_label(
         )
 
     await db.commit()
-    return await fetch_dashboard_services(db, company_id=company_id, q=str(service_id))
+    return await fetch_dashboard_services(
+        db,
+        company_id=company_id,
+        q=str(service_id),
+        allowed_company_ids=allowed_company_ids,
+        portal_account_id=portal_account_id,
+    )
 
 
 async def create_service_kpi_group(
     db: AsyncSession,
     *,
+    portal_account_id: int,
     title: str,
     code: str | None = None,
     description: str | None = None,
@@ -1533,7 +1570,8 @@ async def create_service_kpi_group(
         raise ValueError('title is required')
     now = datetime.utcnow()
     group = ServiceKpiGroup(
-        code=await _unique_service_group_code(db, code or clean_title),
+        portal_account_id=portal_account_id,
+        code=await _unique_service_group_code(db, code or clean_title, portal_account_id=portal_account_id),
         title=clean_title,
         description=str(description or '').strip() or None,
         sort_order=int(sort_order or 0),
@@ -1551,6 +1589,7 @@ async def update_service_kpi_group(
     db: AsyncSession,
     group_id: int,
     *,
+    portal_account_id: int | None = None,
     title: str | None = None,
     code: str | None = None,
     description: str | None = None,
@@ -1560,13 +1599,20 @@ async def update_service_kpi_group(
     group = await db.get(ServiceKpiGroup, group_id)
     if group is None:
         raise ValueError('unknown KPI group')
+    if portal_account_id is not None and group.portal_account_id != portal_account_id:
+        raise ValueError('unknown KPI group')
     if title is not None:
         clean_title = str(title or '').strip()
         if not clean_title:
             raise ValueError('title is required')
         group.title = clean_title
     if code is not None:
-        group.code = await _unique_service_group_code(db, code, ignore_group_id=group_id)
+        group.code = await _unique_service_group_code(
+            db,
+            code,
+            portal_account_id=group.portal_account_id,
+            ignore_group_id=group_id,
+        )
     if description is not None:
         group.description = str(description or '').strip() or None
     if sort_order is not None:
@@ -1579,8 +1625,18 @@ async def update_service_kpi_group(
     return _service_kpi_group_payload(group)
 
 
-async def archive_service_kpi_group(db: AsyncSession, group_id: int) -> dict[str, Any]:
-    return await update_service_kpi_group(db, group_id, is_active=False)
+async def archive_service_kpi_group(
+    db: AsyncSession,
+    group_id: int,
+    *,
+    portal_account_id: int | None = None,
+) -> dict[str, Any]:
+    return await update_service_kpi_group(
+        db,
+        group_id,
+        portal_account_id=portal_account_id,
+        is_active=False,
+    )
 
 
 async def save_service_kpi_assignment(
@@ -1589,7 +1645,11 @@ async def save_service_kpi_assignment(
     service_id: int,
     *,
     group_id: int | None,
+    allowed_company_ids: list[int] | None = None,
+    portal_account_id: int | None = None,
 ) -> dict[str, Any]:
+    if allowed_company_ids is not None and company_id not in set(allowed_company_ids):
+        raise ValueError('company is not allowed')
     catalog = await _service_catalog_row(db, company_id, service_id)
     if catalog is None:
         raise ValueError('unknown service for company')
@@ -1602,10 +1662,18 @@ async def save_service_kpi_assignment(
             )
         )
         await db.commit()
-        return await fetch_dashboard_services(db, company_id=company_id, q=str(service_id))
+        return await fetch_dashboard_services(
+            db,
+            company_id=company_id,
+            q=str(service_id),
+            allowed_company_ids=allowed_company_ids,
+            portal_account_id=portal_account_id,
+        )
 
     group = await db.get(ServiceKpiGroup, group_id)
     if group is None or not group.is_active:
+        raise ValueError('unknown active KPI group')
+    if portal_account_id is not None and group.portal_account_id != portal_account_id:
         raise ValueError('unknown active KPI group')
 
     assignment = await db.get(ServiceKpiAssignment, {'company_id': company_id, 'service_id': service_id})
@@ -1625,7 +1693,13 @@ async def save_service_kpi_assignment(
         assignment.source = 'dashboard'
         assignment.updated_at = now
     await db.commit()
-    return await fetch_dashboard_services(db, company_id=company_id, q=str(service_id))
+    return await fetch_dashboard_services(
+        db,
+        company_id=company_id,
+        q=str(service_id),
+        allowed_company_ids=allowed_company_ids,
+        portal_account_id=portal_account_id,
+    )
 
 
 async def fetch_top_services(
@@ -3019,11 +3093,13 @@ async def fetch_plan_settings(
     db: AsyncSession,
     month: str,
     copy_from: Optional[str] = None,
+    allowed_company_ids: Optional[list[int]] = None,
+    force_allowed: bool = False,
 ) -> dict[str, Any]:
     period_start, period_end = _plan_month_range(month)
     source_start, source_end = _plan_month_range(copy_from) if copy_from else (period_start, period_end)
-    branches = await fetch_branches(db)
-    staff_rows = await fetch_staff(db)
+    branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
+    staff_rows = await fetch_staff(db, allowed_company_ids=allowed_company_ids, force_allowed=force_allowed)
     branch_settings, staff_inputs = await _plan_settings_snapshot(db, source_start, source_end)
 
     payload_branches = [_payload_branch_setting(branch, branch_settings.get(int(branch['id']))) for branch in branches]
@@ -3127,13 +3203,15 @@ async def save_plan_settings(
     month: str,
     branches: list[dict[str, Any]],
     staff: list[dict[str, Any]],
+    allowed_company_ids: Optional[list[int]] = None,
+    force_allowed: bool = False,
 ) -> dict[str, Any]:
     period_start, period_end, normalized_branches, normalized_staff = _normalize_plan_settings_payload(month, branches, staff)
     branch_ids = sorted({int(row['company_id']) for row in normalized_branches})
     if not branch_ids:
         raise ValueError('at least one branch setting is required')
 
-    allowed = await branch_company_ids(db)
+    allowed = (allowed_company_ids or []) if force_allowed else (allowed_company_ids if allowed_company_ids is not None else await branch_company_ids(db))
     if allowed is not None:
         invalid = sorted(set(branch_ids) - set(allowed))
         if invalid:
@@ -3263,7 +3341,12 @@ async def save_plan_settings(
             )
 
     await db.commit()
-    return await fetch_plan_settings(db, _month_value(period_start))
+    return await fetch_plan_settings(
+        db,
+        _month_value(period_start),
+        allowed_company_ids=allowed_company_ids,
+        force_allowed=force_allowed,
+    )
 
 
 def _is_manual_review_admin_row(row: Any) -> bool:
@@ -3302,8 +3385,10 @@ async def fetch_manual_review_facts(
     end: date,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
+    force_allowed: bool = False,
 ) -> dict[str, Any]:
-    branches = await fetch_branches(db)
+    branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
     if company_id is not None:
         branches = [branch for branch in branches if int(branch['id']) == company_id]
     company_ids = [int(branch['id']) for branch in branches]
@@ -3374,6 +3459,8 @@ async def save_manual_review_facts(
     company_id: Optional[int],
     staff_id: Optional[int],
     items: list[dict[str, Any]],
+    allowed_company_ids: Optional[list[int]] = None,
+    force_allowed: bool = False,
 ) -> dict[str, Any]:
     scoped_company_id = int(company_id) if company_id is not None else None
     scoped_staff_id = int(staff_id) if staff_id is not None else None
@@ -3402,11 +3489,21 @@ async def save_manual_review_facts(
         normalized_items[(item_company_id, item_staff_id)] = value
 
     if not normalized_items:
-        return await fetch_manual_review_facts(db, start, end, scoped_company_id, scoped_staff_id)
+        return await fetch_manual_review_facts(
+            db,
+            start,
+            end,
+            scoped_company_id,
+            scoped_staff_id,
+            allowed_company_ids=allowed_company_ids,
+            force_allowed=force_allowed,
+        )
 
-    allowed_company_ids = await branch_company_ids(db)
-    if allowed_company_ids is not None:
-        invalid_company_ids = sorted({company_id for company_id, _ in normalized_items} - set(allowed_company_ids))
+    allowed = (allowed_company_ids or []) if force_allowed else (
+        allowed_company_ids if allowed_company_ids is not None else await branch_company_ids(db)
+    )
+    if allowed is not None:
+        invalid_company_ids = sorted({company_id for company_id, _ in normalized_items} - set(allowed))
         if invalid_company_ids:
             raise ValueError(f'company is not allowed: {invalid_company_ids[0]}')
 
@@ -3458,7 +3555,15 @@ async def save_manual_review_facts(
         )
 
     await db.commit()
-    return await fetch_manual_review_facts(db, start, end, scoped_company_id, scoped_staff_id)
+    return await fetch_manual_review_facts(
+        db,
+        start,
+        end,
+        scoped_company_id,
+        scoped_staff_id,
+        allowed_company_ids=allowed_company_ids,
+        force_allowed=force_allowed,
+    )
 
 
 async def fetch_plan_fact(

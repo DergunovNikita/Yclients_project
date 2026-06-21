@@ -12,8 +12,8 @@ STAFF_SYNC_ROLES = ('branch_admin', 'manager', 'viewer')
 
 
 def portal_user_syncs_to_staff(user: PortalUser) -> bool:
-    """Portal users with branches appear in dashboard «Работник» (not super_admin)."""
-    return user.role != 'super_admin' and bool(user.is_active)
+    """Portal users with branch-scoped roles appear in dashboard «Работник»."""
+    return user.role not in {'platform_admin', 'owner'} and bool(user.is_active)
 
 
 def staff_display_name(user: PortalUser) -> str:

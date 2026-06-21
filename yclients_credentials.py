@@ -72,6 +72,7 @@ def credential_payload(
 ) -> dict:
     return {
         'id': credential.id,
+        'portal_account_id': credential.portal_account_id,
         'title': credential.title,
         'is_active': bool(credential.is_active),
         'company_ids': sorted(int(item) for item in company_ids),
@@ -204,10 +205,14 @@ async def set_credential_companies(
         db.add(YClientsCredentialCompany(credential_id=credential_id, company_id=int(company_id)))
 
 
-async def list_credential_payloads(db: AsyncSession) -> list[dict]:
-    credentials = (
-        await db.execute(select(YClientsCredential).order_by(YClientsCredential.id.asc()))
-    ).scalars().all()
+async def list_credential_payloads(
+    db: AsyncSession,
+    portal_account_id: int | None = None,
+) -> list[dict]:
+    stmt = select(YClientsCredential)
+    if portal_account_id is not None:
+        stmt = stmt.where(YClientsCredential.portal_account_id == portal_account_id)
+    credentials = (await db.execute(stmt.order_by(YClientsCredential.id.asc()))).scalars().all()
     assignments = (
         await db.execute(
             select(
@@ -226,6 +231,7 @@ async def list_credential_payloads(db: AsyncSession) -> list[dict]:
 
 
 def new_credential(
+    portal_account_id: int,
     title: str,
     partner_token: str,
     login: str,
@@ -234,6 +240,7 @@ def new_credential(
 ) -> YClientsCredential:
     now = datetime.utcnow()
     return YClientsCredential(
+        portal_account_id=portal_account_id,
         title=title.strip(),
         partner_token_encrypted=encrypt_secret(partner_token.strip()),
         login_encrypted=encrypt_secret(login.strip()),

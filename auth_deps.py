@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import jwt
 from auth_scope import AccessContext
-from auth_service import decode_access_token, load_user_branch_ids
+from auth_service import decode_access_token, load_portal_account_branch_ids, load_user_access_branch_ids
 from config import API_KEY, AUTH_REQUIRE_LOGIN
 from database import get_async_db
 from models import PortalUser
@@ -40,6 +40,7 @@ def _is_open_path(path: str) -> bool:
 async def _user_from_bearer(
     authorization: str | None,
     db: AsyncSession,
+    x_portal_account_id: int | None = None,
 ) -> AccessContext | None:
     if not authorization or not authorization.lower().startswith('bearer '):
         return None
@@ -54,14 +55,19 @@ async def _user_from_bearer(
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail='User not found or inactive')
 
-    branch_ids = await load_user_branch_ids(db, user.id)
-    return AccessContext.from_user(user.id, user.role, branch_ids)
+    if user.role == 'platform_admin' and x_portal_account_id is not None:
+        branch_ids = await load_portal_account_branch_ids(db, x_portal_account_id)
+        return AccessContext.from_user(user.id, user.role, x_portal_account_id, branch_ids)
+
+    branch_ids = await load_user_access_branch_ids(db, user)
+    return AccessContext.from_user(user.id, user.role, user.portal_account_id, branch_ids)
 
 
 async def require_auth(
     request: Request,
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None),
+    x_portal_account_id: int | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
 ) -> AccessContext | None:
     """Global auth: JWT user, API key (full access), or open paths."""
@@ -69,7 +75,7 @@ async def require_auth(
         return None
 
     if authorization and authorization.lower().startswith('bearer '):
-        ctx = await _user_from_bearer(authorization, db)
+        ctx = await _user_from_bearer(authorization, db, x_portal_account_id)
         request.state.access = ctx
         return ctx
 
@@ -103,9 +109,10 @@ async def get_dashboard_access(
     request: Request,
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None),
+    x_portal_account_id: int | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
 ) -> AccessContext:
-    ctx = await require_auth(request, authorization, x_api_key, db)
+    ctx = await require_auth(request, authorization, x_api_key, x_portal_account_id, db)
     if ctx is not None:
         return ctx
     if not AUTH_REQUIRE_LOGIN:

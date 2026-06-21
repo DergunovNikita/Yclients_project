@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -44,7 +44,7 @@ from dashboard_reports import (
     fetch_report_registry,
 )
 from database import get_async_db
-from models import Company, Staff
+from models import Company, PortalAccount, Staff
 from plan_import import import_plan_sheet_from_config
 from sync_jobs import SyncJobService
 from sync_orchestrator import get_sync_status
@@ -121,8 +121,8 @@ def _require_sync_token(x_sync_token: str | None) -> None:
 
 
 def _require_sync_access(ctx: AccessContext) -> None:
-    if ctx.user_id is not None and ctx.role != 'super_admin':
-        raise HTTPException(status_code=403, detail='Sync operations require super_admin role')
+    if ctx.user_id is not None and ctx.role != 'platform_admin':
+        raise HTTPException(status_code=403, detail='Sync operations require platform_admin role')
 
 
 async def _validate_dashboard_scope(
@@ -130,8 +130,11 @@ async def _validate_dashboard_scope(
     company_id: int | None,
     staff_id: int | None,
     compare_staff_id: int | None = None,
+    allowed_company_ids: list[int] | None = None,
 ) -> None:
     if company_id is not None:
+        if allowed_company_ids is not None and company_id not in allowed_company_ids:
+            raise HTTPException(status_code=403, detail='Branch not allowed')
         company_exists = await db.scalar(select(Company.id).where(Company.id == company_id).limit(1))
         if company_exists is None:
             raise HTTPException(status_code=400, detail='unknown company_id')
@@ -142,9 +145,36 @@ async def _validate_dashboard_scope(
         conditions = [Staff.id == candidate_staff_id]
         if company_id is not None:
             conditions.append(Staff.company_id == company_id)
+        if allowed_company_ids is not None:
+            conditions.append(Staff.company_id.in_(allowed_company_ids))
         staff_exists = await db.scalar(select(Staff.id).where(*conditions).limit(1))
         if staff_exists is None:
             raise HTTPException(status_code=400, detail=f'unknown {field_name}')
+
+
+async def _default_portal_account_id(db: AsyncSession) -> int:
+    account_id = await db.scalar(select(PortalAccount.id).order_by(PortalAccount.id.asc()).limit(1))
+    if account_id is not None:
+        return int(account_id)
+    account = PortalAccount(label='default', created_at=datetime.utcnow())
+    db.add(account)
+    await db.flush()
+    return int(account.id)
+
+
+async def _kpi_portal_account_id(db: AsyncSession, ctx: AccessContext) -> int | None:
+    if ctx.portal_account_id is not None:
+        return ctx.portal_account_id
+    if ctx.full_access:
+        return await _default_portal_account_id(db)
+    return None
+
+
+async def _require_kpi_portal_account_id(db: AsyncSession, ctx: AccessContext) -> int:
+    portal_account_id = await _kpi_portal_account_id(db, ctx)
+    if portal_account_id is None:
+        raise HTTPException(status_code=400, detail='X-Portal-Account-Id is required')
+    return portal_account_id
 
 
 @router.get('/branches')
@@ -186,7 +216,7 @@ async def dashboard_staff_directory_csv(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    if ctx.user_id is not None and ctx.role not in {'super_admin', 'branch_admin'}:
+    if ctx.user_id is not None and ctx.role not in {'platform_admin', 'owner', 'branch_admin'}:
         raise HTTPException(status_code=403, detail='Staff directory export requires admin role')
 
     branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
@@ -226,34 +256,50 @@ async def dashboard_services(
     is_extra: bool | None = Query(None),
     kpi_group_id: int | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
     """Current branch service catalog with dashboard-maintained labels."""
+    scope = query_scope(ctx, company_id)
     return {
         'success': True,
         'data': await fetch_dashboard_services(
             db,
-            company_id=company_id,
+            company_id=scope['company_id'],
             q=q,
             category=category,
             is_extra=is_extra,
             kpi_group_id=kpi_group_id,
+            allowed_company_ids=scope['allowed_company_ids'],
+            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
         ),
     }
 
 
 @router.get('/services/kpi_groups')
-async def dashboard_service_kpi_groups(db: AsyncSession = Depends(get_async_db)):
-    return {'success': True, 'data': await fetch_service_kpi_groups(db, include_inactive=True)}
+async def dashboard_service_kpi_groups(
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    return {
+        'success': True,
+        'data': await fetch_service_kpi_groups(
+            db,
+            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
+            include_inactive=True,
+        ),
+    }
 
 
 @router.post('/services/kpi_groups')
 async def dashboard_service_kpi_group_create(
     payload: ServiceKpiGroupPayload,
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
     try:
         data = await create_service_kpi_group(
             db,
+            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
             title=payload.title or '',
             code=payload.code,
             description=payload.description,
@@ -270,11 +316,13 @@ async def dashboard_service_kpi_group_update(
     group_id: int,
     payload: ServiceKpiGroupPayload,
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
     try:
         data = await update_service_kpi_group(
             db,
             group_id,
+            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
             title=payload.title,
             code=payload.code,
             description=payload.description,
@@ -290,9 +338,14 @@ async def dashboard_service_kpi_group_update(
 async def dashboard_service_kpi_group_delete(
     group_id: int,
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
     try:
-        data = await archive_service_kpi_group(db, group_id)
+        data = await archive_service_kpi_group(
+            db,
+            group_id,
+            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}
@@ -304,9 +357,18 @@ async def dashboard_service_label_save(
     service_id: int,
     payload: ServiceLabelPayload,
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    scope = query_scope(ctx, company_id)
     try:
-        data = await save_service_label(db, company_id, service_id, is_extra=payload.is_extra)
+        data = await save_service_label(
+            db,
+            company_id,
+            service_id,
+            is_extra=payload.is_extra,
+            allowed_company_ids=scope['branch_ids'],
+            portal_account_id=await _kpi_portal_account_id(db, ctx),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}
@@ -318,9 +380,18 @@ async def dashboard_service_kpi_assignment_save(
     service_id: int,
     payload: ServiceKpiAssignmentPayload,
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    scope = query_scope(ctx, company_id)
     try:
-        data = await save_service_kpi_assignment(db, company_id, service_id, group_id=payload.group_id)
+        data = await save_service_kpi_assignment(
+            db,
+            company_id,
+            service_id,
+            group_id=payload.group_id,
+            allowed_company_ids=scope['branch_ids'],
+            portal_account_id=await _kpi_portal_account_id(db, ctx),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}
@@ -344,25 +415,34 @@ async def dashboard_report_data(
     compare_end_date: date | None = Query(None),
     compare_staff_id: int | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
+    scope = query_scope(ctx, company_id)
     if granularity not in REPORT_GRANULARITIES:
         raise HTTPException(status_code=400, detail='granularity must be one of day, week, month')
     if (compare_start_date is None) ^ (compare_end_date is None):
         raise HTTPException(status_code=400, detail='compare_start_date and compare_end_date must be passed together')
-    await _validate_dashboard_scope(db, company_id, staff_id, compare_staff_id)
+    await _validate_dashboard_scope(
+        db,
+        scope['company_id'],
+        staff_id,
+        compare_staff_id,
+        allowed_company_ids=scope['allowed_company_ids'],
+    )
     try:
         data = await fetch_report_data(
             db,
             report_id,
             start,
             end,
-            company_id,
+            scope['company_id'],
             staff_id,
             granularity,
             compare_start_date,
             compare_end_date,
             compare_staff_id,
+            allowed_company_ids=scope['allowed_company_ids'],
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -510,9 +590,17 @@ async def dashboard_plan_settings(
     month: str = Query(..., description='Plan settings month in YYYY-MM format'),
     copy_from: str | None = Query(None, description='Optional source month in YYYY-MM format'),
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
     try:
-        data = await fetch_plan_settings(db, month, copy_from)
+        data = await fetch_plan_settings(
+            db,
+            month,
+            copy_from,
+            allowed_company_ids=branch_ids,
+            force_allowed=force_allowed,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}
@@ -522,13 +610,17 @@ async def dashboard_plan_settings(
 async def dashboard_plan_settings_save(
     payload: PlanSettingsPayload,
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
     try:
         data = await save_plan_settings(
             db,
             payload.month,
             [item.model_dump() for item in payload.branches],
             [item.model_dump() for item in payload.staff],
+            allowed_company_ids=branch_ids,
+            force_allowed=force_allowed,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -542,10 +634,21 @@ async def dashboard_plan_reviews_fact(
     company_id: int | None = Query(None),
     staff_id: int | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
+    scope = query_scope(ctx, company_id)
+    branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
     try:
-        data = await fetch_manual_review_facts(db, start, end, company_id, staff_id)
+        data = await fetch_manual_review_facts(
+            db,
+            start,
+            end,
+            scope['company_id'],
+            staff_id,
+            allowed_company_ids=branch_ids,
+            force_allowed=force_allowed,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}
@@ -555,16 +658,21 @@ async def dashboard_plan_reviews_fact(
 async def dashboard_plan_reviews_fact_save(
     payload: ManualReviewFactsPayload,
     db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(payload.start_date, payload.end_date)
+    scope = query_scope(ctx, payload.company_id)
+    branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
     try:
         data = await save_manual_review_facts(
             db,
             start,
             end,
-            payload.company_id,
+            scope['company_id'],
             payload.staff_id,
             [item.model_dump() for item in payload.items],
+            allowed_company_ids=branch_ids,
+            force_allowed=force_allowed,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

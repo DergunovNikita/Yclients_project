@@ -10,7 +10,7 @@ from sqlalchemy import select
 import api
 from api import app
 from auth_service import create_access_token, hash_password
-from models import Company, Group, PortalUser, PortalUserBranch, Staff
+from models import Company, Group, PortalAccount, PortalBranch, PortalUser, PortalUserBranch, Staff
 
 
 @pytest_asyncio.fixture
@@ -18,20 +18,25 @@ async def auth_db(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Branch 1', group_id=1))
     async_session.add(Company(id=2, title='Branch 2', group_id=1))
+    async_session.add(PortalAccount(id=1, label='Default tenant', created_at=datetime.utcnow()))
+    async_session.add(PortalBranch(portal_account_id=1, company_id=1))
+    async_session.add(PortalBranch(portal_account_id=1, company_id=2))
     await async_session.flush()
 
     admin = PortalUser(
         id=1,
+        portal_account_id=1,
         email='admin@example.com',
         password_hash=hash_password('Admin12345!'),
         full_name='Admin',
-        role='super_admin',
+        role='owner',
         is_active=True,
         email_verified_at=datetime.utcnow(),
         created_at=datetime.utcnow(),
     )
     manager = PortalUser(
         id=2,
+        portal_account_id=1,
         email='manager@example.com',
         password_hash=hash_password('Manager12345!'),
         full_name='Manager',
@@ -44,6 +49,7 @@ async def auth_db(async_session):
     async_session.add(PortalUserBranch(user_id=2, company_id=1))
     branch_admin = PortalUser(
         id=3,
+        portal_account_id=1,
         email='branch@example.com',
         password_hash=hash_password('Branch12345!'),
         full_name='Branch Admin',
@@ -73,7 +79,7 @@ async def test_login_and_me(auth_db, monkeypatch):
         token = login.json()['data']['access_token']
         me = await client.get('/auth/me', headers={'Authorization': f'Bearer {token}'})
         assert me.status_code == 200
-        assert me.json()['data']['role'] == 'super_admin'
+        assert me.json()['data']['role'] == 'owner'
 
     app.dependency_overrides.clear()
 
@@ -93,7 +99,7 @@ async def test_dashboard_auth_alias_login(auth_db, monkeypatch):
             json={'email': 'admin@example.com', 'password': 'Admin12345!'},
         )
         assert login.status_code == 200
-        assert login.json()['data']['user']['role'] == 'super_admin'
+        assert login.json()['data']['user']['role'] == 'owner'
 
     app.dependency_overrides.clear()
 
@@ -148,13 +154,21 @@ async def test_register_requires_verification_before_login(auth_db, monkeypatch)
         login = await client.post('/auth/login', json={'email': 'newuser@example.com', 'password': 'NewUser123!'})
         assert login.status_code == 403
 
+    created_user = (
+        await auth_db.execute(select(PortalUser).where(PortalUser.email == 'newuser@example.com'))
+    ).scalar_one()
+    assert created_user.role == 'owner'
+    assert created_user.portal_account_id is not None
+    created_account = await auth_db.get(PortalAccount, created_user.portal_account_id)
+    assert created_account is not None
+
     app.dependency_overrides.clear()
 
 
 @pytest.mark.asyncio
-async def test_super_admin_creates_manager(auth_db, monkeypatch):
+async def test_owner_creates_manager(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'super_admin')
+    token = create_access_token(1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -184,9 +198,9 @@ async def test_super_admin_creates_manager(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_super_admin_updates_user_email_login(auth_db, monkeypatch):
+async def test_owner_updates_user_email_login(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'super_admin')
+    token = create_access_token(1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -219,9 +233,9 @@ async def test_super_admin_updates_user_email_login(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_super_admin_update_user_email_rejects_duplicate(auth_db, monkeypatch):
+async def test_owner_update_user_email_rejects_duplicate(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'super_admin')
+    token = create_access_token(1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -319,9 +333,9 @@ async def test_branch_admin_cannot_create_user_in_foreign_branch(auth_db, monkey
 
 
 @pytest.mark.asyncio
-async def test_super_admin_lists_same_rank_and_lower(auth_db, monkeypatch):
+async def test_owner_lists_same_rank_and_lower(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'super_admin')
+    token = create_access_token(1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -390,10 +404,10 @@ async def test_manager_cannot_create_or_update_users(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_super_admin_manages_yclients_credentials(auth_db, monkeypatch):
+async def test_owner_manages_yclients_credentials(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
-    token = create_access_token(1, 'super_admin')
+    token = create_access_token(1, 'owner')
 
     class FakeYClientsAPI:
         def __init__(self, partner_token, login, password):
@@ -480,9 +494,9 @@ async def test_branch_admin_cannot_manage_yclients_credentials(auth_db, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_super_admin_deletes_manager(auth_db, monkeypatch):
+async def test_owner_deletes_manager(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'super_admin')
+    token = create_access_token(1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -502,7 +516,7 @@ async def test_super_admin_deletes_manager(auth_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_created_manager_appears_in_dashboard_staff(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'super_admin')
+    token = create_access_token(1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -533,7 +547,7 @@ async def test_created_manager_appears_in_dashboard_staff(auth_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_branch_admin_appears_in_dashboard_staff(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'super_admin')
+    token = create_access_token(1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -562,7 +576,7 @@ async def test_branch_admin_appears_in_dashboard_staff(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_super_admin_updates_unlinked_staff(auth_db, monkeypatch):
+async def test_owner_updates_unlinked_staff(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(
         Staff(
@@ -575,7 +589,7 @@ async def test_super_admin_updates_unlinked_staff(auth_db, monkeypatch):
         )
     )
     await auth_db.commit()
-    token = create_access_token(1, 'super_admin')
+    token = create_access_token(1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -602,7 +616,7 @@ async def test_super_admin_updates_unlinked_staff(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_super_admin_deletes_unlinked_staff(auth_db, monkeypatch):
+async def test_owner_deletes_unlinked_staff(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(
         Staff(
@@ -615,7 +629,7 @@ async def test_super_admin_deletes_unlinked_staff(auth_db, monkeypatch):
         )
     )
     await auth_db.commit()
-    token = create_access_token(1, 'super_admin')
+    token = create_access_token(1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -650,7 +664,7 @@ async def test_provision_staff_account(auth_db, monkeypatch):
         )
     )
     await auth_db.commit()
-    token = create_access_token(1, 'super_admin')
+    token = create_access_token(1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -752,7 +766,7 @@ async def test_branch_admin_sees_branch_initial_passwords_only(auth_db, monkeypa
         )
     )
     await auth_db.commit()
-    super_token = create_access_token(1, 'super_admin')
+    super_token = create_access_token(1, 'owner')
     branch_token = create_access_token(3, 'branch_admin')
 
     async def override_db():
@@ -791,6 +805,7 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
     auth_db.add(
         PortalUser(
             id=10,
+            portal_account_id=1,
             email='real.user@example.com',
             password_hash=hash_password('RealUser123!'),
             full_name='Real User',
@@ -805,6 +820,7 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
     auth_db.add(
         PortalUser(
             id=11,
+            portal_account_id=1,
             email='fake.worker.99@portal.local',
             password_hash=hash_password('FakeWorker123!'),
             full_name='Fake Worker',
@@ -818,7 +834,7 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
     auth_db.add(PortalUserBranch(user_id=11, company_id=1))
     await auth_db.commit()
 
-    token = create_access_token(1, 'super_admin')
+    token = create_access_token(1, 'owner')
 
     async def override_db():
         yield auth_db

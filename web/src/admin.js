@@ -71,11 +71,12 @@ const ROLE_LABELS = {
   viewer: 'viewer — только просмотр',
   manager: 'manager — метрики филиала',
   branch_admin: 'branch_admin — админ филиала',
-  super_admin: 'super_admin — вся сеть',
+  owner: 'owner — владелец сети',
+  platform_admin: 'platform_admin — платформа',
 };
 
-const MANAGER_ROLES = new Set(['super_admin', 'branch_admin', 'manager']);
-const ADMIN_ROLES = new Set(['super_admin', 'branch_admin']);
+const MANAGER_ROLES = new Set(['platform_admin', 'owner', 'branch_admin', 'manager']);
+const ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
 
 let users = [];
 let branches = [];
@@ -182,7 +183,7 @@ function canManageUsers() {
 }
 
 function canManageYclientsCredentials() {
-  return (currentUserRole || adminMeta?.role) === 'super_admin';
+  return (currentUserRole || adminMeta?.role) === 'platform_admin';
 }
 
 function applyAdminMeta() {
@@ -436,7 +437,8 @@ function roleBadge(role) {
     return '<span class="role-badge">staff · без аккаунта</span>';
   }
   const classes = {
-    super_admin: 'role-badge role-badge--super',
+    platform_admin: 'role-badge role-badge--super',
+    owner: 'role-badge role-badge--super',
     viewer: 'role-badge role-badge--viewer',
   };
   const cls = classes[role] || 'role-badge';

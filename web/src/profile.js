@@ -1,8 +1,8 @@
 import './auth.css';
 import { authFetch, getToken, logout, requireAuthRedirect } from './auth.js';
 
-const ADMIN_ROLES = new Set(['super_admin', 'branch_admin']);
-const MANAGER_ROLES = new Set(['super_admin', 'branch_admin', 'manager']);
+const ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
+const MANAGER_ROLES = new Set(['platform_admin', 'owner', 'branch_admin', 'manager']);
 
 const changePasswordModal = document.getElementById('change-password-modal');
 const passwordErrorEl = document.getElementById('password-error');
@@ -14,7 +14,8 @@ const newPasswordInput = document.getElementById('new-password');
 const confirmPasswordInput = document.getElementById('confirm-password');
 
 const ROLE_LABELS = {
-  super_admin: 'Super Admin — вся сеть',
+  platform_admin: 'Platform Admin — платформа',
+  owner: 'Owner — владелец сети',
   branch_admin: 'Branch Admin — админ филиала',
   manager: 'Manager — метрики филиала',
   viewer: 'Viewer — только просмотр',

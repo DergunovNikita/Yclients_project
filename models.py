@@ -117,7 +117,8 @@ class ServiceKpiGroup(Base):
     __tablename__ = 'service_kpi_groups'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    code = Column(String, nullable=False, unique=True, index=True)
+    portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), nullable=False, index=True)
+    code = Column(String, nullable=False, index=True)
     title = Column(String, nullable=False)
     description = Column(Text)
     is_active = Column(Boolean, nullable=False, default=True, index=True)
@@ -683,14 +684,18 @@ class PortalBranch(Base):
     """Maps a portal account to YClients companies (salon branches)."""
 
     __tablename__ = 'portal_branches'
-    __table_args__ = {'schema': SYSTEM_SCHEMA}
+    __table_args__ = (
+        Index('ix_portal_branches_portal_account_id', 'portal_account_id'),
+        Index('ix_portal_branches_company_id', 'company_id', unique=True),
+        {'schema': SYSTEM_SCHEMA},
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), nullable=False)
     company_id = Column(Integer, ForeignKey('companies.id'), nullable=False)
 
 
-PORTAL_ROLES = ('super_admin', 'branch_admin', 'manager', 'viewer')
+PORTAL_ROLES = ('platform_admin', 'owner', 'branch_admin', 'manager', 'viewer')
 
 
 class PortalUser(Base):
@@ -700,6 +705,7 @@ class PortalUser(Base):
     __table_args__ = {'schema': SYSTEM_SCHEMA}
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), index=True)
     email = Column(String(255), nullable=False, unique=True)
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(255))
@@ -749,6 +755,7 @@ class YClientsCredential(Base):
     __table_args__ = {'schema': SYSTEM_SCHEMA}
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), nullable=False, index=True)
     title = Column(String(255), nullable=False)
     partner_token_encrypted = Column(Text, nullable=False)
     login_encrypted = Column(Text, nullable=False)

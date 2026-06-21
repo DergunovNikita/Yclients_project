@@ -28,7 +28,7 @@ from config import (
     SMTP_USER,
     smtp_is_configured,
 )
-from models import PortalEmailToken, PortalUser, PortalUserBranch
+from models import PortalBranch, PortalEmailToken, PortalUser, PortalUserBranch
 
 TOKEN_PURPOSE_VERIFY = 'verify'
 TOKEN_PURPOSE_RESET = 'reset'
@@ -116,6 +116,25 @@ async def load_user_branch_ids(db: AsyncSession, user_id: int) -> list[int]:
         .order_by(PortalUserBranch.company_id.asc())
     )
     return [row[0] for row in rows.all()]
+
+
+async def load_portal_account_branch_ids(db: AsyncSession, portal_account_id: int | None) -> list[int]:
+    if portal_account_id is None:
+        return []
+    rows = await db.execute(
+        select(PortalBranch.company_id)
+        .where(PortalBranch.portal_account_id == portal_account_id)
+        .order_by(PortalBranch.company_id.asc())
+    )
+    return [row[0] for row in rows.all()]
+
+
+async def load_user_access_branch_ids(db: AsyncSession, user: PortalUser) -> list[int]:
+    if user.role == 'platform_admin':
+        return []
+    if user.role == 'owner':
+        return await load_portal_account_branch_ids(db, user.portal_account_id)
+    return await load_user_branch_ids(db, user.id)
 
 
 async def set_user_branches(db: AsyncSession, user_id: int, company_ids: list[int]) -> None:

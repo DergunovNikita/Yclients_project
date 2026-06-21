@@ -8,7 +8,9 @@ from models import PORTAL_ROLES
 
 ROLE_LEVEL = {role: index for index, role in enumerate(PORTAL_ROLES)}
 
-USER_ADMIN_ROLES = ('super_admin', 'branch_admin')
+PLATFORM_ADMIN_ROLE = 'platform_admin'
+TENANT_OWNER_ROLE = 'owner'
+USER_ADMIN_ROLES = (PLATFORM_ADMIN_ROLE, TENANT_OWNER_ROLE, 'branch_admin')
 USER_MANAGER_ROLES = (*USER_ADMIN_ROLES, 'manager')
 
 
@@ -36,7 +38,9 @@ def branches_overlap(actor_branch_ids: list[int], target_branch_ids: list[int]) 
 
 
 def _branch_scope_ok(actor_role: str, actor_branch_ids: list[int], target_branch_ids: list[int]) -> bool:
-    if actor_role == 'super_admin':
+    if actor_role == PLATFORM_ADMIN_ROLE:
+        return True
+    if actor_role == TENANT_OWNER_ROLE:
         return True
     if not actor_branch_ids or not target_branch_ids:
         return False
@@ -52,7 +56,9 @@ def can_list_user(
     """List users with the same rank or lower, scoped by branches when needed."""
     if not rank_at_or_below(actor_role, target_role):
         return False
-    if actor_role == 'super_admin':
+    if actor_role == PLATFORM_ADMIN_ROLE:
+        return True
+    if actor_role == TENANT_OWNER_ROLE:
         return True
     if same_rank(actor_role, target_role):
         if not actor_branch_ids:
@@ -98,8 +104,10 @@ def can_manage_staff(
 ) -> bool:
     if actor_role not in USER_ADMIN_ROLES:
         return False
-    if actor_role == 'super_admin':
+    if actor_role == PLATFORM_ADMIN_ROLE:
         return True
+    if actor_role == TENANT_OWNER_ROLE:
+        return staff_company_id in actor_branch_ids
     return staff_company_id in actor_branch_ids
 
 
@@ -118,15 +126,24 @@ def validate_company_ids_for_role(
     target_role: str,
     company_ids: list[int],
 ) -> None:
-    if target_role == 'super_admin':
+    if target_role == PLATFORM_ADMIN_ROLE:
         if company_ids:
-            raise HTTPException(status_code=400, detail='super_admin must not have branch assignments')
+            raise HTTPException(status_code=400, detail='platform_admin must not have branch assignments')
+        if actor_role != PLATFORM_ADMIN_ROLE:
+            raise HTTPException(status_code=403, detail='Cannot assign this role')
+        return
+
+    if target_role == TENANT_OWNER_ROLE:
+        if company_ids:
+            raise HTTPException(status_code=400, detail='owner must not have branch assignments')
+        if actor_role != PLATFORM_ADMIN_ROLE:
+            raise HTTPException(status_code=403, detail='Cannot assign this role')
         return
 
     if not company_ids:
         raise HTTPException(status_code=400, detail='At least one branch is required for this role')
 
-    if actor_role != 'super_admin':
+    if actor_role not in {PLATFORM_ADMIN_ROLE, TENANT_OWNER_ROLE}:
         invalid = set(company_ids) - set(actor_branch_ids)
         if invalid:
             raise HTTPException(status_code=403, detail=f'Branches not allowed: {sorted(invalid)}')

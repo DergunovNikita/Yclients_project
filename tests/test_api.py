@@ -5,7 +5,18 @@ from httpx import ASGITransport, AsyncClient
 
 import api
 from api import app
-from models import Company, GoodCatalog, GoodTransaction, Group, ServiceCatalog
+from auth_service import create_access_token, hash_password
+from models import (
+    Company,
+    GoodCatalog,
+    GoodTransaction,
+    Group,
+    PortalAccount,
+    PortalBranch,
+    PortalUser,
+    PortalUserBranch,
+    ServiceCatalog,
+)
 
 
 @pytest.mark.asyncio
@@ -67,6 +78,65 @@ async def test_companies_endpoint_applies_pagination(async_session):
     assert payload['limit'] == 2
     assert payload['offset'] == 1
     assert [item['id'] for item in payload['data']] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_legacy_api_filters_jwt_users_by_tenant_scope(async_session, monkeypatch):
+    import auth_deps
+
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    async_session.add(Group(id=1, title='Group'))
+    async_session.add_all([
+        Company(id=1, title='Tenant A Branch', group_id=1),
+        Company(id=2, title='Tenant B Branch', group_id=1),
+    ])
+    async_session.add(PortalAccount(id=1, label='Tenant A', created_at=datetime.utcnow()))
+    async_session.add(PortalAccount(id=2, label='Tenant B', created_at=datetime.utcnow()))
+    async_session.add(PortalBranch(portal_account_id=1, company_id=1))
+    async_session.add(PortalBranch(portal_account_id=2, company_id=2))
+    async_session.add(
+        PortalUser(
+            id=100,
+            portal_account_id=1,
+            email='tenant-a@example.com',
+            password_hash=hash_password('TenantA123!'),
+            full_name='Tenant A',
+            role='manager',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    async_session.add(PortalUserBranch(user_id=100, company_id=1))
+    async_session.add(GoodTransaction(id=1, company_id=1, type_id=1, amount=2.0, cost=10.0))
+    async_session.add(GoodTransaction(id=2, company_id=2, type_id=1, amount=1.0, cost=20.0))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(100, 'manager')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        companies = await client.get('/companies', headers={'Authorization': f'Bearer {token}'})
+        forbidden = await client.get(
+            '/goods_transactions',
+            params={'company_id': 2},
+            headers={'Authorization': f'Bearer {token}'},
+        )
+        exported = await client.get(
+            '/export/csv/goods_transactions',
+            headers={'Authorization': f'Bearer {token}'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert companies.status_code == 200
+    assert [row['id'] for row in companies.json()['data']] == [1]
+    assert forbidden.status_code == 403
+    assert '1,,1,,,,,2.0,,10.0,,,,1' in exported.text
+    assert '2,,1,,,,,1.0,,20.0,,,,2' not in exported.text
 
 
 @pytest.mark.asyncio

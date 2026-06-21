@@ -1943,7 +1943,8 @@ async function loadCurrentView() {
 }
 
 const ROLE_LABELS = {
-  super_admin: 'Super Admin — вся сеть',
+  platform_admin: 'Platform Admin — платформа',
+  owner: 'Owner — владелец сети',
   branch_admin: 'Branch Admin — админ филиала',
   manager: 'Manager — метрики филиала',
   viewer: 'Viewer — только просмотр',

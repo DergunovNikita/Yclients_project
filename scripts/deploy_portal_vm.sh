@@ -34,12 +34,11 @@ for attempt in $(seq 1 30); do
 done
 
 if [ -n "${PORTAL_ADMIN_EMAIL:-}" ] && [ -n "${PORTAL_ADMIN_PASSWORD:-}" ]; then
-  echo "Ensuring portal super_admin (${PORTAL_ADMIN_EMAIL})..."
+  echo "Ensuring portal platform_admin (${PORTAL_ADMIN_EMAIL})..."
   docker compose run --rm --no-deps --entrypoint python api create_portal_admin.py \
     --email "$PORTAL_ADMIN_EMAIL" \
     --password "$PORTAL_ADMIN_PASSWORD" \
-    --full-name "${PORTAL_ADMIN_NAME:-Portal Admin}" \
-    --assign-all-branches
+    --full-name "${PORTAL_ADMIN_NAME:-Portal Admin}"
 fi
 
 if [ "${PORTAL_PROVISION_STAFF:-false}" = "true" ]; then
