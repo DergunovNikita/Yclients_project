@@ -2040,28 +2040,37 @@ async function init() {
   renderExtraServicesTable([]);
   renderServiceManagement({ rows: [], groups: [], categories: [] });
   if (getToken()) {
+    let me;
     try {
-      const me = await loadCurrentUser();
-      currentUser = me.data;
-      const profileLink = document.getElementById('user-profile-link');
-      const profileName = document.getElementById('user-profile-name');
-      const profileRole = document.getElementById('user-profile-role');
-      if (profileLink) {
-        profileLink.hidden = false;
-      }
-      if (profileName) {
-        profileName.textContent = accountDisplayName(me.data);
-      }
-      if (profileRole) {
-        profileRole.textContent = ROLE_LABELS[me.data.role] || me.data.role;
-      }
+      me = await loadCurrentUser();
+    } catch {
+      logout();
+      return;
+    }
+
+    currentUser = me.data;
+    const profileLink = document.getElementById('user-profile-link');
+    const profileName = document.getElementById('user-profile-name');
+    const profileRole = document.getElementById('user-profile-role');
+    if (profileLink) {
+      profileLink.hidden = false;
+    }
+    if (profileName) {
+      profileName.textContent = accountDisplayName(me.data);
+    }
+    if (profileRole) {
+      profileRole.textContent = ROLE_LABELS[me.data.role] || me.data.role;
+    }
+
+    try {
       const canLoadTenantData = await setupPlatformTenantSelector();
       if (!canLoadTenantData) {
         setApiState('API: нет tenant', 'warn');
         return;
       }
-    } catch {
-      logout();
+    } catch (error) {
+      showError(error.message);
+      setApiState('API: tenant ошибка', 'error');
       return;
     }
   } else if (!apiKey) {
