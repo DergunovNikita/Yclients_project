@@ -1,6 +1,14 @@
 import Chart from 'chart.js/auto';
 import { enhanceSelect } from './customSelect.js';
-import { authHeaders, getToken, loadCurrentUser, logout } from './auth.js';
+import {
+  authFetch,
+  authHeaders,
+  getSelectedPortalAccountId,
+  getToken,
+  loadCurrentUser,
+  logout,
+  setSelectedPortalAccountId,
+} from './auth.js';
 
 if (!getToken() && !import.meta.env.VITE_API_KEY) {
   window.location.href = '/login.html';
@@ -73,6 +81,9 @@ const els = {
   serviceGroupCode: document.getElementById('service-group-code'),
   serviceGroupDescription: document.getElementById('service-group-description'),
   serviceGroupAdd: document.getElementById('service-group-add'),
+  tenantSwitcher: document.getElementById('tenant-switcher'),
+  tenantSelect: document.getElementById('tenant-select'),
+  tenantMeta: document.getElementById('tenant-meta'),
   overviewPresetButtons: [...document.querySelectorAll('[data-overview-preset]')],
   overviewJumpButtons: [...document.querySelectorAll('[data-overview-jump]')],
 };
@@ -131,6 +142,7 @@ let serviceManagementSavedData = null;
 let serviceManagementSavedSnapshot = '';
 let serviceManagementDirty = false;
 let reportsController = null;
+let selectedTenant = null;
 
 const ADMIN_HIDDEN_METRIC_CODES = new Set(['revenue', 'avg_check_total']);
 
@@ -278,7 +290,6 @@ async function requestJson(path, { method = 'GET', body = null } = {}) {
       response = await fetch(url, {
         method,
         headers: { ...headers(), 'Content-Type': 'application/json' },
-        headers: { 'Content-Type': 'application/json' },
         body: body === null ? undefined : JSON.stringify(body),
       });
     } catch (error) {
@@ -1956,6 +1967,67 @@ function accountDisplayName(user) {
   return user?.email?.split('@')[0] || '';
 }
 
+function tenantOptionLabel(tenant) {
+  const branchText = tenant.branch_count === 1 ? '1 филиал' : `${tenant.branch_count || 0} филиалов`;
+  return `${tenant.label || `Tenant ${tenant.id}`} · ${branchText}`;
+}
+
+async function setupPlatformTenantSelector() {
+  selectedTenant = null;
+  if (els.tenantSwitcher) {
+    els.tenantSwitcher.hidden = true;
+  }
+
+  if (currentUser?.role !== 'platform_admin') {
+    setSelectedPortalAccountId('');
+    return true;
+  }
+
+  const payload = await authFetch('/auth/admin/portal-accounts');
+  const tenants = payload.data || [];
+  if (!els.tenantSwitcher || !els.tenantSelect) {
+    return tenants.length > 0;
+  }
+
+  els.tenantSwitcher.hidden = false;
+  els.tenantSelect.innerHTML = '';
+  tenants.forEach((tenant) => {
+    const option = document.createElement('option');
+    option.value = tenant.id;
+    option.textContent = tenantOptionLabel(tenant);
+    els.tenantSelect.appendChild(option);
+  });
+
+  if (!tenants.length) {
+    setSelectedPortalAccountId('');
+    els.tenantSelect.disabled = true;
+    if (els.tenantMeta) {
+      els.tenantMeta.textContent = 'Нет созданных бизнес-сетей';
+    }
+    showError('Для platform admin нет доступных business tenants.');
+    return false;
+  }
+
+  const storedTenantId = getSelectedPortalAccountId();
+  selectedTenant = tenants.find((tenant) => String(tenant.id) === storedTenantId)
+    || tenants.find((tenant) => Number(tenant.branch_count || 0) > 0)
+    || tenants[0];
+  setSelectedPortalAccountId(selectedTenant.id);
+  els.tenantSelect.disabled = false;
+  els.tenantSelect.value = String(selectedTenant.id);
+  if (els.tenantMeta) {
+    els.tenantMeta.textContent = selectedTenant.branch_count
+      ? 'Dashboard показывает данные выбранной сети'
+      : 'У выбранной сети пока нет филиалов';
+  }
+
+  if (!selectedTenant.branch_count) {
+    showError('У выбранной business-сети нет подключенных филиалов.');
+    return false;
+  }
+  return true;
+}
+
 async function init() {
   reportsController = initReports({ clearError, showError, setApiState });
   Object.values(filterEls).forEach((filter) => defaultDates(filter));
@@ -1983,6 +2055,11 @@ async function init() {
       if (profileRole) {
         profileRole.textContent = ROLE_LABELS[me.data.role] || me.data.role;
       }
+      const canLoadTenantData = await setupPlatformTenantSelector();
+      if (!canLoadTenantData) {
+        setApiState('API: нет tenant', 'warn');
+        return;
+      }
     } catch {
       logout();
       return;
@@ -1990,6 +2067,8 @@ async function init() {
   } else if (!apiKey) {
     window.location.href = '/login.html';
     return;
+  } else {
+    setSelectedPortalAccountId('');
   }
   await loadBranches();
   await Promise.all(Object.values(filterEls).map((filter) => loadStaff(filter)));
@@ -1998,6 +2077,10 @@ async function init() {
 }
 
 filterEls.overview.load.addEventListener('click', () => loadDashboard());
+els.tenantSelect?.addEventListener('change', () => {
+  setSelectedPortalAccountId(els.tenantSelect.value);
+  window.location.reload();
+});
 filterEls.overview.start.addEventListener('change', () => {
   els.overviewPresetButtons.forEach((button) => button.classList.remove('active'));
 });

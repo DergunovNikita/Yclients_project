@@ -10,6 +10,7 @@ from sqlalchemy import select
 import api
 import auth_deps
 import plan_import
+from auth_service import create_access_token, hash_password
 from dashboard_service import fetch_plan_fact
 from plan_import import (
     import_plan_sheet_csv,
@@ -29,6 +30,9 @@ from models import (
     GoodTransaction,
     Group,
     ManualFactMetric,
+    PortalAccount,
+    PortalBranch,
+    PortalUser,
     PlanBranchSetting,
     PlanMetric,
     PlanStaffInput,
@@ -280,6 +284,62 @@ async def test_dashboard_bundle_requires_api_key(async_session, monkeypatch):
 
     app.dependency_overrides.clear()
     monkeypatch.setattr(auth_deps, 'API_KEY', '')
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_dashboard_bundle_requires_selected_tenant(async_session, monkeypatch):
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    async_session.add(Group(id=1, title='Group'))
+    async_session.add(Company(id=1, title='Tenant A Branch', group_id=1))
+    async_session.add(Company(id=2, title='Tenant B Branch', group_id=1))
+    async_session.add(PortalAccount(id=1, label='Tenant A', created_at=datetime.utcnow()))
+    async_session.add(PortalAccount(id=2, label='Tenant B', created_at=datetime.utcnow()))
+    async_session.add(PortalBranch(portal_account_id=1, company_id=1))
+    async_session.add(PortalBranch(portal_account_id=2, company_id=2))
+    async_session.add(
+        PortalUser(
+            id=900,
+            portal_account_id=None,
+            email='platform.dashboard@example.com',
+            password_hash=hash_password('Platform12345!'),
+            full_name='Platform Admin',
+            role='platform_admin',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(900, 'platform_admin')
+    headers = {'Authorization': f'Bearer {token}'}
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        missing_tenant = await client.get(
+            '/dashboard/bundle',
+            params={'start_date': '2026-06-01', 'end_date': '2026-06-21'},
+            headers=headers,
+        )
+        selected_tenant = await client.get(
+            '/dashboard/bundle',
+            params={'start_date': '2026-06-01', 'end_date': '2026-06-21'},
+            headers={**headers, 'X-Portal-Account-Id': '2'},
+        )
+
+    app.dependency_overrides.clear()
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
+
+    assert missing_tenant.status_code == 403
+    assert missing_tenant.json()['detail'] == 'No branch access assigned'
+    assert selected_tenant.status_code == 200
+    assert selected_tenant.json()['data']['summary']['period'] == {
+        'start': '2026-06-01',
+        'end': '2026-06-21',
+    }
 
 
 @pytest.mark.asyncio

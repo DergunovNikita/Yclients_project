@@ -101,6 +101,43 @@
       text-align: center;
     }
 
+    .tenant-switcher {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      width: min(260px, 100%);
+      margin-top: 4px;
+      text-align: left;
+    }
+
+    .tenant-switcher[hidden] {
+      display: none !important;
+    }
+
+    .tenant-switcher label {
+      color: #64748b;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .tenant-switcher select {
+      width: 100%;
+      min-height: 34px;
+      padding: 6px 8px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #172033;
+      font-size: 13px;
+    }
+
+    .tenant-switcher__meta {
+      color: #64748b;
+      font-size: 11px;
+      line-height: 1.25;
+    }
+
     .user-menu {
       display: flex;
       flex-direction: column;
@@ -1164,6 +1201,11 @@
       <div class="status">
         <span class="pill warn" id="api-state">API: проверка</span>
         <span id="sync-state">данные актуальны: нет данных</span>
+        <div class="tenant-switcher" id="tenant-switcher" hidden>
+          <label for="tenant-select">Бизнес-сеть</label>
+          <select id="tenant-select"></select>
+          <span class="tenant-switcher__meta" id="tenant-meta"></span>
+        </div>
         <div class="user-profile" id="user-profile-link" hidden>
           <a href="/profile.html" class="user-icon-btn" aria-label="Личный кабинет">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">

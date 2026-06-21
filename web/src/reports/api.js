@@ -1,3 +1,5 @@
+import { authHeaders } from '../auth.js';
+
 const apiBase = import.meta.env.VITE_API_BASE || '';
 
 function apiUrl(path, params = {}) {
@@ -29,7 +31,7 @@ export async function fetchJson(path, params = {}) {
   for (const url of apiUrlCandidates(path, params)) {
     let response;
     try {
-      response = await fetch(url);
+      response = await fetch(url, { headers: authHeaders() });
     } catch (error) {
       errors.push(`${url}\n${error.message}`);
       continue;

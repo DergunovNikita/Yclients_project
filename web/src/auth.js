@@ -1,4 +1,5 @@
 const TOKEN_KEY = 'portal_access_token';
+const PORTAL_ACCOUNT_KEY = 'portal_account_id';
 const apiBase = import.meta.env.VITE_API_BASE || '';
 
 export function resolveApiPath(path) {
@@ -17,6 +18,19 @@ export function setToken(token) {
     localStorage.setItem(TOKEN_KEY, token);
   } else {
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(PORTAL_ACCOUNT_KEY);
+  }
+}
+
+export function getSelectedPortalAccountId() {
+  return localStorage.getItem(PORTAL_ACCOUNT_KEY) || '';
+}
+
+export function setSelectedPortalAccountId(portalAccountId) {
+  if (portalAccountId) {
+    localStorage.setItem(PORTAL_ACCOUNT_KEY, String(portalAccountId));
+  } else {
+    localStorage.removeItem(PORTAL_ACCOUNT_KEY);
   }
 }
 
@@ -25,6 +39,10 @@ export function authHeaders(extra = {}) {
   const token = getToken();
   if (token) {
     headers.Authorization = `Bearer ${token}`;
+  }
+  const portalAccountId = getSelectedPortalAccountId();
+  if (portalAccountId) {
+    headers['X-Portal-Account-Id'] = portalAccountId;
   }
   return headers;
 }

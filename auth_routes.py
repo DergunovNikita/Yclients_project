@@ -6,7 +6,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_deps import get_current_user, require_roles
@@ -486,6 +486,38 @@ async def admin_meta(
             'portal_account_id': actor.portal_account_id,
             'company_ids': None if actor.role == 'platform_admin' else branch_ids,
         },
+    }
+
+
+@router.get('/admin/portal-accounts')
+async def admin_list_portal_accounts(
+    _actor: PortalUser = Depends(require_roles('platform_admin')),
+    db: AsyncSession = Depends(get_async_db),
+):
+    rows = (
+        await db.execute(
+            select(
+                PortalAccount.id,
+                PortalAccount.label,
+                PortalAccount.created_at,
+                func.count(PortalBranch.company_id).label('branch_count'),
+            )
+            .outerjoin(PortalBranch, PortalBranch.portal_account_id == PortalAccount.id)
+            .group_by(PortalAccount.id, PortalAccount.label, PortalAccount.created_at)
+            .order_by(PortalAccount.id.asc())
+        )
+    ).all()
+    return {
+        'success': True,
+        'data': [
+            {
+                'id': row.id,
+                'label': row.label,
+                'created_at': row.created_at.isoformat() if row.created_at else None,
+                'branch_count': int(row.branch_count or 0),
+            }
+            for row in rows
+        ],
     }
 
 

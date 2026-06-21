@@ -118,6 +118,48 @@ async def test_platform_admin_me_without_selected_tenant(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_platform_admin_lists_portal_accounts(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    platform_admin = PortalUser(
+        id=51,
+        portal_account_id=None,
+        email='platform.list@example.com',
+        password_hash=hash_password('Platform12345!'),
+        full_name='Platform Admin',
+        role='platform_admin',
+        is_active=True,
+        email_verified_at=datetime.utcnow(),
+        created_at=datetime.utcnow(),
+    )
+    auth_db.add(platform_admin)
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    token = create_access_token(51, 'platform_admin')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/auth/admin/portal-accounts',
+            headers={'Authorization': f'Bearer {token}'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()['data'] == [
+        {
+            'id': 1,
+            'label': 'Default tenant',
+            'created_at': response.json()['data'][0]['created_at'],
+            'branch_count': 2,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_dashboard_auth_alias_login(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
 
