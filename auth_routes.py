@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -701,10 +701,11 @@ async def admin_update_user(
 
 @router.get('/admin/yclients-credentials')
 async def admin_list_yclients_credentials(
+    x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
     db: AsyncSession = Depends(get_async_db),
 ):
-    portal_account_id = None if actor.role == 'platform_admin' else actor.portal_account_id
+    portal_account_id = x_portal_account_id if actor.role == 'platform_admin' else actor.portal_account_id
     return {'success': True, 'data': await list_credential_payloads(db, portal_account_id)}
 
 
@@ -744,10 +745,7 @@ async def admin_create_yclients_credentials(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
-    payloads = await list_credential_payloads(
-        db,
-        None if actor.role == 'platform_admin' else actor.portal_account_id,
-    )
+    payloads = await list_credential_payloads(db, portal_account_id)
     created_payload = next((item for item in payloads if item['id'] == credential.id), None)
     return {'success': True, 'data': created_payload}
 
@@ -784,10 +782,7 @@ async def admin_update_yclients_credentials(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
-    return {'success': True, 'data': await list_credential_payloads(
-        db,
-        None if actor.role == 'platform_admin' else actor.portal_account_id,
-    )}
+    return {'success': True, 'data': await list_credential_payloads(db, credential.portal_account_id)}
 
 
 @router.delete('/admin/yclients-credentials/{credential_id}')

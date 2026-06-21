@@ -10,7 +10,17 @@ from sqlalchemy import select
 import api
 from api import app
 from auth_service import create_access_token, hash_password
-from models import Company, Group, PortalAccount, PortalBranch, PortalUser, PortalUserBranch, Staff
+from models import (
+    Company,
+    Group,
+    PortalAccount,
+    PortalBranch,
+    PortalUser,
+    PortalUserBranch,
+    Staff,
+    YClientsCredential,
+    YClientsCredentialCompany,
+)
 
 
 @pytest_asyncio.fixture
@@ -157,6 +167,78 @@ async def test_platform_admin_lists_portal_accounts(auth_db, monkeypatch):
             'branch_count': 2,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_filters_yclients_credentials_by_selected_tenant(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(Company(id=3, title='Branch 3', group_id=1))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
+    auth_db.add(
+        PortalUser(
+            id=52,
+            portal_account_id=None,
+            email='platform.credentials@example.com',
+            password_hash=hash_password('Platform12345!'),
+            full_name='Platform Admin',
+            role='platform_admin',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add_all([
+        YClientsCredential(
+            id=1,
+            portal_account_id=1,
+            title='Tenant A Credentials',
+            partner_token_encrypted='token-a',
+            login_encrypted='login-a',
+            password_encrypted='password-a',
+            is_active=True,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        ),
+        YClientsCredential(
+            id=2,
+            portal_account_id=2,
+            title='Tenant B Credentials',
+            partner_token_encrypted='token-b',
+            login_encrypted='login-b',
+            password_encrypted='password-b',
+            is_active=True,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        ),
+        YClientsCredentialCompany(credential_id=1, company_id=1),
+        YClientsCredentialCompany(credential_id=2, company_id=3),
+    ])
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    token = create_access_token(52, 'platform_admin')
+    headers = {'Authorization': f'Bearer {token}'}
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        all_credentials = await client.get('/auth/admin/yclients-credentials', headers=headers)
+        tenant_b_credentials = await client.get(
+            '/auth/admin/yclients-credentials',
+            headers={**headers, 'X-Portal-Account-Id': '2'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert all_credentials.status_code == 200
+    assert [item['title'] for item in all_credentials.json()['data']] == [
+        'Tenant A Credentials',
+        'Tenant B Credentials',
+    ]
+    assert tenant_b_credentials.status_code == 200
+    assert [item['title'] for item in tenant_b_credentials.json()['data']] == ['Tenant B Credentials']
 
 
 @pytest.mark.asyncio

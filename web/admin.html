@@ -29,6 +29,20 @@
     <div class="alert error" id="error" hidden></div>
     <div class="alert success" id="success" hidden></div>
 
+    <section class="admin-card admin-card--tenant" id="tenant-switcher-section" hidden>
+      <div class="admin-card__header">
+        <div>
+          <h2>Бизнес-сеть</h2>
+          <p class="admin-card__hint">Для platform admin выбранная сеть определяет филиалы, credentials и данные дашборда.</p>
+        </div>
+        <label class="admin-search">
+          <span class="admin-search__label">Tenant</span>
+          <select id="tenant-select"></select>
+        </label>
+      </div>
+      <p class="admin-card__hint" id="tenant-meta"></p>
+    </section>
+
     <section class="admin-card">
       <div class="admin-card__header">
         <label class="admin-search admin-search--header">

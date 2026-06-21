@@ -1,6 +1,13 @@
 import './auth.css';
 import { enhanceSelect } from './customSelect.js';
-import { authFetch, getToken, logout, requireAuthRedirect } from './auth.js';
+import {
+  authFetch,
+  getSelectedPortalAccountId,
+  getToken,
+  logout,
+  requireAuthRedirect,
+  setSelectedPortalAccountId,
+} from './auth.js';
 import * as XLSX from 'xlsx';
 
 const errorEl = document.getElementById('error');
@@ -59,6 +66,9 @@ const saveBtn = document.getElementById('save-user');
 const saveStaffBtn = document.getElementById('save-staff');
 const adminRoleLabel = document.getElementById('admin-role-label');
 const openCreateUserBtn = document.getElementById('open-create-user');
+const tenantSwitcherSection = document.getElementById('tenant-switcher-section');
+const tenantSelect = document.getElementById('tenant-select');
+const tenantMeta = document.getElementById('tenant-meta');
 
 const createRoleDropdown = enhanceSelect(createRoleSelect, { placeholder: 'Выберите роль' });
 const createBranchDropdown = enhanceSelect(createBranchSelect, { placeholder: 'Выберите филиалы' });
@@ -90,6 +100,7 @@ let initialPasswords = [];
 let yclientsCredentials = [];
 let editingYclientsCredentialId = null;
 let currentCredentialsItems = [];
+let portalAccounts = [];
 
 function hideAlerts() {
   errorEl.hidden = true;
@@ -186,9 +197,64 @@ function canManageYclientsCredentials() {
   return (currentUserRole || adminMeta?.role) === 'platform_admin';
 }
 
+function isPlatformAdmin() {
+  return (currentUserRole || adminMeta?.role) === 'platform_admin';
+}
+
+function selectedPortalAccountId() {
+  if (isPlatformAdmin()) {
+    return getSelectedPortalAccountId();
+  }
+  return adminMeta?.portal_account_id ? String(adminMeta.portal_account_id) : '';
+}
+
+function portalAccountLabel(account) {
+  const branchText = account.branch_count === 1 ? '1 филиал' : `${account.branch_count || 0} филиалов`;
+  return `${account.label || `Tenant ${account.id}`} · ${branchText}`;
+}
+
+function renderTenantSwitcher() {
+  if (!tenantSwitcherSection || !tenantSelect) return;
+  const platform = isPlatformAdmin();
+  tenantSwitcherSection.hidden = !platform;
+  if (!platform) return;
+
+  tenantSelect.innerHTML = '';
+  portalAccounts.forEach((account) => {
+    const option = document.createElement('option');
+    option.value = account.id;
+    option.textContent = portalAccountLabel(account);
+    tenantSelect.appendChild(option);
+  });
+
+  if (!portalAccounts.length) {
+    tenantSelect.disabled = true;
+    setSelectedPortalAccountId('');
+    if (tenantMeta) {
+      tenantMeta.textContent = 'Нет созданных business tenants.';
+    }
+    return;
+  }
+
+  let selected = getSelectedPortalAccountId();
+  if (!portalAccounts.some((account) => String(account.id) === selected)) {
+    selected = String(portalAccounts[0].id);
+    setSelectedPortalAccountId(selected);
+  }
+  tenantSelect.disabled = false;
+  tenantSelect.value = selected;
+  const account = portalAccounts.find((item) => String(item.id) === selected);
+  if (tenantMeta) {
+    tenantMeta.textContent = account?.branch_count
+      ? 'Настройки и credentials применяются к выбранной сети.'
+      : 'У выбранной сети пока нет филиалов. Можно сохранить credentials без выбора филиалов, и система подтянет доступные филиалы из YClients.';
+  }
+}
+
 function applyAdminMeta() {
   const canManage = canManageUsers();
   const roles = canManage ? adminMeta?.assignable_roles || [] : [];
+  renderTenantSwitcher();
   renderRoleOptions(createRoleSelect, createRoleDropdown, roles);
   renderBranchOptions(createBranchSelect, createBranchDropdown);
 
@@ -208,6 +274,23 @@ function applyAdminMeta() {
   if (users.length) {
     renderUsers();
   }
+}
+
+async function loadPortalAccounts() {
+  if (!isPlatformAdmin()) {
+    setSelectedPortalAccountId('');
+    renderTenantSwitcher();
+    return;
+  }
+  const payload = await authFetch('/auth/admin/portal-accounts');
+  portalAccounts = payload.data || [];
+  renderTenantSwitcher();
+}
+
+async function reloadTenantScopedAdminData() {
+  resetYclientsCredentialForm();
+  await loadBranches();
+  await Promise.all([loadUsers(), loadInitialPasswords(), loadYclientsCredentials()]);
 }
 
 function openCreateModal() {
@@ -944,6 +1027,13 @@ async function saveYclientsCredential(event) {
       is_active: yclientsCredentialActive.checked,
       company_ids,
     };
+    if (isPlatformAdmin()) {
+      const portalAccountId = selectedPortalAccountId();
+      if (!portalAccountId) {
+        throw new Error('Выберите business tenant для YClients credentials');
+      }
+      body.portal_account_id = Number(portalAccountId);
+    }
     if (yclientsCredentialPartnerToken.value.trim()) {
       body.partner_token = yclientsCredentialPartnerToken.value.trim();
     }
@@ -1097,6 +1187,11 @@ async function init() {
       return;
     }
     await loadAdminMeta();
+    await loadPortalAccounts();
+    if (isPlatformAdmin() && !selectedPortalAccountId()) {
+      showError('Выберите business tenant для настроек.');
+      return;
+    }
     await loadBranches();
     await Promise.all([loadUsers(), loadInitialPasswords(), loadYclientsCredentials()]);
   } catch (error) {
@@ -1107,5 +1202,16 @@ async function init() {
     showError(error.message);
   }
 }
+
+tenantSelect?.addEventListener('change', async () => {
+  setSelectedPortalAccountId(tenantSelect.value);
+  hideAlerts();
+  try {
+    await reloadTenantScopedAdminData();
+    showSuccess('Business tenant выбран');
+  } catch (error) {
+    showError(error.message);
+  }
+});
 
 init();
