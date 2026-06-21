@@ -9,8 +9,9 @@ const repoRoot = resolve(dirname(rootDir), '..');
 export default defineConfig(({ mode }) => {
   const rootEnv = loadEnv(mode, repoRoot, '');
   const apiKey = process.env.API_KEY || rootEnv.API_KEY || '';
+  const apiTarget = process.env.VITE_DEV_API_TARGET || 'http://127.0.0.1:8000';
   const apiProxy = {
-    target: 'http://127.0.0.1:8000',
+    target: apiTarget,
     changeOrigin: true,
     configure(proxy) {
       proxy.on('proxyReq', (proxyReq) => {
