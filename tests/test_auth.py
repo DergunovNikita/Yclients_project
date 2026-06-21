@@ -85,6 +85,39 @@ async def test_login_and_me(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_platform_admin_me_without_selected_tenant(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    platform_admin = PortalUser(
+        id=50,
+        portal_account_id=None,
+        email='platform@example.com',
+        password_hash=hash_password('Platform12345!'),
+        full_name='Platform Admin',
+        role='platform_admin',
+        is_active=True,
+        email_verified_at=datetime.utcnow(),
+        created_at=datetime.utcnow(),
+    )
+    auth_db.add(platform_admin)
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    token = create_access_token(50, 'platform_admin')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        me = await client.get('/auth/me', headers={'Authorization': f'Bearer {token}'})
+
+    app.dependency_overrides.clear()
+
+    assert me.status_code == 200
+    assert me.json()['data']['role'] == 'platform_admin'
+    assert me.json()['data']['portal_account_id'] is None
+
+
+@pytest.mark.asyncio
 async def test_dashboard_auth_alias_login(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
 

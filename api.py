@@ -82,6 +82,7 @@ async def require_api_key(
     request: Request,
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None),
+    x_portal_account_id: int | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
 ):
     """Global auth: open paths, JWT user, or API key when configured."""
@@ -89,7 +90,13 @@ async def require_api_key(
 
     if request.url.path in OPEN_PATHS:
         return
-    await require_auth(request, authorization, x_api_key=x_api_key, db=db)
+    await require_auth(
+        request,
+        authorization,
+        x_api_key=x_api_key,
+        x_portal_account_id=x_portal_account_id,
+        db=db,
+    )
 
 
 app = FastAPI(
