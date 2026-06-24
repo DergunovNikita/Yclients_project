@@ -282,7 +282,7 @@ async function loadPortalAccounts() {
     renderTenantSwitcher();
     return;
   }
-  const payload = await authFetch('/auth/admin/portal-accounts');
+  const payload = await authFetch('/auth/portal-accounts');
   portalAccounts = payload.data || [];
   renderTenantSwitcher();
 }

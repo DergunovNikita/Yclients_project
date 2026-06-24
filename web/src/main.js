@@ -1983,7 +1983,7 @@ async function setupPlatformTenantSelector() {
     return true;
   }
 
-  const payload = await authFetch('/auth/admin/portal-accounts');
+  const payload = await authFetch('/auth/portal-accounts');
   const tenants = payload.data || [];
   if (!els.tenantSwitcher || !els.tenantSelect) {
     return tenants.length > 0;

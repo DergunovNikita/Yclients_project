@@ -489,6 +489,7 @@ async def admin_meta(
     }
 
 
+@router.get('/portal-accounts')
 @router.get('/admin/portal-accounts')
 async def admin_list_portal_accounts(
     _actor: PortalUser = Depends(require_roles('platform_admin')),
