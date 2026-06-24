@@ -55,9 +55,11 @@ async def _user_from_bearer(
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail='User not found or inactive')
 
-    if user.role == 'platform_admin' and x_portal_account_id is not None:
-        branch_ids = await load_portal_account_branch_ids(db, x_portal_account_id)
-        return AccessContext.from_user(user.id, user.role, x_portal_account_id, branch_ids)
+    if user.role == 'platform_admin':
+        active_account_id = x_portal_account_id if x_portal_account_id is not None else user.portal_account_id
+        if active_account_id is not None:
+            branch_ids = await load_portal_account_branch_ids(db, active_account_id)
+            return AccessContext.from_user(user.id, user.role, active_account_id, branch_ids)
 
     branch_ids = await load_user_access_branch_ids(db, user)
     return AccessContext.from_user(user.id, user.role, user.portal_account_id, branch_ids)
