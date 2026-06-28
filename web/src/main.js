@@ -484,6 +484,10 @@ function renderKpi(summary) {
 
 function renderVisitMetrics(summary) {
   const visitMetrics = summary.visit_metrics || {};
+  const clientFrequency = visitMetrics.client_visit_frequency || {};
+  const oneVisit = clientFrequency.one_visit || {};
+  const twoToThreeVisits = clientFrequency.two_to_three_visits || {};
+  const fourPlusVisits = clientFrequency.four_plus_visits || {};
   const cards = [
     {
       label: 'Количество ОПЗ',
@@ -519,6 +523,24 @@ function renderVisitMetrics(summary) {
       label: 'Уникальные клиенты с доп. услугами',
       value: formatMetricValue(visitMetrics.extra_service_clients_pct, 'percent'),
       delta: `${formatNumber(visitMetrics.extra_service_clients)} уник. клиентов`,
+      deltaValue: null,
+    },
+    {
+      label: 'Клиенты с 1 визитом',
+      value: formatNumber(oneVisit.count),
+      delta: `${formatMetricValue(oneVisit.pct, 'percent')} от клиентов`,
+      deltaValue: null,
+    },
+    {
+      label: 'Клиенты с 2-3 визитами',
+      value: formatNumber(twoToThreeVisits.count),
+      delta: `${formatMetricValue(twoToThreeVisits.pct, 'percent')} от клиентов`,
+      deltaValue: null,
+    },
+    {
+      label: 'Клиенты с 4+ визитами',
+      value: formatNumber(fourPlusVisits.count),
+      delta: `${formatMetricValue(fourPlusVisits.pct, 'percent')} от клиентов`,
       deltaValue: null,
     },
   ];

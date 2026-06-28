@@ -62,12 +62,14 @@ async def test_dashboard_reports_registry_contract(async_session):
 
     assert r.status_code == 200
     data = r.json()['data']
-    assert len(data) == 71
+    assert len(data) == 72
     by_id = {item['id']: item for item in data}
     assert by_id['revenue_dynamics']['status'] == 'ready'
     assert by_id['conversion_funnel']['status'] == 'source_missing'
     assert by_id['nps_dashboard']['status'] == 'partial'
     assert by_id['revenue_dynamics']['filters']['compare'] is True
+    assert by_id['year_over_year']['status'] == 'ready'
+    assert by_id['year_over_year']['group'] == 'finance'
 
 
 @pytest.mark.asyncio
@@ -153,6 +155,71 @@ async def test_dashboard_report_data_ready_report_and_compare(async_session):
     assert data['comparison']['cards'][0]['value'] == 800.0
     assert data['charts']
     assert data['tables']
+
+
+@pytest.mark.asyncio
+async def test_dashboard_year_over_year_report_uses_aggregate_entities_without_service_slice(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add_all([
+        Client(id=1, name='Client 2024 A', company_id=1),
+        Client(id=2, name='Client 2024 B', company_id=1),
+        Client(id=3, name='Client 2025 A', company_id=1),
+        Client(id=4, name='Client 2025 B', company_id=1),
+        Client(id=5, name='Client 2025 C', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2024, 1, 10), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2024, 1, 11), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=3, date=date(2025, 1, 10), attendance=1),
+        Appointment(id=4, company_id=1, staff_id=1, client_id=4, date=date(2025, 1, 11), attendance=1),
+        Appointment(id=5, company_id=1, staff_id=1, client_id=5, date=date(2025, 1, 12), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2024, 1, 10, 12, 0), amount=1000.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=2, date=datetime(2024, 1, 11, 12, 0), amount=1000.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=3, date=datetime(2025, 1, 10, 12, 0), amount=1500.0, record_id=3, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=4, date=datetime(2025, 1, 11, 12, 0), amount=1500.0, record_id=4, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=5, date=datetime(2025, 1, 12, 12, 0), amount=1500.0, record_id=5, sold_item_type='service', master_id=1, company_id=1),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        r = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'year_over_year',
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+                'company_id': 1,
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    data = r.json()['data']
+    assert data['report_id'] == 'year_over_year'
+    assert data['source_status'] == 'ready'
+    assert data['raw']['service_detail_excluded'] is True
+    assert [row['year'] for row in data['raw']['years']] == [2024, 2025]
+    years_by_year = {row['year']: row for row in data['raw']['years']}
+    assert years_by_year[2024]['revenue'] == 2000.0
+    assert years_by_year[2024]['appointments'] == 2
+    assert years_by_year[2024]['avg_check'] == 1000.0
+    assert years_by_year[2025]['revenue'] == 4500.0
+    assert years_by_year[2025]['appointments'] == 3
+    assert years_by_year[2025]['avg_check'] == 1500.0
+    assert years_by_year[2025]['revenue_change_pct'] == 125.0
+    assert years_by_year[2025]['appointments_change_pct'] == 50.0
+    assert {table['id'] for table in data['tables']} == {'years', 'months'}
 
 
 @pytest.mark.asyncio
@@ -610,6 +677,90 @@ async def test_dashboard_summary_split_revenue_and_average_checks(async_session)
     assert data['visit_metrics']['visits_per_client'] == 1.5
     assert data['visit_metrics']['extra_service_clients'] == 1
     assert data['visit_metrics']['extra_service_clients_pct'] == 50.0
+    frequency = data['visit_metrics']['client_visit_frequency']
+    assert frequency['total_clients'] == 2
+    assert frequency['one_visit']['count'] == 1
+    assert frequency['one_visit']['pct'] == 50.0
+    assert frequency['two_to_three_visits']['count'] == 1
+    assert frequency['two_to_three_visits']['pct'] == 50.0
+    assert frequency['four_plus_visits']['count'] == 0
+    assert frequency['four_plus_visits']['pct'] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_dashboard_summary_client_visit_frequency_respects_branch_and_date_filters(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add_all([
+        Company(id=1, title='Salon 1', group_id=1),
+        Company(id=2, title='Salon 2', group_id=1),
+        Staff(id=1, name='Master 1', position='Барбер', company_id=1),
+        Staff(id=2, name='Master 2', position='Барбер', company_id=2),
+    ])
+    async_session.add_all([
+        Client(id=1, name='Client 1', company_id=1),
+        Client(id=2, name='Client 2', company_id=1),
+        Client(id=3, name='Client 3', company_id=1),
+        Client(id=4, name='Canceled Client', company_id=1),
+        Client(id=5, name='Branch 2 Client', company_id=2),
+    ])
+    await async_session.flush()
+
+    appointments = [
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 10), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=1, date=date(2025, 2, 10), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=2, date=date(2025, 1, 11), attendance=1),
+        Appointment(id=4, company_id=1, staff_id=1, client_id=2, date=date(2025, 1, 12), attendance=1),
+        Appointment(id=5, company_id=1, staff_id=1, client_id=3, date=date(2025, 1, 13), attendance=1),
+        Appointment(id=6, company_id=1, staff_id=1, client_id=3, date=date(2025, 1, 14), attendance=1),
+        Appointment(id=7, company_id=1, staff_id=1, client_id=3, date=date(2025, 1, 15), attendance=1),
+        Appointment(id=8, company_id=1, staff_id=1, client_id=3, date=date(2025, 1, 16), attendance=1),
+        Appointment(id=9, company_id=1, staff_id=1, client_id=4, date=date(2025, 1, 17), attendance=-1),
+        Appointment(id=10, company_id=2, staff_id=2, client_id=5, date=date(2025, 1, 18), attendance=1),
+    ]
+    async_session.add_all(appointments)
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        company_1_response = await client.get(
+            '/dashboard/widget/summary',
+            params={
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+                'company_id': 1,
+            },
+        )
+        company_2_response = await client.get(
+            '/dashboard/widget/summary',
+            params={
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+                'company_id': 2,
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert company_1_response.status_code == 200
+    company_1_frequency = company_1_response.json()['data']['visit_metrics']['client_visit_frequency']
+    assert company_1_frequency['total_clients'] == 3
+    assert company_1_frequency['one_visit']['count'] == 1
+    assert company_1_frequency['one_visit']['pct'] == pytest.approx(100 / 3)
+    assert company_1_frequency['two_to_three_visits']['count'] == 1
+    assert company_1_frequency['two_to_three_visits']['pct'] == pytest.approx(100 / 3)
+    assert company_1_frequency['four_plus_visits']['count'] == 1
+    assert company_1_frequency['four_plus_visits']['pct'] == pytest.approx(100 / 3)
+
+    assert company_2_response.status_code == 200
+    company_2_frequency = company_2_response.json()['data']['visit_metrics']['client_visit_frequency']
+    assert company_2_frequency['total_clients'] == 1
+    assert company_2_frequency['one_visit']['count'] == 1
+    assert company_2_frequency['one_visit']['pct'] == 100.0
+    assert company_2_frequency['two_to_three_visits']['count'] == 0
+    assert company_2_frequency['four_plus_visits']['count'] == 0
 
 
 @pytest.mark.asyncio

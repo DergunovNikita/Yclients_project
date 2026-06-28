@@ -733,6 +733,84 @@ async def _average_check_block(
     }
 
 
+def _returning_bucket(count: int, total: int) -> dict[str, Any]:
+    return {
+        'count': count,
+        'pct': 100.0 * _safe_div(float(count), float(total)),
+    }
+
+
+async def _client_visit_frequency_block(
+    db: AsyncSession,
+    dr: DateRange,
+    company_id: Optional[int],
+    staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
+) -> dict[str, Any]:
+    filters = [
+        Appointment.attendance == COMPLETED_ATTENDANCE,
+        Appointment.client_id.is_not(None),
+        Appointment.date >= dr.start,
+        Appointment.date <= dr.end,
+    ]
+    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        filters.append(scope)
+    if staff_id is not None:
+        filters.append(Appointment.staff_id == staff_id)
+
+    visits_by_client = (
+        select(
+            Appointment.client_id.label('client_id'),
+            func.count(Appointment.id).label('visit_count'),
+        )
+        .where(*filters)
+        .group_by(Appointment.client_id)
+        .subquery()
+    )
+    row = (
+        await db.execute(
+            select(
+                func.count(visits_by_client.c.client_id).label('total_clients'),
+                func.coalesce(
+                    func.sum(case((visits_by_client.c.visit_count == 1, 1), else_=0)),
+                    0,
+                ).label('one_visit'),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                and_(
+                                    visits_by_client.c.visit_count >= 2,
+                                    visits_by_client.c.visit_count <= 3,
+                                ),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label('two_to_three_visits'),
+                func.coalesce(
+                    func.sum(case((visits_by_client.c.visit_count >= 4, 1), else_=0)),
+                    0,
+                ).label('four_plus_visits'),
+            ).select_from(visits_by_client)
+        )
+    ).one()
+
+    total_clients = int(row.total_clients or 0)
+    one_visit = int(row.one_visit or 0)
+    two_to_three_visits = int(row.two_to_three_visits or 0)
+    four_plus_visits = int(row.four_plus_visits or 0)
+    return {
+        'total_clients': total_clients,
+        'one_visit': _returning_bucket(one_visit, total_clients),
+        'two_to_three_visits': _returning_bucket(two_to_three_visits, total_clients),
+        'four_plus_visits': _returning_bucket(four_plus_visits, total_clients),
+    }
+
+
 def _title_matches(title_expr, parts: tuple[str, ...]):
     conditions = []
     for part in parts:
@@ -1048,6 +1126,13 @@ async def fetch_summary(
     prev_average_check = await _average_check_block(
         db, prev_dr, company_id, staff_id, company_ids=avg_company_ids
     )
+    client_frequency = await _client_visit_frequency_block(
+        db,
+        current_dr,
+        company_id,
+        staff_id,
+        allowed_company_ids=allowed_company_ids,
+    )
     for block, average_check in ((cur, cur_average_check), (prev, prev_average_check)):
         block['service_revenue'] = average_check['service_revenue']
         block['goods_revenue'] = average_check['goods_revenue']
@@ -1195,6 +1280,7 @@ async def fetch_summary(
                 cur_extra_service_clients_pct,
                 prev_extra_service_clients_pct,
             ),
+            'client_visit_frequency': client_frequency,
         },
         'average_check': {
             **cur_average_check,

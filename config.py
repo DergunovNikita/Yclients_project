@@ -3,6 +3,7 @@
 Значения берутся из переменных окружения (.env файл) с fallback-значениями.
 """
 import os
+from datetime import date
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -34,6 +35,16 @@ def _get_bool(name: str, default: bool) -> bool:
         return default
     return value.strip().lower() in {'1', 'true', 'yes', 'on'}
 
+
+def _get_date(name: str, default: date) -> date:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return default
+
 # ============================================================================
 # Настройки YClients API
 # ============================================================================
@@ -57,7 +68,8 @@ DB_PASSWORD = os.getenv('DB_PASSWORD', '')
 # ============================================================================
 # Параметры синхронизации
 # ============================================================================
-SYNC_DAYS = _get_int('SYNC_DAYS', 365)
+SYNC_DAYS = _get_int('SYNC_DAYS', 0)
+SYNC_HISTORY_START_DATE = _get_date('SYNC_HISTORY_START_DATE', date(2000, 1, 1))
 SCHEDULE_DAYS = _get_int('SCHEDULE_DAYS', 60)
 ANALYTICS_DAYS = _get_int('ANALYTICS_DAYS', 30)
 DB_BATCH_SIZE = _get_int('DB_BATCH_SIZE', 1000)

@@ -7,7 +7,7 @@ from typing import Iterable
 from config import (
     DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD,
     SYNC_DAYS, SCHEDULE_DAYS, ANALYTICS_DAYS, DB_BATCH_SIZE,
-    SYNC_INCREMENTAL, SYNC_LOOKBACK_DAYS,
+    SYNC_HISTORY_START_DATE, SYNC_INCREMENTAL, SYNC_LOOKBACK_DAYS,
     YCLIENTS_REQUEST_DELAY, YCLIENTS_TIMEOUT,
     YCLIENTS_RETRY_TOTAL, YCLIENTS_RETRY_BACKOFF,
 )
@@ -145,8 +145,14 @@ def set_sync_state_value(db, key: str, value: str):
     db.commit()
 
 
+def full_sync_start_date(end_date: date) -> date:
+    if SYNC_DAYS and SYNC_DAYS > 0:
+        return end_date - timedelta(days=SYNC_DAYS)
+    return min(SYNC_HISTORY_START_DATE, end_date)
+
+
 def resolve_transaction_window(db, end_date: date):
-    full_start = end_date - timedelta(days=SYNC_DAYS)
+    full_start = full_sync_start_date(end_date)
     if not SYNC_INCREMENTAL:
         return full_start, 'full'
 
@@ -166,7 +172,7 @@ def resolve_transaction_window(db, end_date: date):
 def resolve_sync_window(db, end_date: date, requested_mode: str):
     normalized_mode = (requested_mode or 'incremental').strip().lower()
     if normalized_mode == 'full':
-        return end_date - timedelta(days=SYNC_DAYS), 'full'
+        return full_sync_start_date(end_date), 'full'
     return resolve_transaction_window(db, end_date)
 
 

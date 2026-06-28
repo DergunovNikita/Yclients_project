@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from calendar import monthrange
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -108,6 +109,7 @@ REPORT_ORDER = (
     'top_goods_revenue',
     'traffic_source_roi',
     'visit_forecast',
+    'year_over_year',
 )
 
 READY_REPORTS = {
@@ -145,6 +147,7 @@ READY_REPORTS = {
     'staff_time_heatmap',
     'top_clients_pareto',
     'top_goods_revenue',
+    'year_over_year',
 }
 
 SOURCE_MISSING_REPORTS = {
@@ -168,6 +171,7 @@ FINANCE_REPORTS = {
     'revenue_decomposition',
     'revenue_dynamics',
     'booking_channels',
+    'year_over_year',
 }
 BOOKING_REPORTS = {'bookings_dynamics', 'cancellation_analysis', 'peak_load'}
 STAFF_REPORTS = {
@@ -264,6 +268,7 @@ TITLE_OVERRIDES = {
     'top_goods_revenue': 'Топ товаров по выручке',
     'traffic_source_roi': 'ROI источников трафика',
     'visit_forecast': 'Прогноз визитов',
+    'year_over_year': 'Сравнение по годам',
 }
 
 
@@ -442,6 +447,8 @@ def _description_for(report_id: str, status: str) -> str:
         return 'Отчет включен в каталог и ожидает отдельной методологии расчета.'
     if report_id == 'nps_dashboard':
         return 'Отзывы YClients доступны сейчас; NPS-опросы требуют отдельного источника.'
+    if report_id == 'year_over_year':
+        return 'Год к году по выручке, визитам, среднему чеку и крупным агрегатам без среза по услугам.'
     return 'Отчет строится на текущих данных YClients в PostgreSQL.'
 
 
@@ -544,6 +551,8 @@ async def _fetch_report_payload(
         return await _churn_payload(db, base, start, end, company_id, staff_id, allowed_company_ids)
     if report_id in BOOKING_REPORTS:
         return await _operations_payload(db, base, start, end, company_id, staff_id, granularity, allowed_company_ids)
+    if report_id == 'year_over_year':
+        return await _year_over_year_payload(db, base, start, end, company_id, staff_id, allowed_company_ids)
     return await _financial_payload(db, base, start, end, company_id, staff_id, granularity, allowed_company_ids)
 
 
@@ -641,6 +650,247 @@ def _aggregate_daily(rows: list[dict[str, Any]], granularity: str) -> list[dict[
         grouped[key]['goods_revenue'] += float(row.get('goods_revenue') or 0)
         grouped[key]['appointments'] += float(row.get('appointments') or 0)
     return [{'period': key, **values} for key, values in sorted(grouped.items())]
+
+
+def _pct_change(current: float, previous: float) -> float | None:
+    if previous == 0:
+        return None if current == 0 else 100.0
+    return round(100.0 * (current - previous) / previous, 2)
+
+
+def _safe_date(year: int, month: int, day: int) -> date:
+    return date(year, month, min(day, monthrange(year, month)[1]))
+
+
+def _year_periods(start: date, end: date) -> list[dict[str, Any]]:
+    if start.year == end.year:
+        return [
+            {
+                'year': start.year - 1,
+                'start': _safe_date(start.year - 1, start.month, start.day),
+                'end': _safe_date(end.year - 1, end.month, end.day),
+            },
+            {'year': start.year, 'start': start, 'end': end},
+        ]
+
+    periods = []
+    for year in range(start.year, end.year + 1):
+        period_start = date(year, 1, 1)
+        period_end = date(year, 12, 31)
+        if year == start.year:
+            period_start = start
+        if year == end.year:
+            period_end = end
+        periods.append({'year': year, 'start': period_start, 'end': period_end})
+    return periods
+
+
+def _year_row_from_summary(year: int, period_start: date, period_end: date, summary: dict[str, Any]) -> dict[str, Any]:
+    revenue = summary.get('revenue', {})
+    average_check = summary.get('average_check', {})
+    visits = summary.get('visit_metrics', {})
+    return {
+        'year': year,
+        'period_start': period_start.isoformat(),
+        'period_end': period_end.isoformat(),
+        'revenue': float(revenue.get('total') or 0),
+        'service_revenue': float(revenue.get('service_revenue') or 0),
+        'goods_revenue': float(revenue.get('goods_revenue') or 0),
+        'topup_revenue': float(revenue.get('topup_revenue') or 0),
+        'appointments': int(revenue.get('appointments') or 0),
+        'service_count': float(revenue.get('service_count') or 0),
+        'goods_count': float(revenue.get('goods_count') or 0),
+        'extra_service_count': float(revenue.get('extra_service_count') or 0),
+        'extra_service_revenue': float(revenue.get('extra_service_revenue') or 0),
+        'unique_clients': int(visits.get('unique_clients') or 0),
+        'avg_check': float(average_check.get('total') or 0),
+        'visits_per_client': float(visits.get('visits_per_client') or 0),
+        'opz_qty': float(visits.get('opz_qty') or 0),
+        'opz_pct': float(visits.get('opz_pct') or 0),
+    }
+
+
+def _monthly_yoy_rows(year: int, daily: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    monthly = {month: {'revenue': 0.0, 'appointments': 0.0} for month in range(1, 13)}
+    for row in _aggregate_daily(daily, 'month'):
+        month = date.fromisoformat(row['period']).month
+        monthly[month]['revenue'] += float(row.get('revenue') or 0)
+        monthly[month]['appointments'] += float(row.get('appointments') or 0)
+    return [
+        {
+            'year': year,
+            'month': month,
+            'month_label': f'{month:02d}',
+            'revenue': values['revenue'],
+            'appointments': values['appointments'],
+        }
+        for month, values in monthly.items()
+    ]
+
+
+def _with_year_changes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    previous: dict[str, Any] | None = None
+    out = []
+    for row in sorted(rows, key=lambda item: item['year']):
+        enriched = dict(row)
+        for metric in ('revenue', 'appointments', 'avg_check', 'unique_clients', 'service_revenue', 'goods_revenue'):
+            enriched[f'{metric}_change_pct'] = (
+                _pct_change(float(row.get(metric) or 0), float(previous.get(metric) or 0))
+                if previous is not None
+                else None
+            )
+        out.append(enriched)
+        previous = row
+    return out
+
+
+async def _year_over_year_payload(
+    db: AsyncSession,
+    base: dict[str, Any],
+    start: date,
+    end: date,
+    company_id: int | None,
+    staff_id: int | None,
+    allowed_company_ids: list[int] | None,
+) -> dict[str, Any]:
+    periods = _year_periods(start, end)
+    year_rows = []
+    monthly_by_year: dict[int, list[dict[str, Any]]] = {}
+
+    for period in periods:
+        period_start = period['start']
+        period_end = period['end']
+        year = int(period['year'])
+        summary = await fetch_summary(
+            db,
+            period_start,
+            period_end,
+            company_id,
+            staff_id,
+            allowed_company_ids=allowed_company_ids,
+        )
+        year_rows.append(_year_row_from_summary(year, period_start, period_end, summary))
+        daily = await fetch_revenue_daily(
+            db,
+            period_start,
+            period_end,
+            company_id,
+            staff_id,
+            allowed_company_ids=allowed_company_ids,
+        )
+        monthly_by_year[year] = _monthly_yoy_rows(year, daily)
+
+    year_rows = _with_year_changes(year_rows)
+    latest = year_rows[-1] if year_rows else {}
+    previous = year_rows[-2] if len(year_rows) > 1 else {}
+    months = [f'{month:02d}' for month in range(1, 13)]
+    monthly_rows = [
+        row
+        for year in sorted(monthly_by_year)
+        for row in monthly_by_year[year]
+    ]
+
+    base['notes'].append({
+        'kind': 'formula',
+        'title': 'Срез по услугам исключен',
+        'text': 'Отчет сравнивает только крупные агрегаты, потому что исторические названия услуг могли меняться.',
+    })
+    base['cards'] = [
+        _card('Выручка последнего года', latest.get('revenue', 0), MONEY_FORMAT),
+        _card('Изменение выручки год к году', latest.get('revenue_change_pct'), PERCENT_FORMAT),
+        _card('Визиты последнего года', latest.get('appointments', 0), NUMBER_FORMAT),
+        _card('Изменение визитов год к году', latest.get('appointments_change_pct'), PERCENT_FORMAT),
+        _card('Средний чек последнего года', latest.get('avg_check', 0), MONEY_FORMAT),
+        _card('Клиенты последнего года', latest.get('unique_clients', 0), NUMBER_FORMAT),
+    ]
+    base['charts'] = [
+        _chart(
+            'year_revenue',
+            'Выручка по годам',
+            'bar',
+            [str(row['year']) for row in year_rows],
+            [{'label': 'Выручка', 'data': [row['revenue'] for row in year_rows], 'format': MONEY_FORMAT}],
+        ),
+        _chart(
+            'year_appointments',
+            'Визиты по годам',
+            'bar',
+            [str(row['year']) for row in year_rows],
+            [{'label': 'Визиты', 'data': [row['appointments'] for row in year_rows], 'format': NUMBER_FORMAT}],
+        ),
+        _chart(
+            'monthly_revenue_yoy',
+            'Помесячная выручка год к году',
+            'line',
+            months,
+            [
+                {
+                    'label': str(year),
+                    'data': [row['revenue'] for row in monthly_by_year[year]],
+                    'format': MONEY_FORMAT,
+                }
+                for year in sorted(monthly_by_year)
+            ],
+        ),
+        _chart(
+            'monthly_appointments_yoy',
+            'Помесячные визиты год к году',
+            'line',
+            months,
+            [
+                {
+                    'label': str(year),
+                    'data': [row['appointments'] for row in monthly_by_year[year]],
+                    'format': NUMBER_FORMAT,
+                }
+                for year in sorted(monthly_by_year)
+            ],
+        ),
+    ]
+    base['tables'] = [
+        _table(
+            'years',
+            'Годовые агрегаты',
+            [
+                ('year', 'Год', NUMBER_FORMAT),
+                ('period_start', 'С', 'date'),
+                ('period_end', 'По', 'date'),
+                ('revenue', 'Выручка', MONEY_FORMAT),
+                ('revenue_change_pct', 'Выручка YoY', PERCENT_FORMAT),
+                ('appointments', 'Визиты', NUMBER_FORMAT),
+                ('appointments_change_pct', 'Визиты YoY', PERCENT_FORMAT),
+                ('avg_check', 'Средний чек', MONEY_FORMAT),
+                ('avg_check_change_pct', 'Средний чек YoY', PERCENT_FORMAT),
+                ('unique_clients', 'Клиенты', NUMBER_FORMAT),
+                ('unique_clients_change_pct', 'Клиенты YoY', PERCENT_FORMAT),
+                ('service_revenue', 'Услуги', MONEY_FORMAT),
+                ('goods_revenue', 'Товары', MONEY_FORMAT),
+                ('extra_service_count', 'Доп. услуги', NUMBER_FORMAT),
+                ('opz_qty', 'ОПЗ', NUMBER_FORMAT),
+                ('opz_pct', 'ОПЗ %', PERCENT_FORMAT),
+            ],
+            year_rows,
+        ),
+        _table(
+            'months',
+            'Помесячные агрегаты',
+            [
+                ('year', 'Год', NUMBER_FORMAT),
+                ('month_label', 'Месяц', 'text'),
+                ('revenue', 'Выручка', MONEY_FORMAT),
+                ('appointments', 'Визиты', NUMBER_FORMAT),
+            ],
+            monthly_rows,
+        ),
+    ]
+    base['raw'] = {
+        'years': year_rows,
+        'months': monthly_rows,
+        'latest_year': latest.get('year'),
+        'previous_year': previous.get('year'),
+        'service_detail_excluded': True,
+    }
+    return base
 
 
 async def _financial_payload(

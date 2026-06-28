@@ -15,7 +15,9 @@ from models import (
     Staff,
     SyncSourceState,
 )
+import sync_pipeline
 from sync_pipeline import (
+    full_sync_start_date,
     sync_financial_transactions,
     sync_goods_transactions,
     sync_services,
@@ -56,6 +58,12 @@ class FakeFinancialTransactionsAPI:
 
     def get_financial_transactions(self, company_id, start_date=None, end_date=None):
         return self._txns
+
+
+def test_full_sync_start_date_uses_history_start_when_sync_days_is_unlimited(monkeypatch):
+    monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
+    assert full_sync_start_date(date(2026, 6, 28)) == date(2000, 1, 1)
 
 
 def test_sync_financial_transactions_persists_expense_article_and_source_coverage():
