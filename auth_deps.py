@@ -12,7 +12,7 @@ from auth_service import decode_access_token, load_portal_account_branch_ids, lo
 from auth_sessions import ACCESS_COOKIE_NAME, enforce_csrf
 from config import API_KEY, AUTH_REQUIRE_LOGIN
 from database import get_async_db
-from models import PortalUser
+from models import PortalUser, Staff
 
 OPEN_PATH_PREFIXES = (
     '/health',
@@ -71,7 +71,15 @@ async def _user_from_token(
         return AccessContext.from_user(user.id, user.role, None, None)
 
     branch_ids = await load_user_access_branch_ids(db, user)
-    return AccessContext.from_user(user.id, user.role, user.portal_account_id, branch_ids)
+    staff_id = None
+    if user.role == 'viewer':
+        staff_id = await db.scalar(
+            select(Staff.id)
+            .where(Staff.portal_user_id == user.id, Staff.fired == 0)
+            .order_by(Staff.id.asc())
+            .limit(1)
+        )
+    return AccessContext.from_user(user.id, user.role, user.portal_account_id, branch_ids, staff_id=staff_id)
 
 
 def _extract_access_token(request: Request, authorization: str | None) -> str | None:

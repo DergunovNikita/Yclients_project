@@ -11,6 +11,7 @@ from config import (
     YCLIENTS_REQUEST_DELAY, YCLIENTS_TIMEOUT,
     YCLIENTS_RETRY_TOTAL, YCLIENTS_RETRY_BACKOFF,
 )
+from data_sources import SOURCE_YCLIENTS, adapter_from_payload
 from yclients_api import YClientsAPI
 from yclients_credentials import (
     YClientsCredentialValue,
@@ -264,18 +265,19 @@ def get_target_companies(db, company_ids: Iterable[int] | None = None):
 
 
 def _build_api_for_credential(credential: YClientsCredentialValue) -> YClientsAPI | None:
-    api = YClientsAPI(
-        credential.partner_token,
-        credential.login,
-        credential.password,
+    adapter = adapter_from_payload(
+        SOURCE_YCLIENTS,
+        partner_token=credential.partner_token,
+        login=credential.login,
+        password=credential.password,
         request_delay=YCLIENTS_REQUEST_DELAY,
         timeout=YCLIENTS_TIMEOUT,
         retry_total=YCLIENTS_RETRY_TOTAL,
         retry_backoff=YCLIENTS_RETRY_BACKOFF,
     )
-    if not api.authenticate():
+    if not adapter.authenticate():
         return None
-    return api
+    return adapter.build_sync_client()
 
 
 def format_company_label(company: Company) -> str:

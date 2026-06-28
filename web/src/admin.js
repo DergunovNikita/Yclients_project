@@ -1111,6 +1111,7 @@ createForm.addEventListener('submit', async (event) => {
   createBtn.classList.add('is-loading');
   try {
     const company_ids = Array.from(createBranchSelect.selectedOptions).map((option) => Number(option.value));
+    const portal_account_id = selectedPortalAccountId();
     const payload = await authFetch('/auth/admin/users', {
       method: 'POST',
       body: JSON.stringify({
@@ -1118,6 +1119,7 @@ createForm.addEventListener('submit', async (event) => {
         password: createPassword.value,
         full_name: createName.value.trim() || null,
         role: createRoleSelect.value,
+        portal_account_id: portal_account_id ? Number(portal_account_id) : null,
         company_ids,
       }),
     });

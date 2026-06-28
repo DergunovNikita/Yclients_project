@@ -15,6 +15,7 @@ class AccessContext:
     user_id: int | None
     role: str | None
     portal_account_id: int | None
+    staff_id: int | None
     is_platform_admin: bool
     full_access: bool
     company_ids: list[int] | None  # None = all branches; [] = none
@@ -25,6 +26,7 @@ class AccessContext:
             user_id=None,
             role=None,
             portal_account_id=None,
+            staff_id=None,
             is_platform_admin=False,
             full_access=True,
             company_ids=None,
@@ -37,12 +39,14 @@ class AccessContext:
         role: str,
         portal_account_id: int | None,
         company_ids: list[int] | None,
+        staff_id: int | None = None,
     ) -> AccessContext:
         is_platform_admin = role == 'platform_admin'
         return cls(
             user_id=user_id,
             role=role,
             portal_account_id=portal_account_id,
+            staff_id=staff_id,
             is_platform_admin=is_platform_admin,
             full_access=False,
             company_ids=company_ids or [],
@@ -93,6 +97,15 @@ def query_scope(ctx: AccessContext, requested_company_id: int | None) -> dict[st
         'branch_ids': branch_ids,
         'force_allowed': force_allowed,
     }
+
+
+def effective_staff_id(ctx: AccessContext, requested_staff_id: int | None) -> int | None:
+    """Apply staff-level user scope when the current viewer is linked to a staff row."""
+    if ctx.full_access or ctx.staff_id is None:
+        return requested_staff_id
+    if requested_staff_id is not None and int(requested_staff_id) != int(ctx.staff_id):
+        raise HTTPException(status_code=403, detail='Staff member not allowed')
+    return int(ctx.staff_id)
 
 
 def require_tenant_context(ctx: AccessContext, *, allow_full_access: bool = False) -> int | None:

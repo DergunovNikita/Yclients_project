@@ -52,8 +52,9 @@ from auth_sessions import (
     rotate_session,
     set_auth_cookies,
 )
+from data_sources import SOURCE_YCLIENTS, adapter_from_payload, normalize_source_type
 from database import get_async_db
-from models import Company, Group, PortalAccount, PortalBranch, PortalUser, Staff, YClientsCredential
+from models import Company, PortalAccount, PortalBranch, PortalUser, Staff, YClientsCredential
 from portal_audit import log_portal_audit
 from portal_account_provision import provision_all_unlinked_staff, provision_staff_account
 from portal_staff_sync import (
@@ -63,7 +64,6 @@ from portal_staff_sync import (
     sync_all_portal_users_staff,
     sync_portal_user_staff,
 )
-from yclients_api import YClientsAPI
 from yclients_credentials import (
     CredentialsConfigError,
     decrypted_credential,
@@ -145,6 +145,7 @@ class AdminStaffUpdateRequest(BaseModel):
 
 
 class YClientsCredentialCreateRequest(BaseModel):
+    source_type: str = Field(default=SOURCE_YCLIENTS, min_length=1, max_length=32)
     title: str = Field(min_length=1, max_length=255)
     portal_account_id: int | None = None
     partner_token: str = Field(min_length=1, max_length=4096)
@@ -155,6 +156,7 @@ class YClientsCredentialCreateRequest(BaseModel):
 
 
 class YClientsCredentialUpdateRequest(BaseModel):
+    source_type: str | None = Field(default=None, min_length=1, max_length=32)
     title: str | None = Field(default=None, min_length=1, max_length=255)
     portal_account_id: int | None = None
     partner_token: str | None = Field(default=None, min_length=1, max_length=4096)
@@ -165,6 +167,7 @@ class YClientsCredentialUpdateRequest(BaseModel):
 
 
 class YClientsCredentialTestRequest(BaseModel):
+    source_type: str = Field(default=SOURCE_YCLIENTS, min_length=1, max_length=32)
     partner_token: str | None = Field(default=None, min_length=1, max_length=4096)
     login: str | None = Field(default=None, min_length=1, max_length=255)
     password: str | None = Field(default=None, min_length=1, max_length=255)
@@ -561,11 +564,17 @@ async def _validate_credential_companies(
         raise HTTPException(status_code=403, detail=f'Companies outside tenant: {missing}')
 
 
-def _test_yclients_credentials(partner_token: str, login: str, password: str) -> dict:
-    api = YClientsAPI(partner_token, login, password)
-    if not api.authenticate():
-        raise HTTPException(status_code=400, detail='YClients authentication failed')
-    return {'success': True, 'message': 'YClients credentials are valid'}
+def _test_source_credentials(source_type: str | None, partner_token: str, login: str, password: str) -> dict:
+    normalized = normalize_source_type(source_type)
+    adapter = adapter_from_payload(
+        normalized,
+        partner_token=partner_token,
+        login=login,
+        password=password,
+    )
+    if not adapter.authenticate():
+        raise HTTPException(status_code=400, detail='Data source authentication failed')
+    return {'success': True, 'source_type': normalized, 'message': 'Data source credentials are valid'}
 
 
 async def _sync_credential_companies_from_yclients(
@@ -574,50 +583,18 @@ async def _sync_credential_companies_from_yclients(
     partner_token: str,
     login: str,
     password: str,
+    source_type: str = SOURCE_YCLIENTS,
 ) -> list[int]:
-    api = YClientsAPI(partner_token, login, password)
-    if not hasattr(api, 'get_groups'):
-        return []
-    groups = api.get_groups() or []
-    company_ids: list[int] = []
-    for group_data in groups:
-        group_id = group_data.get('id')
-        if group_id is None:
-            continue
-        group = await db.get(Group, int(group_id))
-        if group is None:
-            group = Group(id=int(group_id), title=group_data.get('title', ''), access=group_data.get('access'))
-            db.add(group)
-        else:
-            group.title = group_data.get('title', '')
-            group.access = group_data.get('access')
-
-        for company_data in group_data.get('companies') or []:
-            company_id = company_data.get('id')
-            if company_id is None:
-                continue
-            company_id = int(company_id)
-            company = await db.get(Company, company_id)
-            if company is None:
-                company = Company(
-                    id=company_id,
-                    title=company_data.get('title', ''),
-                    group_id=int(group_id),
-                )
-                db.add(company)
-            else:
-                company.title = company_data.get('title', '')
-                company.group_id = int(group_id)
-
-            existing_branch = (
-                await db.execute(select(PortalBranch).where(PortalBranch.company_id == company_id))
-            ).scalar_one_or_none()
-            if existing_branch is not None and existing_branch.portal_account_id != portal_account_id:
-                raise HTTPException(status_code=409, detail=f'Company {company_id} belongs to another tenant')
-            if existing_branch is None:
-                db.add(PortalBranch(portal_account_id=portal_account_id, company_id=company_id))
-            company_ids.append(company_id)
-    await db.flush()
+    adapter = adapter_from_payload(
+        source_type,
+        partner_token=partner_token,
+        login=login,
+        password=password,
+    )
+    if not adapter.authenticate():
+        raise HTTPException(status_code=400, detail='Data source authentication failed')
+    company_ids = sorted(item.company_id for item in adapter.list_branches())
+    await adapter.materialize_branches(db, portal_account_id, company_ids)
     return sorted(set(company_ids))
 
 
@@ -740,13 +717,19 @@ async def admin_create_user(
     portal_account_id = actor.portal_account_id
     if actor.role == 'platform_admin':
         if body.role == 'owner':
-            account = PortalAccount(
-                label=(body.full_name or body.email).strip(),
-                created_at=datetime.utcnow(),
-            )
-            db.add(account)
-            await db.flush()
-            portal_account_id = account.id
+            if body.portal_account_id is not None:
+                account = await db.get(PortalAccount, body.portal_account_id)
+                if account is None:
+                    raise HTTPException(status_code=400, detail='Unknown portal_account_id')
+                portal_account_id = account.id
+            else:
+                account = PortalAccount(
+                    label=(body.full_name or body.email).strip(),
+                    created_at=datetime.utcnow(),
+                )
+                db.add(account)
+                await db.flush()
+                portal_account_id = account.id
         elif body.role == 'platform_admin':
             portal_account_id = None
         elif body.portal_account_id is not None:
@@ -889,11 +872,12 @@ async def admin_create_yclients_credentials(
     actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
     db: AsyncSession = Depends(get_async_db),
 ):
+    source_type = normalize_source_type(body.source_type)
     if actor.role == 'platform_admin' and body.portal_account_id is not None and x_portal_account_id is not None:
         if body.portal_account_id != x_portal_account_id:
             raise HTTPException(status_code=400, detail='portal_account_id does not match X-Portal-Account-Id')
     portal_account_id = _credential_account_id(actor, x_portal_account_id or body.portal_account_id)
-    _test_yclients_credentials(body.partner_token, body.login, body.password)
+    _test_source_credentials(source_type, body.partner_token, body.login, body.password)
     company_ids = list(body.company_ids)
     if not company_ids:
         company_ids = await _sync_credential_companies_from_yclients(
@@ -902,6 +886,7 @@ async def admin_create_yclients_credentials(
             body.partner_token,
             body.login,
             body.password,
+            source_type,
         )
     await _validate_credential_companies(db, portal_account_id, company_ids)
     try:
@@ -930,7 +915,7 @@ async def admin_create_yclients_credentials(
         action='yclients_credentials.created',
         target_type='yclients_credential',
         target_id=credential.id,
-        metadata={'company_ids': company_ids, 'is_active': credential.is_active},
+        metadata={'source_type': source_type, 'company_ids': company_ids, 'is_active': credential.is_active},
     )
     await db.commit()
     payloads = await list_credential_payloads(db, portal_account_id)
@@ -946,6 +931,8 @@ async def admin_update_yclients_credentials(
     actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
     db: AsyncSession = Depends(get_async_db),
 ):
+    if body.source_type is not None:
+        normalize_source_type(body.source_type)
     credential = await _load_credential(db, credential_id, actor, x_portal_account_id)
     if body.portal_account_id is not None and body.portal_account_id != credential.portal_account_id:
         if actor.role != 'platform_admin':
@@ -1029,7 +1016,7 @@ async def admin_test_saved_yclients_credentials(
         await db.commit()
         raise _credentials_config_error(exc) from exc
     try:
-        result = _test_yclients_credentials(value.partner_token, value.login, value.password)
+        result = _test_source_credentials(SOURCE_YCLIENTS, value.partner_token, value.login, value.password)
     except HTTPException as exc:
         await mark_credential_failure_async(db, credential.id, exc.detail)
         await db.commit()
@@ -1044,9 +1031,10 @@ async def admin_test_yclients_credentials_payload(
     body: YClientsCredentialTestRequest,
     _actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
 ):
+    source_type = normalize_source_type(body.source_type)
     if not (body.partner_token and body.login and body.password):
         raise HTTPException(status_code=400, detail='partner_token, login and password are required')
-    return _test_yclients_credentials(body.partner_token, body.login, body.password)
+    return _test_source_credentials(source_type, body.partner_token, body.login, body.password)
 
 
 @router.delete('/admin/users/{user_id}')

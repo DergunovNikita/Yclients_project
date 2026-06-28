@@ -87,6 +87,7 @@ def credential_payload(
 ) -> dict:
     return {
         'id': credential.id,
+        'source_type': 'yclients',
         'portal_account_id': credential.portal_account_id,
         'title': credential.title,
         'is_active': bool(credential.is_active),

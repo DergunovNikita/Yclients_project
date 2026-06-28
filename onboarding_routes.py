@@ -17,15 +17,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_deps import get_current_user
 from database import get_async_db
-from models import Company, Group, PortalBranch, PortalUser, YClientsCredential, YClientsCredentialCompany
+from data_sources import SOURCE_YCLIENTS, adapter_from_credential, adapter_from_payload, normalize_source_type
+from models import PortalBranch, PortalUser, YClientsCredential, YClientsCredentialCompany
 from portal_audit import log_portal_audit
-from yclients_api import YClientsAPI
 from yclients_credentials import CredentialsConfigError, mark_credential_failure_async, mark_credential_success_async, new_credential
+from sync_jobs import SyncJobService
 
 router = APIRouter()
 
 
 class OnboardingCredentialsRequest(BaseModel):
+    source_type: str = Field(default=SOURCE_YCLIENTS, min_length=1, max_length=32)
     partner_token: str = Field(min_length=1, max_length=4096)
     login: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=1, max_length=255)
@@ -33,6 +35,7 @@ class OnboardingCredentialsRequest(BaseModel):
 
 
 class OnboardingBranchesRequest(BaseModel):
+    source_type: str = Field(default=SOURCE_YCLIENTS, min_length=1, max_length=32)
     credential_id: int
     company_ids: list[int] = Field(min_length=1, max_length=200)
 
@@ -91,36 +94,13 @@ async def onboarding_state(
             'email_verified': user.email_verified_at is not None,
             'has_credentials': has_credentials,
             'credentials': [
-                {'id': item.id, 'title': item.title, 'is_active': bool(item.is_active)}
+                {'id': item.id, 'source_type': SOURCE_YCLIENTS, 'title': item.title, 'is_active': bool(item.is_active)}
                 for item in credentials
             ],
             'branches': branches,
             'completed_at': user.onboarding_completed_at.isoformat() if user.onboarding_completed_at else None,
         },
     }
-
-
-async def _fetch_yclients_companies(api: YClientsAPI) -> list[dict]:
-    """Pull (group_id, company_id, title) tuples from the authenticated YClients account."""
-    groups = api.get_groups() or []
-    items: list[dict] = []
-    for group_data in groups:
-        group_id = group_data.get('id')
-        if group_id is None:
-            continue
-        for company_data in group_data.get('companies') or []:
-            company_id = company_data.get('id')
-            if company_id is None:
-                continue
-            items.append(
-                {
-                    'group_id': int(group_id),
-                    'group_title': group_data.get('title', ''),
-                    'company_id': int(company_id),
-                    'title': company_data.get('title', ''),
-                }
-            )
-    return items
 
 
 @router.post('/credentials')
@@ -133,13 +113,19 @@ async def onboarding_credentials(
     if user.email_verified_at is None:
         raise HTTPException(status_code=400, detail='Verify email first')
 
-    api = YClientsAPI(body.partner_token, body.login, body.password)
-    if not api.authenticate():
-        raise HTTPException(status_code=400, detail='YClients authentication failed')
+    source_type = normalize_source_type(body.source_type)
+    adapter = adapter_from_payload(
+        source_type,
+        partner_token=body.partner_token,
+        login=body.login,
+        password=body.password,
+    )
+    if not adapter.authenticate():
+        raise HTTPException(status_code=400, detail='Data source authentication failed')
 
-    available = await _fetch_yclients_companies(api)
+    available = [item.as_payload() for item in adapter.list_branches()]
     if not available:
-        raise HTTPException(status_code=400, detail='YClients returned no companies for these credentials')
+        raise HTTPException(status_code=400, detail='Data source returned no companies for these credentials')
 
     conflicting = []
     for item in available:
@@ -185,6 +171,7 @@ async def onboarding_credentials(
     return {
         'success': True,
         'data': {
+            'source_type': source_type,
             'credential_id': credential.id,
             'companies': available,
         },
@@ -209,59 +196,21 @@ async def onboarding_branches(
     if credential is None:
         raise HTTPException(status_code=404, detail='Credential not found for this tenant')
 
+    source_type = normalize_source_type(body.source_type)
     company_ids = sorted({int(cid) for cid in body.company_ids})
     if not company_ids:
         raise HTTPException(status_code=400, detail='Pick at least one branch')
 
-    # Materialize Group/Company by hitting the YClients API once more so the
-    # tenant's branch labels are always populated even before the first sync.
-    from yclients_credentials import decrypt_secret
-
-    api = YClientsAPI(
-        decrypt_secret(credential.partner_token_encrypted),
-        decrypt_secret(credential.login_encrypted),
-        decrypt_secret(credential.password_encrypted),
-    )
-    if not api.authenticate():
+    adapter = adapter_from_credential(source_type, credential)
+    if not adapter.authenticate():
         await mark_credential_failure_async(db, credential.id, 'YClients re-authentication failed')
         await db.commit()
-        raise HTTPException(status_code=400, detail='YClients re-authentication failed')
+        raise HTTPException(status_code=400, detail='Data source re-authentication failed')
     await mark_credential_success_async(db, credential.id)
 
-    yclients_companies = {item['company_id']: item for item in await _fetch_yclients_companies(api)}
-    unknown = [cid for cid in company_ids if cid not in yclients_companies]
-    if unknown:
-        raise HTTPException(status_code=400, detail=f'Companies not available for credential: {unknown}')
+    await adapter.materialize_branches(db, user.portal_account_id, company_ids)
 
     for cid in company_ids:
-        meta = yclients_companies[cid]
-        group_id = int(meta['group_id'])
-        group = await db.get(Group, group_id)
-        if group is None:
-            db.add(Group(id=group_id, title=meta.get('group_title', '')))
-        else:
-            group.title = meta.get('group_title', '') or group.title
-
-        company = await db.get(Company, cid)
-        if company is None:
-            db.add(Company(id=cid, title=meta.get('title', ''), group_id=group_id))
-        else:
-            company.title = meta.get('title', '') or company.title
-            company.group_id = group_id
-
-        existing_branch = (
-            await db.execute(select(PortalBranch).where(PortalBranch.company_id == cid))
-        ).scalar_one_or_none()
-        if existing_branch is None:
-            db.add(PortalBranch(portal_account_id=user.portal_account_id, company_id=cid))
-        elif existing_branch.portal_account_id != user.portal_account_id:
-            raise HTTPException(
-                status_code=409,
-                detail=f'Company {cid} already linked to another tenant',
-            )
-
-        await db.flush()
-
         link = (
             await db.execute(
                 select(YClientsCredentialCompany).where(
@@ -282,13 +231,24 @@ async def onboarding_branches(
         action='onboarding.completed',
         target_type='portal_account',
         target_id=user.portal_account_id,
-        metadata={'credential_id': credential.id, 'company_ids': company_ids},
+        metadata={'source_type': source_type, 'credential_id': credential.id, 'company_ids': company_ids},
+    )
+    sync_job = await SyncJobService().async_enqueue_job(
+        db,
+        'full',
+        'onboarding',
+        portal_account_id=user.portal_account_id,
+        credential_id=credential.id,
+        company_ids=company_ids,
     )
     await db.commit()
     return {
         'success': True,
         'data': {
+            'source_type': source_type,
             'company_ids': company_ids,
+            'sync_job_id': sync_job.id,
+            'sync_status': sync_job.status,
             'completed_at': user.onboarding_completed_at.isoformat(),
         },
     }

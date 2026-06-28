@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_deps import get_dashboard_access
-from auth_scope import AccessContext, query_scope, require_tenant_context
+from auth_scope import AccessContext, effective_staff_id, query_scope, require_tenant_context
 from config import SYNC_API_TOKEN
 from dashboard_service import (
     fetch_branches,
@@ -419,6 +419,8 @@ async def dashboard_report_data(
 ):
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
+    staff_id = effective_staff_id(ctx, staff_id)
+    compare_staff_id = effective_staff_id(ctx, compare_staff_id)
     if granularity not in REPORT_GRANULARITIES:
         raise HTTPException(status_code=400, detail='granularity must be one of day, week, month')
     if (compare_start_date is None) ^ (compare_end_date is None):
@@ -471,6 +473,7 @@ async def dashboard_widget_summary(
 ):
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
+    staff_id = effective_staff_id(ctx, staff_id)
     return {
         'success': True,
         'data': await fetch_summary(
@@ -495,6 +498,7 @@ async def dashboard_widget_revenue_daily(
 ):
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
+    staff_id = effective_staff_id(ctx, staff_id)
     return {
         'success': True,
         'data': await fetch_revenue_daily(
@@ -520,6 +524,7 @@ async def dashboard_widget_top_services(
 ):
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
+    staff_id = effective_staff_id(ctx, staff_id)
     return {
         'success': True,
         'data': await fetch_top_services(
@@ -546,6 +551,7 @@ async def dashboard_widget_extra_services(
 ):
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
+    staff_id = effective_staff_id(ctx, staff_id)
     return {
         'success': True,
         'data': await fetch_extra_services(
@@ -571,6 +577,7 @@ async def dashboard_widget_plan_fact(
 ):
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
+    staff_id = effective_staff_id(ctx, staff_id)
     branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
     return {
         'success': True,
@@ -639,6 +646,7 @@ async def dashboard_plan_reviews_fact(
 ):
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
+    staff_id = effective_staff_id(ctx, staff_id)
     branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
     try:
         data = await fetch_manual_review_facts(
@@ -663,6 +671,7 @@ async def dashboard_plan_reviews_fact_save(
 ):
     start, end = _parse_range(payload.start_date, payload.end_date)
     scope = query_scope(ctx, payload.company_id)
+    payload_staff_id = effective_staff_id(ctx, payload.staff_id)
     branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
     try:
         data = await save_manual_review_facts(
@@ -670,7 +679,7 @@ async def dashboard_plan_reviews_fact_save(
             start,
             end,
             scope['company_id'],
-            payload.staff_id,
+            payload_staff_id,
             [item.model_dump() for item in payload.items],
             allowed_company_ids=branch_ids,
             force_allowed=force_allowed,
@@ -702,6 +711,7 @@ async def dashboard_bundle(
 ):
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
+    staff_id = effective_staff_id(ctx, staff_id)
     summary = await fetch_summary(
         db,
         start,

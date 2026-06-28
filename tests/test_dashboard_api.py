@@ -33,6 +33,7 @@ from models import (
     PortalAccount,
     PortalBranch,
     PortalUser,
+    PortalUserBranch,
     PlanBranchSetting,
     PlanMetric,
     PlanStaffInput,
@@ -340,6 +341,101 @@ async def test_platform_admin_dashboard_bundle_requires_selected_tenant(async_se
         'start': '2026-06-01',
         'end': '2026-06-21',
     }
+
+
+@pytest.mark.asyncio
+async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, monkeypatch):
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    async_session.add(Group(id=1, title='Group'))
+    async_session.add(Company(id=1, title='Branch', group_id=1))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    async_session.add(PortalBranch(portal_account_id=1, company_id=1))
+    async_session.add_all([
+        PortalUser(
+            id=100,
+            portal_account_id=1,
+            email='viewer@example.com',
+            password_hash=hash_password('Viewer12345!'),
+            role='viewer',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+        PortalUser(
+            id=101,
+            portal_account_id=1,
+            email='manager@example.com',
+            password_hash=hash_password('Manager12345!'),
+            role='manager',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+        PortalUserBranch(user_id=100, company_id=1),
+        PortalUserBranch(user_id=101, company_id=1),
+        Staff(id=1, name='Linked Staff', company_id=1, portal_user_id=100),
+        Staff(id=2, name='Other Staff', company_id=1),
+    ])
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 10), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=2, client_id=2, date=date(2025, 1, 11), attendance=1),
+        Transaction(id=1, appointment_id=1, service_id=10, service_title='Cut', amount=1, company_id=1),
+        Transaction(id=2, appointment_id=2, service_id=10, service_title='Cut', amount=1, company_id=1),
+        FinancialTransaction(
+            id=1,
+            date=datetime(2025, 1, 10, 12, 0, 0),
+            amount=1000.0,
+            record_id=1,
+            sold_item_id=10,
+            sold_item_type='service',
+            master_id=1,
+            company_id=1,
+        ),
+        FinancialTransaction(
+            id=2,
+            date=datetime(2025, 1, 11, 12, 0, 0),
+            amount=2000.0,
+            record_id=2,
+            sold_item_id=10,
+            sold_item_type='service',
+            master_id=2,
+            company_id=1,
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    viewer_token = create_access_token(100, 'viewer')
+    manager_token = create_access_token(101, 'manager')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        viewer_summary = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+            headers={'Authorization': f'Bearer {viewer_token}'},
+        )
+        forbidden_other_staff = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'staff_id': 2},
+            headers={'Authorization': f'Bearer {viewer_token}'},
+        )
+        manager_other_staff = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'staff_id': 2},
+            headers={'Authorization': f'Bearer {manager_token}'},
+        )
+
+    app.dependency_overrides.clear()
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
+
+    assert viewer_summary.status_code == 200
+    assert viewer_summary.json()['data']['revenue']['total'] == 1000.0
+    assert forbidden_other_staff.status_code == 403
+    assert manager_other_staff.status_code == 200
+    assert manager_other_staff.json()['data']['revenue']['total'] == 2000.0
 
 
 @pytest.mark.asyncio
