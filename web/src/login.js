@@ -18,6 +18,18 @@ form.addEventListener('submit', async (event) => {
       body: JSON.stringify({ email, password }),
     });
     setToken(payload.data.access_token);
+    const user = payload.data.user;
+    if (user?.role === 'owner') {
+      try {
+        const state = await authFetch('/onboarding/state');
+        if (state?.data?.step && state.data.step !== 'done') {
+          window.location.href = '/onboarding.html';
+          return;
+        }
+      } catch {
+        /* fallback to dashboard on error — main.js will gate again */
+      }
+    }
     window.location.href = '/';
   } catch (error) {
     errorEl.textContent = error.message;

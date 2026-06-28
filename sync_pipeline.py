@@ -5,7 +5,6 @@ import time
 from datetime import date, timedelta, datetime
 from typing import Iterable
 from config import (
-    PARTNER_TOKEN, LOGIN, PASSWORD,
     DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD,
     SYNC_DAYS, SCHEDULE_DAYS, ANALYTICS_DAYS, DB_BATCH_SIZE,
     SYNC_INCREMENTAL, SYNC_LOOKBACK_DAYS,
@@ -13,7 +12,12 @@ from config import (
     YCLIENTS_RETRY_TOTAL, YCLIENTS_RETRY_BACKOFF,
 )
 from yclients_api import YClientsAPI
-from yclients_credentials import load_credentials_for_companies_sync
+from yclients_credentials import (
+    YClientsCredentialValue,
+    load_active_credentials_sync,
+    mark_credential_failure_sync,
+    mark_credential_success_sync,
+)
 from database import init_database
 from models import (
     Group, Company,
@@ -86,6 +90,9 @@ def bulk_delete_by_ids(db, model, column, ids) -> int:
 
 def run_sync_step(results, name: str, fn, *args, **kwargs):
     step_key = kwargs.pop('step_key', name)
+    progress_callback = kwargs.pop('progress_callback', None)
+    progress_context = kwargs.pop('progress_context', {}) or {}
+    progress_pct = kwargs.pop('progress_pct', None)
     started_at = time.perf_counter()
     success = False
     try:
@@ -99,6 +106,16 @@ def run_sync_step(results, name: str, fn, *args, **kwargs):
             'success': success,
             'elapsed': elapsed,
         })
+        if progress_callback is not None:
+            progress_callback({
+                **progress_context,
+                'stage_key': step_key,
+                'status': 'success' if success else 'warning',
+                'elapsed_seconds': elapsed,
+                'message': name,
+                'progress_pct': progress_pct,
+                'step_results': list(results),
+            })
         status = 'OK' if success else 'WARN'
         print(f"  [{status}] {name}: {format_duration(elapsed)}")
 
@@ -236,13 +253,29 @@ def steps_successful(results, step_names) -> bool:
     return bool(named_steps) and all(item['success'] for item in named_steps)
 
 
-def get_target_companies(db):
-    return (
-        db.query(Company)
-        .filter(Company.id.isnot(None))
-        .order_by(Company.title.asc(), Company.id.asc())
-        .all()
+def get_target_companies(db, company_ids: Iterable[int] | None = None):
+    query = db.query(Company).filter(Company.id.isnot(None))
+    if company_ids is not None:
+        ids = [int(item) for item in company_ids]
+        if not ids:
+            return []
+        query = query.filter(Company.id.in_(ids))
+    return query.order_by(Company.title.asc(), Company.id.asc()).all()
+
+
+def _build_api_for_credential(credential: YClientsCredentialValue) -> YClientsAPI | None:
+    api = YClientsAPI(
+        credential.partner_token,
+        credential.login,
+        credential.password,
+        request_delay=YCLIENTS_REQUEST_DELAY,
+        timeout=YCLIENTS_TIMEOUT,
+        retry_total=YCLIENTS_RETRY_TOTAL,
+        retry_backoff=YCLIENTS_RETRY_BACKOFF,
     )
+    if not api.authenticate():
+        return None
+    return api
 
 
 def format_company_label(company: Company) -> str:
@@ -1690,59 +1723,35 @@ def sync_z_report(api: YClientsAPI, db, company_id: str, report_date: str):
 # Основная функция
 # ===================================================================
 
-def execute_sync(mode: str = 'incremental', end_date: date | None = None):
+def execute_sync(
+    mode: str = 'incremental',
+    end_date: date | None = None,
+    *,
+    portal_account_id: int | None = None,
+    credential_id: int | None = None,
+    company_ids: Iterable[int] | None = None,
+    progress_callback=None,
+):
     print("=" * 60)
     print("  YClients → PostgreSQL: синхронизация")
     print("=" * 60)
 
     database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
+    empty_result = {
+        'completed': False,
+        'success': False,
+        'step_results': [],
+        'mode': mode,
+        'window_start': None,
+        'window_end': None,
+        'companies_count': 0,
+    }
 
     if not database.test_connection():
-        return {
-            'completed': False,
-            'success': False,
-            'step_results': [],
-            'mode': mode,
-            'window_start': None,
-            'window_end': None,
-            'companies_count': 0,
-        }
-
-    api = YClientsAPI(
-        PARTNER_TOKEN,
-        LOGIN,
-        PASSWORD,
-        request_delay=YCLIENTS_REQUEST_DELAY,
-        timeout=YCLIENTS_TIMEOUT,
-        retry_total=YCLIENTS_RETRY_TOTAL,
-        retry_backoff=YCLIENTS_RETRY_BACKOFF,
-    )
-
-    print("\nАвторизация...")
-    if not api.authenticate():
-        return {
-            'completed': False,
-            'success': False,
-            'step_results': [],
-            'mode': mode,
-            'window_start': None,
-            'window_end': None,
-            'companies_count': 0,
-        }
-
-    print("✓ Авторизация успешна!")
-    print(
-        "Параметры: "
-        f"SYNC_DAYS={SYNC_DAYS}, "
-        f"SCHEDULE_DAYS={SCHEDULE_DAYS}, "
-        f"ANALYTICS_DAYS={ANALYTICS_DAYS}, "
-        f"REQUEST_DELAY={YCLIENTS_REQUEST_DELAY}, "
-        f"TIMEOUT={YCLIENTS_TIMEOUT}"
-    )
-    print("=" * 60)
+        return empty_result
 
     db = database.get_db()
-    step_results = []
+    step_results: list[dict] = []
     overall_success = False
     companies_count = 0
 
@@ -1750,7 +1759,6 @@ def execute_sync(mode: str = 'incremental', end_date: date | None = None):
     start, sync_mode = resolve_sync_window(db, end, mode)
     sd = start.isoformat()
     ed = end.isoformat()
-
     schedule_end = end + timedelta(days=SCHEDULE_DAYS)
     analytics_start = end - timedelta(days=ANALYTICS_DAYS)
     analytics_sd = analytics_start.isoformat()
@@ -1761,68 +1769,67 @@ def execute_sync(mode: str = 'incremental', end_date: date | None = None):
         'Комментарии',
     }
 
+    requested_company_ids = [int(item) for item in dict.fromkeys(company_ids or [])]
+
+    def emit_progress(
+        stage_key: str,
+        status: str = 'info',
+        progress_pct: int | None = None,
+        message: str | None = None,
+        *,
+        credential: YClientsCredentialValue | None = None,
+        company_id: int | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        if progress_callback is None:
+            return
+        progress_callback({
+            'portal_account_id': credential.portal_account_id if credential else portal_account_id,
+            'credential_id': credential.id if credential else credential_id,
+            'company_id': company_id,
+            'stage_key': stage_key,
+            'status': status,
+            'progress_pct': progress_pct,
+            'message': message,
+            'payload': payload or {},
+            'step_results': list(step_results),
+        })
+
     try:
+        credentials = load_active_credentials_sync(db, portal_account_id=portal_account_id)
+        if credential_id is not None:
+            credentials = [credential for credential in credentials if credential.id == int(credential_id)]
+        if not credentials:
+            print('! Нет активных учётных данных YClients. Добавьте их через личный кабинет.')
+            emit_progress('credentials', 'warning', 100, 'No active YClients credentials')
+            return {
+                **empty_result,
+                'completed': True,
+                'mode': sync_mode,
+                'window_start': sd,
+                'window_end': ed,
+            }
+
+        print(
+            "Параметры: "
+            f"SYNC_DAYS={SYNC_DAYS}, "
+            f"SCHEDULE_DAYS={SCHEDULE_DAYS}, "
+            f"ANALYTICS_DAYS={ANALYTICS_DAYS}, "
+            f"REQUEST_DELAY={YCLIENTS_REQUEST_DELAY}, "
+            f"TIMEOUT={YCLIENTS_TIMEOUT}"
+        )
         print(
             f"Режим синхронизации транзакций: {sync_mode} "
             f"({sd} .. {ed}, lookback={SYNC_LOOKBACK_DAYS} дн.)"
         )
-        companies_synced = run_sync_step(step_results, "Сети и компании", sync_groups_and_companies, api, db)
-        if not companies_synced:
-            print("! Синхронизация остановлена: не удалось загрузить список филиалов")
-            return {
-                'completed': True,
-                'success': False,
-                'step_results': step_results,
-                'mode': sync_mode,
-                'window_start': sd,
-                'window_end': ed,
-                'companies_count': 0,
-            }
-
-        target_companies = get_target_companies(db)
-        if not target_companies:
-            print("! Синхронизация остановлена: таблица companies пуста")
-            return {
-                'completed': True,
-                'success': False,
-                'step_results': step_results,
-                'mode': sync_mode,
-                'window_start': sd,
-                'window_end': ed,
-                'companies_count': 0,
-            }
-
-        companies_count = len(target_companies)
-        print(f"✓ Найдено филиалов для синхронизации: {companies_count}")
-        credentials_by_company, _fallback_credentials = load_credentials_for_companies_sync(
-            db,
-            [int(company.id) for company in target_companies],
+        print(f"Активных учётных данных: {len(credentials)}")
+        emit_progress(
+            'credentials',
+            'success',
+            5,
+            f'Active credentials: {len(credentials)}',
+            payload={'credentials_count': len(credentials)},
         )
-        api_cache: dict[int | str, YClientsAPI] = {'env': api}
-
-        def api_for_company(company: Company) -> YClientsAPI | None:
-            credential = credentials_by_company.get(int(company.id))
-            if credential is None or credential.is_fallback:
-                return api
-            cache_key = int(credential.id) if credential.id is not None else 'env'
-            cached = api_cache.get(cache_key)
-            if cached is not None:
-                return cached
-            credential_api = YClientsAPI(
-                credential.partner_token,
-                credential.login,
-                credential.password,
-                request_delay=YCLIENTS_REQUEST_DELAY,
-                timeout=YCLIENTS_TIMEOUT,
-                retry_total=YCLIENTS_RETRY_TOTAL,
-                retry_backoff=YCLIENTS_RETRY_BACKOFF,
-            )
-            print(f"Авторизация credentials: {credential.title}")
-            if not credential_api.authenticate():
-                print(f"! Не удалось авторизовать credentials для филиала {format_company_label(company)}")
-                return None
-            api_cache[cache_key] = credential_api
-            return credential_api
 
         company_steps = [
             ("Категории услуг", sync_service_categories, {}),
@@ -1863,56 +1870,151 @@ def execute_sync(mode: str = 'incremental', end_date: date | None = None):
             ("Z-Отчёт", sync_z_report, {'report_date': ed}),
         ]
 
-        for company in target_companies:
-            company_id = str(company.id)
-            company_label = format_company_label(company)
-            company_api = api_for_company(company)
+        for credential in credentials:
+            tenant_label = f"#{credential.portal_account_id} · {credential.title}"
+            print(f"\n{'=' * 60}")
+            print(f"  Тенант {tenant_label}")
+            print(f"{'=' * 60}")
+
+            try:
+                company_api = _build_api_for_credential(credential)
+            except Exception as exc:
+                mark_credential_failure_sync(db, credential.id, exc.__class__.__name__)
+                emit_progress(
+                    'credentials_auth',
+                    'failed',
+                    10,
+                    f'Credential auth failed: {credential.title}',
+                    credential=credential,
+                    payload={'error': str(exc)[:1000]},
+                )
+                raise
             if company_api is None:
+                print(f"! Не удалось авторизовать учётные данные «{credential.title}» — пропуск тенанта")
+                mark_credential_failure_sync(db, credential.id, 'YClients authentication failed')
                 step_results.append({
-                    'name': f"Credentials auth [{company_label}]",
+                    'name': f"Credentials auth [{tenant_label}]",
                     'key': 'credentials_auth',
                     'success': False,
                     'elapsed': 0.0,
                 })
+                emit_progress(
+                    'credentials_auth',
+                    'failed',
+                    10,
+                    f'Credential auth failed: {credential.title}',
+                    credential=credential,
+                )
+                continue
+            mark_credential_success_sync(db, credential.id)
+            emit_progress(
+                'credentials_auth',
+                'success',
+                10,
+                f'Credential auth succeeded: {credential.title}',
+                credential=credential,
+            )
+
+            run_sync_step(
+                step_results,
+                f"Сети и компании [{tenant_label}]",
+                sync_groups_and_companies,
+                company_api,
+                db,
+                step_key='Сети и компании',
+                progress_callback=progress_callback,
+                progress_context={
+                    'portal_account_id': credential.portal_account_id,
+                    'credential_id': credential.id,
+                },
+                progress_pct=15,
+            )
+
+            credential_company_ids = list(credential.company_ids)
+            if requested_company_ids:
+                if credential_company_ids:
+                    scoped_company_ids = sorted(set(requested_company_ids) & set(credential_company_ids))
+                else:
+                    scoped_company_ids = requested_company_ids
+            else:
+                scoped_company_ids = credential_company_ids
+            target_companies = get_target_companies(db, scoped_company_ids or None)
+            if not target_companies:
+                print(f"! Тенант {tenant_label}: нет филиалов для синхронизации")
+                emit_progress(
+                    'companies',
+                    'warning',
+                    20,
+                    f'No companies for credential: {credential.title}',
+                    credential=credential,
+                )
                 continue
 
-            print(f"\n{'─' * 60}")
-            print(f"Филиал: {company_label}")
-            print(f"{'─' * 60}")
+            print(f"✓ Тенант {tenant_label}: найдено филиалов {len(target_companies)}")
+            companies_count += len(target_companies)
+            emit_progress(
+                'companies',
+                'success',
+                20,
+                f'Companies selected: {len(target_companies)}',
+                credential=credential,
+                payload={'company_ids': [company.id for company in target_companies]},
+            )
 
-            if sync_mode == 'full':
-                purge_full_refresh_window(
-                    db,
-                    company.id,
-                    sd,
-                    ed,
-                    schedule_end.isoformat(),
-                )
+            for company in target_companies:
+                company_id = str(company.id)
+                company_label = format_company_label(company)
+                print(f"\n{'─' * 60}")
+                print(f"Филиал: {company_label}")
+                print(f"{'─' * 60}")
 
-            for name, fn, kwargs in company_steps:
-                run_sync_step(
-                    step_results,
-                    f"{name} [{company_label}]",
-                    fn,
-                    company_api,
-                    db,
-                    company_id,
-                    step_key=name,
-                    **kwargs,
-                )
+                if sync_mode == 'full':
+                    purge_full_refresh_window(
+                        db,
+                        company.id,
+                        sd,
+                        ed,
+                        schedule_end.isoformat(),
+                    )
 
-            print(f"\n── Аналитика: период {analytics_sd} .. {ed} ({ANALYTICS_DAYS} дней) [{company_label}] ──")
-            for name, fn, kwargs in analytics_steps:
-                run_sync_step(
-                    step_results,
-                    f"{name} [{company_label}]",
-                    fn,
-                    company_api,
-                    db,
-                    company_id,
-                    step_key=name,
-                    **kwargs,
-                )
+                for name, fn, kwargs in company_steps:
+                    run_sync_step(
+                        step_results,
+                        f"{name} [{company_label}]",
+                        fn,
+                        company_api,
+                        db,
+                        company_id,
+                        step_key=name,
+                        progress_callback=progress_callback,
+                        progress_context={
+                            'portal_account_id': credential.portal_account_id,
+                            'credential_id': credential.id,
+                            'company_id': company.id,
+                        },
+                        progress_pct=50,
+                        **kwargs,
+                    )
+
+                print(f"\n── Аналитика: период {analytics_sd} .. {ed} ({ANALYTICS_DAYS} дней) [{company_label}] ──")
+                for name, fn, kwargs in analytics_steps:
+                    run_sync_step(
+                        step_results,
+                        f"{name} [{company_label}]",
+                        fn,
+                        company_api,
+                        db,
+                        company_id,
+                        step_key=name,
+                        progress_callback=progress_callback,
+                        progress_context={
+                            'portal_account_id': credential.portal_account_id,
+                            'credential_id': credential.id,
+                            'company_id': company.id,
+                        },
+                        progress_pct=85,
+                        **kwargs,
+                    )
 
         if steps_successful(step_results, checkpoint_step_names):
             set_sync_state_value(db, TRANSACTIONAL_STATE_KEY, ed)

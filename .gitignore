@@ -21,5 +21,6 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+.claude/
 web/node_modules/
 web/dist/

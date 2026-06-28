@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +27,7 @@ from auth_service import (
     TOKEN_PURPOSE_VERIFY,
     consume_email_token,
     create_access_token,
+    email_cooldown_active,
     hash_password,
     load_portal_account_branch_ids,
     load_user_access_branch_ids,
@@ -39,8 +40,21 @@ from auth_service import (
     user_can_login,
     verify_password,
 )
+from auth_sessions import (
+    REFRESH_COOKIE_NAME,
+    bump_user_token_version,
+    clear_auth_cookies,
+    issue_session,
+    list_user_sessions,
+    revoke_refresh,
+    revoke_session_by_id,
+    revoke_user_sessions,
+    rotate_session,
+    set_auth_cookies,
+)
 from database import get_async_db
 from models import Company, Group, PortalAccount, PortalBranch, PortalUser, Staff, YClientsCredential
+from portal_audit import log_portal_audit
 from portal_account_provision import provision_all_unlinked_staff, provision_staff_account
 from portal_staff_sync import (
     deactivate_portal_user_staff,
@@ -54,6 +68,8 @@ from yclients_credentials import (
     CredentialsConfigError,
     decrypted_credential,
     list_credential_payloads,
+    mark_credential_failure_async,
+    mark_credential_success_async,
     new_credential,
     set_credential_companies,
     update_credential_secrets,
@@ -89,6 +105,10 @@ class ForgotPasswordRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8, max_length=128)
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
 
 
 class AdminStaffCreateAccountRequest(BaseModel):
@@ -247,8 +267,17 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_async_d
     }
 
 
+def _access_token_for(user: PortalUser) -> str:
+    return create_access_token(user.id, user.role, user.token_version)
+
+
 @router.post('/login')
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_async_db)):
+async def login(
+    body: LoginRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_async_db),
+):
     email = normalize_email(body.email)
     user = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
     if user is None or not verify_password(body.password, user.password_hash):
@@ -259,17 +288,116 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_async_db)):
         raise HTTPException(status_code=403, detail='Account disabled')
 
     user.last_login_at = datetime.utcnow()
+    session = await issue_session(db, user, request, access_token_fn=_access_token_for)
     await db.commit()
+    set_auth_cookies(response, session)
     branch_ids = await load_user_access_branch_ids(db, user)
-    token = create_access_token(user.id, user.role)
     return {
         'success': True,
         'data': {
-            'access_token': token,
+            'access_token': session.access_token,
             'token_type': 'bearer',
+            'csrf_token': session.csrf_token,
             'user': _user_payload(user, branch_ids),
         },
     }
+
+
+@router.post('/refresh')
+async def refresh(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_async_db),
+):
+    raw_refresh = request.cookies.get(REFRESH_COOKIE_NAME)
+    if not raw_refresh:
+        raise HTTPException(status_code=401, detail='Missing refresh token')
+    user, session = await rotate_session(db, raw_refresh, request, access_token_fn=_access_token_for)
+    await db.commit()
+    set_auth_cookies(response, session)
+    branch_ids = await load_user_access_branch_ids(db, user)
+    return {
+        'success': True,
+        'data': {
+            'access_token': session.access_token,
+            'token_type': 'bearer',
+            'csrf_token': session.csrf_token,
+            'user': _user_payload(user, branch_ids),
+        },
+    }
+
+
+@router.post('/logout')
+async def logout(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_async_db),
+):
+    raw_refresh = request.cookies.get(REFRESH_COOKIE_NAME)
+    if raw_refresh:
+        await revoke_refresh(db, raw_refresh)
+        await db.commit()
+    clear_auth_cookies(response)
+    return {'success': True}
+
+
+@router.post('/logout-all')
+async def logout_all(
+    response: Response,
+    user: PortalUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    await revoke_user_sessions(db, user.id)
+    bump_user_token_version(user)
+    await db.commit()
+    clear_auth_cookies(response)
+    return {'success': True}
+
+
+@router.post('/logout-others')
+async def logout_others(
+    request: Request,
+    user: PortalUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    current_refresh = request.cookies.get(REFRESH_COOKIE_NAME)
+    await revoke_user_sessions(db, user.id, except_refresh=current_refresh)
+    await db.commit()
+    return {'success': True}
+
+
+@router.get('/sessions')
+async def list_sessions(
+    user: PortalUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    sessions = await list_user_sessions(db, user.id)
+    return {
+        'success': True,
+        'data': [
+            {
+                'id': item.id,
+                'device_label': item.device_label,
+                'created_at': item.created_at.isoformat() if item.created_at else None,
+                'last_used_at': item.last_used_at.isoformat() if item.last_used_at else None,
+                'expires_at': item.expires_at.isoformat() if item.expires_at else None,
+            }
+            for item in sessions
+        ],
+    }
+
+
+@router.delete('/sessions/{session_id}')
+async def delete_session(
+    session_id: int,
+    user: PortalUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    removed = await revoke_session_by_id(db, user.id, session_id)
+    await db.commit()
+    if not removed:
+        raise HTTPException(status_code=404, detail='Session not found')
+    return {'success': True}
 
 
 @router.get('/me')
@@ -295,11 +423,23 @@ async def verify_email(body: TokenRequest, db: AsyncSession = Depends(get_async_
 async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depends(get_async_db)):
     email = normalize_email(body.email)
     user = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
-    if user is not None and user.is_active:
+    if user is not None and user.is_active and not email_cooldown_active(user.password_reset_sent_at):
         await send_password_reset_email(db, user)
     return {
         'success': True,
         'message': 'Если аккаунт с таким email существует, на почту отправлена ссылка для сброса пароля.',
+    }
+
+
+@router.post('/resend-verification')
+async def resend_verification(body: ResendVerificationRequest, db: AsyncSession = Depends(get_async_db)):
+    email = normalize_email(body.email)
+    user = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
+    if user is not None and user.email_verified_at is None and not email_cooldown_active(user.email_verification_sent_at):
+        await send_verification_email(db, user)
+    return {
+        'success': True,
+        'message': 'Если аккаунт существует и не подтверждён — письмо отправлено повторно.',
     }
 
 
@@ -311,6 +451,8 @@ async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(
     user.password_hash = hash_password(body.password)
     user.initial_password = None
     user.password_changed_at = datetime.utcnow()
+    bump_user_token_version(user)
+    await revoke_user_sessions(db, user.id)
     await db.commit()
     return {'success': True, 'message': 'Пароль обновлён. Теперь можно войти в кабинет.'}
 
@@ -329,8 +471,10 @@ async def change_password(
     user.password_hash = hash_password(body.new_password)
     user.initial_password = None
     user.password_changed_at = datetime.utcnow()
+    bump_user_token_version(user)
+    await revoke_user_sessions(db, user.id)
     await db.commit()
-    return {'success': True, 'message': 'Пароль успешно изменён.'}
+    return {'success': True, 'message': 'Пароль успешно изменён. Войдите снова.'}
 
 
 async def _actor_branch_ids(db: AsyncSession, user: PortalUser) -> list[int]:
@@ -374,14 +518,20 @@ async def _load_credential(
     db: AsyncSession,
     credential_id: int,
     actor: PortalUser | None = None,
+    active_portal_account_id: int | None = None,
 ) -> YClientsCredential:
     credential = (
         await db.execute(select(YClientsCredential).where(YClientsCredential.id == credential_id))
     ).scalar_one_or_none()
     if credential is None:
         raise HTTPException(status_code=404, detail='YClients credentials not found')
-    if actor is not None and actor.role != 'platform_admin':
-        if credential.portal_account_id != actor.portal_account_id:
+    if actor is not None:
+        if actor.role == 'platform_admin':
+            if active_portal_account_id is None:
+                raise HTTPException(status_code=400, detail='X-Portal-Account-Id is required')
+            if credential.portal_account_id != active_portal_account_id:
+                raise HTTPException(status_code=404, detail='YClients credentials not found')
+        elif credential.portal_account_id != actor.portal_account_id:
             raise HTTPException(status_code=404, detail='YClients credentials not found')
     return credential
 
@@ -635,6 +785,15 @@ async def admin_create_user(
         await set_user_branches(db, user.id, body.company_ids)
     branch_ids = body.company_ids or []
     await sync_portal_user_staff(db, user, branch_ids)
+    await log_portal_audit(
+        db,
+        actor_user_id=actor.id,
+        portal_account_id=portal_account_id,
+        action='portal_user.created',
+        target_type='portal_user',
+        target_id=user.id,
+        metadata={'role': user.role, 'company_ids': branch_ids},
+    )
     await db.commit()
     await db.refresh(user)
     branch_ids = await load_user_access_branch_ids(db, user)
@@ -696,6 +855,19 @@ async def admin_update_user(
 
     branch_ids = await load_user_access_branch_ids(db, user)
     await sync_portal_user_staff(db, user, branch_ids)
+    await log_portal_audit(
+        db,
+        actor_user_id=actor.id,
+        portal_account_id=user.portal_account_id,
+        action='portal_user.updated',
+        target_type='portal_user',
+        target_id=user.id,
+        metadata={
+            'role': user.role,
+            'is_active': user.is_active,
+            'company_ids': branch_ids,
+        },
+    )
     await db.commit()
     return {'success': True, 'data': _user_payload(user, branch_ids, manageable=None)}
 
@@ -706,17 +878,22 @@ async def admin_list_yclients_credentials(
     actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
     db: AsyncSession = Depends(get_async_db),
 ):
-    portal_account_id = x_portal_account_id if actor.role == 'platform_admin' else actor.portal_account_id
+    portal_account_id = _credential_account_id(actor, x_portal_account_id)
     return {'success': True, 'data': await list_credential_payloads(db, portal_account_id)}
 
 
 @router.post('/admin/yclients-credentials')
 async def admin_create_yclients_credentials(
     body: YClientsCredentialCreateRequest,
+    x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
     db: AsyncSession = Depends(get_async_db),
 ):
-    portal_account_id = _credential_account_id(actor, body.portal_account_id)
+    if actor.role == 'platform_admin' and body.portal_account_id is not None and x_portal_account_id is not None:
+        if body.portal_account_id != x_portal_account_id:
+            raise HTTPException(status_code=400, detail='portal_account_id does not match X-Portal-Account-Id')
+    portal_account_id = _credential_account_id(actor, x_portal_account_id or body.portal_account_id)
+    _test_yclients_credentials(body.partner_token, body.login, body.password)
     company_ids = list(body.company_ids)
     if not company_ids:
         company_ids = await _sync_credential_companies_from_yclients(
@@ -741,10 +918,20 @@ async def admin_create_yclients_credentials(
 
     db.add(credential)
     await db.flush()
+    await mark_credential_success_async(db, credential.id)
     try:
         await set_credential_companies(db, credential.id, company_ids)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await log_portal_audit(
+        db,
+        actor_user_id=actor.id,
+        portal_account_id=portal_account_id,
+        action='yclients_credentials.created',
+        target_type='yclients_credential',
+        target_id=credential.id,
+        metadata={'company_ids': company_ids, 'is_active': credential.is_active},
+    )
     await db.commit()
     payloads = await list_credential_payloads(db, portal_account_id)
     created_payload = next((item for item in payloads if item['id'] == credential.id), None)
@@ -755,10 +942,11 @@ async def admin_create_yclients_credentials(
 async def admin_update_yclients_credentials(
     credential_id: int,
     body: YClientsCredentialUpdateRequest,
+    x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
     db: AsyncSession = Depends(get_async_db),
 ):
-    credential = await _load_credential(db, credential_id, actor)
+    credential = await _load_credential(db, credential_id, actor, x_portal_account_id)
     if body.portal_account_id is not None and body.portal_account_id != credential.portal_account_id:
         if actor.role != 'platform_admin':
             raise HTTPException(status_code=403, detail='Cannot move credentials between tenants')
@@ -782,6 +970,23 @@ async def admin_update_yclients_credentials(
             await set_credential_companies(db, credential.id, body.company_ids)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await log_portal_audit(
+        db,
+        actor_user_id=actor.id,
+        portal_account_id=credential.portal_account_id,
+        action='yclients_credentials.updated',
+        target_type='yclients_credential',
+        target_id=credential.id,
+        metadata={
+            'company_ids': body.company_ids,
+            'is_active': credential.is_active,
+            'secrets_rotated': any([
+                body.partner_token is not None,
+                body.login is not None,
+                body.password is not None,
+            ]),
+        },
+    )
     await db.commit()
     return {'success': True, 'data': await list_credential_payloads(db, credential.portal_account_id)}
 
@@ -789,10 +994,21 @@ async def admin_update_yclients_credentials(
 @router.delete('/admin/yclients-credentials/{credential_id}')
 async def admin_delete_yclients_credentials(
     credential_id: int,
+    x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
     db: AsyncSession = Depends(get_async_db),
 ):
-    credential = await _load_credential(db, credential_id, actor)
+    credential = await _load_credential(db, credential_id, actor, x_portal_account_id)
+    portal_account_id = credential.portal_account_id
+    await log_portal_audit(
+        db,
+        actor_user_id=actor.id,
+        portal_account_id=portal_account_id,
+        action='yclients_credentials.deleted',
+        target_type='yclients_credential',
+        target_id=credential.id,
+        metadata={'title': credential.title},
+    )
     await db.delete(credential)
     await db.commit()
     return {'success': True, 'message': 'YClients credentials deleted'}
@@ -801,15 +1017,26 @@ async def admin_delete_yclients_credentials(
 @router.post('/admin/yclients-credentials/{credential_id}/test')
 async def admin_test_saved_yclients_credentials(
     credential_id: int,
+    x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
     db: AsyncSession = Depends(get_async_db),
 ):
-    credential = await _load_credential(db, credential_id, actor)
+    credential = await _load_credential(db, credential_id, actor, x_portal_account_id)
     try:
         value = decrypted_credential(credential)
     except CredentialsConfigError as exc:
+        await mark_credential_failure_async(db, credential.id, exc.__class__.__name__)
+        await db.commit()
         raise _credentials_config_error(exc) from exc
-    return _test_yclients_credentials(value.partner_token, value.login, value.password)
+    try:
+        result = _test_yclients_credentials(value.partner_token, value.login, value.password)
+    except HTTPException as exc:
+        await mark_credential_failure_async(db, credential.id, exc.detail)
+        await db.commit()
+        raise
+    await mark_credential_success_async(db, credential.id)
+    await db.commit()
+    return result
 
 
 @router.post('/admin/yclients-credentials/test')
@@ -841,6 +1068,15 @@ async def admin_delete_user(
     assert_can_manage_user(actor.role, actor_branch_ids, user.role, branch_ids)
 
     await deactivate_portal_user_staff(db, user.id)
+    await log_portal_audit(
+        db,
+        actor_user_id=actor.id,
+        portal_account_id=user.portal_account_id,
+        action='portal_user.deleted',
+        target_type='portal_user',
+        target_id=user.id,
+        metadata={'role': user.role, 'company_ids': branch_ids},
+    )
     await db.delete(user)
     await db.commit()
     return {'success': True, 'message': 'User deleted'}

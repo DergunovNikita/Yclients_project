@@ -68,7 +68,6 @@ SYSTEM_BASE_TABLES = {
     'sync_state',
     'sync_runs',
     'sync_step_runs',
-    'sync_jobs',
 }
 
 
@@ -81,7 +80,7 @@ def _rebuild_public_schema(bind) -> None:
         bind=bind,
         tables=[
             table for table in Base.metadata.sorted_tables
-            if table.schema != 'system'
+            if table.schema != 'system' and table.name in PUBLIC_TABLES
         ],
         checkfirst=False,
     )

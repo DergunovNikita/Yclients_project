@@ -232,11 +232,8 @@ async def test_platform_admin_filters_yclients_credentials_by_selected_tenant(au
 
     app.dependency_overrides.clear()
 
-    assert all_credentials.status_code == 200
-    assert [item['title'] for item in all_credentials.json()['data']] == [
-        'Tenant A Credentials',
-        'Tenant B Credentials',
-    ]
+    assert all_credentials.status_code == 400
+    assert all_credentials.json()['detail'] == 'portal_account_id is required'
     assert tenant_b_credentials.status_code == 200
     assert [item['title'] for item in tenant_b_credentials.json()['data']] == ['Tenant B Credentials']
 

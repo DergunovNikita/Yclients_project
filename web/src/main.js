@@ -3,14 +3,15 @@ import { enhanceSelect } from './customSelect.js';
 import {
   authFetch,
   authHeaders,
+  ensureOnboardingComplete,
   getSelectedPortalAccountId,
-  getToken,
+  hasSessionHint,
   loadCurrentUser,
   logout,
   setSelectedPortalAccountId,
 } from './auth.js';
 
-if (!getToken() && !import.meta.env.VITE_API_KEY) {
+if (!hasSessionHint() && !import.meta.env.VITE_API_KEY) {
   window.location.href = '/login.html';
 }
 
@@ -2039,7 +2040,7 @@ async function init() {
   renderServicesTable([]);
   renderExtraServicesTable([]);
   renderServiceManagement({ rows: [], groups: [], categories: [] });
-  if (getToken()) {
+  if (hasSessionHint()) {
     let me;
     try {
       me = await loadCurrentUser();
@@ -2049,6 +2050,8 @@ async function init() {
     }
 
     currentUser = me.data;
+    const onboardingOk = await ensureOnboardingComplete(currentUser);
+    if (!onboardingOk) return;
     const profileLink = document.getElementById('user-profile-link');
     const profileName = document.getElementById('user-profile-name');
     const profileRole = document.getElementById('user-profile-role');

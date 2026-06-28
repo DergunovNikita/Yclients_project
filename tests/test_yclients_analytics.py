@@ -1,9 +1,11 @@
-from datetime import date
+from datetime import date, datetime
 
 import httpx
 import pytest
 
 import yclients_analytics
+from models import Company, Group, PortalAccount, PortalBranch, YClientsCredentialCompany
+from yclients_credentials import new_credential
 
 
 class FakeResponse:
@@ -58,8 +60,23 @@ class FakeAsyncClient:
         })
 
 
+async def _seed_db_credentials(async_session, monkeypatch, company_ids=(1, 2)):
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-analytics-key')
+    async_session.add(Group(id=1, title='Group'))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    for company_id in company_ids:
+        async_session.add(Company(id=company_id, title=f'Company {company_id}', group_id=1))
+        async_session.add(PortalBranch(portal_account_id=1, company_id=company_id))
+    credential = new_credential(1, 'Analytics', 'partner', 'login', 'password')
+    async_session.add(credential)
+    await async_session.flush()
+    for company_id in company_ids:
+        async_session.add(YClientsCredentialCompany(credential_id=credential.id, company_id=company_id))
+    await async_session.commit()
+
+
 @pytest.mark.asyncio
-async def test_fetch_record_stats_aggregates_companies_and_passes_staff(monkeypatch):
+async def test_fetch_record_stats_aggregates_companies_and_passes_staff(async_session, monkeypatch):
     clients = []
 
     def client_factory(*args, **kwargs):
@@ -67,9 +84,7 @@ async def test_fetch_record_stats_aggregates_companies_and_passes_staff(monkeypa
         clients.append(client)
         return client
 
-    monkeypatch.setattr(yclients_analytics, 'PARTNER_TOKEN', 'partner')
-    monkeypatch.setattr(yclients_analytics, 'LOGIN', 'login')
-    monkeypatch.setattr(yclients_analytics, 'PASSWORD', 'password')
+    await _seed_db_credentials(async_session, monkeypatch)
     monkeypatch.setattr(yclients_analytics.httpx, 'AsyncClient', client_factory)
 
     result = await yclients_analytics.fetch_record_stats(
@@ -77,6 +92,7 @@ async def test_fetch_record_stats_aggregates_companies_and_passes_staff(monkeypa
         date(2026, 6, 1),
         date(2026, 6, 30),
         staff_id=77,
+        db=async_session,
     )
 
     assert result == {'completed': 30, 'incomplete': 6, 'cancelled': 4, 'total': 40}
@@ -99,7 +115,7 @@ async def test_fetch_record_stats_requires_credentials(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_record_stats_rejects_invalid_payload(monkeypatch):
+async def test_fetch_record_stats_rejects_invalid_payload(async_session, monkeypatch):
     class InvalidPayloadClient(FakeAsyncClient):
         async def get(self, url, *, headers, params):
             return FakeResponse({
@@ -114,9 +130,7 @@ async def test_fetch_record_stats_rejects_invalid_payload(monkeypatch):
                 },
             })
 
-    monkeypatch.setattr(yclients_analytics, 'PARTNER_TOKEN', 'partner')
-    monkeypatch.setattr(yclients_analytics, 'LOGIN', 'login')
-    monkeypatch.setattr(yclients_analytics, 'PASSWORD', 'password')
+    await _seed_db_credentials(async_session, monkeypatch, company_ids=(1,))
     monkeypatch.setattr(yclients_analytics.httpx, 'AsyncClient', InvalidPayloadClient)
 
     with pytest.raises(yclients_analytics.YClientsAnalyticsError):
@@ -124,18 +138,17 @@ async def test_fetch_record_stats_rejects_invalid_payload(monkeypatch):
             [1],
             date(2026, 6, 1),
             date(2026, 6, 30),
+            db=async_session,
         )
 
 
 @pytest.mark.asyncio
-async def test_fetch_record_stats_wraps_timeout(monkeypatch):
+async def test_fetch_record_stats_wraps_timeout(async_session, monkeypatch):
     class TimeoutClient(FakeAsyncClient):
         async def get(self, url, *, headers, params):
             raise httpx.ReadTimeout('timed out', request=httpx.Request('GET', url))
 
-    monkeypatch.setattr(yclients_analytics, 'PARTNER_TOKEN', 'partner')
-    monkeypatch.setattr(yclients_analytics, 'LOGIN', 'login')
-    monkeypatch.setattr(yclients_analytics, 'PASSWORD', 'password')
+    await _seed_db_credentials(async_session, monkeypatch, company_ids=(1,))
     monkeypatch.setattr(yclients_analytics.httpx, 'AsyncClient', TimeoutClient)
 
     with pytest.raises(yclients_analytics.YClientsAnalyticsError):
@@ -143,4 +156,5 @@ async def test_fetch_record_stats_wraps_timeout(monkeypatch):
             [1],
             date(2026, 6, 1),
             date(2026, 6, 30),
+            db=async_session,
         )

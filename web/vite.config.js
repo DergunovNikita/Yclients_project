@@ -33,6 +33,8 @@ export default defineConfig(({ mode }) => {
           verify: resolve(rootDir, 'verify-email.html'),
           profile: resolve(rootDir, 'profile.html'),
           admin: resolve(rootDir, 'admin.html'),
+          onboarding: resolve(rootDir, 'onboarding.html'),
+          settings: resolve(rootDir, 'settings.html'),
         },
       },
     },

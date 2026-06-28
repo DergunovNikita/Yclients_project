@@ -1,5 +1,5 @@
 import './auth.css';
-import { authFetch, getToken, logout, requireAuthRedirect } from './auth.js';
+import { authFetch, hasSessionHint, logout, requireAuthRedirect } from './auth.js';
 
 const ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
 const MANAGER_ROLES = new Set(['platform_admin', 'owner', 'branch_admin', 'manager']);
@@ -113,7 +113,7 @@ async function init() {
         : 'Смотреть пользователей';
     }
   } catch {
-    if (!getToken()) {
+    if (!hasSessionHint()) {
       logout();
     }
   }

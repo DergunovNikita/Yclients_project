@@ -716,6 +716,33 @@ class PortalUser(Base):
     password_changed_at = Column(DateTime)
     created_at = Column(DateTime, nullable=False)
     last_login_at = Column(DateTime)
+    # Bumped on password change or logout-all; embedded in every JWT as the `tv`
+    # claim so token comparison invalidates every live access token at once.
+    token_version = Column(Integer, nullable=False, default=0)
+    email_verification_sent_at = Column(DateTime)
+    password_reset_sent_at = Column(DateTime)
+    onboarding_completed_at = Column(DateTime)
+
+
+class PortalRefreshToken(Base):
+    """Long-lived refresh tokens with device metadata for the «active sessions» UI."""
+
+    __tablename__ = 'portal_refresh_tokens'
+    __table_args__ = (
+        Index('ix_portal_refresh_tokens_user_id', 'user_id'),
+        {'schema': SYSTEM_SCHEMA},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_users.id', ondelete='CASCADE'), nullable=False)
+    token_hash = Column(String(64), nullable=False, unique=True)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime)
+    last_used_at = Column(DateTime)
+    user_agent = Column(String(500))
+    device_label = Column(String(100))
+    ip_hash = Column(String(64))
+    created_at = Column(DateTime, nullable=False)
 
 
 class PortalUserBranch(Base):
@@ -761,6 +788,11 @@ class YClientsCredential(Base):
     login_encrypted = Column(Text, nullable=False)
     password_encrypted = Column(Text, nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
+    last_used_at = Column(DateTime)
+    last_error_at = Column(DateTime)
+    last_error = Column(Text)
+    needs_reauth = Column(Boolean, nullable=False, default=False)
+    credential_fingerprint = Column(String(64), index=True)
     created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, nullable=False)
 
@@ -829,8 +861,53 @@ class SyncJob(Base):
     mode = Column(String, nullable=False, index=True)
     initiator = Column(String)
     status = Column(String, nullable=False, index=True)
+    portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), index=True)
+    credential_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.yclients_credentials.id'), index=True)
+    company_ids = Column(JSON)
+    progress_pct = Column(Integer, nullable=False, default=0)
+    current_stage = Column(String)
+    step_results = Column(JSON)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
     requested_at = Column(DateTime, nullable=False, index=True)
     started_at = Column(DateTime, index=True)
     finished_at = Column(DateTime, index=True)
     run_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.sync_runs.id'), index=True)
     error_message = Column(Text)
+
+
+class SyncJobEvent(Base):
+    __tablename__ = 'sync_job_events'
+    __table_args__ = (
+        Index('ix_sync_job_events_job_id_created_at', 'job_id', 'created_at'),
+        {'schema': SYSTEM_SCHEMA},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.sync_jobs.id', ondelete='CASCADE'), nullable=False, index=True)
+    portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), index=True)
+    credential_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.yclients_credentials.id'), index=True)
+    company_id = Column(Integer, ForeignKey('companies.id'), index=True)
+    stage_key = Column(String, index=True)
+    status = Column(String, nullable=False, index=True)
+    elapsed_seconds = Column(Float)
+    message = Column(Text)
+    payload = Column(JSON)
+    created_at = Column(DateTime, nullable=False, index=True)
+
+
+class PortalAuditEvent(Base):
+    __tablename__ = 'portal_audit_events'
+    __table_args__ = (
+        Index('ix_portal_audit_events_account_created', 'portal_account_id', 'created_at'),
+        Index('ix_portal_audit_events_actor_created', 'actor_user_id', 'created_at'),
+        {'schema': SYSTEM_SCHEMA},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    actor_user_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_users.id'), index=True)
+    portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), index=True)
+    action = Column(String, nullable=False, index=True)
+    target_type = Column(String, index=True)
+    target_id = Column(String, index=True)
+    metadata_json = Column(JSON)
+    created_at = Column(DateTime, nullable=False, index=True)

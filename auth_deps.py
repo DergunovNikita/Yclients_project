@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import jwt
 from auth_scope import AccessContext
 from auth_service import decode_access_token, load_portal_account_branch_ids, load_user_access_branch_ids
+from auth_sessions import ACCESS_COOKIE_NAME, enforce_csrf
 from config import API_KEY, AUTH_REQUIRE_LOGIN
 from database import get_async_db
 from models import PortalUser
@@ -20,14 +21,20 @@ OPEN_PATH_PREFIXES = (
     '/redoc',
     '/auth/register',
     '/auth/login',
+    '/auth/refresh',
+    '/auth/logout',
     '/auth/verify-email',
     '/auth/forgot-password',
     '/auth/reset-password',
+    '/auth/resend-verification',
     '/dashboard/auth/register',
     '/dashboard/auth/login',
+    '/dashboard/auth/refresh',
+    '/dashboard/auth/logout',
     '/dashboard/auth/verify-email',
     '/dashboard/auth/forgot-password',
     '/dashboard/auth/reset-password',
+    '/dashboard/auth/resend-verification',
 )
 
 
@@ -37,14 +44,11 @@ def _is_open_path(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in OPEN_PATH_PREFIXES)
 
 
-async def _user_from_bearer(
-    authorization: str | None,
+async def _user_from_token(
+    token: str,
     db: AsyncSession,
     x_portal_account_id: int | None = None,
-) -> AccessContext | None:
-    if not authorization or not authorization.lower().startswith('bearer '):
-        return None
-    token = authorization.split(' ', 1)[1].strip()
+) -> AccessContext:
     try:
         payload = decode_access_token(token)
     except jwt.PyJWTError as exc:
@@ -55,14 +59,26 @@ async def _user_from_bearer(
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail='User not found or inactive')
 
+    claim_tv = int(payload.get('tv', 0) or 0)
+    if claim_tv != int(user.token_version or 0):
+        raise HTTPException(status_code=401, detail='Session invalidated')
+
     if user.role == 'platform_admin':
-        active_account_id = x_portal_account_id if x_portal_account_id is not None else user.portal_account_id
+        active_account_id = x_portal_account_id
         if active_account_id is not None:
             branch_ids = await load_portal_account_branch_ids(db, active_account_id)
             return AccessContext.from_user(user.id, user.role, active_account_id, branch_ids)
+        return AccessContext.from_user(user.id, user.role, None, None)
 
     branch_ids = await load_user_access_branch_ids(db, user)
     return AccessContext.from_user(user.id, user.role, user.portal_account_id, branch_ids)
+
+
+def _extract_access_token(request: Request, authorization: str | None) -> str | None:
+    """Bearer header wins so explicit auth always takes precedence over cookies."""
+    if authorization and authorization.lower().startswith('bearer '):
+        return authorization.split(' ', 1)[1].strip()
+    return request.cookies.get(ACCESS_COOKIE_NAME)
 
 
 async def require_auth(
@@ -72,12 +88,14 @@ async def require_auth(
     x_portal_account_id: int | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
 ) -> AccessContext | None:
-    """Global auth: JWT user, API key (full access), or open paths."""
+    """Global auth: JWT user (header or cookie), API key (full access), or open paths."""
     if _is_open_path(request.url.path):
         return None
 
-    if authorization and authorization.lower().startswith('bearer '):
-        ctx = await _user_from_bearer(authorization, db, x_portal_account_id)
+    token = _extract_access_token(request, authorization)
+    if token:
+        ctx = await _user_from_token(token, db, x_portal_account_id)
+        enforce_csrf(request)
         request.state.access = ctx
         return ctx
 
@@ -95,10 +113,15 @@ async def require_auth(
 
 
 async def get_current_user(
+    request: Request,
     authorization: str | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
 ) -> PortalUser:
-    ctx = await _user_from_bearer(authorization, db)
+    token = _extract_access_token(request, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail='Authentication required')
+    ctx = await _user_from_token(token, db)
+    enforce_csrf(request)
     if ctx is None or ctx.user_id is None:
         raise HTTPException(status_code=401, detail='Authentication required')
     user = (await db.execute(select(PortalUser).where(PortalUser.id == ctx.user_id))).scalar_one_or_none()

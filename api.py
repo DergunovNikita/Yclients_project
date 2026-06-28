@@ -31,8 +31,10 @@ from config import (
 )
 from dashboard_routes import router as dashboard_router
 from auth_routes import router as auth_router
-from auth_scope import AccessContext
+from auth_scope import AccessContext, require_sync_company_ids, require_tenant_context
+from onboarding_routes import router as onboarding_router
 from database import get_async_db, init_async_database
+from portal_audit import log_portal_audit
 from models import (
     Account,
     Appointment,
@@ -120,6 +122,8 @@ if _cors_origins:
 
 app.include_router(auth_router, prefix='/auth', tags=['auth'])
 app.include_router(auth_router, prefix='/dashboard/auth', tags=['auth'])
+app.include_router(onboarding_router, prefix='/onboarding', tags=['onboarding'])
+app.include_router(onboarding_router, prefix='/dashboard/onboarding', tags=['onboarding'])
 app.include_router(dashboard_router, prefix='/dashboard', tags=['dashboard'])
 
 
@@ -775,31 +779,82 @@ async def api_stats(request: Request, db: AsyncSession = Depends(get_async_db)):
 class SyncTriggerRequest(BaseModel):
     mode: Literal['incremental', 'full'] = 'incremental'
     initiator: str = 'dashboard'
+    portal_account_id: int | None = None
+    credential_id: int | None = None
+    company_ids: list[int] = []
+    global_sync: bool = False
 
 
 @app.post("/sync/trigger")
 async def trigger_sync(
     payload: SyncTriggerRequest,
+    request: Request,
     _: None = Depends(require_sync_token),
     db: AsyncSession = Depends(get_async_db),
 ):
-    job = await SyncJobService().async_enqueue_job(db, payload.mode, payload.initiator)
+    ctx = request_access(request)
+    portal_account_id: int | None = None
+    company_ids: list[int] | None = None
+    credential_id = payload.credential_id
+
+    if ctx is not None and not ctx.full_access:
+        portal_account_id = require_tenant_context(ctx)
+        company_ids = require_sync_company_ids(ctx, payload.company_ids)
+    elif ctx is not None and ctx.full_access:
+        if payload.portal_account_id is not None:
+            portal_account_id = payload.portal_account_id
+        elif not payload.global_sync:
+            raise HTTPException(status_code=400, detail='portal_account_id or global_sync=true is required')
+        company_ids = [int(item) for item in dict.fromkeys(payload.company_ids)] or None
+
+    job = await SyncJobService().async_enqueue_job(
+        db,
+        payload.mode,
+        payload.initiator,
+        portal_account_id=portal_account_id,
+        credential_id=credential_id,
+        company_ids=company_ids,
+    )
+    await log_portal_audit(
+        db,
+        actor_user_id=ctx.user_id if ctx is not None else None,
+        portal_account_id=portal_account_id,
+        action='sync.started',
+        target_type='sync_job',
+        target_id=job.id,
+        metadata={
+            'mode': job.mode,
+            'initiator': job.initiator,
+            'credential_id': job.credential_id,
+            'company_ids': job.company_ids or [],
+            'global_sync': bool(payload.global_sync and portal_account_id is None),
+        },
+    )
+    await db.commit()
     return {
         "status": "queued",
         "job_id": job.id,
         "mode": job.mode,
         "initiator": job.initiator,
+        "portal_account_id": job.portal_account_id,
+        "credential_id": job.credential_id,
+        "company_ids": job.company_ids or [],
     }
 
 
 @app.get("/sync/status")
 async def sync_status(
+    request: Request,
     _: None = Depends(require_sync_token),
     db: AsyncSession = Depends(get_async_db),
 ):
+    ctx = request_access(request)
+    portal_account_id = None
+    if ctx is not None and not ctx.full_access:
+        portal_account_id = require_tenant_context(ctx)
     return {
         "sync": get_sync_status(),
-        "queue": await SyncJobService().async_get_status_payload(db),
+        "queue": await SyncJobService().async_get_status_payload(db, portal_account_id=portal_account_id),
     }
 
 

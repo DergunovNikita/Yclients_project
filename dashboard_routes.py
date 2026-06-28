@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_deps import get_dashboard_access
-from auth_scope import AccessContext, query_scope
+from auth_scope import AccessContext, query_scope, require_tenant_context
 from config import SYNC_API_TOKEN
 from dashboard_service import (
     fetch_branches,
@@ -454,8 +454,9 @@ async def dashboard_widget_sync_status(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    portal_account_id = require_tenant_context(ctx, allow_full_access=True)
     sync_payload = await asyncio.to_thread(get_sync_status)
-    queue = await SyncJobService().async_get_status_payload(db)
+    queue = await SyncJobService().async_get_status_payload(db, portal_account_id=portal_account_id)
     return {'success': True, 'data': {'sync': sync_payload, 'queue': queue}}
 
 

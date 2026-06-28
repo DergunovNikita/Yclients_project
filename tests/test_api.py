@@ -147,10 +147,14 @@ async def test_sync_trigger_queues_job(async_session, monkeypatch):
         id = 42
         mode = 'incremental'
         initiator = 'dashboard'
+        portal_account_id = None
+        credential_id = None
+        company_ids = []
 
-    async def fake_enqueue(self, db, mode, initiator):
+    async def fake_enqueue(self, db, mode, initiator, **kwargs):
         captured['mode'] = mode
         captured['initiator'] = initiator
+        captured.update(kwargs)
         return DummyJob()
 
     async def override_db():
@@ -170,8 +174,17 @@ async def test_sync_trigger_queues_job(async_session, monkeypatch):
         'job_id': 42,
         'mode': 'incremental',
         'initiator': 'dashboard',
+        'portal_account_id': None,
+        'credential_id': None,
+        'company_ids': [],
     }
-    assert captured == {'mode': 'incremental', 'initiator': 'dashboard'}
+    assert captured == {
+        'mode': 'incremental',
+        'initiator': 'dashboard',
+        'portal_account_id': None,
+        'credential_id': None,
+        'company_ids': None,
+    }
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import (
     APP_PUBLIC_URL,
     AUTH_CONSOLE_EMAIL,
+    AUTH_EMAIL_RESEND_COOLDOWN_SECONDS,
     AUTH_EMAIL_VERIFY_REQUIRED,
     AUTH_JWT_EXPIRE_MINUTES,
     AUTH_JWT_SECRET,
@@ -49,14 +50,21 @@ def verify_password(password: str, password_hash: str) -> bool:
     return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
 
 
-def create_access_token(user_id: int, role: str) -> str:
+def create_access_token(user_id: int, role: str, token_version: int = 0) -> str:
     payload = {
         'sub': str(user_id),
         'role': role,
+        'tv': int(token_version or 0),
         'exp': datetime.utcnow() + timedelta(minutes=AUTH_JWT_EXPIRE_MINUTES),
         'iat': datetime.utcnow(),
     }
     return jwt.encode(payload, AUTH_JWT_SECRET, algorithm='HS256')
+
+
+def email_cooldown_active(sent_at: datetime | None) -> bool:
+    if sent_at is None or AUTH_EMAIL_RESEND_COOLDOWN_SECONDS <= 0:
+        return False
+    return datetime.utcnow() - sent_at < timedelta(seconds=AUTH_EMAIL_RESEND_COOLDOWN_SECONDS)
 
 
 def decode_access_token(token: str) -> dict:
@@ -189,6 +197,8 @@ def send_auth_email(to_email: str, subject: str, body: str) -> None:
 
 async def send_verification_email(db: AsyncSession, user: PortalUser) -> None:
     token = await create_email_token(db, user.id, TOKEN_PURPOSE_VERIFY)
+    user.email_verification_sent_at = datetime.utcnow()
+    await db.commit()
     link = _email_link('/verify-email.html', token)
     name = (user.full_name or user.email).strip()
     send_auth_email(
@@ -205,6 +215,8 @@ async def send_verification_email(db: AsyncSession, user: PortalUser) -> None:
 
 async def send_password_reset_email(db: AsyncSession, user: PortalUser) -> None:
     token = await create_email_token(db, user.id, TOKEN_PURPOSE_RESET)
+    user.password_reset_sent_at = datetime.utcnow()
+    await db.commit()
     link = _email_link('/reset-password.html', token)
     name = (user.full_name or user.email).strip()
     send_auth_email(

@@ -3,7 +3,7 @@ import { enhanceSelect } from './customSelect.js';
 import {
   authFetch,
   getSelectedPortalAccountId,
-  getToken,
+  hasSessionHint,
   logout,
   requireAuthRedirect,
   setSelectedPortalAccountId,
@@ -1195,7 +1195,7 @@ async function init() {
     await loadBranches();
     await Promise.all([loadUsers(), loadInitialPasswords(), loadYclientsCredentials()]);
   } catch (error) {
-    if (!getToken()) {
+    if (!hasSessionHint()) {
       logout();
       return;
     }

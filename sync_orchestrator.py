@@ -14,17 +14,28 @@ from config import (
 from database import init_database
 from setup_analytics import refresh_analytics_views
 from sync_control import SyncControlService
+from sync_jobs import SyncJobService
 from sync_logging import build_log_path, stream_run_output
 from sync_notifier import TelegramNotifier, build_sync_message
 from sync_pipeline import execute_sync
 
 
-def run_sync_job(mode: str, trigger_type: str, initiator: str = 'system') -> dict:
+def run_sync_job(
+    mode: str,
+    trigger_type: str,
+    initiator: str = 'system',
+    *,
+    job_id: int | None = None,
+    portal_account_id: int | None = None,
+    credential_id: int | None = None,
+    company_ids: list[int] | None = None,
+) -> dict:
     normalized_mode = (mode or 'incremental').strip().lower()
     normalized_trigger = (trigger_type or 'manual').strip().lower()
     database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
     control_db = database.get_db()
     control = SyncControlService()
+    jobs = SyncJobService()
     notifier = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
 
     if not control.acquire_lock(control_db):
@@ -51,11 +62,46 @@ def run_sync_job(mode: str, trigger_type: str, initiator: str = 'system') -> dic
     finished_status = 'failed'
     finished_message = 'Sync interrupted'
 
+    def progress_callback(event: dict) -> None:
+        stage_key = event.get('stage_key') or event.get('key') or event.get('current_stage')
+        status = event.get('status') or 'info'
+        jobs.record_event(
+            control_db,
+            job_id,
+            portal_account_id=event.get('portal_account_id', portal_account_id),
+            credential_id=event.get('credential_id', credential_id),
+            company_id=event.get('company_id'),
+            stage_key=stage_key,
+            status=status,
+            elapsed_seconds=event.get('elapsed_seconds'),
+            message=event.get('message'),
+            payload=event.get('payload') or {},
+        )
+        jobs.update_progress(
+            control_db,
+            job_id,
+            progress_pct=event.get('progress_pct'),
+            current_stage=stage_key,
+            step_results=event.get('step_results'),
+        )
+
     try:
         with stream_run_output(log_path):
             started_at = datetime.now().isoformat()
             print(f'▶ Sync run started at {started_at}')
-            sync_result = execute_sync(mode=normalized_mode)
+            progress_callback({
+                'status': 'running',
+                'current_stage': 'started',
+                'progress_pct': 1,
+                'message': 'Sync started',
+            })
+            sync_result = execute_sync(
+                mode=normalized_mode,
+                portal_account_id=portal_account_id,
+                credential_id=credential_id,
+                company_ids=company_ids,
+                progress_callback=progress_callback,
+            )
             step_results = list(sync_result.get('step_results', []))
 
             print('\n' + '=' * 60)
@@ -67,6 +113,14 @@ def run_sync_job(mode: str, trigger_type: str, initiator: str = 'system') -> dic
                 'key': 'SQL views refresh',
                 'success': bool(analytics_result.get('success')),
                 'elapsed': None,
+            })
+            progress_callback({
+                'status': 'success' if analytics_result.get('success') else 'failed',
+                'current_stage': 'SQL views refresh',
+                'stage_key': 'SQL views refresh',
+                'progress_pct': 95,
+                'message': 'SQL views refresh completed',
+                'step_results': step_results,
             })
 
             warning_count = sum(1 for item in step_results if not item.get('success'))
@@ -81,6 +135,13 @@ def run_sync_job(mode: str, trigger_type: str, initiator: str = 'system') -> dic
                 'log_path': log_path,
                 'sync_result': sync_result,
             })
+            progress_callback({
+                'status': finished_status,
+                'current_stage': finished_status,
+                'progress_pct': 100 if finished_status == 'success' else 99,
+                'message': finished_message,
+                'step_results': step_results,
+            })
         control.finish_run(control_db, run, finished_status, finished_message, step_results)
     except Exception as exc:
         with stream_run_output(log_path):
@@ -93,6 +154,13 @@ def run_sync_job(mode: str, trigger_type: str, initiator: str = 'system') -> dic
             'error': str(exc),
             'run_id': run.id,
             'log_path': log_path,
+        })
+        progress_callback({
+            'status': finished_status,
+            'current_stage': 'failed',
+            'progress_pct': 99,
+            'message': str(exc),
+            'step_results': step_results,
         })
     finally:
         finished_at = datetime.now()

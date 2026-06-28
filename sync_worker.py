@@ -123,6 +123,10 @@ def process_next_job() -> bool:
             mode=job.mode,
             trigger_type='queued',
             initiator=job.initiator or 'worker',
+            job_id=job.id,
+            portal_account_id=job.portal_account_id,
+            credential_id=job.credential_id,
+            company_ids=job.company_ids or None,
         )
         if result.get('status') == 'already_running':
             jobs.release_job_to_queue(db, job)

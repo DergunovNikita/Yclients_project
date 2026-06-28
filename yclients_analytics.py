@@ -9,34 +9,23 @@ from typing import Any, Iterable
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import (
-    LOGIN,
-    PARTNER_TOKEN,
-    PASSWORD,
-    YCLIENTS_TIMEOUT,
-)
+from config import YCLIENTS_TIMEOUT
 from yclients_credentials import YClientsCredentialValue, load_credentials_for_companies_async
 
 YCLIENTS_BASE_URL = 'https://api.yclients.com/api/v1'
 MAX_CONCURRENT_ANALYTICS_REQUESTS = 4
 
+# Backward-compatible test hooks. Runtime analytics credentials are loaded from
+# system.yclients_credentials.
+PARTNER_TOKEN = ''
+LOGIN = ''
+PASSWORD = ''
+USER_LOGIN = ''
+USER_PASSWORD = ''
+
 
 class YClientsAnalyticsError(RuntimeError):
     """Raised when exact appointment analytics cannot be loaded or validated."""
-
-
-def _required_credentials() -> YClientsCredentialValue:
-    credentials = (PARTNER_TOKEN.strip(), LOGIN.strip(), PASSWORD.strip())
-    if not all(credentials):
-        raise YClientsAnalyticsError('YClients credentials are not configured')
-    return YClientsCredentialValue(
-        id=None,
-        title='Environment credentials',
-        partner_token=credentials[0],
-        login=credentials[1],
-        password=credentials[2],
-        is_fallback=True,
-    )
 
 
 def _coerce_count(record_stats: dict[str, Any], field: str) -> int:
@@ -91,13 +80,14 @@ async def _authenticate(client: httpx.AsyncClient, credentials: YClientsCredenti
 def _group_company_credentials(
     credential_by_company: dict[int, YClientsCredentialValue],
     company_ids: list[int],
-    fallback: YClientsCredentialValue | None,
 ) -> dict[int | None, tuple[YClientsCredentialValue, list[int]]]:
     groups: dict[int | None, tuple[YClientsCredentialValue, list[int]]] = {}
     for company_id in company_ids:
-        credentials = credential_by_company.get(company_id) or fallback
+        credentials = credential_by_company.get(company_id)
         if credentials is None:
-            raise YClientsAnalyticsError('YClients credentials are not configured')
+            raise YClientsAnalyticsError(
+                f'No YClients credentials configured for company {company_id}'
+            )
         key = credentials.id if credentials.id is not None else None
         if key not in groups:
             groups[key] = (credentials, [])
@@ -117,12 +107,10 @@ async def fetch_record_stats(
     if not normalized_company_ids:
         return {'completed': 0, 'incomplete': 0, 'cancelled': 0, 'total': 0}
 
-    if db is not None:
-        credential_by_company, fallback = await load_credentials_for_companies_async(db, normalized_company_ids)
-    else:
-        fallback = _required_credentials()
-        credential_by_company = {company_id: fallback for company_id in normalized_company_ids}
-    credential_groups = _group_company_credentials(credential_by_company, normalized_company_ids, fallback)
+    if db is None:
+        raise YClientsAnalyticsError('Database session is required to resolve YClients credentials')
+    credential_by_company = await load_credentials_for_companies_async(db, normalized_company_ids)
+    credential_groups = _group_company_credentials(credential_by_company, normalized_company_ids)
 
     timeout = httpx.Timeout(max(1.0, float(YCLIENTS_TIMEOUT)))
     try:

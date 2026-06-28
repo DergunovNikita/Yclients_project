@@ -93,3 +93,32 @@ def query_scope(ctx: AccessContext, requested_company_id: int | None) -> dict[st
         'branch_ids': branch_ids,
         'force_allowed': force_allowed,
     }
+
+
+def require_tenant_context(ctx: AccessContext, *, allow_full_access: bool = False) -> int | None:
+    """Return active tenant id for tenant-scoped endpoints."""
+    if ctx.full_access:
+        if allow_full_access:
+            return None
+        raise HTTPException(status_code=400, detail='Tenant scope is required')
+    if ctx.is_platform_admin and ctx.portal_account_id is None:
+        raise HTTPException(status_code=400, detail='X-Portal-Account-Id is required')
+    if ctx.portal_account_id is None:
+        raise HTTPException(status_code=403, detail='Tenant account is required')
+    return ctx.portal_account_id
+
+
+def require_sync_company_ids(ctx: AccessContext, requested_company_ids: list[int] | None = None) -> list[int] | None:
+    """Validate optional sync branch scope against the current auth context."""
+    requested = [int(item) for item in dict.fromkeys(requested_company_ids or [])]
+    if ctx.full_access:
+        return requested or None
+    allowed = ctx.company_ids or []
+    if not allowed:
+        raise HTTPException(status_code=403, detail='No branch access assigned')
+    if requested:
+        forbidden = sorted(set(requested) - set(allowed))
+        if forbidden:
+            raise HTTPException(status_code=403, detail=f'Branches outside scope: {forbidden}')
+        return requested
+    return allowed

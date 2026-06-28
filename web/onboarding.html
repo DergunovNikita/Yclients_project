@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Подключение YClients — Portal</title>
+  <link rel="stylesheet" href="/src/auth.css" />
+  <link rel="stylesheet" href="/src/onboarding.css" />
+</head>
+<body class="auth-page auth-page--onboarding">
+  <div class="auth-layout">
+    <aside class="auth-brand">
+      <div class="auth-brand__logo">
+        <span class="auth-brand__mark">Y</span>
+        <span>YClients Portal</span>
+      </div>
+      <div class="auth-brand__content">
+        <h2>Подключите YClients</h2>
+        <p>3 шага: подтвердите email, добавьте токены доступа, выберите филиалы для синхронизации.</p>
+      </div>
+      <ol class="onboarding-progress" id="progress">
+        <li data-step="pending_verification">Подтверждение email</li>
+        <li data-step="pending_credentials">YClients API</li>
+        <li data-step="pending_branches">Выбор филиалов</li>
+      </ol>
+    </aside>
+
+    <main class="auth-panel">
+      <section class="auth-card auth-card--wide">
+        <div id="step-loading" class="onboarding-loading">Загружаем состояние…</div>
+
+        <div id="step-verification" hidden>
+          <span class="auth-card__eyebrow">Шаг 1 из 3</span>
+          <h1>Подтвердите email</h1>
+          <p class="auth-subhead">
+            Мы отправили письмо со ссылкой подтверждения. Пройдите по ней и обновите страницу. Если письма нет — запросите отправку заново.
+          </p>
+          <div class="alert success" id="resend-success" hidden></div>
+          <div class="alert error" id="resend-error" hidden></div>
+          <button class="btn btn--secondary" id="resend-btn">Отправить письмо повторно</button>
+          <button class="btn btn--ghost" id="refresh-state">Я подтвердил, обновить статус</button>
+        </div>
+
+        <div id="step-credentials" hidden>
+          <span class="auth-card__eyebrow">Шаг 2 из 3</span>
+          <h1>Токены доступа к YClients</h1>
+          <p class="auth-subhead">
+            Создайте партнёрский ключ и логин/пароль в админке YClients. Мы зашифруем их и используем только для синхронизации.
+          </p>
+          <div class="alert error" id="creds-error" hidden></div>
+          <form class="auth-form" id="creds-form">
+            <div class="field">
+              <label for="title">Название интеграции</label>
+              <input type="text" id="title" value="YClients integration" maxlength="255" />
+            </div>
+            <div class="field">
+              <label for="partner_token">Partner token</label>
+              <input type="text" id="partner_token" required autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="login">Логин</label>
+              <input type="text" id="login" required autocomplete="username" />
+            </div>
+            <div class="field">
+              <label for="password">Пароль</label>
+              <input type="password" id="password" required autocomplete="current-password" />
+            </div>
+            <button type="submit" class="btn btn--primary" id="creds-submit">Проверить и сохранить</button>
+          </form>
+        </div>
+
+        <div id="step-branches" hidden>
+          <span class="auth-card__eyebrow">Шаг 3 из 3</span>
+          <h1>Выберите филиалы</h1>
+          <p class="auth-subhead">Отметьте филиалы, по которым мы будем тянуть данные. Можно вернуться к настройке позже.</p>
+          <div class="alert error" id="branches-error" hidden></div>
+          <form class="auth-form" id="branches-form">
+            <div id="branches-list" class="onboarding-branches"></div>
+            <button type="submit" class="btn btn--primary" id="branches-submit" disabled>Завершить настройку</button>
+          </form>
+        </div>
+
+        <div id="step-done" hidden>
+          <span class="auth-card__eyebrow">Готово</span>
+          <h1>Настройка завершена</h1>
+          <p class="auth-subhead">Синхронизация запустится автоматически в ближайший цикл. Перейдите в кабинет, чтобы посмотреть прогресс.</p>
+          <a class="btn btn--primary" href="/">Открыть кабинет</a>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/src/onboarding.js"></script>
+</body>
+</html>
