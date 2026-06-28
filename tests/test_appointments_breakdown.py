@@ -119,6 +119,42 @@ async def test_appointment_breakdown_handles_source_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_appointment_breakdown_falls_back_to_local_appointments(async_session, monkeypatch):
+    async_session.add(Group(id=1, title='G'))
+    async_session.add(Company(id=1, title='One', group_id=1))
+    async_session.add(Staff(id=1, name='Master', company_id=1, fired=0))
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2026, 6, 10), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, date=date(2026, 6, 10), attendance=-1),
+        Appointment(id=3, company_id=1, staff_id=1, date=date(2026, 6, 10), attendance=2),
+        Appointment(id=4, company_id=1, staff_id=1, date=date(2026, 7, 10), attendance=1),
+    ])
+    await async_session.commit()
+
+    async def fail_record_stats(*args, **kwargs):
+        raise dashboard_service.yclients_analytics.YClientsAnalyticsError('timeout')
+
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', fail_record_stats)
+    data = await _fetch_appointments_breakdown(
+        async_session,
+        [1],
+        date(2026, 6, 1),
+        date(2026, 6, 30),
+        None,
+    )
+
+    assert data['source_status'] == 'local'
+    assert data['total'] == 3
+    assert data['completed'] == 1
+    assert data['cancelled'] == 1
+    assert data['incomplete'] == 1
+    assert data['attended'] == 1
+    assert data['pending'] == 1
+    assert data['shares_total_pct'] == 100
+
+
+@pytest.mark.asyncio
 async def test_appointment_scope_uses_all_branches_or_staff_company(async_session):
     async_session.add(Group(id=1, title='G'))
     async_session.add_all([

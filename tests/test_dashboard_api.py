@@ -561,8 +561,12 @@ async def test_dashboard_summary_revenue_and_change(async_session):
     data = r.json()['data']
     assert data['revenue']['total'] == 1000.0
     assert data['revenue']['change_pct'] == 100.0
-    assert data['appointments_breakdown']['source_status'] == 'unavailable'
-    assert data['appointments_breakdown']['attended'] is None
+    assert data['appointments_breakdown']['source_status'] == 'local'
+    assert data['appointments_breakdown']['total'] == 1
+    assert data['appointments_breakdown']['completed'] == 1
+    assert data['appointments_breakdown']['cancelled'] == 0
+    assert data['appointments_breakdown']['incomplete'] == 0
+    assert data['appointments_breakdown']['attended'] == 1
 
 
 @pytest.mark.asyncio

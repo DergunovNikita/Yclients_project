@@ -550,7 +550,8 @@ function renderVisitMetrics(summary) {
 
 function renderAppointmentsMetrics(summary) {
   const breakdown = summary.appointments_breakdown || {};
-  const ready = breakdown.source_status === 'ready';
+  const exact = breakdown.source_status === 'ready';
+  const ready = exact || breakdown.source_status === 'local';
   const metricValue = (value) => (ready ? formatNumber(value) : 'Нет данных');
   const metricShare = (value) => (ready ? `${formatNumber(value)}% от общего` : '');
   const cards = [
@@ -582,9 +583,9 @@ function renderAppointmentsMetrics(summary) {
 
   renderCards(els.appointmentsMetrics, cards);
   els.appointmentsWarning.textContent = ready
-    ? ''
+    ? exact ? '' : 'Точные метрики YClients временно недоступны, показана локальная оценка по синхронизированным записям.'
     : 'Точные метрики записей временно недоступны в YCLIENTS.';
-  els.appointmentsWarning.classList.toggle('visible', !ready);
+  els.appointmentsWarning.classList.toggle('visible', !exact);
 }
 
 function destroyChart(name) {
@@ -1791,7 +1792,7 @@ function renderBundle(bundle) {
   els.periodLabel.textContent = `${summary.period.start} .. ${summary.period.end}`;
   els.revenueMeta.textContent = `${daily.length} дней`;
   const appointmentsBreakdown = summary.appointments_breakdown || {};
-  els.appointmentsMeta.textContent = appointmentsBreakdown.source_status === 'ready'
+  els.appointmentsMeta.textContent = appointmentsBreakdown.source_status === 'ready' || appointmentsBreakdown.source_status === 'local'
     ? `${formatNumber(appointmentsBreakdown.total)} записей`
     : 'Нет точных данных';
   els.servicesMeta.textContent = `${services.length} услуг`;

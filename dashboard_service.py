@@ -188,7 +188,7 @@ def _unavailable_appointments_breakdown() -> dict[str, Any]:
     }
 
 
-def _ready_appointments_breakdown(counts: dict[str, int]) -> dict[str, Any]:
+def _ready_appointments_breakdown(counts: dict[str, int], source_status: str = 'ready') -> dict[str, Any]:
     if any(counts[field] < 0 for field in ('total', 'cancelled', 'completed', 'incomplete')):
         return _unavailable_appointments_breakdown()
     if counts['cancelled'] + counts['completed'] + counts['incomplete'] != counts['total']:
@@ -197,7 +197,7 @@ def _ready_appointments_breakdown(counts: dict[str, int]) -> dict[str, Any]:
     shares = _appointment_shares(counts)
     shares_total = sum(shares.values()) if counts['total'] else 0
     return {
-        'source_status': 'ready',
+        'source_status': source_status,
         **counts,
         'total_share_pct': 100 if counts['total'] else 0,
         'cancelled_share_pct': shares['cancelled'],
@@ -207,6 +207,66 @@ def _ready_appointments_breakdown(counts: dict[str, int]) -> dict[str, Any]:
         'attended': counts['completed'],
         'pending': counts['incomplete'],
     }
+
+
+async def _local_appointments_breakdown(
+    db: AsyncSession,
+    company_ids: list[int],
+    start: date,
+    end: date,
+    staff_id: Optional[int] = None,
+) -> dict[str, Any]:
+    if not company_ids:
+        return _ready_appointments_breakdown(
+            {'total': 0, 'cancelled': 0, 'completed': 0, 'incomplete': 0},
+            source_status='local',
+        )
+    filters = [
+        Appointment.company_id.in_(company_ids),
+        Appointment.date >= start,
+        Appointment.date <= end,
+    ]
+    if staff_id is not None:
+        filters.append(Appointment.staff_id == staff_id)
+    row = (
+        await db.execute(
+            select(
+                func.count(Appointment.id).label('total'),
+                func.coalesce(
+                    func.sum(case((Appointment.attendance == -1, 1), else_=0)),
+                    0,
+                ).label('cancelled'),
+                func.coalesce(
+                    func.sum(case((Appointment.attendance == COMPLETED_ATTENDANCE, 1), else_=0)),
+                    0,
+                ).label('completed'),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                and_(
+                                    Appointment.attendance != COMPLETED_ATTENDANCE,
+                                    Appointment.attendance != -1,
+                                ),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label('incomplete'),
+            ).where(*filters)
+        )
+    ).one()
+    return _ready_appointments_breakdown(
+        {
+            'total': int(row.total or 0),
+            'cancelled': int(row.cancelled or 0),
+            'completed': int(row.completed or 0),
+            'incomplete': int(row.incomplete or 0),
+        },
+        source_status='local',
+    )
 
 
 async def _appointment_company_ids(
@@ -266,6 +326,8 @@ async def _fetch_appointments_breakdown(
             except TypeError:
                 counts = await yclients_analytics.fetch_record_stats(company_ids, start, end, staff_id)
     except yclients_analytics.YClientsAnalyticsError:
+        if db is not None:
+            return await _local_appointments_breakdown(db, company_ids, start, end, staff_id)
         return _unavailable_appointments_breakdown()
     return _ready_appointments_breakdown(counts)
 
