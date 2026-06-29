@@ -10,15 +10,10 @@ const els = {
   loading: document.getElementById('step-loading'),
   progress: document.getElementById('progress'),
   steps: {
-    pending_verification: document.getElementById('step-verification'),
     pending_credentials: document.getElementById('step-credentials'),
     pending_branches: document.getElementById('step-branches'),
     done: document.getElementById('step-done'),
   },
-  resendBtn: document.getElementById('resend-btn'),
-  resendSuccess: document.getElementById('resend-success'),
-  resendError: document.getElementById('resend-error'),
-  refreshState: document.getElementById('refresh-state'),
   credsForm: document.getElementById('creds-form'),
   credsSubmit: document.getElementById('creds-submit'),
   credsError: document.getElementById('creds-error'),
@@ -50,7 +45,7 @@ function showStep(step) {
   });
 }
 
-const STEP_ORDER = ['pending_verification', 'pending_credentials', 'pending_branches', 'done'];
+const STEP_ORDER = ['pending_credentials', 'pending_branches', 'done'];
 function isStepBefore(a, b) {
   return STEP_ORDER.indexOf(a) < STEP_ORDER.indexOf(b);
 }
@@ -120,26 +115,6 @@ async function refreshState() {
     els.loading.textContent = `Ошибка: ${error.message}`;
   }
 }
-
-els.resendBtn.addEventListener('click', async () => {
-  clearAlert(els.resendSuccess);
-  clearAlert(els.resendError);
-  els.resendBtn.disabled = true;
-  try {
-    await authFetch('/auth/resend-verification', {
-      method: 'POST',
-      body: JSON.stringify({ email: currentUser.email }),
-    });
-    els.resendSuccess.textContent = 'Письмо отправлено повторно. Проверьте почту.';
-    els.resendSuccess.hidden = false;
-  } catch (error) {
-    showError(els.resendError, error.message);
-  } finally {
-    els.resendBtn.disabled = false;
-  }
-});
-
-els.refreshState.addEventListener('click', refreshState);
 
 els.credsForm.addEventListener('submit', async (event) => {
   event.preventDefault();

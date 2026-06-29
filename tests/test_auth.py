@@ -461,12 +461,8 @@ async def test_onboarding_credentials_rejects_branch_owned_by_other_tenant(auth_
 
 
 @pytest.mark.asyncio
-async def test_register_requires_verification_before_login(auth_db, monkeypatch):
+async def test_register_allows_login_without_email_verification(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    async def _noop_send(_db, _user):
-        return None
-
-    monkeypatch.setattr('auth_service.send_verification_email', _noop_send)
 
     async def override_db():
         yield auth_db
@@ -480,12 +476,13 @@ async def test_register_requires_verification_before_login(auth_db, monkeypatch)
         )
         assert created.status_code == 200
         login = await client.post('/auth/login', json={'email': 'newuser@example.com', 'password': 'NewUser123!'})
-        assert login.status_code == 403
+        assert login.status_code == 200
 
     created_user = (
         await auth_db.execute(select(PortalUser).where(PortalUser.email == 'newuser@example.com'))
     ).scalar_one()
     assert created_user.role == 'owner'
+    assert created_user.email_verified_at is not None
     assert created_user.portal_account_id is not None
     created_account = await auth_db.get(PortalAccount, created_user.portal_account_id)
     assert created_account is not None

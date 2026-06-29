@@ -258,15 +258,15 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_async_d
         full_name=body.full_name,
         role='owner',
         is_active=True,
+        email_verified_at=datetime.utcnow(),
         created_at=datetime.utcnow(),
     )
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    await send_verification_email(db, user)
     return {
         'success': True,
-        'message': 'Регистрация успешна. Проверьте почту и перейдите по ссылке для подтверждения аккаунта.',
+        'message': 'Регистрация успешна. Можно войти и подключить источник данных.',
     }
 
 
@@ -286,8 +286,6 @@ async def login(
     if user is None or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail='Invalid email or password')
     if not user_can_login(user):
-        if user.email_verified_at is None:
-            raise HTTPException(status_code=403, detail='Email not verified')
         raise HTTPException(status_code=403, detail='Account disabled')
 
     user.last_login_at = datetime.utcnow()

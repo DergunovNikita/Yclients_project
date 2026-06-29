@@ -17,7 +17,6 @@ from config import (
     APP_PUBLIC_URL,
     AUTH_CONSOLE_EMAIL,
     AUTH_EMAIL_RESEND_COOLDOWN_SECONDS,
-    AUTH_EMAIL_VERIFY_REQUIRED,
     AUTH_JWT_EXPIRE_MINUTES,
     AUTH_JWT_SECRET,
     SMTP_FROM,
@@ -154,8 +153,6 @@ async def set_user_branches(db: AsyncSession, user_id: int, company_ids: list[in
 
 def user_can_login(user: PortalUser) -> bool:
     if not user.is_active:
-        return False
-    if AUTH_EMAIL_VERIFY_REQUIRED and user.email_verified_at is None:
         return False
     return True
 

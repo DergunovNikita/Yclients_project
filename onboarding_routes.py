@@ -1,9 +1,8 @@
 """Onboarding wizard for freshly-registered owners.
 
-Three logical steps:
-  1. verify email  (existing /auth/verify-email)
-  2. add YClients credentials (POST /onboarding/credentials → returns company preview)
-  3. pick branches            (POST /onboarding/branches → marks onboarding_completed_at)
+Two logical steps:
+  1. add YClients credentials (POST /onboarding/credentials -> returns company preview)
+  2. pick branches            (POST /onboarding/branches -> marks onboarding_completed_at)
 """
 
 from __future__ import annotations
@@ -64,8 +63,6 @@ async def _account_branches(db: AsyncSession, portal_account_id: int) -> list[in
 
 
 def _step_from_state(user: PortalUser, has_credentials: bool, has_branches: bool) -> str:
-    if user.email_verified_at is None:
-        return 'pending_verification'
     if not has_credentials:
         return 'pending_credentials'
     if not has_branches:
@@ -110,8 +107,6 @@ async def onboarding_credentials(
     db: AsyncSession = Depends(get_async_db),
 ):
     _require_owner(user)
-    if user.email_verified_at is None:
-        raise HTTPException(status_code=400, detail='Verify email first')
 
     source_type = normalize_source_type(body.source_type)
     adapter = adapter_from_payload(

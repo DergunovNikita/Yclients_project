@@ -16,10 +16,9 @@
       </div>
       <div class="auth-brand__content">
         <h2>Подключите YClients</h2>
-        <p>3 шага: подтвердите email, добавьте токены доступа, выберите филиалы для синхронизации.</p>
+        <p>2 шага: добавьте токены доступа и выберите филиалы для синхронизации.</p>
       </div>
       <ol class="onboarding-progress" id="progress">
-        <li data-step="pending_verification">Подтверждение email</li>
         <li data-step="pending_credentials">YClients API</li>
         <li data-step="pending_branches">Выбор филиалов</li>
       </ol>
@@ -29,20 +28,8 @@
       <section class="auth-card auth-card--wide">
         <div id="step-loading" class="onboarding-loading">Загружаем состояние…</div>
 
-        <div id="step-verification" hidden>
-          <span class="auth-card__eyebrow">Шаг 1 из 3</span>
-          <h1>Подтвердите email</h1>
-          <p class="auth-subhead">
-            Мы отправили письмо со ссылкой подтверждения. Пройдите по ней и обновите страницу. Если письма нет — запросите отправку заново.
-          </p>
-          <div class="alert success" id="resend-success" hidden></div>
-          <div class="alert error" id="resend-error" hidden></div>
-          <button class="btn btn--secondary" id="resend-btn">Отправить письмо повторно</button>
-          <button class="btn btn--ghost" id="refresh-state">Я подтвердил, обновить статус</button>
-        </div>
-
         <div id="step-credentials" hidden>
-          <span class="auth-card__eyebrow">Шаг 2 из 3</span>
+          <span class="auth-card__eyebrow">Шаг 1 из 2</span>
           <h1>Токены доступа к YClients</h1>
           <p class="auth-subhead">
             Создайте партнёрский ключ и логин/пароль в админке YClients. Мы зашифруем их и используем только для синхронизации.
@@ -70,7 +57,7 @@
         </div>
 
         <div id="step-branches" hidden>
-          <span class="auth-card__eyebrow">Шаг 3 из 3</span>
+          <span class="auth-card__eyebrow">Шаг 2 из 2</span>
           <h1>Выберите филиалы</h1>
           <p class="auth-subhead">Отметьте филиалы, по которым мы будем тянуть данные. Можно вернуться к настройке позже.</p>
           <div class="alert error" id="branches-error" hidden></div>
