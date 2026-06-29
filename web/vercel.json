@@ -6,6 +6,7 @@
   "rewrites": [
     { "source": "/auth/:path*", "destination": "/api/auth/:path*" },
     { "source": "/dashboard/:path*", "destination": "/api/dashboard/:path*" },
+    { "source": "/settings", "destination": "/settings.html" },
     { "source": "/reports", "destination": "/index.html" },
     { "source": "/reports/:path*", "destination": "/index.html" }
   ]
