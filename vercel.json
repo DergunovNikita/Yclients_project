@@ -4,7 +4,8 @@
   "outputDirectory": "web/dist",
   "framework": null,
   "rewrites": [
-    { "source": "/auth/:path*", "destination": "/api/auth/:path*" },
+    { "source": "/auth/:path*", "destination": "/api/auth-proxy?path=:path*" },
+    { "source": "/api/auth/:path*", "destination": "/api/auth-proxy?path=:path*" },
     { "source": "/dashboard/:path*", "destination": "/api/dashboard/:path*" },
     { "source": "/settings", "destination": "/settings.html" },
     { "source": "/reports", "destination": "/index.html" },
