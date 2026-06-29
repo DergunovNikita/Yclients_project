@@ -5,7 +5,7 @@ function buildTargetUrl(req) {
   const path = (incoming.searchParams.get('path') || '').replace(/^\/+/, '');
   incoming.searchParams.delete('path');
 
-  const target = new URL(`/auth/${path}`, vmOrigin());
+  const target = new URL(`/dashboard/auth/${path}`, vmOrigin());
   target.search = incoming.searchParams.toString();
   return target;
 }
