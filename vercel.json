@@ -3,6 +3,9 @@
   "buildCommand": "cd web && npm run build",
   "outputDirectory": "web/dist",
   "framework": null,
+  "functions": {
+    "api/auth-proxy.js": { "maxDuration": 30 }
+  },
   "rewrites": [
     { "source": "/auth/:path*", "destination": "/api/auth-proxy?path=:path*" },
     { "source": "/api/auth/:path*", "destination": "/api/auth-proxy?path=:path*" },
