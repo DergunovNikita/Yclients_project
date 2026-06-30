@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dashboard_service import (
     COMPLETED_ATTENDANCE,
+    _business_staff_id_condition,
+    business_appointment_condition,
     fetch_extra_services,
     fetch_appointments_breakdown,
     fetch_plan_fact,
@@ -231,7 +233,7 @@ TITLE_OVERRIDES = {
     'lost_clients_list': 'Потерянные клиенты',
     'market_benchmarks': 'Рыночные бенчмарки',
     'marketing_funnel': 'Воронка новых клиентов',
-    'master_avg_check': 'Средний чек мастеров',
+    'master_avg_check': 'Выручка / завершенная запись по мастерам',
     'master_motivation': 'Мотивация мастеров',
     'masters_rating': 'Рейтинг мастеров',
     'mind_index': 'MInd индекс мастеров',
@@ -470,6 +472,8 @@ async def fetch_report_data(
     compare_start: date | None = None,
     compare_end: date | None = None,
     compare_staff_id: int | None = None,
+    start_year: int = 2022,
+    end_year: int = 2026,
     allowed_company_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     if report_id not in REPORT_REGISTRY:
@@ -482,7 +486,7 @@ async def fetch_report_data(
         raise ValueError('compare_start_date must be <= compare_end_date')
 
     data = await _fetch_report_payload(
-        db, report_id, start, end, company_id, staff_id, granularity, allowed_company_ids
+        db, report_id, start, end, company_id, staff_id, granularity, allowed_company_ids, start_year, end_year
     )
     if data['source_status'] == 'ready' and ((compare_start and compare_end) or compare_staff_id):
         cmp_start = compare_start or start
@@ -497,12 +501,15 @@ async def fetch_report_data(
             cmp_staff_id,
             granularity,
             allowed_company_ids,
+            start_year,
+            end_year,
         )
         data['comparison'] = {
             'period': compare_data['period'],
             'staff_id': cmp_staff_id,
             'source_status': compare_data['source_status'],
             'cards': compare_data.get('cards', []),
+            'rows': _comparison_rows(data.get('cards', []), compare_data.get('cards', [])),
             'raw': compare_data.get('raw', {}),
         }
     return data
@@ -517,6 +524,8 @@ async def _fetch_report_payload(
     staff_id: int | None,
     granularity: str,
     allowed_company_ids: list[int] | None,
+    start_year: int = 2022,
+    end_year: int = 2026,
 ) -> dict[str, Any]:
     definition = REPORT_REGISTRY[report_id]
     base = {
@@ -552,7 +561,9 @@ async def _fetch_report_payload(
     if report_id in BOOKING_REPORTS:
         return await _operations_payload(db, base, start, end, company_id, staff_id, granularity, allowed_company_ids)
     if report_id == 'year_over_year':
-        return await _year_over_year_payload(db, base, start, end, company_id, staff_id, allowed_company_ids)
+        return await _year_over_year_payload(
+            db, base, start, end, company_id, staff_id, allowed_company_ids, start_year, end_year
+        )
     return await _financial_payload(db, base, start, end, company_id, staff_id, granularity, allowed_company_ids)
 
 
@@ -613,7 +624,11 @@ def _appointment_conditions(
     attended_only: bool = False,
     allowed_company_ids: list[int] | None = None,
 ) -> list[Any]:
-    conditions = [Appointment.date >= start, Appointment.date <= end]
+    conditions = [
+        Appointment.date >= start,
+        Appointment.date <= end,
+        business_appointment_condition(),
+    ]
     if attended_only:
         conditions.append(Appointment.attendance == COMPLETED_ATTENDANCE)
     if company_id is not None:
@@ -658,30 +673,46 @@ def _pct_change(current: float, previous: float) -> float | None:
     return round(100.0 * (current - previous) / previous, 2)
 
 
+def _comparison_rows(current_cards: list[dict[str, Any]], compare_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compare_by_label = {card.get('label'): card for card in compare_cards}
+    rows = []
+    for card in current_cards:
+        label = card.get('label')
+        compare_card = compare_by_label.get(label)
+        current_value = card.get('value')
+        compare_value = compare_card.get('value') if compare_card else None
+        delta = None
+        delta_pct = None
+        if isinstance(current_value, (int, float)) and isinstance(compare_value, (int, float)):
+            delta = current_value - compare_value
+            delta_pct = _pct_change(float(current_value), float(compare_value))
+        rows.append({
+            'label': label,
+            'format': card.get('format') or (compare_card.get('format') if compare_card else None),
+            'current': current_value,
+            'compare': compare_value,
+            'delta': delta,
+            'delta_pct': delta_pct,
+        })
+    return rows
+
+
 def _safe_date(year: int, month: int, day: int) -> date:
     return date(year, month, min(day, monthrange(year, month)[1]))
 
 
-def _year_periods(start: date, end: date) -> list[dict[str, Any]]:
-    if start.year == end.year:
-        return [
-            {
-                'year': start.year - 1,
-                'start': _safe_date(start.year - 1, start.month, start.day),
-                'end': _safe_date(end.year - 1, end.month, end.day),
-            },
-            {'year': start.year, 'start': start, 'end': end},
-        ]
-
+def _year_periods(start: date, end: date, start_year: int, end_year: int) -> list[dict[str, Any]]:
+    if start.year != end.year:
+        raise ValueError('year_over_year requires start_date and end_date within one calendar year')
+    if start_year > end_year:
+        raise ValueError('start_year must be <= end_year')
     periods = []
-    for year in range(start.year, end.year + 1):
-        period_start = date(year, 1, 1)
-        period_end = date(year, 12, 31)
-        if year == start.year:
-            period_start = start
-        if year == end.year:
-            period_end = end
-        periods.append({'year': year, 'start': period_start, 'end': period_end})
+    for year in range(start_year, end_year + 1):
+        periods.append({
+            'year': year,
+            'start': _safe_date(year, start.month, start.day),
+            'end': _safe_date(year, end.month, end.day),
+        })
     return periods
 
 
@@ -710,10 +741,16 @@ def _year_row_from_summary(year: int, period_start: date, period_end: date, summ
     }
 
 
-def _monthly_yoy_rows(year: int, daily: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    monthly = {month: {'revenue': 0.0, 'appointments': 0.0} for month in range(1, 13)}
+def _month_numbers_for_range(start: date, end: date) -> list[int]:
+    return list(range(start.month, end.month + 1))
+
+
+def _monthly_yoy_rows(year: int, daily: list[dict[str, Any]], months: list[int]) -> list[dict[str, Any]]:
+    monthly = {month: {'revenue': 0.0, 'appointments': 0.0} for month in months}
     for row in _aggregate_daily(daily, 'month'):
         month = date.fromisoformat(row['period']).month
+        if month not in monthly:
+            continue
         monthly[month]['revenue'] += float(row.get('revenue') or 0)
         monthly[month]['appointments'] += float(row.get('appointments') or 0)
     return [
@@ -752,8 +789,11 @@ async def _year_over_year_payload(
     company_id: int | None,
     staff_id: int | None,
     allowed_company_ids: list[int] | None,
+    start_year: int = 2022,
+    end_year: int = 2026,
 ) -> dict[str, Any]:
-    periods = _year_periods(start, end)
+    periods = _year_periods(start, end, start_year, end_year)
+    month_numbers = _month_numbers_for_range(start, end)
     year_rows = []
     monthly_by_year: dict[int, list[dict[str, Any]]] = {}
 
@@ -778,12 +818,12 @@ async def _year_over_year_payload(
             staff_id,
             allowed_company_ids=allowed_company_ids,
         )
-        monthly_by_year[year] = _monthly_yoy_rows(year, daily)
+        monthly_by_year[year] = _monthly_yoy_rows(year, daily, month_numbers)
 
     year_rows = _with_year_changes(year_rows)
     latest = year_rows[-1] if year_rows else {}
     previous = year_rows[-2] if len(year_rows) > 1 else {}
-    months = [f'{month:02d}' for month in range(1, 13)]
+    months = [f'{month:02d}' for month in month_numbers]
     monthly_rows = [
         row
         for year in sorted(monthly_by_year)
@@ -828,6 +868,7 @@ async def _year_over_year_payload(
                     'label': str(year),
                     'data': [row['revenue'] for row in monthly_by_year[year]],
                     'format': MONEY_FORMAT,
+                    'fill': False,
                 }
                 for year in sorted(monthly_by_year)
             ],
@@ -842,6 +883,7 @@ async def _year_over_year_payload(
                     'label': str(year),
                     'data': [row['appointments'] for row in monthly_by_year[year]],
                     'format': NUMBER_FORMAT,
+                    'fill': False,
                 }
                 for year in sorted(monthly_by_year)
             ],
@@ -888,6 +930,9 @@ async def _year_over_year_payload(
         'months': monthly_rows,
         'latest_year': latest.get('year'),
         'previous_year': previous.get('year'),
+        'start_year': start_year,
+        'end_year': end_year,
+        'months_in_scope': months,
         'service_detail_excluded': True,
     }
     return base
@@ -1118,7 +1163,7 @@ async def _staff_payload(
         _card('Сотрудников в отчете', len(rows), NUMBER_FORMAT),
         _card('Завершено записей', total_completed, NUMBER_FORMAT),
         _card('Выручка', total_revenue, MONEY_FORMAT),
-        _card('Средний чек', total_revenue / total_completed if total_completed else 0, MONEY_FORMAT),
+        _card('Выручка / завершенная запись', total_revenue / total_completed if total_completed else 0, MONEY_FORMAT),
     ]
     base['charts'] = [
         _chart(
@@ -1147,7 +1192,7 @@ async def _staff_payload(
                 ('appointments', 'Доступные записи', NUMBER_FORMAT),
                 ('clients', 'Клиентов', NUMBER_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
-                ('avg_check', 'Средний чек', MONEY_FORMAT),
+                ('avg_check', 'Выручка / завершенная запись', MONEY_FORMAT),
             ],
             rows,
         )
@@ -1265,7 +1310,7 @@ async def _clients_payload(
                 ('last_visit', 'Последний визит', 'date'),
                 ('days_since_last_visit', 'Дней нет', NUMBER_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
-                ('avg_check', 'Средний чек', MONEY_FORMAT),
+                ('avg_check', 'Доход на визит', MONEY_FORMAT),
                 ('segment', 'Сегмент', 'text'),
             ],
             rows[:100],
@@ -1403,6 +1448,7 @@ async def _goods_payload(
         GoodTransaction.type_id == 1,
         func.date(GoodTransaction.date) >= start,
         func.date(GoodTransaction.date) <= end,
+        _business_staff_id_condition(GoodTransaction.master_id),
     ]
     if company_id is not None:
         conditions.append(GoodTransaction.company_id == company_id)

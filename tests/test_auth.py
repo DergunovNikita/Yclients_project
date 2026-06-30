@@ -240,6 +240,78 @@ async def test_platform_admin_filters_yclients_credentials_by_selected_tenant(au
 
 
 @pytest.mark.asyncio
+async def test_platform_admin_user_management_is_scoped_to_selected_tenant(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(Company(id=3, title='Branch 3', group_id=1))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
+    auth_db.add(
+        PortalUser(
+            id=53,
+            portal_account_id=None,
+            email='platform.users@example.com',
+            password_hash=hash_password('Platform12345!'),
+            full_name='Platform Admin',
+            role='platform_admin',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add(
+        PortalUser(
+            id=54,
+            portal_account_id=2,
+            email='tenant-b@example.com',
+            password_hash=hash_password('TenantB12345!'),
+            full_name='Tenant B',
+            role='manager',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            initial_password='TenantB12345!',
+            created_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add(PortalUserBranch(user_id=54, company_id=3))
+    auth_db.add(Staff(id=9101, name='Tenant A Staff', email='staff-a@example.com', company_id=1, fired=0))
+    auth_db.add(Staff(id=9102, name='Tenant B Staff', email='staff-b@example.com', company_id=3, fired=0))
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    token = create_access_token(53, 'platform_admin')
+    headers = {'Authorization': f'Bearer {token}'}
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        no_tenant = await client.get('/auth/admin/users', headers=headers)
+        tenant_a = await client.get('/auth/admin/users', headers={**headers, 'X-Portal-Account-Id': '1'})
+        tenant_b = await client.get('/auth/admin/users', headers={**headers, 'X-Portal-Account-Id': '2'})
+        tenant_b_passwords = await client.get(
+            '/auth/admin/initial-passwords',
+            headers={**headers, 'X-Portal-Account-Id': '2'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert no_tenant.status_code == 400
+    assert no_tenant.json()['detail'] == 'X-Portal-Account-Id is required'
+    assert tenant_a.status_code == 200
+    assert tenant_b.status_code == 200
+    tenant_a_emails = {item['email'] for item in tenant_a.json()['data']}
+    tenant_b_emails = {item['email'] for item in tenant_b.json()['data']}
+    assert 'admin@example.com' in tenant_a_emails
+    assert 'staff-a@example.com' in tenant_a_emails
+    assert 'tenant-b@example.com' not in tenant_a_emails
+    assert 'tenant-b@example.com' in tenant_b_emails
+    assert 'staff-b@example.com' in tenant_b_emails
+    assert 'admin@example.com' not in tenant_b_emails
+    assert tenant_b_passwords.status_code == 200
+    assert [row['email'] for row in tenant_b_passwords.json()['data']] == ['tenant-b@example.com']
+
+
+@pytest.mark.asyncio
 async def test_platform_admin_creates_tenant_users_in_selected_existing_tenant(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     platform_admin = PortalUser(
@@ -1002,9 +1074,17 @@ async def test_provision_staff_account(auth_db, monkeypatch):
             headers={'Authorization': f'Bearer {token}'},
             json={'role': 'viewer'},
         )
+        assert created.status_code == 409
+        assert 'Real email is required' in created.json()['detail']
+
+        created = await client.post(
+            '/auth/admin/staff/9003/create-account',
+            headers={'Authorization': f'Bearer {token}'},
+            json={'role': 'viewer', 'email': 'worker9003@example.com'},
+        )
         assert created.status_code == 200
         data = created.json()['data']
-        assert data['email'].endswith('@portal.local')
+        assert data['email'] == 'worker9003@example.com'
         assert data['user_id'] == 9003
         assert data['staff_id'] == 9003
         assert len(data['initial_password']) >= 8
@@ -1074,6 +1154,7 @@ async def test_branch_admin_sees_branch_initial_passwords_only(auth_db, monkeypa
         Staff(
             id=9004,
             name='Branch Worker',
+            email='branch.worker@example.com',
             position='master',
             company_id=1,
             fired=0,
@@ -1084,6 +1165,7 @@ async def test_branch_admin_sees_branch_initial_passwords_only(auth_db, monkeypa
         Staff(
             id=9005,
             name='Other Branch Worker',
+            email='other.branch.worker@example.com',
             position='master',
             company_id=2,
             fired=0,
@@ -1111,10 +1193,57 @@ async def test_branch_admin_sees_branch_initial_passwords_only(auth_db, monkeypa
         )
         assert branch_passwords.status_code == 200
         branch_emails = {row['email'] for row in branch_passwords.json()['data']}
-        assert any('9004' in email for email in branch_emails)
-        assert not any('9005' in email for email in branch_emails)
+        assert 'branch.worker@example.com' in branch_emails
+        assert 'other.branch.worker@example.com' not in branch_emails
 
     app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_mass_provision_requires_real_staff_email(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(
+        Staff(
+            id=9006,
+            name='Worker With Email',
+            email='worker.with.email@example.com',
+            position='master',
+            company_id=1,
+            fired=0,
+            bookable=True,
+        )
+    )
+    auth_db.add(
+        Staff(
+            id=9007,
+            name='Worker Without Email',
+            position='master',
+            company_id=1,
+            fired=0,
+            bookable=True,
+        )
+    )
+    await auth_db.commit()
+    token = create_access_token(1, 'owner')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/auth/admin/provision-accounts',
+            headers={'Authorization': f'Bearer {token}'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    data = response.json()['data']
+    assert data['created_count'] == 1
+    assert data['created'][0]['email'] == 'worker.with.email@example.com'
+    assert any('Real email is required for staff 9007' in error for error in data['errors'])
 
 
 @pytest.mark.asyncio

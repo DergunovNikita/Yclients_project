@@ -259,6 +259,10 @@ export function initReports({ clearError, showError, setApiState }) {
       params.compare_start_date = els.compareStart.value;
       params.compare_end_date = els.compareEnd.value;
     }
+    if (state.activeReportId === 'year_over_year') {
+      params.start_year = 2022;
+      params.end_year = 2026;
+    }
     return params;
   }
 

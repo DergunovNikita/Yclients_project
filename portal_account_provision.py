@@ -10,7 +10,13 @@ from datetime import datetime
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_service import generate_initial_password, hash_password, normalize_email, set_user_branches
+from auth_service import (
+    generate_initial_password,
+    hash_password,
+    is_deliverable_portal_email,
+    normalize_email,
+    set_user_branches,
+)
 from models import PortalBranch, PortalUser, Staff
 
 _CYRILLIC_TO_LATIN = {
@@ -59,23 +65,14 @@ async def _email_is_taken(db: AsyncSession, email: str) -> bool:
 
 
 async def _unique_staff_email(db: AsyncSession, staff: Staff, preferred: str | None = None) -> str:
-    if preferred:
-        email = normalize_email(preferred)
-        if not await _email_is_taken(db, email):
-            return email
-        raise ValueError(f'Email already registered: {email}')
-
-    base = staff_login_email(staff)
-    if not await _email_is_taken(db, base):
-        return base
-
-    local, domain = base.split('@', 1)
-    suffix = 2
-    while True:
-        candidate = normalize_email(f'{local}.{suffix}@{domain}')
-        if not await _email_is_taken(db, candidate):
-            return candidate
-        suffix += 1
+    email = normalize_email(preferred or staff.email or '')
+    if not email:
+        raise ValueError(f'Real email is required for staff {staff.id}')
+    if not is_deliverable_portal_email(email):
+        raise ValueError(f'Real email is required for staff {staff.id}')
+    if not await _email_is_taken(db, email):
+        return email
+    raise ValueError(f'Email already registered: {email}')
 
 
 async def _ensure_portal_user_id_sequence(db: AsyncSession) -> None:

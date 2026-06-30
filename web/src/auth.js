@@ -1,9 +1,11 @@
 const TOKEN_KEY = 'portal_access_token';
 const PORTAL_ACCOUNT_KEY = 'portal_account_id';
+const USER_EMAIL_KEY = 'portal_user_email';
 const CSRF_COOKIE_NAME = 'portal_csrf';
 const CSRF_HEADER_NAME = 'X-CSRF-Token';
 const apiBase = import.meta.env.VITE_API_BASE || '';
 let refreshInFlight = null;
+let reauthInFlight = null;
 
 export function resolveApiPath(path) {
   if (!apiBase) {
@@ -23,6 +25,17 @@ export function setToken(token) {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(PORTAL_ACCOUNT_KEY);
   }
+}
+
+function rememberUser(payload) {
+  const user = payload?.data?.user || (payload?.data?.email ? payload.data : null);
+  if (user?.email) {
+    localStorage.setItem(USER_EMAIL_KEY, String(user.email));
+  }
+}
+
+function cachedUserEmail() {
+  return localStorage.getItem(USER_EMAIL_KEY) || '';
 }
 
 export function getSelectedPortalAccountId() {
@@ -113,14 +126,130 @@ async function refreshSession() {
   }
   const response = await refreshInFlight;
   if (!response.ok) {
-    setToken('');
     throw new Error('Authentication required');
   }
   const payload = await parsePayload(response);
   if (payload?.data?.access_token) {
     setToken(payload.data.access_token);
   }
+  rememberUser(payload);
   return payload;
+}
+
+function ensureReauthModal() {
+  let modal = document.getElementById('reauth-modal');
+  if (modal) return modal;
+
+  const style = document.createElement('style');
+  style.textContent = `
+    .reauth-modal[hidden]{display:none!important}
+    .reauth-modal{position:fixed;inset:0;z-index:10000;display:grid;place-items:center;background:rgba(15,23,42,.42);padding:20px}
+    .reauth-modal__dialog{width:min(420px,100%);background:#fff;border:1px solid #e2e8f0;border-radius:8px;box-shadow:0 24px 80px rgba(15,23,42,.24);padding:22px}
+    .reauth-modal__dialog h2{margin:0 0 8px;font-size:20px;letter-spacing:0;color:#0f172a}
+    .reauth-modal__dialog p{margin:0 0 16px;color:#64748b;font-size:14px;line-height:1.45}
+    .reauth-modal__dialog label{display:grid;gap:6px;margin-bottom:12px;color:#334155;font-size:13px;font-weight:600}
+    .reauth-modal__dialog input{min-height:38px;border:1px solid #cbd5e1;border-radius:6px;padding:8px 10px;font:inherit}
+    .reauth-modal__error{margin:0 0 12px;color:#b91c1c;font-size:13px}
+    .reauth-modal__actions{display:flex;justify-content:flex-end;gap:10px;margin-top:16px}
+    .reauth-modal__actions button{min-height:38px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;padding:0 14px;font:inherit;cursor:pointer}
+    .reauth-modal__actions button[type=submit]{border-color:#0f766e;background:#0f766e;color:#fff}
+  `;
+  document.head.appendChild(style);
+
+  modal = document.createElement('div');
+  modal.id = 'reauth-modal';
+  modal.className = 'reauth-modal';
+  modal.hidden = true;
+  modal.innerHTML = `
+    <form class="reauth-modal__dialog" id="reauth-form">
+      <h2>Повторный вход</h2>
+      <p>Сессия истекла. Введите пароль, чтобы продолжить без потери текущего экрана.</p>
+      <div class="reauth-modal__error" id="reauth-error" hidden></div>
+      <label>Email<input type="email" id="reauth-email" autocomplete="username" readonly /></label>
+      <label>Пароль<input type="password" id="reauth-password" autocomplete="current-password" required /></label>
+      <div class="reauth-modal__actions">
+        <button type="button" id="reauth-cancel">Отмена</button>
+        <button type="submit" id="reauth-submit">Войти</button>
+      </div>
+    </form>
+  `;
+  document.body.appendChild(modal);
+  return modal;
+}
+
+async function promptReauth() {
+  if (typeof document === 'undefined') {
+    throw new Error('Authentication required');
+  }
+  if (reauthInFlight) return reauthInFlight;
+
+  reauthInFlight = new Promise((resolve, reject) => {
+    const modal = ensureReauthModal();
+    const form = modal.querySelector('#reauth-form');
+    const emailInput = modal.querySelector('#reauth-email');
+    const passwordInput = modal.querySelector('#reauth-password');
+    const errorEl = modal.querySelector('#reauth-error');
+    const submitBtn = modal.querySelector('#reauth-submit');
+    const cancelBtn = modal.querySelector('#reauth-cancel');
+    const email = cachedUserEmail();
+
+    emailInput.value = email;
+    emailInput.readOnly = Boolean(email);
+    passwordInput.value = '';
+    errorEl.hidden = true;
+    modal.hidden = false;
+    passwordInput.focus();
+
+    const cleanup = () => {
+      form.removeEventListener('submit', onSubmit);
+      cancelBtn.removeEventListener('click', onCancel);
+      modal.hidden = true;
+      submitBtn.disabled = false;
+      reauthInFlight = null;
+    };
+
+    const onCancel = () => {
+      cleanup();
+      reject(new Error('Authentication required'));
+    };
+
+    const onSubmit = async (event) => {
+      event.preventDefault();
+      errorEl.hidden = true;
+      submitBtn.disabled = true;
+      try {
+        const response = await fetch(resolveApiPath('/auth/login'), {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: emailInput.value.trim(),
+            password: passwordInput.value,
+          }),
+        });
+        const payload = await parsePayload(response);
+        if (!response.ok) {
+          throw new Error(errorMessage(response, payload));
+        }
+        if (payload?.data?.access_token) {
+          setToken(payload.data.access_token);
+        }
+        rememberUser(payload);
+        cleanup();
+        resolve(payload);
+      } catch (error) {
+        errorEl.textContent = error.message;
+        errorEl.hidden = false;
+        submitBtn.disabled = false;
+        passwordInput.focus();
+      }
+    };
+
+    form.addEventListener('submit', onSubmit);
+    cancelBtn.addEventListener('click', onCancel);
+  });
+
+  return reauthInFlight;
 }
 
 async function doFetch(path, options = {}) {
@@ -132,16 +261,26 @@ async function doFetch(path, options = {}) {
   });
 }
 
-export async function authFetch(path, options = {}) {
-  let response = await doFetch(path, options);
+export async function requestWithReauth(path, options = {}, requestFn = doFetch) {
+  let response = await requestFn(path, options);
   if (response.status === 401 && !options.__retried && !path.startsWith('/auth/refresh') && !isPublicAuthPath(path)) {
-    await refreshSession();
-    response = await doFetch(path, { ...options, __retried: true });
+    try {
+      await refreshSession();
+    } catch {
+      await promptReauth();
+    }
+    response = await requestFn(path, { ...options, __retried: true });
   }
+  return response;
+}
+
+export async function authFetch(path, options = {}) {
+  const response = await requestWithReauth(path, options, doFetch);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(errorMessage(response, payload));
   }
+  rememberUser(payload);
   return payload;
 }
 

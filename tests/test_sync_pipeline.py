@@ -125,6 +125,7 @@ def test_sync_staff_marks_missing_staff_as_fired():
             {
                 'id': 1,
                 'name': 'Existing',
+                'email': 'Existing.Worker@Example.COM',
                 'fired': 0,
                 'position': {'title': 'Барбер'},
             },
@@ -134,8 +135,35 @@ def test_sync_staff_marks_missing_staff_as_fired():
 
         active = db.get(Staff, 1)
         stale = db.get(Staff, 2)
+        assert active.email == 'existing.worker@example.com'
         assert active.fired == 0
         assert stale.fired == 1
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_staff_ignores_invalid_staff_email():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__, Staff.__table__])
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.commit()
+
+        api = FakeYClientsAPI([
+            {
+                'id': 1,
+                'name': 'Worker',
+                'email': 'worker.1@portal.local',
+                'fired': 0,
+            },
+        ])
+
+        assert sync_staff(api, db, '1') is True
+        assert db.get(Staff, 1).email is None
     finally:
         db.close()
         engine.dispose()

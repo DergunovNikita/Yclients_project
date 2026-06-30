@@ -15,11 +15,13 @@ const successEl = document.getElementById('success');
 const createErrorEl = document.getElementById('create-error');
 const editErrorEl = document.getElementById('edit-error');
 const editStaffErrorEl = document.getElementById('edit-staff-error');
+const createStaffAccountErrorEl = document.getElementById('create-staff-account-error');
 const tableBody = document.getElementById('users-body');
 const usersSearch = document.getElementById('users-search');
 const createModal = document.getElementById('create-user-modal');
 const editModal = document.getElementById('edit-user-modal');
 const editStaffModal = document.getElementById('edit-staff-modal');
+const createStaffAccountModal = document.getElementById('create-staff-account-modal');
 const deleteConfirmModal = document.getElementById('delete-confirm-modal');
 const credentialsModal = document.getElementById('credentials-modal');
 const credentialsMessage = document.getElementById('credentials-message');
@@ -49,6 +51,7 @@ const saveYclientsCredentialBtn = document.getElementById('save-yclients-credent
 const createForm = document.getElementById('create-user-form');
 const editForm = document.getElementById('edit-user-form');
 const editStaffForm = document.getElementById('edit-staff-form');
+const createStaffAccountForm = document.getElementById('create-staff-account-form');
 const createEmail = document.getElementById('create-email');
 const createPassword = document.getElementById('create-password');
 const createName = document.getElementById('create-name');
@@ -62,6 +65,8 @@ const editBranchSelect = document.getElementById('edit-branch-select');
 const editStaffName = document.getElementById('edit-staff-name');
 const editStaffPosition = document.getElementById('edit-staff-position');
 const editStaffBranchSelect = document.getElementById('edit-staff-branch-select');
+const createStaffAccountName = document.getElementById('create-staff-account-name');
+const createStaffAccountEmail = document.getElementById('create-staff-account-email');
 const saveBtn = document.getElementById('save-user');
 const saveStaffBtn = document.getElementById('save-staff');
 const adminRoleLabel = document.getElementById('admin-role-label');
@@ -95,6 +100,7 @@ let currentUserId = null;
 let currentUserRole = null;
 let editingUserId = null;
 let editingStaffId = null;
+let pendingStaffAccountId = null;
 let pendingDelete = null;
 let initialPasswords = [];
 let yclientsCredentials = [];
@@ -119,6 +125,10 @@ function hideEditStaffError() {
   editStaffErrorEl.hidden = true;
 }
 
+function hideCreateStaffAccountError() {
+  createStaffAccountErrorEl.hidden = true;
+}
+
 function showError(message) {
   hideAlerts();
   errorEl.textContent = message;
@@ -141,6 +151,12 @@ function showEditStaffError(message) {
   hideEditStaffError();
   editStaffErrorEl.textContent = message;
   editStaffErrorEl.hidden = false;
+}
+
+function showCreateStaffAccountError(message) {
+  hideCreateStaffAccountError();
+  createStaffAccountErrorEl.textContent = message;
+  createStaffAccountErrorEl.hidden = false;
 }
 
 function showSuccess(message) {
@@ -311,6 +327,7 @@ function isAnyModalOpen() {
     !createModal.hidden ||
     !editModal.hidden ||
     !editStaffModal.hidden ||
+    !createStaffAccountModal.hidden ||
     !deleteConfirmModal.hidden ||
     !credentialsModal.hidden
   );
@@ -367,6 +384,27 @@ function closeEditStaffModal() {
     document.body.classList.remove('admin-modal-open');
   }
   hideEditStaffError();
+}
+
+function openCreateStaffAccountModal(staff) {
+  if (!staff?.manageable || staff.is_portal_user) return;
+  pendingStaffAccountId = staff.staff_id;
+  hideCreateStaffAccountError();
+  createStaffAccountForm.reset();
+  createStaffAccountName.value = staff.full_name || '';
+  createStaffAccountEmail.value = staff.can_create_account ? staff.email : '';
+  createStaffAccountModal.hidden = false;
+  document.body.classList.add('admin-modal-open');
+  createStaffAccountEmail.focus();
+}
+
+function closeCreateStaffAccountModal() {
+  createStaffAccountModal.hidden = true;
+  pendingStaffAccountId = null;
+  if (!isAnyModalOpen()) {
+    document.body.classList.remove('admin-modal-open');
+  }
+  hideCreateStaffAccountError();
 }
 
 function escapeHtml(value) {
@@ -786,11 +824,12 @@ async function provisionAllAccounts() {
   provisionAccountsBtn.classList.add('is-loading');
   try {
     const payload = await authFetch('/auth/admin/provision-accounts', { method: 'POST' });
-    const { created_count: count, created } = payload.data || {};
+    const { created_count: count, created, errors } = payload.data || {};
     if (created?.length) {
       showCredentialsModal(created);
     }
-    showSuccess(`Создано аккаунтов: ${count || 0}`);
+    const skippedCount = errors?.length || 0;
+    showSuccess(`Создано аккаунтов: ${count || 0}${skippedCount ? `. Пропущено без real email: ${skippedCount}` : ''}`);
     await Promise.all([loadUsers(), loadInitialPasswords()]);
   } catch (error) {
     showError(error.message);
@@ -800,7 +839,7 @@ async function provisionAllAccounts() {
   }
 }
 
-async function createStaffAccount(staffId) {
+async function createStaffAccount(staffId, email = null) {
   const selected = users.find((user) => user.staff_id === staffId);
   if (!selected?.manageable) return;
 
@@ -808,13 +847,18 @@ async function createStaffAccount(staffId) {
   try {
     const payload = await authFetch(`/auth/admin/staff/${staffId}/create-account`, {
       method: 'POST',
-      body: JSON.stringify({ role: 'viewer' }),
+      body: JSON.stringify({ role: 'viewer', email: email || selected.email }),
     });
+    closeCreateStaffAccountModal();
     showCredentialsModal([payload.data]);
     showSuccess(`Аккаунт для ${selected.full_name} создан`);
     await Promise.all([loadUsers(), loadInitialPasswords()]);
   } catch (error) {
-    showError(error.message);
+    if (!createStaffAccountModal.hidden) {
+      showCreateStaffAccountError(error.message);
+    } else {
+      showError(error.message);
+    }
   }
 }
 
@@ -918,7 +962,13 @@ tableBody.addEventListener('click', async (event) => {
   }
   if (createAccountBtn) {
     closeAllRowMenus();
-    await createStaffAccount(Number(createAccountBtn.dataset.createAccount));
+    const staffId = Number(createAccountBtn.dataset.createAccount);
+    const staff = users.find((item) => item.staff_id === staffId);
+    if (staff?.can_create_account) {
+      await createStaffAccount(staffId);
+    } else {
+      openCreateStaffAccountModal(staff);
+    }
     return;
   }
   if (deleteBtn) {
@@ -962,6 +1012,18 @@ editStaffForm.addEventListener('submit', async (event) => {
     saveStaffBtn.disabled = false;
     saveStaffBtn.classList.remove('is-loading');
   }
+});
+
+createStaffAccountForm?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  hideCreateStaffAccountError();
+  if (!pendingStaffAccountId) return;
+  const email = createStaffAccountEmail.value.trim();
+  if (!email) {
+    showCreateStaffAccountError('Укажите реальный email сотрудника');
+    return;
+  }
+  await createStaffAccount(pendingStaffAccountId, email);
 });
 
 editForm.addEventListener('submit', async (event) => {
@@ -1155,6 +1217,8 @@ document.getElementById('close-edit-user').addEventListener('click', closeEditMo
 document.getElementById('cancel-edit-user').addEventListener('click', closeEditModal);
 document.getElementById('close-edit-staff').addEventListener('click', closeEditStaffModal);
 document.getElementById('cancel-edit-staff').addEventListener('click', closeEditStaffModal);
+document.getElementById('close-create-staff-account').addEventListener('click', closeCreateStaffAccountModal);
+document.getElementById('cancel-create-staff-account').addEventListener('click', closeCreateStaffAccountModal);
 document.getElementById('close-delete-confirm').addEventListener('click', closeDeleteConfirm);
 document.getElementById('cancel-delete-confirm').addEventListener('click', closeDeleteConfirm);
 document.getElementById('confirm-delete').addEventListener('click', confirmPendingDelete);
@@ -1163,12 +1227,14 @@ deleteConfirmModal.querySelector('[data-close-modal="delete"]').addEventListener
 createModal.querySelector('[data-close-modal="create"]').addEventListener('click', closeCreateModal);
 editModal.querySelector('[data-close-modal="edit"]').addEventListener('click', closeEditModal);
 editStaffModal.querySelector('[data-close-modal="edit-staff"]').addEventListener('click', closeEditStaffModal);
+createStaffAccountModal.querySelector('[data-close-modal="create-staff-account"]').addEventListener('click', closeCreateStaffAccountModal);
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   if (closeAllRowMenus()) return;
   if (!credentialsModal.hidden) closeCredentialsModal();
   else if (!deleteConfirmModal.hidden) closeDeleteConfirm();
+  else if (!createStaffAccountModal.hidden) closeCreateStaffAccountModal();
   else if (!editStaffModal.hidden) closeEditStaffModal();
   else if (!editModal.hidden) closeEditModal();
   else if (!createModal.hidden) closeCreateModal();

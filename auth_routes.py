@@ -201,10 +201,12 @@ def _user_payload(
 
 
 def _staff_payload(staff: Staff, manageable: bool = False) -> dict:
+    email = normalize_email(staff.email or '') if staff.email else ''
+    can_create_account = bool(email and is_deliverable_portal_email(email))
     return {
         'id': None,
         'staff_id': staff.id,
-        'email': '—',
+        'email': email or '—',
         'full_name': staff.name,
         'role': 'staff',
         'position': staff.position,
@@ -213,6 +215,7 @@ def _staff_payload(staff: Staff, manageable: bool = False) -> dict:
         'company_ids': [staff.company_id],
         'is_portal_user': False,
         'manageable': manageable,
+        'can_create_account': can_create_account,
     }
 
 
@@ -232,6 +235,8 @@ async def _load_manageable_staff(
         )
     ).scalar_one_or_none()
     if staff is None:
+        raise HTTPException(status_code=404, detail='Staff member not found')
+    if actor.role == 'platform_admin' and staff.company_id not in actor_branch_ids:
         raise HTTPException(status_code=404, detail='Staff member not found')
     assert_can_manage_staff(actor.role, actor_branch_ids, staff.company_id)
     return staff
@@ -482,6 +487,32 @@ async def _actor_branch_ids(db: AsyncSession, user: PortalUser) -> list[int]:
     return await load_user_access_branch_ids(db, user)
 
 
+async def _active_admin_portal_account_id(
+    db: AsyncSession,
+    actor: PortalUser,
+    x_portal_account_id: int | None,
+) -> int | None:
+    if actor.role != 'platform_admin':
+        return actor.portal_account_id
+    if x_portal_account_id is None:
+        raise HTTPException(status_code=400, detail='X-Portal-Account-Id is required')
+    account = await db.get(PortalAccount, x_portal_account_id)
+    if account is None:
+        raise HTTPException(status_code=400, detail='Unknown portal_account_id')
+    return int(x_portal_account_id)
+
+
+async def _active_admin_branch_ids(
+    db: AsyncSession,
+    actor: PortalUser,
+    x_portal_account_id: int | None,
+) -> list[int]:
+    if actor.role == 'platform_admin':
+        portal_account_id = await _active_admin_portal_account_id(db, actor, x_portal_account_id)
+        return await load_portal_account_branch_ids(db, portal_account_id)
+    return await _actor_branch_ids(db, actor)
+
+
 def _same_tenant(actor: PortalUser, target: PortalUser) -> bool:
     if actor.role == 'platform_admin':
         return True
@@ -663,10 +694,12 @@ async def _load_staff_ids_by_portal_user(db: AsyncSession, portal_user_ids: list
 
 @router.get('/admin/users')
 async def admin_list_users(
+    x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_MANAGER_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
-    actor_branch_ids = await _actor_branch_ids(db, actor)
+    active_portal_account_id = await _active_admin_portal_account_id(db, actor, x_portal_account_id)
+    actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
     users = (await db.execute(select(PortalUser).order_by(PortalUser.id.asc()))).scalars().all()
     await sync_all_portal_users_staff(db)
     await db.commit()
@@ -675,6 +708,8 @@ async def admin_list_users(
     show_passwords = actor.role in USER_ADMIN_ROLES
     staff_ids_by_user = await _load_staff_ids_by_portal_user(db, [user.id for user in users])
     for user in users:
+        if actor.role == 'platform_admin' and user.portal_account_id != active_portal_account_id:
+            continue
         if not _same_tenant(actor, user):
             continue
         branch_ids = await load_user_access_branch_ids(db, user)
@@ -694,7 +729,7 @@ async def admin_list_users(
                 )
             )
 
-    allowed_staff_companies = None if actor.role == 'platform_admin' else actor_branch_ids
+    allowed_staff_companies = actor_branch_ids
     for staff in await list_unlinked_staff(db, allowed_staff_companies):
         manageable = can_manage_staff(actor.role, actor_branch_ids, staff.company_id)
         payload.append(_staff_payload(staff, manageable=manageable))
@@ -1072,10 +1107,11 @@ async def admin_delete_user(
 async def admin_update_staff(
     staff_id: int,
     body: AdminStaffUpdateRequest,
+    x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
-    actor_branch_ids = await _actor_branch_ids(db, actor)
+    actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
     staff = await _load_manageable_staff(db, staff_id, actor, actor_branch_ids)
 
     if body.company_id != staff.company_id:
@@ -1096,10 +1132,11 @@ async def admin_update_staff(
 @router.delete('/admin/staff/{staff_id}')
 async def admin_delete_staff(
     staff_id: int,
+    x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
-    actor_branch_ids = await _actor_branch_ids(db, actor)
+    actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
     staff = await _load_manageable_staff(db, staff_id, actor, actor_branch_ids)
     staff.fired = 1
     await db.commit()
@@ -1120,11 +1157,12 @@ def _provisioned_payload(account) -> dict:
 
 @router.post('/admin/provision-accounts')
 async def admin_provision_accounts(
+    x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
-    actor_branch_ids = await _actor_branch_ids(db, actor)
-    allowed = None if actor.role == 'platform_admin' else actor_branch_ids
+    actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
+    allowed = actor_branch_ids
     created, errors = await provision_all_unlinked_staff(db, allowed)
     await db.commit()
     return {
@@ -1141,10 +1179,11 @@ async def admin_provision_accounts(
 async def admin_create_staff_account(
     staff_id: int,
     body: AdminStaffCreateAccountRequest,
+    x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
-    actor_branch_ids = await _actor_branch_ids(db, actor)
+    actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
     staff = await _load_manageable_staff(db, staff_id, actor, actor_branch_ids)
     assert_can_assign_role(actor.role, body.role)
     validate_company_ids_for_role(actor.role, actor_branch_ids, body.role, [staff.company_id])
@@ -1166,10 +1205,12 @@ async def admin_create_staff_account(
 
 @router.get('/admin/initial-passwords')
 async def admin_list_initial_passwords(
+    x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
-    actor_branch_ids = await _actor_branch_ids(db, actor)
+    active_portal_account_id = await _active_admin_portal_account_id(db, actor, x_portal_account_id)
+    actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
     users = (
         await db.execute(
             select(PortalUser)
@@ -1181,6 +1222,8 @@ async def admin_list_initial_passwords(
     payload = []
     staff_ids_by_user = await _load_staff_ids_by_portal_user(db, [user.id for user in users])
     for user in users:
+        if actor.role == 'platform_admin' and user.portal_account_id != active_portal_account_id:
+            continue
         if not _same_tenant(actor, user):
             continue
         branch_ids = await load_user_access_branch_ids(db, user)
@@ -1202,10 +1245,12 @@ async def admin_list_initial_passwords(
 @router.post('/admin/distribute-credentials')
 async def admin_distribute_credentials(
     body: DistributeCredentialsRequest,
+    x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
-    actor_branch_ids = await _actor_branch_ids(db, actor)
+    active_portal_account_id = await _active_admin_portal_account_id(db, actor, x_portal_account_id)
+    actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
     unique_ids = sorted(set(body.user_ids))
     users = (
         await db.execute(select(PortalUser).where(PortalUser.id.in_(unique_ids)))
@@ -1222,6 +1267,9 @@ async def admin_distribute_credentials(
             errors.append({'user_id': user_id, 'reason': 'User not found'})
             continue
 
+        if actor.role == 'platform_admin' and user.portal_account_id != active_portal_account_id:
+            errors.append({'user_id': user_id, 'email': user.email, 'reason': 'Access denied'})
+            continue
         if not _same_tenant(actor, user):
             errors.append({'user_id': user_id, 'email': user.email, 'reason': 'Access denied'})
             continue

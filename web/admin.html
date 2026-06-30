@@ -50,7 +50,7 @@
           <input type="search" id="users-search" placeholder="Поиск пользователя…" autocomplete="off" />
         </label>
         <div class="admin-card__header-actions">
-          <button type="button" class="btn btn--ghost" id="provision-accounts" hidden>Создать аккаунты для всех без входа</button>
+          <button type="button" class="btn btn--ghost" id="provision-accounts" hidden>Создать аккаунты с email</button>
           <button type="button" class="btn btn--primary" id="open-create-user">Создать пользователя</button>
         </div>
       </div>
@@ -213,6 +213,25 @@
         <div class="admin-modal__actions">
           <button type="button" class="btn btn--ghost" id="cancel-edit-staff">Отмена</button>
           <button type="submit" class="btn btn--primary" id="save-staff">Сохранить</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="admin-modal" id="create-staff-account-modal" hidden>
+    <div class="admin-modal__backdrop" data-close-modal="create-staff-account"></div>
+    <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="create-staff-account-title">
+      <header class="admin-modal__header">
+        <h2 id="create-staff-account-title">Аккаунт сотрудника</h2>
+        <button type="button" class="admin-modal__close" id="close-create-staff-account" aria-label="Закрыть">×</button>
+      </header>
+      <div class="alert error" id="create-staff-account-error" hidden></div>
+      <form class="admin-toolbar admin-toolbar--create" id="create-staff-account-form">
+        <label>Имя<input type="text" id="create-staff-account-name" disabled /></label>
+        <label>Email<input type="email" id="create-staff-account-email" required autocomplete="off" placeholder="user@company.com" /></label>
+        <div class="admin-modal__actions">
+          <button type="button" class="btn btn--ghost" id="cancel-create-staff-account">Отмена</button>
+          <button type="submit" class="btn btn--primary" id="create-staff-account">Создать</button>
         </div>
       </form>
     </div>

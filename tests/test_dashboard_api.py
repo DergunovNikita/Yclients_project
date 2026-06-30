@@ -153,6 +153,11 @@ async def test_dashboard_report_data_ready_report_and_compare(async_session):
     assert data['report_id'] == 'revenue_dynamics'
     assert data['cards'][0]['value'] == 1200.0
     assert data['comparison']['cards'][0]['value'] == 800.0
+    assert data['comparison']['rows'][0]['label'] == 'Выручка'
+    assert data['comparison']['rows'][0]['current'] == 1200.0
+    assert data['comparison']['rows'][0]['compare'] == 800.0
+    assert data['comparison']['rows'][0]['delta'] == 400.0
+    assert data['comparison']['rows'][0]['delta_pct'] == 50.0
     assert data['charts']
     assert data['tables']
 
@@ -209,8 +214,13 @@ async def test_dashboard_year_over_year_report_uses_aggregate_entities_without_s
     assert data['report_id'] == 'year_over_year'
     assert data['source_status'] == 'ready'
     assert data['raw']['service_detail_excluded'] is True
-    assert [row['year'] for row in data['raw']['years']] == [2024, 2025]
+    assert [row['year'] for row in data['raw']['years']] == [2022, 2023, 2024, 2025, 2026]
+    assert data['raw']['start_year'] == 2022
+    assert data['raw']['end_year'] == 2026
+    assert data['raw']['months_in_scope'] == ['01']
     years_by_year = {row['year']: row for row in data['raw']['years']}
+    assert years_by_year[2022]['revenue'] == 0.0
+    assert years_by_year[2023]['revenue'] == 0.0
     assert years_by_year[2024]['revenue'] == 2000.0
     assert years_by_year[2024]['appointments'] == 2
     assert years_by_year[2024]['avg_check'] == 1000.0
@@ -219,7 +229,33 @@ async def test_dashboard_year_over_year_report_uses_aggregate_entities_without_s
     assert years_by_year[2025]['avg_check'] == 1500.0
     assert years_by_year[2025]['revenue_change_pct'] == 125.0
     assert years_by_year[2025]['appointments_change_pct'] == 50.0
+    assert years_by_year[2026]['revenue'] == 0.0
     assert {table['id'] for table in data['tables']} == {'years', 'months'}
+    monthly_chart = next(chart for chart in data['charts'] if chart['id'] == 'monthly_revenue_yoy')
+    assert monthly_chart['labels'] == ['01']
+    assert [dataset['label'] for dataset in monthly_chart['datasets']] == ['2022', '2023', '2024', '2025', '2026']
+
+
+@pytest.mark.asyncio
+async def test_dashboard_year_over_year_rejects_cross_year_period(async_session):
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'year_over_year',
+                'start_date': '2024-12-01',
+                'end_date': '2025-01-31',
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert 'within one calendar year' in response.json()['detail']
 
 
 @pytest.mark.asyncio
@@ -888,6 +924,71 @@ async def test_average_check_uses_cash_income_and_business_denominator(async_ses
     assert avg['denominator'] == 4
     assert avg['total'] == 312.5
     assert avg['unclassified_operations'] == 1
+
+
+@pytest.mark.asyncio
+async def test_summary_excludes_placeholder_admin_appointments_from_revenue_and_avg_check(async_session):
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Staff(id=2, name='Администратор Ривьера', position='Администратор', company_id=1),
+        Client(id=1, name='Client 1', company_id=1),
+        Client(id=2, name='Client 2', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 5), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=2, client_id=2, date=date(2025, 1, 5), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(
+            id=1, company_id=1, record_id=1, master_id=1,
+            date=datetime(2025, 1, 5, 12), amount=1000, sold_item_type='service',
+        ),
+        FinancialTransaction(
+            id=2, company_id=1, record_id=2, master_id=2,
+            date=datetime(2025, 1, 5, 13), amount=9000, sold_item_type='service',
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        summary_response = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+        daily_response = await client.get(
+            '/dashboard/widget/revenue_daily',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    assert summary_response.status_code == 200
+    summary = summary_response.json()['data']
+    assert summary['revenue']['total'] == 1000.0
+    assert summary['revenue']['appointments'] == 1
+    assert summary['average_check']['numerator'] == 1000.0
+    assert summary['average_check']['denominator'] == 1
+    assert summary['average_check']['total'] == 1000.0
+
+    assert daily_response.status_code == 200
+    daily = daily_response.json()['data']
+    assert daily == [{
+        'date': '2025-01-05',
+        'revenue': 1000.0,
+        'service_revenue': 1000.0,
+        'goods_revenue': 0.0,
+        'appointments': 1,
+        'opz_qty': 0,
+        'opz_pct': 0.0,
+    }]
 
 
 @pytest.mark.asyncio

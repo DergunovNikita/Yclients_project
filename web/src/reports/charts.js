@@ -94,7 +94,7 @@ export class ReportChartManager {
             ? `${PALETTE[index % PALETTE.length]}22`
             : PALETTE[index % PALETTE.length],
           tension: 0.28,
-          fill: spec.type === 'line',
+          fill: dataset.fill ?? (spec.type === 'line'),
           borderRadius: spec.type === 'bar' ? 4 : 0,
           yAxisID: dataset.axis || 'y',
           reportFormat: dataset.format || 'number',

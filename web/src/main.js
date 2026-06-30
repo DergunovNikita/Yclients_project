@@ -105,6 +105,7 @@ const filterEls = {
     load: document.getElementById('plan-load'),
   },
   reviewFacts: {
+    month: document.getElementById('review-fact-month'),
     start: document.getElementById('review-fact-start'),
     end: document.getElementById('review-fact-end'),
     branch: document.getElementById('review-fact-branch'),
@@ -332,8 +333,9 @@ function defaultDates(filter) {
 
 function setReviewFactDefaultDates() {
   const now = new Date(pageOpenedAt);
-  filterEls.reviewFacts.start.value = formatInputDate(new Date(now.getFullYear(), now.getMonth(), 1));
-  filterEls.reviewFacts.end.value = formatInputDate(now);
+  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  filterEls.reviewFacts.month.value = month;
+  setReviewFactMonthRange(month);
 }
 
 function overviewPresetRange(preset) {
@@ -370,6 +372,37 @@ function previousMonthValue(month) {
   const [year, monthNumber] = String(month || currentMonthValue()).split('-').map(Number);
   const date = new Date(year, monthNumber - 2, 1);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function setReviewFactMonthRange(monthValue) {
+  const [year, monthNumber] = String(monthValue || '').split('-').map(Number);
+  if (!year || !monthNumber) return;
+  const start = new Date(year, monthNumber - 1, 1);
+  const end = new Date(year, monthNumber, 0);
+  filterEls.reviewFacts.start.value = formatInputDate(start);
+  filterEls.reviewFacts.end.value = formatInputDate(end);
+}
+
+function syncReviewFactMonthFromDates() {
+  const filter = filterEls.reviewFacts;
+  if (!filter.start.value || !filter.end.value) {
+    filter.month.value = '';
+    return;
+  }
+  const start = new Date(`${filter.start.value}T00:00:00`);
+  const end = new Date(`${filter.end.value}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    filter.month.value = '';
+    return;
+  }
+  const fullMonthStart = new Date(start.getFullYear(), start.getMonth(), 1);
+  const fullMonthEnd = new Date(start.getFullYear(), start.getMonth() + 1, 0);
+  filter.month.value = (
+    start.getTime() === fullMonthStart.getTime()
+    && end.getTime() === fullMonthEnd.getTime()
+  )
+    ? `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}`
+    : '';
 }
 
 function formatInputDate(date) {
@@ -2148,6 +2181,12 @@ filterEls.plan.branch.addEventListener('change', async () => {
 });
 filterEls.plan.staff.addEventListener('change', () => loadPlanFact());
 filterEls.reviewFacts.load.addEventListener('click', () => loadReviewFacts());
+filterEls.reviewFacts.month.addEventListener('change', async () => {
+  setReviewFactMonthRange(filterEls.reviewFacts.month.value);
+  await loadReviewFacts();
+});
+filterEls.reviewFacts.start.addEventListener('change', syncReviewFactMonthFromDates);
+filterEls.reviewFacts.end.addEventListener('change', syncReviewFactMonthFromDates);
 filterEls.reviewFacts.branch.addEventListener('change', async () => {
   await loadStaff(filterEls.reviewFacts);
   await loadReviewFacts();

@@ -414,6 +414,8 @@ async def dashboard_report_data(
     compare_start_date: date | None = Query(None),
     compare_end_date: date | None = Query(None),
     compare_staff_id: int | None = Query(None),
+    start_year: int = Query(2022, ge=2000, le=2100),
+    end_year: int = Query(2026, ge=2000, le=2100),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -444,6 +446,8 @@ async def dashboard_report_data(
             compare_start_date,
             compare_end_date,
             compare_staff_id,
+            start_year=start_year,
+            end_year=end_year,
             allowed_company_ids=scope['allowed_company_ids'],
         )
     except ValueError as exc:

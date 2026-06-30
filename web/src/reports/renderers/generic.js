@@ -97,14 +97,50 @@ function renderUnavailable(data) {
 
 function renderComparison(data) {
   const comparison = data.comparison;
-  if (!comparison?.cards?.length) return '';
+  const rows = comparison?.rows || [];
+  if (!rows.length && !comparison?.cards?.length) return '';
+  const currentPeriod = data.period ? `${data.period.start || ''} .. ${data.period.end || ''}` : '';
+  const comparePeriod = comparison.period ? `${comparison.period.start || ''} .. ${comparison.period.end || ''}` : '';
+  const bodyRows = rows.length
+    ? rows
+    : (comparison.cards || []).map((card) => ({
+        label: card.label,
+        format: card.format,
+        current: null,
+        compare: card.value,
+        delta: null,
+        delta_pct: null,
+      }));
   return `
     <section class="reports-panel reports-panel--wide reports-compare">
       <div class="reports-panel__head">
         <h3>Сравнение</h3>
-        <span>${escapeHtml(comparison.period?.start || '')} .. ${escapeHtml(comparison.period?.end || '')}</span>
+        <span>${escapeHtml(currentPeriod)} / ${escapeHtml(comparePeriod)}</span>
       </div>
-      ${renderCards(comparison.cards)}
+      <div class="reports-table-scroll">
+        <table class="reports-table">
+          <thead>
+            <tr>
+              <th>Метрика</th>
+              <th class="number">Текущий период</th>
+              <th class="number">Период сравнения</th>
+              <th class="number">Δ</th>
+              <th class="number">Δ%</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${bodyRows.map((row) => `
+              <tr>
+                <td>${escapeHtml(row.label || '')}</td>
+                <td class="number">${escapeHtml(formatValue(row.current, row.format))}</td>
+                <td class="number">${escapeHtml(formatValue(row.compare, row.format))}</td>
+                <td class="number">${escapeHtml(formatValue(row.delta, row.format))}</td>
+                <td class="number">${escapeHtml(formatValue(row.delta_pct, 'percent'))}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
     </section>
   `;
 }

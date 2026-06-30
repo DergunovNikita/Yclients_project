@@ -37,6 +37,16 @@ TRANSACTIONAL_STATE_KEY = 'transactions_last_success_date'
 PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
 
 
+def _valid_staff_email(value) -> str | None:
+    email = str(value or '').strip().casefold()
+    local, sep, domain = email.partition('@')
+    if not (local and sep and domain):
+        return None
+    if domain == 'portal.local' or '.' not in domain:
+        return None
+    return email
+
+
 def format_duration(seconds: float) -> str:
     total_seconds = int(seconds)
     minutes, secs = divmod(total_seconds, 60)
@@ -647,11 +657,13 @@ def sync_staff(api: YClientsAPI, db, company_id: str):
 
             user_id = s.get('user_id')
             fired = int(bool(s.get('is_fired'))) if s.get('fired') is None else int(s.get('fired') or 0)
+            email = _valid_staff_email(s.get('email'))
 
             obj = existing_staff.get(staff_id)
             if not obj:
                 obj = Staff(
                     id=staff_id, name=s.get('name', ''),
+                    email=email,
                     specialization=s.get('specialization'),
                     position=position_title,
                     avatar_url=s.get('avatar'),
@@ -665,6 +677,7 @@ def sync_staff(api: YClientsAPI, db, company_id: str):
                 db.add(obj)
             else:
                 obj.name = s.get('name', '')
+                obj.email = email
                 obj.specialization = s.get('specialization')
                 obj.position = position_title
                 obj.avatar_url = s.get('avatar')

@@ -13,6 +13,7 @@ from typing import Any, Optional
 from sqlalchemy import String, and_, case, cast, delete, exists, func, or_, select
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 import yclients_analytics
 from models import (
@@ -352,6 +353,47 @@ def _is_admin_placeholder_staff_name(value: Any) -> bool:
     return str(value or '').strip().casefold().startswith(ADMIN_PLACEHOLDER_STAFF_PREFIX)
 
 
+def _business_staff_id_condition(staff_id_column):
+    staff_alias = aliased(Staff)
+    staff_name_raw = func.coalesce(staff_alias.name, '')
+    staff_name = func.lower(staff_name_raw)
+    non_business_staff = exists(
+        select(1).where(
+            staff_alias.id == staff_id_column,
+            or_(
+                staff_name == WAITLIST_STAFF_NAME,
+                staff_name_raw == 'Лист ожидания',
+                staff_name.like(f'{ADMIN_PLACEHOLDER_STAFF_PREFIX}%'),
+                staff_name_raw.like('Администратор%'),
+            ),
+        )
+    )
+    return or_(staff_id_column.is_(None), ~non_business_staff)
+
+
+def business_appointment_condition():
+    return _business_staff_id_condition(Appointment.staff_id)
+
+
+def _business_financial_master_condition():
+    linked_business_appointment = exists(
+        select(1).where(
+            Appointment.id == FinancialTransaction.record_id,
+            business_appointment_condition(),
+        )
+    )
+    return or_(
+        and_(
+            FinancialTransaction.master_id.is_not(None),
+            _business_staff_id_condition(FinancialTransaction.master_id),
+        ),
+        and_(
+            FinancialTransaction.master_id.is_(None),
+            or_(FinancialTransaction.record_id.is_(None), linked_business_appointment),
+        ),
+    )
+
+
 def _coerce_date(value: Any) -> date:
     if isinstance(value, datetime):
         return value.date()
@@ -406,6 +448,7 @@ def _appt_revenue_filters(
         Appointment.attendance == COMPLETED_ATTENDANCE,
         Appointment.date >= start,
         Appointment.date <= end,
+        business_appointment_condition(),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -427,6 +470,7 @@ def _appt_all_filters(
     parts = [
         Appointment.date >= start,
         Appointment.date <= end,
+        business_appointment_condition(),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -447,6 +491,7 @@ def _goods_revenue_filters(
         GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
         func.date(GoodTransaction.date) >= start,
         func.date(GoodTransaction.date) <= end,
+        _business_staff_id_condition(GoodTransaction.master_id),
     ]
     scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -470,6 +515,7 @@ def _service_paid_filters(
         FinancialTransaction.amount > 0,
         func.date(FinancialTransaction.date) >= start,
         func.date(FinancialTransaction.date) <= end,
+        business_appointment_condition(),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -493,6 +539,7 @@ def _goods_paid_filters(
         FinancialTransaction.amount > 0,
         func.date(FinancialTransaction.date) >= start,
         func.date(FinancialTransaction.date) <= end,
+        _business_financial_master_condition(),
     ]
     scope = _company_scope_clause(FinancialTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -620,6 +667,7 @@ async def _average_check_block(
         Appointment.attendance == COMPLETED_ATTENDANCE,
         Appointment.date >= dr.start,
         Appointment.date <= dr.end,
+        business_appointment_condition(),
     ]
     if company_id is not None:
         visit_filters.append(Appointment.company_id == company_id)
@@ -647,6 +695,7 @@ async def _average_check_block(
         GoodTransaction.document_id.is_not(None),
         func.date(GoodTransaction.date) >= dr.start,
         func.date(GoodTransaction.date) <= dr.end,
+        _business_staff_id_condition(GoodTransaction.master_id),
     ]
     if company_id is not None:
         goods_filters.append(GoodTransaction.company_id == company_id)
@@ -672,6 +721,7 @@ async def _average_check_block(
         *base_payment_filters,
         FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
         Appointment.attendance == COMPLETED_ATTENDANCE,
+        business_appointment_condition(),
     ]
     if company_id is not None:
         service_filters.append(Appointment.company_id == company_id)
@@ -700,6 +750,7 @@ async def _average_check_block(
 
     classified_revenue = {}
     direct_payment_filters = list(base_payment_filters)
+    direct_payment_filters.append(_business_financial_master_condition())
     if company_id is not None:
         direct_payment_filters.append(FinancialTransaction.company_id == company_id)
     elif company_ids is not None:
@@ -814,6 +865,7 @@ async def _client_visit_frequency_block(
         Appointment.client_id.is_not(None),
         Appointment.date >= dr.start,
         Appointment.date <= dr.end,
+        business_appointment_condition(),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:

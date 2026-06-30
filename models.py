@@ -174,6 +174,7 @@ class Staff(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
+    email = Column(String)
     specialization = Column(String)
     position = Column(String, index=True)
     avatar_url = Column(String)

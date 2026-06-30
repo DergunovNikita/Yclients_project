@@ -1,4 +1,4 @@
-import { authHeaders } from '../auth.js';
+import { authHeaders, requestWithReauth } from '../auth.js';
 
 const apiBase = import.meta.env.VITE_API_BASE || '';
 
@@ -31,7 +31,14 @@ export async function fetchJson(path, params = {}) {
   for (const url of apiUrlCandidates(path, params)) {
     let response;
     try {
-      response = await fetch(url, { headers: authHeaders() });
+      response = await requestWithReauth(url, {}, (_path, options = {}) => {
+        const { __retried, ...fetchOptions } = options;
+        return fetch(url, {
+          ...fetchOptions,
+          credentials: 'include',
+          headers: authHeaders(fetchOptions.headers || {}),
+        });
+      });
     } catch (error) {
       errors.push(`${url}\n${error.message}`);
       continue;
