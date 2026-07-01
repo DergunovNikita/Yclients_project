@@ -1040,6 +1040,23 @@ def _round_optional(value: Optional[float]) -> Optional[float]:
     return round(float(value), 2)
 
 
+def _round_half_up_int(value: float) -> float:
+    """School-style rounding: 16.5 → 17, unlike Python's banker's round()."""
+    if value >= 0:
+        return float(math.floor(value + 0.5))
+    return float(-math.floor(-value + 0.5))
+
+
+def _round_metric_value(value: Optional[float], fmt: str) -> Optional[float]:
+    """Round a plan/fact metric value to the precision its display format expects."""
+    if value is None:
+        return None
+    v = float(value)
+    if fmt == 'number':
+        return _round_half_up_int(v)
+    return round(v, 2)
+
+
 def _iso_datetime(value: Any) -> str | None:
     return value.isoformat() if value is not None else None
 
@@ -2640,21 +2657,24 @@ def _metric_cells(
     cells = []
     for metric in metrics:
         code = metric['code']
-        plan = plan_values.get(code)
-        fact = fact_values.get(code, 0.0)
-        remaining = None if plan is None else plan - fact
+        fmt = metric['format']
+        plan = _round_metric_value(plan_values.get(code), fmt)
+        fact = _round_metric_value(fact_values.get(code, 0.0), fmt)
+        remaining = None if plan is None else _round_metric_value(
+            (plan or 0.0) - (fact or 0.0), fmt
+        )
         if plan is None:
             completion_pct = None
         elif plan == 0:
-            completion_pct = 100.0 if fact >= 0 else None
+            completion_pct = 100.0 if (fact or 0) >= 0 else None
         else:
-            completion_pct = 100.0 * fact / plan
+            completion_pct = 100.0 * (fact or 0.0) / plan
         cells.append({
             'code': code,
-            'plan': _round_optional(plan),
-            'fact': _round_optional(fact),
-            'remaining': _round_optional(remaining),
-            'completion_pct': _round_optional(completion_pct),
+            'plan': plan,
+            'fact': fact,
+            'remaining': remaining,
+            'completion_pct': _round_metric_value(completion_pct, 'percent'),
             'status': _completion_status(completion_pct),
         })
     return cells
@@ -2736,27 +2756,32 @@ def _goods_kpi_execution_payload(groups: list[dict[str, Any]]) -> list[dict[str,
     out = []
     for code in GOODS_KPI_CODES:
         metric = metric_by_code[code]
+        fmt = metric['format']
         plan_values = [
             plan
             for plan in (_metric_plan_value(group, code) for group in groups)
             if plan is not None
         ]
-        plan = sum(plan_values) if plan_values else None
-        fact = sum(_metric_fact_value(group, code) for group in groups)
+        plan_raw = sum(plan_values) if plan_values else None
+        fact_raw = sum(_metric_fact_value(group, code) for group in groups)
+        plan = _round_metric_value(plan_raw, fmt)
+        fact = _round_metric_value(fact_raw, fmt)
         if plan is None:
             completion_pct = None
         elif plan == 0:
-            completion_pct = 100.0 if fact >= 0 else None
+            completion_pct = 100.0 if (fact or 0) >= 0 else None
         else:
-            completion_pct = 100.0 * fact / plan
+            completion_pct = 100.0 * (fact or 0.0) / plan
         out.append({
             'code': code,
             'label': metric['label'],
-            'format': metric['format'],
-            'plan': _round_optional(plan),
-            'fact': _round_optional(fact),
-            'remaining': None if plan is None else _round_optional(plan - fact),
-            'completion_pct': _round_optional(completion_pct),
+            'format': fmt,
+            'plan': plan,
+            'fact': fact,
+            'remaining': None if plan is None else _round_metric_value(
+                (plan or 0.0) - (fact or 0.0), fmt
+            ),
+            'completion_pct': _round_metric_value(completion_pct, 'percent'),
             'status': _completion_status(completion_pct),
         })
     return out
@@ -2867,8 +2892,8 @@ async def _client_fact_diagnostics(
             'в факте у барберов'
         ),
         'company_id': branch_id,
-        'barber_clients_fact': _round_optional(barber_clients),
-        'administrator_clients_fact': _round_optional(admin_clients),
+        'barber_clients_fact': _round_half_up_int(barber_clients or 0.0),
+        'administrator_clients_fact': _round_half_up_int(admin_clients or 0.0),
         'unassigned_records_count': int(unassigned_count or 0),
         'sample_record_ids': [int(row.id) for row in sample_rows],
         'administrator_staff_without_user_id': missing_user_staff_ids,
@@ -3158,10 +3183,10 @@ def _payload_staff_input(staff: dict[str, Any], item: PlanStaffInput | None) -> 
         'position': staff.get('position'),
         'user_id': staff.get('user_id'),
         'staff_category': category if category in STAFF_CATEGORY_METRIC_CODES else 'barber',
-        'clients': _round_optional(item.clients) if item is not None else None,
+        'clients': _round_metric_value(item.clients, 'number') if item is not None else None,
         'avg_check_total': _round_optional(item.avg_check_total) if item is not None else None,
-        'reviews_qty': _round_optional(item.reviews_qty) if item is not None else None,
-        'cosmo_qty': _round_optional(item.cosmo_qty) if item is not None else None,
+        'reviews_qty': _round_metric_value(item.reviews_qty, 'number') if item is not None else None,
+        'cosmo_qty': _round_metric_value(item.cosmo_qty, 'number') if item is not None else None,
         'updated_at': item.updated_at.isoformat() if item is not None else None,
     }
 
@@ -3207,27 +3232,28 @@ def _staff_metric_values_from_input(
     if category == 'administrator':
         values: dict[str, float] = {}
         if clients > 0:
-            values['clients'] = clients
+            values['clients'] = _round_half_up_int(clients)
         if reviews_qty > 0:
-            values[REVIEWS_QTY_CODE] = reviews_qty
+            values[REVIEWS_QTY_CODE] = _round_half_up_int(reviews_qty)
         if cosmo_qty_input > 0:
-            values['cosmo_qty'] = cosmo_qty_input
-            values['cosmo_sum'] = cosmo_qty_input * cosmo_price
+            rounded_cosmo = _round_half_up_int(cosmo_qty_input)
+            values['cosmo_qty'] = rounded_cosmo
+            values['cosmo_sum'] = rounded_cosmo * cosmo_price
         return values
 
     if clients <= 0 or avg_check <= 0:
         return {}
 
-    wax_qty = clients * float(branch_setting.get('wax_pct') or 0.0)
-    head_care_qty = clients * float(branch_setting.get('head_care_pct') or 0.0)
-    face_care_qty = clients * float(branch_setting.get('face_care_pct') or 0.0)
-    camouflage_qty = clients * float(branch_setting.get('camouflage_pct') or 0.0)
-    cosmo_qty = clients * float(branch_setting.get('cosmo_pct') or 0.0)
-    opz_qty = clients * float(branch_setting.get('opz_pct') or 0.0)
+    wax_qty = _round_half_up_int(clients * float(branch_setting.get('wax_pct') or 0.0))
+    head_care_qty = _round_half_up_int(clients * float(branch_setting.get('head_care_pct') or 0.0))
+    face_care_qty = _round_half_up_int(clients * float(branch_setting.get('face_care_pct') or 0.0))
+    camouflage_qty = _round_half_up_int(clients * float(branch_setting.get('camouflage_pct') or 0.0))
+    cosmo_qty = _round_half_up_int(clients * float(branch_setting.get('cosmo_pct') or 0.0))
+    opz_qty = _round_half_up_int(clients * float(branch_setting.get('opz_pct') or 0.0))
     return {
         'revenue': clients * avg_check,
         'avg_check_total': avg_check,
-        'clients': clients,
+        'clients': _round_half_up_int(clients),
         'wax_qty': wax_qty,
         'head_care_qty': head_care_qty,
         'face_care_qty': face_care_qty,
@@ -3262,7 +3288,7 @@ def _metric_preview(metrics: dict[str, float]) -> list[dict[str, Any]]:
             'code': metric['code'],
             'label': metric['label'],
             'format': metric['format'],
-            'value': _round_optional(value),
+            'value': _round_metric_value(value, metric['format']),
         })
     return cells
 
@@ -3576,7 +3602,7 @@ def _manual_review_payload_row(
         'staff_id': staff_id,
         'staff_name': row.staff_name,
         'position': row.position,
-        'value': _round_optional(total_value) or 0.0,
+        'value': _round_half_up_int(total_value or 0.0),
         'updated_at': max(updated_at_values).isoformat() if updated_at_values else None,
     }
 
@@ -3649,7 +3675,7 @@ async def fetch_manual_review_facts(
     return {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
         'metric_code': REVIEWS_QTY_CODE,
-        'total_value': _round_optional(sum(float(row['value'] or 0.0) for row in payload_rows)) or 0.0,
+        'total_value': _round_half_up_int(sum(float(row['value'] or 0.0) for row in payload_rows)),
         'rows': payload_rows,
     }
 
