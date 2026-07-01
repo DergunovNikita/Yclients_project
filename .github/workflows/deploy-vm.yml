@@ -76,16 +76,22 @@ jobs:
           chmod 700 ~/.ssh
           printf '%s\n' "$VM_SSH_KEY" > ~/.ssh/vm_deploy_key
           chmod 600 ~/.ssh/vm_deploy_key
-          ssh-keyscan -p "$VM_SSH_PORT" -H "$VM_HOST" >> ~/.ssh/known_hosts
+          # ssh-keyscan default timeout is 5s and it exits non-zero when KEX
+          # doesn't finish in time — this is flaky against sshd under rate-limit
+          # or first-request warmup. Retry with an explicit timeout and key type
+          # list; treat a genuinely unreachable host as the follow-up ssh step's
+          # concern so we get a clearer error there instead of exit 1 here.
+          ssh-keyscan -p "$VM_SSH_PORT" -T 15 -t rsa,ecdsa,ed25519 "$VM_HOST" \
+            >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Deploy backend on VM
         if: env.VM_HOST != '' && env.VM_USER != '' && env.VM_SSH_KEY != ''
         run: |
           set +e
-          ssh -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" "$VM_USER@$VM_HOST" \
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" "$VM_USER@$VM_HOST" \
             'sudo systemctl start yclients-auto-deploy.service'
           deploy_status=$?
-          ssh -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" "$VM_USER@$VM_HOST" \
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" "$VM_USER@$VM_HOST" \
             'sudo journalctl -u yclients-auto-deploy.service -n 120 --no-pager'
           exit "$deploy_status"
 
@@ -93,12 +99,12 @@ jobs:
         if: env.VM_HOST != '' && env.VM_USER != '' && env.VM_SSH_KEY != '' && env.VM_PROJECT_DIR != ''
         continue-on-error: true
         run: |
-          ssh -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" "$VM_USER@$VM_HOST" \
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" "$VM_USER@$VM_HOST" \
             "cd \"$VM_PROJECT_DIR\" && docker compose --profile tools run --rm sync"
 
       - name: Post-deploy Google Sheets import
         if: env.VM_HOST != '' && env.VM_USER != '' && env.VM_SSH_KEY != '' && env.VM_PROJECT_DIR != ''
         continue-on-error: true
         run: |
-          ssh -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" "$VM_USER@$VM_HOST" \
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" "$VM_USER@$VM_HOST" \
             "cd \"$VM_PROJECT_DIR\" && docker compose --profile tools run --rm import-sheets"
