@@ -17,12 +17,14 @@ from models import (
 )
 import sync_pipeline
 from sync_pipeline import (
+    execute_sync,
     full_sync_start_date,
     sync_financial_transactions,
     sync_goods_transactions,
     sync_services,
     sync_staff,
 )
+from yclients_credentials import YClientsCredentialValue
 
 
 class FakeYClientsAPI:
@@ -60,10 +62,62 @@ class FakeFinancialTransactionsAPI:
         return self._txns
 
 
+class FakeSyncDatabase:
+    def __init__(self, db):
+        self._db = db
+
+    def test_connection(self):
+        return True
+
+    def get_db(self):
+        return self._db
+
+
+class FakeSyncAPI:
+    def get_groups(self):
+        return [{'id': 1, 'title': 'G1', 'companies': [{'id': 10, 'title': 'Salon'}]}]
+
+
 def test_full_sync_start_date_uses_history_start_when_sync_days_is_unlimited(monkeypatch):
     monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
     monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
     assert full_sync_start_date(date(2026, 6, 28)) == date(2000, 1, 1)
+
+
+def test_execute_sync_skips_credentials_without_assigned_companies(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__])
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        credential = YClientsCredentialValue(
+            id=1,
+            title='Orphan credential',
+            partner_token='partner',
+            login='login',
+            password='password',
+            company_ids=(),
+            portal_account_id=1,
+        )
+        monkeypatch.setattr(sync_pipeline, 'init_database', lambda *_args, **_kwargs: FakeSyncDatabase(db))
+        monkeypatch.setattr(sync_pipeline, 'load_active_credentials_sync', lambda *_args, **_kwargs: [credential])
+        monkeypatch.setattr(sync_pipeline, '_build_api_for_credential', lambda _credential: FakeSyncAPI())
+        monkeypatch.setattr(sync_pipeline, 'mark_credential_success_sync', lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(sync_pipeline, 'mark_credential_failure_sync', lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            sync_pipeline,
+            'resolve_sync_window',
+            lambda _db, _end_date, requested_mode: (date(2026, 6, 28), requested_mode),
+        )
+
+        result = execute_sync(mode='incremental', end_date=date(2026, 6, 30))
+
+        assert result['success'] is False
+        assert result['companies_count'] == 0
+        assert db.query(Company).filter(Company.id == 10).one_or_none() is not None
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_sync_financial_transactions_persists_expense_article_and_source_coverage():

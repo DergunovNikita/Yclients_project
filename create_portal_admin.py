@@ -56,6 +56,7 @@ def main() -> int:
         else:
             user.password_hash = hash_password(args.password)
             user.role = 'platform_admin'
+            user.portal_account_id = None
             user.is_active = True
             user.email_verified_at = user.email_verified_at or datetime.utcnow()
             user.full_name = args.full_name

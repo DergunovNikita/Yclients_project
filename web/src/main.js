@@ -1204,7 +1204,7 @@ function renderPlanSettingsBranches(rows) {
   ];
   els.planSettingsBranchMeta.textContent = `${rows.length} филиалов`;
   els.planSettingsBranches.innerHTML = `
-    <div class="table-scroll">
+    <div class="table-scroll plan-settings-scroll">
       <table class="plan-settings-table">
         <thead>
           <tr>
@@ -1235,7 +1235,7 @@ function renderPlanSettingsStaffSection(title, rows, fields) {
         <h3>${escapeHtml(title)}</h3>
         <span class="meta">${rows.length} сотрудников</span>
       </div>
-      <div class="table-scroll">
+      <div class="table-scroll plan-settings-scroll">
         <table class="plan-settings-table">
           <thead>
             <tr>

@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Company, Group, PortalBranch, YClientsCredential
+from portal_tenant_ownership import reassign_branch_from_admin_only_tenant
 from yclients_api import YClientsAPI
 from yclients_credentials import decrypt_secret
 
@@ -152,7 +153,7 @@ class YClientsDataSourceAdapter(DataSourceAdapter):
             ).scalar_one_or_none()
             if existing_branch is None:
                 db.add(PortalBranch(portal_account_id=portal_account_id, company_id=cid))
-            elif existing_branch.portal_account_id != portal_account_id:
+            elif not await reassign_branch_from_admin_only_tenant(db, existing_branch, portal_account_id):
                 raise HTTPException(status_code=409, detail=f'Company {cid} already linked to another tenant')
 
         await db.flush()

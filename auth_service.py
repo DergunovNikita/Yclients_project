@@ -148,7 +148,6 @@ async def set_user_branches(db: AsyncSession, user_id: int, company_ids: list[in
     await db.execute(delete(PortalUserBranch).where(PortalUserBranch.user_id == user_id))
     for company_id in sorted(set(company_ids)):
         db.add(PortalUserBranch(user_id=user_id, company_id=company_id))
-    await db.commit()
 
 
 def user_can_login(user: PortalUser) -> bool:

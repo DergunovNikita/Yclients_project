@@ -19,6 +19,7 @@ from database import get_async_db
 from data_sources import SOURCE_YCLIENTS, adapter_from_credential, adapter_from_payload, normalize_source_type
 from models import PortalBranch, PortalUser, YClientsCredential, YClientsCredentialCompany
 from portal_audit import log_portal_audit
+from portal_tenant_ownership import can_reassign_branch_from_tenant
 from yclients_credentials import CredentialsConfigError, mark_credential_failure_async, mark_credential_success_async, new_credential
 from sync_jobs import SyncJobService
 
@@ -129,7 +130,16 @@ async def onboarding_credentials(
                 select(PortalBranch).where(PortalBranch.company_id == item['company_id'])
             )
         ).scalar_one_or_none()
-        if existing is not None and existing.portal_account_id != user.portal_account_id:
+        if (
+            existing is not None
+            and existing.portal_account_id != user.portal_account_id
+            and not await can_reassign_branch_from_tenant(
+                db,
+                existing.portal_account_id,
+                user.portal_account_id,
+                item['company_id'],
+            )
+        ):
             conflicting.append(item['company_id'])
     if conflicting:
         raise HTTPException(

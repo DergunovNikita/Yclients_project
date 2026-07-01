@@ -970,7 +970,9 @@ async def admin_update_yclients_credentials(
     if body.portal_account_id is not None and body.portal_account_id != credential.portal_account_id:
         if actor.role != 'platform_admin':
             raise HTTPException(status_code=403, detail='Cannot move credentials between tenants')
-        await _validate_credential_companies(db, body.portal_account_id, body.company_ids or [])
+        if body.company_ids is None:
+            raise HTTPException(status_code=400, detail='company_ids is required when moving credentials')
+        await _validate_credential_companies(db, body.portal_account_id, body.company_ids)
         credential.portal_account_id = body.portal_account_id
     try:
         update_credential_secrets(

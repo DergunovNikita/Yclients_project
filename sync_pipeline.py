@@ -1956,10 +1956,20 @@ def execute_sync(
                 if credential_company_ids:
                     scoped_company_ids = sorted(set(requested_company_ids) & set(credential_company_ids))
                 else:
-                    scoped_company_ids = requested_company_ids
+                    scoped_company_ids = []
             else:
                 scoped_company_ids = credential_company_ids
-            target_companies = get_target_companies(db, scoped_company_ids or None)
+            if not scoped_company_ids:
+                print(f"! Тенант {tenant_label}: у credentials нет назначенных филиалов")
+                emit_progress(
+                    'companies',
+                    'warning',
+                    20,
+                    f'No assigned companies for credential: {credential.title}',
+                    credential=credential,
+                )
+                continue
+            target_companies = get_target_companies(db, scoped_company_ids)
             if not target_companies:
                 print(f"! Тенант {tenant_label}: нет филиалов для синхронизации")
                 emit_progress(
@@ -2043,7 +2053,7 @@ def execute_sync(
         else:
             print("! Состояние инкрементальной синхронизации не обновлено")
 
-        overall_success = True
+        overall_success = companies_count > 0 and steps_successful(step_results, checkpoint_step_names)
 
         print("\n" + "=" * 60)
         print("  Синхронизация завершена!")

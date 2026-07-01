@@ -23,16 +23,6 @@ export function forwardedHeaders(req) {
     }
   }
 
-  const authHeader = headers.authorization || headers.Authorization;
-  const hasBearer = authHeader && String(authHeader).toLowerCase().startsWith('bearer ');
-  const injectApiKey = env('VM_INJECT_API_KEY') !== 'false';
-  if (!hasBearer && injectApiKey) {
-    const apiKey = env('VM_API_KEY') || env('API_KEY');
-    if (apiKey) {
-      headers['X-API-Key'] = apiKey;
-    }
-  }
-
   return headers;
 }
 

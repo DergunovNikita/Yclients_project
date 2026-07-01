@@ -240,6 +240,127 @@ async def test_platform_admin_filters_yclients_credentials_by_selected_tenant(au
 
 
 @pytest.mark.asyncio
+async def test_platform_admin_move_yclients_credentials_requires_company_ids(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(Company(id=3, title='Branch 3', group_id=1))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
+    auth_db.add(
+        PortalUser(
+            id=53,
+            portal_account_id=None,
+            email='platform.move.required@example.com',
+            password_hash=hash_password('Platform12345!'),
+            full_name='Platform Admin',
+            role='platform_admin',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add(
+        YClientsCredential(
+            id=3,
+            portal_account_id=1,
+            title='Tenant A Credentials',
+            partner_token_encrypted='token-a',
+            login_encrypted='login-a',
+            password_encrypted='password-a',
+            is_active=True,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add(YClientsCredentialCompany(credential_id=3, company_id=1))
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    token = create_access_token(53, 'platform_admin')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.patch(
+            '/auth/admin/yclients-credentials/3',
+            headers={
+                'Authorization': f'Bearer {token}',
+                'X-Portal-Account-Id': '1',
+            },
+            json={'portal_account_id': 2, 'is_active': True},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert 'company_ids' in response.json()['detail']
+    credential = await auth_db.get(YClientsCredential, 3)
+    assert credential.portal_account_id == 1
+    links = (await auth_db.execute(select(YClientsCredentialCompany.company_id))).scalars().all()
+    assert links == [1]
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_move_yclients_credentials_updates_company_bindings(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(Company(id=3, title='Branch 3', group_id=1))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
+    auth_db.add(
+        PortalUser(
+            id=54,
+            portal_account_id=None,
+            email='platform.move.valid@example.com',
+            password_hash=hash_password('Platform12345!'),
+            full_name='Platform Admin',
+            role='platform_admin',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add(
+        YClientsCredential(
+            id=4,
+            portal_account_id=1,
+            title='Tenant A Credentials',
+            partner_token_encrypted='token-a',
+            login_encrypted='login-a',
+            password_encrypted='password-a',
+            is_active=True,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add(YClientsCredentialCompany(credential_id=4, company_id=1))
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    token = create_access_token(54, 'platform_admin')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.patch(
+            '/auth/admin/yclients-credentials/4',
+            headers={
+                'Authorization': f'Bearer {token}',
+                'X-Portal-Account-Id': '1',
+            },
+            json={'portal_account_id': 2, 'company_ids': [3], 'is_active': True},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    credential = await auth_db.get(YClientsCredential, 4)
+    assert credential.portal_account_id == 2
+    links = (await auth_db.execute(select(YClientsCredentialCompany.company_id))).scalars().all()
+    assert links == [3]
+
+
+@pytest.mark.asyncio
 async def test_platform_admin_user_management_is_scoped_to_selected_tenant(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
@@ -500,6 +621,149 @@ async def test_onboarding_credentials_rejects_branch_owned_by_other_tenant(auth_
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
     auth_db.add(PortalAccount(id=2, label='Other tenant', created_at=datetime.utcnow()))
     auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
+    auth_db.add(PortalUser(
+        id=60,
+        portal_account_id=2,
+        email='other-owner@example.com',
+        password_hash=hash_password('Owner12345!'),
+        full_name='Other Owner',
+        role='owner',
+        is_active=True,
+        email_verified_at=datetime.utcnow(),
+        created_at=datetime.utcnow(),
+    ))
+    await auth_db.commit()
+    token = create_access_token(1, 'owner')
+
+    class FakeYClientsAPI:
+        def __init__(self, partner_token, login, password):
+            pass
+
+        def authenticate(self):
+            return True
+
+        def get_groups(self):
+            return [{'id': 1, 'title': 'G1', 'companies': [{'id': 3, 'title': 'Branch 3'}]}]
+
+    monkeypatch.setattr('data_sources.YClientsAPI', FakeYClientsAPI)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/onboarding/credentials',
+            headers={'Authorization': f'Bearer {token}'},
+            json={'partner_token': 'partner', 'login': 'login', 'password': 'password'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_onboarding_claims_branch_from_admin_only_tenant(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
+    auth_db.add(Company(id=3, title='Branch 3', group_id=1))
+    auth_db.add(PortalAccount(id=2, label='Old platform tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
+    auth_db.add(PortalUser(
+        id=61,
+        portal_account_id=2,
+        email='old-platform@example.com',
+        password_hash=hash_password('Platform12345!'),
+        full_name='Old Platform Admin',
+        role='platform_admin',
+        is_active=True,
+        email_verified_at=datetime.utcnow(),
+        created_at=datetime.utcnow(),
+    ))
+    await auth_db.commit()
+    token = create_access_token(1, 'owner')
+
+    class FakeYClientsAPI:
+        def __init__(self, partner_token, login, password):
+            pass
+
+        def authenticate(self):
+            return True
+
+        def get_groups(self):
+            return [{'id': 1, 'title': 'G1', 'companies': [{'id': 3, 'title': 'Branch 3'}]}]
+
+    monkeypatch.setattr('data_sources.YClientsAPI', FakeYClientsAPI)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        credentials = await client.post(
+            '/onboarding/credentials',
+            headers={'Authorization': f'Bearer {token}'},
+            json={'partner_token': 'partner', 'login': 'login', 'password': 'password'},
+        )
+        assert credentials.status_code == 200
+        credential_id = credentials.json()['data']['credential_id']
+
+        branches = await client.post(
+            '/onboarding/branches',
+            headers={'Authorization': f'Bearer {token}'},
+            json={'credential_id': credential_id, 'company_ids': [3]},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert branches.status_code == 200
+    branch = (
+        await auth_db.execute(select(PortalBranch).where(PortalBranch.company_id == 3))
+    ).scalar_one()
+    assert branch.portal_account_id == 1
+    link = (
+        await auth_db.execute(select(YClientsCredentialCompany).where(YClientsCredentialCompany.company_id == 3))
+    ).scalar_one()
+    assert link.credential_id == credential_id
+
+
+@pytest.mark.asyncio
+async def test_onboarding_rejects_claim_from_admin_only_tenant_with_active_credential(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
+    auth_db.add(Company(id=3, title='Branch 3', group_id=1))
+    auth_db.add(PortalAccount(id=2, label='Prepared tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
+    auth_db.add(
+        PortalUser(
+            id=62,
+            portal_account_id=2,
+            email='old-platform-active@example.com',
+            password_hash=hash_password('Platform12345!'),
+            full_name='Old Platform Admin',
+            role='platform_admin',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add(
+        YClientsCredential(
+            id=5,
+            portal_account_id=2,
+            title='Prepared credential',
+            partner_token_encrypted='token',
+            login_encrypted='login',
+            password_encrypted='password',
+            is_active=True,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add(YClientsCredentialCompany(credential_id=5, company_id=3))
     await auth_db.commit()
     token = create_access_token(1, 'owner')
 
