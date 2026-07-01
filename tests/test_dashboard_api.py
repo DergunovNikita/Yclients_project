@@ -828,6 +828,7 @@ async def test_average_check_uses_cash_income_and_business_denominator(async_ses
         Appointment(id=4, company_id=1, staff_id=1, client_id=None, date=date(2025, 1, 8), attendance=1),
         Appointment(id=5, company_id=1, staff_id=1, client_id=2, date=date(2025, 1, 9), attendance=0),
         Appointment(id=6, company_id=1, staff_id=1, client_id=2, date=date(2025, 2, 1), attendance=1),
+        Appointment(id=7, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 14), attendance=1),
     ])
     await async_session.flush()
     async_session.add_all([
@@ -917,12 +918,14 @@ async def test_average_check_uses_cash_income_and_business_denominator(async_ses
     assert avg['service_revenue'] == 700.0
     assert avg['goods_revenue'] == 300.0
     assert avg['topup_revenue'] == 250.0
+    assert avg['completed_appointments'] == 5
     assert avg['unique_clients'] == 1
     assert avg['appointments_without_client'] == 2
     assert avg['goods_checks'] == 1
     assert avg['numerator'] == 1250.0
-    assert avg['denominator'] == 4
-    assert avg['total'] == 312.5
+    assert avg['denominator'] == 5
+    assert avg['total'] == 250.0
+    assert avg['formula'] == 'income / completed_appointments'
     assert avg['unclassified_operations'] == 1
 
 
@@ -992,7 +995,7 @@ async def test_summary_excludes_placeholder_admin_appointments_from_revenue_and_
 
 
 @pytest.mark.asyncio
-async def test_plan_fact_network_deduplicates_client_across_branches(async_session):
+async def test_plan_fact_network_avg_check_uses_completed_appointments_across_branches(async_session):
     async_session.add_all([
         Group(id=1, title='G1'),
         Company(id=1, title='Salon 1', group_id=1),
@@ -1035,7 +1038,7 @@ async def test_plan_fact_network_deduplicates_client_across_branches(async_sessi
     network = next(group for group in result['groups'] if group['scope'] == 'network')
     cells = {cell['code']: cell for cell in network['metrics']}
     assert cells['revenue']['fact'] == 1500.0
-    assert cells['avg_check_total']['fact'] == 1500.0
+    assert cells['avg_check_total']['fact'] == 750.0
 
 
 @pytest.mark.asyncio
@@ -3060,7 +3063,7 @@ async def test_admin_fact_revenue_uses_created_records_and_goods_cost(async_sess
     admin_group = next(g for g in r.json()['data']['groups'] if g['category'] == 'administrator')
     admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
     assert admin_cells['revenue']['fact'] == 1000.0
-    assert admin_cells['avg_check_total']['fact'] == 500.0
+    assert admin_cells['avg_check_total']['fact'] == 1000.0
     assert admin_cells['clients']['fact'] == 1.0
     assert admin_cells['cosmo_qty']['fact'] == 2.0
     assert admin_cells['cosmo_sum']['fact'] == 300.0

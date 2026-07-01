@@ -681,6 +681,7 @@ async def _average_check_block(
     visit_row = (
         await db.execute(
             select(
+                func.count(func.distinct(Appointment.id)).label('completed_appointments'),
                 func.count(func.distinct(Appointment.client_id)).label('unique_clients'),
                 func.coalesce(
                     func.sum(case((Appointment.client_id.is_(None), 1), else_=0)),
@@ -811,13 +812,14 @@ async def _average_check_block(
     )
 
     unique_clients = int(visit_row.unique_clients or 0)
+    completed_appointments = int(visit_row.completed_appointments or 0)
     appointments_without_client = int(visit_row.appointments_without_client or 0)
     numerator = (
         service_revenue
         + classified_revenue['goods_revenue']
         + classified_revenue['topup_revenue']
     )
-    denominator = unique_clients + appointments_without_client + goods_checks
+    denominator = completed_appointments
     source_status, missing_components = await _source_coverage_status(
         db,
         dr.start,
@@ -832,14 +834,14 @@ async def _average_check_block(
         'service_revenue': service_revenue,
         'goods_revenue': classified_revenue['goods_revenue'],
         'topup_revenue': classified_revenue['topup_revenue'],
+        'completed_appointments': completed_appointments,
         'unique_clients': unique_clients,
         'appointments_without_client': appointments_without_client,
         'goods_checks': goods_checks,
         'numerator': numerator,
         'denominator': denominator,
         'formula': (
-            'income / (unique_completed_clients + '
-            'completed_appointments_without_client + goods_checks)'
+            'income / completed_appointments'
         ),
         'unclassified_operations': unclassified_operations,
         'total': _safe_div(numerator, denominator),

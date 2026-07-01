@@ -1,8 +1,16 @@
-"""Tenant ownership helpers for portal account branch assignment."""
+"""Tenant ownership helpers for portal account branch assignment.
+
+A tenant that only contains platform_admin users (or none at all) is considered
+"admin-only": platform admins hop between tenants for support, so their presence
+must not stop a real owner from claiming the branches. When an owner onboards
+and provides valid YClients credentials that cover an admin-only tenant's
+branches, we reassign those branches to the owner's tenant and drop the stale
+credential<->company links on the source side.
+"""
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import PortalBranch, PortalUser, YClientsCredential, YClientsCredentialCompany
@@ -27,27 +35,34 @@ async def can_reassign_branch_from_tenant(
     db: AsyncSession,
     source_portal_account_id: int,
     target_portal_account_id: int,
-    company_id: int | None = None,
+    company_id: int | None = None,  # kept for call-site compatibility
 ) -> bool:
     if source_portal_account_id == target_portal_account_id:
         return True
-    if await tenant_has_business_users(db, source_portal_account_id):
-        return False
-    if company_id is None:
-        return True
-    row = (
+    return not await tenant_has_business_users(db, source_portal_account_id)
+
+
+async def _detach_source_credential_company_links(
+    db: AsyncSession,
+    source_portal_account_id: int,
+    company_id: int,
+) -> None:
+    """Drop stale credential<->company links from the source tenant."""
+    source_credential_ids = (
         await db.execute(
-            select(YClientsCredentialCompany.id)
-            .join(YClientsCredential, YClientsCredential.id == YClientsCredentialCompany.credential_id)
-            .where(
-                YClientsCredential.portal_account_id == source_portal_account_id,
-                YClientsCredential.is_active.is_(True),
-                YClientsCredentialCompany.company_id == company_id,
+            select(YClientsCredential.id).where(
+                YClientsCredential.portal_account_id == source_portal_account_id
             )
-            .limit(1)
         )
-    ).scalar_one_or_none()
-    return row is None
+    ).scalars().all()
+    if not source_credential_ids:
+        return
+    await db.execute(
+        delete(YClientsCredentialCompany).where(
+            YClientsCredentialCompany.company_id == company_id,
+            YClientsCredentialCompany.credential_id.in_(source_credential_ids),
+        )
+    )
 
 
 async def reassign_branch_from_admin_only_tenant(
@@ -64,5 +79,8 @@ async def reassign_branch_from_admin_only_tenant(
         branch.company_id,
     ):
         return False
+    await _detach_source_credential_company_links(
+        db, branch.portal_account_id, branch.company_id
+    )
     branch.portal_account_id = target_portal_account_id
     return True

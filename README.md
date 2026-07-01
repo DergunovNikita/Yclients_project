@@ -123,6 +123,27 @@ npm --version
 pytest --version
 ```
 
+Быстрый гейт перед коммитом (ruff + syntax + fast pytest + gitleaks):
+
+```bash
+./scripts/preflight.sh
+```
+
+Краткий разбор последнего sync-лога (top slowest шаги + ошибки):
+
+```bash
+python scripts/sync-log-summary.py            # последний лог
+python scripts/sync-log-summary.py --last 5   # сводка по последним 5 запускам
+```
+
+Постановка sync-джобы без ручного curl (авто-читает `.env`):
+
+```bash
+python scripts/enqueue-sync.py --tenant 1 --mode incremental
+python scripts/enqueue-sync.py --global --mode full --dry-run   # печатает curl
+python scripts/enqueue-sync.py --status                          # текущий статус
+```
+
 Полная проверка backend + frontend build:
 
 ```bash

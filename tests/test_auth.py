@@ -731,7 +731,11 @@ async def test_onboarding_claims_branch_from_admin_only_tenant(auth_db, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_onboarding_rejects_claim_from_admin_only_tenant_with_active_credential(auth_db, monkeypatch):
+async def test_onboarding_claims_branch_from_admin_only_tenant_with_active_credential(auth_db, monkeypatch):
+    """Owner takes over branches from an admin-only tenant even if a platform
+    admin previously uploaded YClients credentials for them: the stale
+    credential<->company link is detached, and the owner's fresh credential
+    becomes the new owner of the company."""
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
@@ -785,15 +789,32 @@ async def test_onboarding_rejects_claim_from_admin_only_tenant_with_active_crede
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        response = await client.post(
+        credentials = await client.post(
             '/onboarding/credentials',
             headers={'Authorization': f'Bearer {token}'},
             json={'partner_token': 'partner', 'login': 'login', 'password': 'password'},
         )
+        assert credentials.status_code == 200
+        credential_id = credentials.json()['data']['credential_id']
+
+        branches = await client.post(
+            '/onboarding/branches',
+            headers={'Authorization': f'Bearer {token}'},
+            json={'credential_id': credential_id, 'company_ids': [3]},
+        )
 
     app.dependency_overrides.clear()
 
-    assert response.status_code == 409
+    assert branches.status_code == 200
+    branch = (
+        await auth_db.execute(select(PortalBranch).where(PortalBranch.company_id == 3))
+    ).scalar_one()
+    assert branch.portal_account_id == 1
+    link = (
+        await auth_db.execute(select(YClientsCredentialCompany).where(YClientsCredentialCompany.company_id == 3))
+    ).scalar_one()
+    assert link.credential_id == credential_id
+    assert link.credential_id != 5
 
 
 @pytest.mark.asyncio
