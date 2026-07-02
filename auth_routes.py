@@ -249,15 +249,8 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_async_d
     if existing is not None:
         raise HTTPException(status_code=409, detail='Email already registered')
 
-    account = PortalAccount(
-        label=(body.full_name or email).strip() or email,
-        created_at=datetime.utcnow(),
-    )
-    db.add(account)
-    await db.flush()
-
     user = PortalUser(
-        portal_account_id=account.id,
+        portal_account_id=None,
         email=email,
         password_hash=hash_password(body.password),
         full_name=body.full_name,
@@ -865,7 +858,10 @@ async def admin_update_user(
             user.email = email
             user.email_verified_at = datetime.utcnow()
 
-    if body.company_ids is not None:
+    if user.role == 'platform_admin':
+        user.portal_account_id = None
+        await set_user_branches(db, user.id, [])
+    elif body.company_ids is not None:
         await _validate_company_ids_in_scope(db, actor, body.company_ids)
         await set_user_branches(db, user.id, body.company_ids)
 

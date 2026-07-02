@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth_deps import get_current_user
 from database import get_async_db
 from data_sources import SOURCE_YCLIENTS, adapter_from_credential, adapter_from_payload, normalize_source_type
-from models import PortalBranch, PortalUser, YClientsCredential, YClientsCredentialCompany
+from models import PortalAccount, PortalBranch, PortalUser, YClientsCredential, YClientsCredentialCompany
 from portal_audit import log_portal_audit
 from portal_tenant_ownership import can_reassign_branch_from_tenant
 from yclients_credentials import CredentialsConfigError, mark_credential_failure_async, mark_credential_success_async, new_credential
@@ -43,8 +43,20 @@ class OnboardingBranchesRequest(BaseModel):
 def _require_owner(user: PortalUser) -> None:
     if user.role != 'owner':
         raise HTTPException(status_code=403, detail='Onboarding is only available to owner accounts')
-    if user.portal_account_id is None:
-        raise HTTPException(status_code=400, detail='Owner is not attached to a tenant')
+
+
+async def _ensure_owner_account(db: AsyncSession, user: PortalUser) -> int:
+    if user.portal_account_id is not None:
+        return int(user.portal_account_id)
+    account = PortalAccount(
+        label=(user.full_name or user.email).strip() or user.email,
+        created_at=datetime.utcnow(),
+    )
+    db.add(account)
+    await db.flush()
+    user.portal_account_id = account.id
+    await db.flush()
+    return int(account.id)
 
 
 async def _account_credentials(db: AsyncSession, portal_account_id: int) -> list[YClientsCredential]:
@@ -77,8 +89,12 @@ async def onboarding_state(
     db: AsyncSession = Depends(get_async_db),
 ):
     _require_owner(user)
-    credentials = await _account_credentials(db, user.portal_account_id)
-    branches = await _account_branches(db, user.portal_account_id)
+    if user.portal_account_id is None:
+        credentials = []
+        branches = []
+    else:
+        credentials = await _account_credentials(db, user.portal_account_id)
+        branches = await _account_branches(db, user.portal_account_id)
     has_credentials = bool(credentials)
     has_branches = bool(branches)
     step = _step_from_state(user, has_credentials, has_branches)
@@ -136,7 +152,7 @@ async def onboarding_credentials(
             and not await can_reassign_branch_from_tenant(
                 db,
                 existing.portal_account_id,
-                user.portal_account_id,
+                user.portal_account_id or -1,
                 item['company_id'],
             )
         ):
@@ -147,9 +163,10 @@ async def onboarding_credentials(
             detail=f'Companies already linked to another tenant: {sorted(conflicting)}',
         )
 
+    portal_account_id = await _ensure_owner_account(db, user)
     try:
         credential = new_credential(
-            portal_account_id=user.portal_account_id,
+            portal_account_id=portal_account_id,
             title=body.title,
             partner_token=body.partner_token,
             login=body.login,
@@ -164,7 +181,7 @@ async def onboarding_credentials(
     await log_portal_audit(
         db,
         actor_user_id=user.id,
-        portal_account_id=user.portal_account_id,
+        portal_account_id=portal_account_id,
         action='yclients_credentials.created',
         target_type='yclients_credential',
         target_id=credential.id,

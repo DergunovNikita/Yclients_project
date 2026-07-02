@@ -43,6 +43,7 @@ from plan_config import (
     REVIEWS_QTY_CODE,
     STAFF_CATEGORY_LABELS,
     STAFF_CATEGORY_METRIC_CODES,
+    is_visible_staff_plan,
     metrics_for_category,
     normalize_staff_category,
 )
@@ -2684,24 +2685,6 @@ def _has_plan_values(plan_values: dict[str, float]) -> bool:
     return bool(plan_values)
 
 
-def _has_zero_clients_plan(plan_values: dict[str, float]) -> bool:
-    return (
-        'clients' in plan_values
-        and float(plan_values.get('clients') or 0.0) == 0.0
-    )
-
-
-def _has_positive_plan_values(plan_values: dict[str, float]) -> bool:
-    return any(float(value or 0.0) > 0.0 for value in plan_values.values())
-
-
-def _is_visible_staff_plan(plan_values: dict[str, float]) -> bool:
-    return (
-        not _has_zero_clients_plan(plan_values)
-        and (not plan_values or _has_positive_plan_values(plan_values))
-    )
-
-
 def _metric_sets_payload() -> dict[str, list[dict[str, str]]]:
     return {
         'branch': list(PLAN_FACT_METRICS),
@@ -2956,7 +2939,7 @@ async def _staff_plan_groups_for_branch(
     if has_staff_plans or not include_all_when_branch_planned:
         staff_rows = [
             staff for staff in staff_rows
-            if _is_visible_staff_plan(plans_by_staff.get(int(staff.id), {}))
+            if is_visible_staff_plan(plans_by_staff.get(int(staff.id), {}))
             and (
                 _has_plan_values(plans_by_staff.get(int(staff.id), {}))
                 or _staff_category(
@@ -2969,7 +2952,7 @@ async def _staff_plan_groups_for_branch(
     else:
         staff_rows = [
             staff for staff in staff_rows
-            if _is_visible_staff_plan(plans_by_staff.get(int(staff.id), {}))
+            if is_visible_staff_plan(plans_by_staff.get(int(staff.id), {}))
         ]
     staff_ids = [int(row.id) for row in staff_rows]
     categories_by_staff_id: dict[int, str] = {}

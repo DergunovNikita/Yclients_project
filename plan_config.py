@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -102,3 +103,25 @@ def metrics_for_category(category: str | None) -> tuple[dict[str, str], ...]:
     codes = STAFF_CATEGORY_METRIC_CODES.get(category or '', BARBER_METRIC_CODES)
     allowed = set(codes)
     return tuple(metric for metric in PLAN_FACT_METRICS if metric['code'] in allowed)
+
+
+def has_zero_clients_plan(plan_values: Mapping[str, Any]) -> bool:
+    return (
+        'clients' in plan_values
+        and float(plan_values.get('clients') or 0.0) == 0.0
+    )
+
+
+def has_positive_plan_values(plan_values: Mapping[str, Any]) -> bool:
+    return any(float(value or 0.0) > 0.0 for value in plan_values.values())
+
+
+def is_visible_staff_plan(plan_values: Mapping[str, Any]) -> bool:
+    return (
+        not has_zero_clients_plan(plan_values)
+        and (not plan_values or has_positive_plan_values(plan_values))
+    )
+
+
+def is_non_working_staff_plan(plan_values: Mapping[str, Any]) -> bool:
+    return has_zero_clients_plan(plan_values) or not has_positive_plan_values(plan_values)

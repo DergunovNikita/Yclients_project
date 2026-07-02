@@ -37,6 +37,7 @@ from plan_config import (
     PLAN_FACT_METRICS,
     RAW_PLAN_FACT_CODES,
     STAFF_CATEGORY_METRIC_CODES,
+    is_non_working_staff_plan,
     normalize_staff_category,
 )
 
@@ -264,23 +265,8 @@ def _metric_codes(rows: list[ParsedPlanRow]) -> set[str]:
     return codes
 
 
-def _has_zero_clients_plan(row: ParsedPlanRow) -> bool:
-    return (
-        row.scope == 'staff'
-        and 'clients' in row.values
-        and float(row.values.get('clients') or 0.0) == 0.0
-    )
-
-
-def _has_positive_plan_values(row: ParsedPlanRow) -> bool:
-    return any(float(value or 0.0) > 0.0 for value in row.values.values())
-
-
 def _is_non_working_staff_plan(row: ParsedPlanRow) -> bool:
-    return row.scope == 'staff' and (
-        _has_zero_clients_plan(row)
-        or not _has_positive_plan_values(row)
-    )
+    return row.scope == 'staff' and is_non_working_staff_plan(row.values)
 
 
 def _scope_count(rows: list[ParsedPlanRow], scope: str) -> int:
