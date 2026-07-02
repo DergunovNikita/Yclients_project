@@ -18,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import (
     API_HOST,
-    API_KEY,
     API_PORT,
     DASHBOARD_CORS_ORIGIN_REGEX,
     DASHBOARD_CORS_ORIGINS,

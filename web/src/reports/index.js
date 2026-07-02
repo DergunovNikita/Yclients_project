@@ -48,8 +48,9 @@ function reportMatches(report, filters, favorites) {
   return true;
 }
 
-function reportPath(reportId = '') {
-  return reportId ? `/reports/${encodeURIComponent(reportId)}` : '/reports';
+function reportPath(reportId = '', search = '') {
+  const query = search ? (search.startsWith('?') ? search : `?${search}`) : '';
+  return reportId ? `/reports/${encodeURIComponent(reportId)}${query}` : `/reports${query}`;
 }
 
 function reportIdFromLocation() {
@@ -59,6 +60,26 @@ function reportIdFromLocation() {
   if (path === '/reports') return '';
   if (!path.startsWith('/reports/')) return '';
   return decodeURIComponent(path.slice('/reports/'.length).split('/')[0] || '');
+}
+
+function applyReportParamsFromLocation(els) {
+  const params = new URLSearchParams(window.location.search);
+  const valueMap = {
+    start_date: els.start,
+    end_date: els.end,
+    company_id: els.branch,
+    staff_id: els.staff,
+    granularity: els.granularity,
+    compare_start_date: els.compareStart,
+    compare_end_date: els.compareEnd,
+  };
+  Object.entries(valueMap).forEach(([key, input]) => {
+    const value = params.get(key);
+    if (value !== null && input) input.value = value;
+  });
+  if (params.has('compare_start_date') || params.has('compare_end_date')) {
+    els.compareEnabled.checked = true;
+  }
 }
 
 function periodSubtitle(data) {
@@ -266,6 +287,20 @@ export function initReports({ clearError, showError, setApiState }) {
     return params;
   }
 
+  function reportSearch() {
+    const params = new URLSearchParams();
+    if (els.start.value) params.set('start_date', els.start.value);
+    if (els.end.value) params.set('end_date', els.end.value);
+    if (els.branch.value) params.set('company_id', els.branch.value);
+    if (els.staff.value) params.set('staff_id', els.staff.value);
+    if (els.granularity.value) params.set('granularity', els.granularity.value);
+    if (els.compareEnabled.checked) {
+      if (els.compareStart.value) params.set('compare_start_date', els.compareStart.value);
+      if (els.compareEnd.value) params.set('compare_end_date', els.compareEnd.value);
+    }
+    return params.toString();
+  }
+
   async function openReport(reportId, push = true) {
     state.activeReportId = reportId;
     const meta = state.reports.find((report) => report.id === reportId);
@@ -273,7 +308,7 @@ export function initReports({ clearError, showError, setApiState }) {
       showCatalog(push);
       return;
     }
-    if (push) history.pushState({ view: 'reports', report: reportId }, '', reportPath(reportId));
+    if (push) history.pushState({ view: 'reports', report: reportId }, '', reportPath(reportId, reportSearch()));
     setCatalogVisible(false);
     els.viewer.classList.add('visible');
     els.viewerTitle.textContent = meta.title;
@@ -298,6 +333,8 @@ export function initReports({ clearError, showError, setApiState }) {
 
   async function loadFromLocation() {
     await ensureLoaded();
+    applyReportParamsFromLocation(els);
+    await loadStaff();
     const reportId = reportIdFromLocation();
     if (reportId) {
       await openReport(reportId, false);

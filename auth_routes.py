@@ -60,7 +60,6 @@ from portal_account_provision import provision_all_unlinked_staff, provision_sta
 from portal_staff_sync import (
     deactivate_portal_user_staff,
     list_unlinked_staff,
-    portal_user_syncs_to_staff,
     sync_all_portal_users_staff,
     sync_portal_user_staff,
 )

@@ -1,5 +1,10 @@
 import './auth.css';
 import { authFetch, hasSessionHint, logout, requireAuthRedirect } from './auth.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
+
+document.documentElement.lang = getLocale();
+applyTranslations();
+mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListener('change', () => location.reload());
 
 const ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
 const MANAGER_ROLES = new Set(['platform_admin', 'owner', 'branch_admin', 'manager']);
@@ -13,13 +18,7 @@ const currentPasswordInput = document.getElementById('current-password');
 const newPasswordInput = document.getElementById('new-password');
 const confirmPasswordInput = document.getElementById('confirm-password');
 
-const ROLE_LABELS = {
-  platform_admin: 'Platform Admin — платформа',
-  owner: 'Owner — владелец сети',
-  branch_admin: 'Branch Admin — админ филиала',
-  manager: 'Manager — метрики филиала',
-  viewer: 'Viewer — только просмотр',
-};
+const roleLabel = (role) => t(`roles.${role}`);
 
 function greetingName(user) {
   const fullName = user.full_name?.trim();
@@ -69,7 +68,7 @@ changePasswordForm.addEventListener('submit', async (event) => {
   hidePasswordAlerts();
 
   if (newPasswordInput.value !== confirmPasswordInput.value) {
-    passwordErrorEl.textContent = 'Новый пароль и подтверждение не совпадают';
+    passwordErrorEl.textContent = t('profile.passwordsMismatch');
     passwordErrorEl.hidden = false;
     return;
   }
@@ -85,7 +84,7 @@ changePasswordForm.addEventListener('submit', async (event) => {
       }),
     });
     changePasswordForm.reset();
-    passwordSuccessEl.textContent = 'Пароль успешно изменён';
+    passwordSuccessEl.textContent = t('profile.passwordChanged');
     passwordSuccessEl.hidden = false;
   } catch (error) {
     passwordErrorEl.textContent = error.message;
@@ -101,16 +100,16 @@ async function init() {
   try {
     const me = await authFetch('/auth/me');
     const user = me.data;
-    document.getElementById('profile-name').textContent = `Здравствуйте, ${greetingName(user)}!`;
+    document.getElementById('profile-name').textContent = `${t('profile.greeting')}, ${greetingName(user)}!`;
     document.getElementById('profile-email').textContent = user.email;
-    document.getElementById('profile-role').textContent = ROLE_LABELS[user.role] || user.role;
+    document.getElementById('profile-role').textContent = roleLabel(user.role) || user.role;
 
     if (MANAGER_ROLES.has(user.role)) {
       const manageUsersBtn = document.getElementById('manage-users');
       manageUsersBtn.hidden = false;
       manageUsersBtn.textContent = ADMIN_ROLES.has(user.role)
-        ? 'Редактирование пользователей'
-        : 'Смотреть пользователей';
+        ? t('profile.manageUsers')
+        : t('profile.viewUsers');
     }
   } catch {
     if (!hasSessionHint()) {

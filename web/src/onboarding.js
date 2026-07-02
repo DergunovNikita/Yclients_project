@@ -1,10 +1,15 @@
 import './auth.css';
 import './onboarding.css';
 import { authFetch, hasSessionHint, loadCurrentUser } from './auth.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 if (!hasSessionHint()) {
   window.location.href = '/login.html';
 }
+
+document.documentElement.lang = getLocale();
+applyTranslations();
+mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListener('change', () => refreshState());
 
 const els = {
   loading: document.getElementById('step-loading'),
@@ -64,7 +69,7 @@ function clearAlert(el) {
 
 function renderBranches(companies) {
   if (!companies.length) {
-    els.branchesList.innerHTML = '<div class="empty compact">YClients не вернул филиалов.</div>';
+    els.branchesList.innerHTML = `<div class="empty compact">${t('onboarding.noBranches')}</div>`;
     return;
   }
   els.branchesList.innerHTML = companies
@@ -72,7 +77,7 @@ function renderBranches(companies) {
       (item) => `
         <label>
           <input type="checkbox" data-company-id="${item.company_id}" checked />
-          <span class="branch-title">${escapeHtml(item.title || `Филиал ${item.company_id}`)}</span>
+          <span class="branch-title">${escapeHtml(item.title || `${t('onboarding.branchFallback')} ${item.company_id}`)}</span>
           <span class="branch-meta">${escapeHtml(item.group_title || '')} · id ${item.company_id}</span>
         </label>
       `,
@@ -112,7 +117,7 @@ async function refreshState() {
     }
     showStep(data.step || 'done');
   } catch (error) {
-    els.loading.textContent = `Ошибка: ${error.message}`;
+    els.loading.textContent = `${t('common.errorPrefix')}: ${error.message}`;
   }
 }
 
@@ -120,7 +125,7 @@ els.credsForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   clearAlert(els.credsError);
   els.credsSubmit.disabled = true;
-  els.credsSubmit.textContent = 'Проверяем…';
+  els.credsSubmit.textContent = t('onboarding.credsSubmitLoading');
   try {
     const body = {
       title: document.getElementById('title').value.trim() || 'YClients integration',
@@ -140,7 +145,7 @@ els.credsForm.addEventListener('submit', async (event) => {
     showError(els.credsError, error.message);
   } finally {
     els.credsSubmit.disabled = false;
-    els.credsSubmit.textContent = 'Проверить и сохранить';
+    els.credsSubmit.textContent = t('onboarding.credsSubmit');
   }
 });
 
@@ -151,15 +156,15 @@ els.branchesForm.addEventListener('submit', async (event) => {
     Number(cb.dataset.companyId),
   );
   if (!company_ids.length) {
-    showError(els.branchesError, 'Выберите хотя бы один филиал');
+    showError(els.branchesError, t('onboarding.selectOne'));
     return;
   }
   if (!credentialId) {
-    showError(els.branchesError, 'Сначала добавьте учётные данные YClients');
+    showError(els.branchesError, t('onboarding.needCreds'));
     return;
   }
   els.branchesSubmit.disabled = true;
-  els.branchesSubmit.textContent = 'Сохраняем…';
+  els.branchesSubmit.textContent = t('onboarding.branchesSubmitLoading');
   try {
     await authFetch('/onboarding/branches', {
       method: 'POST',
@@ -170,7 +175,7 @@ els.branchesForm.addEventListener('submit', async (event) => {
     showError(els.branchesError, error.message);
   } finally {
     els.branchesSubmit.disabled = false;
-    els.branchesSubmit.textContent = 'Завершить настройку';
+    els.branchesSubmit.textContent = t('onboarding.branchesSubmit');
   }
 });
 

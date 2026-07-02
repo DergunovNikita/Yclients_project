@@ -1,10 +1,15 @@
 import './auth.css';
 import './settings.css';
 import { authFetch, hasSessionHint, loadCurrentUser, setToken } from './auth.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 if (!hasSessionHint()) {
   window.location.href = '/login.html';
 }
+
+document.documentElement.lang = getLocale();
+applyTranslations();
+mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListener('change', () => location.reload());
 
 const els = {
   tabs: [...document.querySelectorAll('.settings-tab[data-tab]')],
@@ -30,13 +35,7 @@ const els = {
   addCredSuccess: document.getElementById('add-cred-success'),
 };
 
-const ROLE_LABELS = {
-  platform_admin: 'Платформенный администратор',
-  owner: 'Владелец сети',
-  branch_admin: 'Администратор филиала',
-  manager: 'Менеджер',
-  viewer: 'Наблюдатель',
-};
+const roleLabel = (role) => t(`roles.${role}`);
 
 let currentUser = null;
 
@@ -94,7 +93,7 @@ async function loadProfile() {
     currentUser = me.data;
     els.profileName.textContent = currentUser.full_name || '—';
     els.profileEmail.textContent = currentUser.email || '—';
-    els.profileRole.textContent = ROLE_LABELS[currentUser.role] || currentUser.role;
+    els.profileRole.textContent = roleLabel(currentUser.role) || currentUser.role;
     els.profileTenant.textContent = currentUser.portal_account_id ? `#${currentUser.portal_account_id}` : '—';
     const branches = (currentUser.company_ids || []).join(', ');
     els.profileBranches.textContent = branches || '—';
@@ -103,7 +102,7 @@ async function loadProfile() {
     document.querySelector('[data-tab="sources"]').hidden = !ownerOrAdmin;
     document.querySelector('[data-tab="team"]').hidden = !['platform_admin', 'owner', 'branch_admin', 'manager'].includes(currentUser.role);
   } catch (error) {
-    showError(els.passwordError, `Не удалось загрузить профиль: ${error.message}`);
+    showError(els.passwordError, `${t('settings.profileLoadError')}: ${error.message}`);
   }
 }
 
@@ -115,7 +114,7 @@ els.changePasswordForm.addEventListener('submit', async (event) => {
   const next = document.getElementById('new-password').value;
   const confirm = document.getElementById('confirm-password').value;
   if (next !== confirm) {
-    showError(els.passwordError, 'Новые пароли не совпадают');
+    showError(els.passwordError, t('settings.passwordsMismatch'));
     return;
   }
   try {
@@ -123,7 +122,7 @@ els.changePasswordForm.addEventListener('submit', async (event) => {
       method: 'POST',
       body: JSON.stringify({ current_password: current, new_password: next }),
     });
-    els.passwordSuccess.textContent = 'Пароль обновлён. Сейчас вы будете перенаправлены на вход.';
+    els.passwordSuccess.textContent = t('settings.passwordUpdated');
     els.passwordSuccess.hidden = false;
     setTimeout(() => {
       setToken('');
@@ -136,12 +135,12 @@ els.changePasswordForm.addEventListener('submit', async (event) => {
 
 async function loadSessions() {
   clearAlert(els.sessionsError);
-  els.sessionsList.innerHTML = '<div class="settings-empty">Загружаем…</div>';
+  els.sessionsList.innerHTML = `<div class="settings-empty">${t('common.loading')}</div>`;
   try {
     const response = await authFetch('/auth/sessions');
     const sessions = response.data || [];
     if (!sessions.length) {
-      els.sessionsList.innerHTML = '<div class="settings-empty">Активных сессий нет</div>';
+      els.sessionsList.innerHTML = `<div class="settings-empty">${t('settings.noSessions')}</div>`;
       return;
     }
     els.sessionsList.innerHTML = sessions
@@ -149,10 +148,10 @@ async function loadSessions() {
         (item) => `
           <div class="settings-session">
             <div class="settings-session__main">
-              <span class="settings-session__title">${escapeHtml(item.device_label || 'Unknown')}</span>
-              <span class="settings-session__meta">создана ${formatDate(item.created_at)} · последняя активность ${formatDate(item.last_used_at)} · истекает ${formatDate(item.expires_at)}</span>
+              <span class="settings-session__title">${escapeHtml(item.device_label || t('settings.unknownDevice'))}</span>
+              <span class="settings-session__meta">${t('settings.sessionCreated')} ${formatDate(item.created_at)} · ${t('settings.sessionLastUsed')} ${formatDate(item.last_used_at)} · ${t('settings.sessionExpires')} ${formatDate(item.expires_at)}</span>
             </div>
-            <button type="button" class="btn btn--ghost btn--sm" data-revoke="${item.id}">Завершить</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-revoke="${item.id}">${t('settings.sessionRevoke')}</button>
           </div>
         `,
       )
@@ -166,15 +165,17 @@ async function loadSessions() {
   }
 }
 
+const DATETIME_LOCALE = { ru: 'ru-RU', en: 'en-US', it: 'it-IT' };
+
 function formatDate(value) {
   if (!value) return '—';
-  return new Date(value).toLocaleString('ru-RU');
+  return new Date(value).toLocaleString(DATETIME_LOCALE[getLocale()] || 'ru-RU');
 }
 
 function credentialStatus(item) {
-  if (item.needs_reauth) return 'нужна повторная авторизация';
-  if (!item.is_active) return 'отключена';
-  return 'активна';
+  if (item.needs_reauth) return t('settings.credNeedsReauth');
+  if (!item.is_active) return t('settings.credDisabled');
+  return t('settings.credActive');
 }
 
 async function revokeSession(id) {
@@ -189,7 +190,7 @@ async function revokeSession(id) {
 els.refreshSessions.addEventListener('click', loadSessions);
 
 els.logoutAll.addEventListener('click', async () => {
-  if (!confirm('Завершить ВСЕ сессии? Сейчас вас тоже выкинет.')) return;
+  if (!confirm(t('settings.logoutAllConfirm'))) return;
   try {
     await authFetch('/auth/logout-all', { method: 'POST' });
     setToken('');
@@ -201,12 +202,12 @@ els.logoutAll.addEventListener('click', async () => {
 
 async function loadCredentials() {
   clearAlert(els.credentialsError);
-  els.credentialsList.innerHTML = '<div class="settings-empty">Загружаем…</div>';
+  els.credentialsList.innerHTML = `<div class="settings-empty">${t('common.loading')}</div>`;
   try {
     const response = await authFetch('/auth/admin/yclients-credentials');
     const items = response.data || [];
     if (!items.length) {
-      els.credentialsList.innerHTML = '<div class="settings-empty">Интеграций пока нет</div>';
+      els.credentialsList.innerHTML = `<div class="settings-empty">${t('settings.noCredentials')}</div>`;
       return;
     }
     els.credentialsList.innerHTML = items
@@ -215,15 +216,15 @@ async function loadCredentials() {
           <div class="settings-credential">
             <div class="settings-credential__main">
               <span class="settings-credential__title">${escapeHtml(item.title)}</span>
-              <span class="settings-credential__meta">${credentialStatus(item)} · филиалы: ${(item.company_ids || []).join(', ') || '—'} · создана ${formatDate(item.created_at)} · использована ${formatDate(item.last_used_at)}</span>
+              <span class="settings-credential__meta">${credentialStatus(item)} · ${t('settings.credBranches')}: ${(item.company_ids || []).join(', ') || '—'} · ${t('settings.credCreated')} ${formatDate(item.created_at)} · ${t('settings.credUsed')} ${formatDate(item.last_used_at)}</span>
               ${
                 item.last_error
-                  ? `<span class="settings-credential__meta">последняя ошибка ${formatDate(item.last_error_at)}: ${escapeHtml(item.last_error)}</span>`
+                  ? `<span class="settings-credential__meta">${t('settings.credLastError')} ${formatDate(item.last_error_at)}: ${escapeHtml(item.last_error)}</span>`
                   : ''
               }
             </div>
-            <button type="button" class="btn btn--ghost btn--sm" data-toggle="${item.id}" data-active="${item.is_active ? '1' : '0'}">${item.is_active ? 'Отключить' : 'Включить'}</button>
-            <button type="button" class="btn btn--danger btn--sm" data-delete="${item.id}">Удалить</button>
+            <button type="button" class="btn btn--ghost btn--sm" data-toggle="${item.id}" data-active="${item.is_active ? '1' : '0'}">${item.is_active ? t('settings.credDisable') : t('settings.credEnable')}</button>
+            <button type="button" class="btn btn--danger btn--sm" data-delete="${item.id}">${t('settings.credDelete')}</button>
           </div>
         `,
       )
@@ -253,7 +254,7 @@ async function toggleCredential(id, isActive) {
 }
 
 async function deleteCredential(id) {
-  if (!confirm('Удалить эту интеграцию? Это удалит и привязку филиалов.')) return;
+  if (!confirm(t('settings.credDeleteConfirm'))) return;
   try {
     await authFetch(`/auth/admin/yclients-credentials/${id}`, { method: 'DELETE' });
     await loadCredentials();
@@ -278,7 +279,7 @@ els.addCredForm.addEventListener('submit', async (event) => {
         password: document.getElementById('cred-password').value,
       }),
     });
-    els.addCredSuccess.textContent = 'Интеграция создана. Филиалы подтянутся из YClients автоматически.';
+    els.addCredSuccess.textContent = t('settings.credCreated2');
     els.addCredSuccess.hidden = false;
     els.addCredForm.reset();
     document.getElementById('cred-title').value = 'YClients integration';

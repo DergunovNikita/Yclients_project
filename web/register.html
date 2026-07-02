@@ -3,58 +3,60 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Регистрация — YClients Portal</title>
+  <title>Регистрация — Salon Analytics</title>
   <link rel="stylesheet" href="/src/auth.css" />
 </head>
 <body class="auth-page auth-page--register">
   <div class="auth-layout">
     <aside class="auth-brand">
       <div class="auth-brand__logo">
-        <span class="auth-brand__mark">Y</span>
-        <span>YClients Portal</span>
+        <span class="auth-brand__mark" data-i18n="brand.mark">S</span>
+        <span data-i18n="brand.name">Salon Analytics</span>
       </div>
       <div class="auth-brand__content">
-        <h2>Добро пожаловать в команду</h2>
-        <p>После регистрации можно сразу войти и подключить источник данных.</p>
+        <h2 data-i18n="register.aside.title">Добро пожаловать в команду</h2>
+        <p data-i18n="register.aside.subtitle">После регистрации можно сразу войти и подключить источник данных.</p>
       </div>
       <ul class="auth-brand__features">
-        <li>Минимум 8 символов в пароле</li>
-        <li>Вход без подтверждения почты</li>
-        <li>Безопасное восстановление доступа</li>
+        <li data-i18n="register.aside.feature1">Минимум 8 символов в пароле</li>
+        <li data-i18n="register.aside.feature2">Вход без подтверждения почты</li>
+        <li data-i18n="register.aside.feature3">Безопасное восстановление доступа</li>
       </ul>
     </aside>
 
     <main class="auth-panel">
       <section class="auth-card">
         <div class="auth-mobile-logo">
-          <span class="auth-brand__mark">Y</span>
-          <span>YClients Portal</span>
+          <span class="auth-brand__mark" data-i18n="brand.mark">S</span>
+          <span data-i18n="brand.name">Salon Analytics</span>
         </div>
-        <span class="auth-card__eyebrow">Новый аккаунт</span>
-        <h1>Регистрация</h1>
-        <p class="auth-subhead">Создайте аккаунт владельца сети и перейдите к подключению источника данных.</p>
+        <span class="auth-card__eyebrow" data-i18n="register.eyebrow">Новый аккаунт</span>
+        <h1 data-i18n="register.title">Регистрация</h1>
+        <p class="auth-subhead" data-i18n="register.subhead">Создайте аккаунт владельца сети и перейдите к подключению источника данных.</p>
+
+        <div class="auth-lang" id="lang-switcher"></div>
 
         <div class="alert error" id="error" hidden></div>
         <div class="alert success" id="success" hidden></div>
 
         <form class="auth-form" id="auth-form">
           <div class="field">
-            <label for="full_name">Имя</label>
-            <input type="text" id="full_name" autocomplete="name" placeholder="Иван Иванов" />
+            <label for="full_name" data-i18n="register.name">Имя</label>
+            <input type="text" id="full_name" autocomplete="name" placeholder="Иван Иванов" data-i18n-attr="placeholder:register.namePlaceholder" />
           </div>
           <div class="field">
-            <label for="email">Email</label>
-            <input type="email" id="email" required autocomplete="username" placeholder="name@company.com" />
+            <label for="email" data-i18n="common.email">Email</label>
+            <input type="email" id="email" required autocomplete="username" placeholder="name@company.com" data-i18n-attr="placeholder:login.emailPlaceholder" />
           </div>
           <div class="field">
-            <label for="password">Пароль</label>
-            <input type="password" id="password" required minlength="8" autocomplete="new-password" placeholder="Не менее 8 символов" />
+            <label for="password" data-i18n="common.password">Пароль</label>
+            <input type="password" id="password" required minlength="8" autocomplete="new-password" placeholder="Не менее 8 символов" data-i18n-attr="placeholder:register.passwordPlaceholder" />
           </div>
-          <button type="submit" class="btn btn--primary" id="submit">Создать аккаунт</button>
+          <button type="submit" class="btn btn--primary" id="submit" data-i18n="register.submit">Создать аккаунт</button>
         </form>
 
         <p class="auth-links">
-          <a href="/login.html">Уже есть аккаунт? Войти</a>
+          <a href="/login.html" data-i18n="register.haveAccount">Уже есть аккаунт? Войти</a>
         </p>
       </section>
     </main>

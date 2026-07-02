@@ -97,7 +97,7 @@ def isolate_api_auth(monkeypatch):
     import dashboard_routes
     import dashboard_service
 
-    monkeypatch.setattr(api, 'API_KEY', '')
+    monkeypatch.setattr(api, 'API_KEY', '', raising=False)
     monkeypatch.setattr(api, 'SYNC_API_TOKEN', '')
     monkeypatch.setattr(auth_deps, 'API_KEY', '')
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)

@@ -1,5 +1,14 @@
 import './auth.css';
 import { authFetch } from './auth.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
+
+document.documentElement.lang = getLocale();
+applyTranslations();
+const syncTitle = () => {
+  document.title = `${t('verify.title')} — ${t('brand.name')}`;
+};
+syncTitle();
+mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListener('change', syncTitle);
 
 const params = new URLSearchParams(window.location.search);
 const token = params.get('token');
@@ -8,7 +17,7 @@ const successEl = document.getElementById('success');
 
 async function verify() {
   if (!token) {
-    errorEl.textContent = 'Missing verification token in URL';
+    errorEl.textContent = t('verify.missingToken');
     errorEl.hidden = false;
     return;
   }

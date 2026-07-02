@@ -928,6 +928,78 @@ async def _client_visit_frequency_block(
     }
 
 
+async def _client_recency_block(
+    db: AsyncSession,
+    dr: DateRange,
+    company_id: Optional[int],
+    staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
+) -> dict[str, Any]:
+    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
+    scope_filters = [
+        Appointment.attendance == COMPLETED_ATTENDANCE,
+        Appointment.client_id.is_not(None),
+        business_appointment_condition(),
+    ]
+    if scope is not None:
+        scope_filters.append(scope)
+    current_filters = list(scope_filters)
+    if staff_id is not None:
+        current_filters.append(Appointment.staff_id == staff_id)
+
+    current_clients = (
+        select(Appointment.client_id.label('client_id'))
+        .where(
+            *current_filters,
+            Appointment.date >= dr.start,
+            Appointment.date <= dr.end,
+        )
+        .group_by(Appointment.client_id)
+        .subquery()
+    )
+    first_visits = (
+        select(
+            Appointment.client_id.label('client_id'),
+            func.min(Appointment.date).label('first_visit_date'),
+        )
+        .where(*scope_filters)
+        .group_by(Appointment.client_id)
+        .subquery()
+    )
+    row = (
+        await db.execute(
+            select(
+                func.count(current_clients.c.client_id).label('total_clients'),
+                func.coalesce(
+                    func.sum(
+                        case((first_visits.c.first_visit_date >= dr.start, 1), else_=0)
+                    ),
+                    0,
+                ).label('new_clients'),
+                func.coalesce(
+                    func.sum(
+                        case((first_visits.c.first_visit_date < dr.start, 1), else_=0)
+                    ),
+                    0,
+                ).label('repeat_clients'),
+            )
+            .select_from(current_clients)
+            .join(first_visits, first_visits.c.client_id == current_clients.c.client_id)
+        )
+    ).one()
+
+    total_clients = int(row.total_clients or 0)
+    new_clients = int(row.new_clients or 0)
+    repeat_clients = int(row.repeat_clients or 0)
+    return {
+        'total_clients': total_clients,
+        'new_clients': new_clients,
+        'new_clients_pct': 100.0 * _safe_div(float(new_clients), float(total_clients)),
+        'repeat_clients': repeat_clients,
+        'repeat_clients_pct': 100.0 * _safe_div(float(repeat_clients), float(total_clients)),
+    }
+
+
 def _title_matches(title_expr, parts: tuple[str, ...]):
     conditions = []
     for part in parts:
@@ -1267,6 +1339,20 @@ async def fetch_summary(
         staff_id,
         allowed_company_ids=allowed_company_ids,
     )
+    cur_client_recency = await _client_recency_block(
+        db,
+        current_dr,
+        company_id,
+        staff_id,
+        allowed_company_ids=allowed_company_ids,
+    )
+    prev_client_recency = await _client_recency_block(
+        db,
+        prev_dr,
+        company_id,
+        staff_id,
+        allowed_company_ids=allowed_company_ids,
+    )
     for block, average_check in ((cur, cur_average_check), (prev, prev_average_check)):
         block['service_revenue'] = average_check['service_revenue']
         block['goods_revenue'] = average_check['goods_revenue']
@@ -1415,6 +1501,26 @@ async def fetch_summary(
                 prev_extra_service_clients_pct,
             ),
             'client_visit_frequency': client_frequency,
+            'new_clients': cur_client_recency['new_clients'],
+            'new_clients_change_pct': _pct_change(
+                float(cur_client_recency['new_clients']),
+                float(prev_client_recency['new_clients']),
+            ),
+            'new_clients_pct': cur_client_recency['new_clients_pct'],
+            'new_clients_pct_change_pct': _pct_change(
+                cur_client_recency['new_clients_pct'],
+                prev_client_recency['new_clients_pct'],
+            ),
+            'repeat_clients': cur_client_recency['repeat_clients'],
+            'repeat_clients_change_pct': _pct_change(
+                float(cur_client_recency['repeat_clients']),
+                float(prev_client_recency['repeat_clients']),
+            ),
+            'repeat_clients_pct': cur_client_recency['repeat_clients_pct'],
+            'repeat_clients_pct_change_pct': _pct_change(
+                cur_client_recency['repeat_clients_pct'],
+                prev_client_recency['repeat_clients_pct'],
+            ),
         },
         'average_check': {
             **cur_average_check,

@@ -35,6 +35,11 @@ class Company(Base):
     id = Column(Integer, primary_key=True)
     title = Column(String, nullable=False)
     group_id = Column(Integer, ForeignKey('groups.id'), index=True)
+    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
+    country = Column(String)
+    locale = Column(String)
+    currency = Column(String)
+    timezone = Column(String)
 
     group = relationship("Group", back_populates="companies")
     services = relationship("Service", back_populates="company")

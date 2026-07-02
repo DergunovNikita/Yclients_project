@@ -1,0 +1,435 @@
+<title>Roadmap — мультиисточниковый BI-продукт</title>
+<style>
+  :root {
+    --serif: Georgia, "Iowan Old Style", "Times New Roman", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+    --ground: #f6f5f8;
+    --card: #ffffff;
+    --ink: #1b1722;
+    --muted: #6e6878;
+    --faint: #9994a3;
+    --line: #e7e3ec;
+    --line-strong: #d8d3e0;
+
+    --accent: #c21e56;
+    --accent-soft: #f7e2ea;
+
+    --done: #2e7d5b;   --done-bg: #e6f1ec;
+    --part: #a86e12;   --part-bg: #f8efd9;
+    --todo: #7a7585;   --todo-bg: #edeaf0;
+
+    --maxw: 1040px;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: var(--maxw);
+    margin: 0 auto;
+    padding: clamp(28px, 5vw, 64px) clamp(18px, 4vw, 44px) 80px;
+  }
+
+  .fade { animation: rise .5s ease both; }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .fade { animation: none; } }
+
+  /* ---------- header ---------- */
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(30px, 5vw, 46px);
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    margin: 0 0 16px;
+  }
+  .lede {
+    font-size: clamp(16px, 2.2vw, 19px);
+    color: var(--muted);
+    max-width: 62ch;
+    margin: 0 0 28px;
+  }
+
+  .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 28px;
+    align-items: center;
+    padding: 18px 0 4px;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--faint);
+    letter-spacing: .02em;
+  }
+
+  /* overall meter */
+  .overall {
+    margin: 26px 0 6px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 20px 22px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 6px 20px;
+    align-items: baseline;
+  }
+  .overall .label { font-family: var(--mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .overall .pct { font-family: var(--serif); font-size: 34px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .overall .bar { grid-column: 1 / -1; height: 9px; border-radius: 6px; background: var(--ground); overflow: hidden; margin-top: 6px; }
+  .overall .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), #e0568a); border-radius: 6px; }
+  .overall .note { grid-column: 1 / -1; font-size: 13.5px; color: var(--muted); margin-top: 4px; }
+
+  /* legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 22px 0 34px; }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .dot.done { background: var(--done); }
+  .dot.part { background: var(--part); }
+  .dot.todo { background: var(--todo); }
+
+  /* ---------- section grid ---------- */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+
+  .axis {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 20px 20px 18px;
+    display: flex;
+    flex-direction: column;
+  }
+  .axis-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  .axis-letter {
+    font-family: var(--serif);
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--accent);
+    width: 22px; height: 22px;
+    display: inline-grid; place-items: center;
+    border: 1px solid var(--accent-soft);
+    background: var(--accent-soft);
+    border-radius: 6px;
+    flex: none;
+    letter-spacing: 0;
+  }
+  .axis-title { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
+
+  .mini { height: 5px; border-radius: 4px; background: var(--ground); overflow: hidden; margin: 12px 0 14px; display: flex; }
+  .mini > i { display: block; height: 100%; }
+  .mini > i.done { background: var(--done); }
+  .mini > i.part { background: var(--part); }
+
+  ul.items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+  ul.items li { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start; font-size: 13.7px; }
+  ul.items li .dot { margin-top: 6px; }
+  ul.items li b { font-weight: 600; }
+  .tagline { font-size: 12.5px; color: var(--faint); margin-top: 12px; font-style: italic; }
+
+  /* ---------- critical path ---------- */
+  .cp {
+    margin-top: 46px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: clamp(22px, 4vw, 34px);
+  }
+  .cp h2, .mvp h2 { font-family: var(--serif); font-weight: 600; font-size: 24px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .cp .sub { color: var(--muted); font-size: 14.5px; margin: 0 0 26px; }
+
+  .steps { display: flex; flex-direction: column; }
+  .step { display: grid; grid-template-columns: 40px 1fr; gap: 16px; }
+  .step .rail { display: flex; flex-direction: column; align-items: center; }
+  .step .num {
+    width: 34px; height: 34px; flex: none;
+    border-radius: 50%;
+    display: grid; place-items: center;
+    font-family: var(--mono); font-size: 14px; font-weight: 600;
+    background: var(--accent); color: #fff;
+    font-variant-numeric: tabular-nums;
+  }
+  .step .line { width: 2px; flex: 1; background: var(--line-strong); margin: 4px 0; min-height: 14px; }
+  .step:last-child .line { display: none; }
+  .step .body { padding-bottom: 22px; }
+  .step h3 { font-size: 15.5px; margin: 5px 0 4px; font-weight: 650; }
+  .step p { margin: 0; font-size: 13.7px; color: var(--muted); }
+  .step .gate { font-family: var(--mono); font-size: 11.5px; letter-spacing: .04em; color: var(--accent); margin-top: 7px; }
+
+  .parallel {
+    margin-top: 6px;
+    border: 1px dashed var(--line-strong);
+    border-radius: 12px;
+    padding: 14px 16px;
+    display: grid; grid-template-columns: 40px 1fr; gap: 16px; align-items: center;
+  }
+  .parallel .num { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-family: var(--mono); font-weight: 600; background: var(--todo-bg); color: var(--todo); }
+  .parallel h3 { font-size: 14.5px; margin: 0 0 2px; }
+  .parallel p { margin: 0; font-size: 13px; color: var(--muted); }
+
+  /* ---------- mvp ---------- */
+  .mvp {
+    margin-top: 22px;
+    background: linear-gradient(180deg, #221a2a, #16121c);
+    color: #f3eef6;
+    border-radius: 16px;
+    padding: clamp(24px, 4vw, 36px);
+  }
+  .mvp .eyebrow { color: #f0a0bd; }
+  .mvp h2 { color: #fff; }
+  .mvp p { color: #cdc5d6; font-size: 15px; max-width: 68ch; margin: 6px 0 18px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    font-family: var(--mono); font-size: 12.5px;
+    padding: 7px 12px; border-radius: 999px;
+    background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.14);
+    color: #f3eef6;
+  }
+  .chip.key { background: var(--accent); border-color: var(--accent); }
+
+  footer { margin-top: 40px; font-family: var(--mono); font-size: 11.5px; color: var(--faint); letter-spacing: .03em; text-align: center; }
+</style>
+
+<div class="wrap fade">
+  <header>
+    <p class="eyebrow">Продуктовая стратегия · ETL/BI для салонов</p>
+    <h1>От российского ETL к мультиисточниковому SaaS</h1>
+    <p class="lede">Что нужно, чтобы продукт оперировал <b>разными данными из разных источников</b> для <b>разных пользователей и бизнесов</b> — с выходом на итальянский рынок. Ниже — полный свод работ по осям, текущий статус и критический путь.</p>
+
+    <div class="overall" role="group" aria-label="Общий прогресс">
+      <span class="label">Общая готовность фундамента</span>
+      <span class="pct">~20%</span>
+      <div class="bar"><span style="width:20%"></span></div>
+      <p class="note">Заложен архитектурный шов (мульти-источник, i18n, мульти-тенант). Основной объём — доведение до end-to-end, локализация и продуктизация.</p>
+    </div>
+
+    <div class="legend" aria-hidden="false">
+      <span><i class="dot done"></i> Сделано</span>
+      <span><i class="dot part"></i> Частично / в этой сессии</span>
+      <span><i class="dot todo"></i> Ещё нет</span>
+    </div>
+
+    <div class="meta-row">
+      <span>Состояние на 2 июля 2026</span>
+      <span>10 осей · 43 пункта</span>
+      <span>Тесты: 163 ✓ · ruff clean</span>
+    </div>
+  </header>
+
+  <main>
+    <div class="grid" style="margin-top:30px">
+
+      <!-- A -->
+      <section class="axis">
+        <div class="axis-head"><span class="axis-letter">A</span><span class="axis-title">Мульти-источник</span></div>
+        <div class="mini" aria-hidden="true"><i class="done" style="width:12.5%"></i><i class="part" style="width:6.25%"></i></div>
+        <ul class="items">
+          <li><i class="dot done"></i><span><b>Контракт <code>SyncSource</code></b> — pipeline source-agnostic</span></li>
+          <li><i class="dot part"></i><span><b>file_import</b>: клиент + профили маппинга + парсеры локали</span></li>
+          <li><i class="dot todo"></i><span>Upload-эндпоинт + онбординг файла + прогон <code>execute_sync</code></span></li>
+          <li><i class="dot todo"></i><span>Реальный профиль Area <b>(Phase 0)</b> — блокер 1-го клиента</span></li>
+          <li><i class="dot todo"></i><span><code>api_pull</code> для приватных API</span></li>
+          <li><i class="dot todo"></i><span><code>native</code>-режим (fallback для greenfield)</span></li>
+          <li><i class="dot todo"></i><span>Расписание + дедуп на уровне БД</span></li>
+          <li><i class="dot todo"></i><span>Наблюдаемость «свежести» источников + алерты</span></li>
+        </ul>
+      </section>
+
+      <!-- B -->
+      <section class="axis">
+        <div class="axis-head"><span class="axis-letter">B</span><span class="axis-title">Каноническая модель</span></div>
+        <div class="mini" aria-hidden="true"><i class="part" style="width:12.5%"></i></div>
+        <ul class="items">
+          <li><i class="dot part"></i><span><code>source_type</code> + локаль-колонки (миграции 0029/0030)</span></li>
+          <li><i class="dot todo"></i><span>Применить и обкатать на реальной БД</span></li>
+          <li><i class="dot todo"></i><span>Ключ <code>(company_id, source_type, external_id)</code></span></li>
+          <li><i class="dot todo"></i><span>Маппинг справочников между источниками</span></li>
+          <li><i class="dot todo"></i><span>Graceful degradation недостающих метрик</span></li>
+        </ul>
+      </section>
+
+      <!-- C -->
+      <section class="axis">
+        <div class="axis-head"><span class="axis-letter">C</span><span class="axis-title">Мульти-бизнес</span></div>
+        <div class="mini" aria-hidden="true"><i class="done" style="width:25%"></i></div>
+        <ul class="items">
+          <li><i class="dot done"></i><span><b>Мульти-тенант</b> — PortalAccount/Branch, изоляция, ownership</span></li>
+          <li><i class="dot todo"></i><span>Настройки локали/валюты/налога/tz как сущность + UI</span></li>
+          <li><i class="dot todo"></i><span>Проверка изоляции данных при мульти-источнике</span></li>
+          <li><i class="dot todo"></i><span>Data residency per-tenant (ЕС)</span></li>
+        </ul>
+      </section>
+
+      <!-- D -->
+      <section class="axis">
+        <div class="axis-head"><span class="axis-letter">D</span><span class="axis-title">Мульти-пользователь</span></div>
+        <div class="mini" aria-hidden="true"><i class="done" style="width:25%"></i><i class="part" style="width:12.5%"></i></div>
+        <ul class="items">
+          <li><i class="dot done"></i><span><b>Auth + роли + иерархия + сессии</b>, права по филиалам</span></li>
+          <li><i class="dot part"></i><span>Аудит действий (база <code>portal_audit</code> есть)</span></li>
+          <li><i class="dot todo"></i><span>Язык на пользователя (<code>user.locale</code>)</span></li>
+          <li><i class="dot todo"></i><span>Ревизия RBAC под источники/импорты/настройки</span></li>
+        </ul>
+      </section>
+
+      <!-- E -->
+      <section class="axis">
+        <div class="axis-head"><span class="axis-letter">E</span><span class="axis-title">Интернационализация</span></div>
+        <div class="mini" aria-hidden="true"><i class="part" style="width:10%"></i></div>
+        <ul class="items">
+          <li><i class="dot part"></i><span><b>i18n-фундамент</b> — RU/EN/IT, <code>i18n.js</code>, switcher, ребренд, login</span></li>
+          <li><i class="dot todo"></i><span>Раскатать на остальные 9 страниц + index/main</span></li>
+          <li><i class="dot todo"></i><span>Бэкенд-переводы + шаблоны писем на язык</span></li>
+          <li><i class="dot todo"></i><span>Форматы чисел/дат/валюты (EUR, запятая)</span></li>
+          <li><i class="dot todo"></i><span>Финальный ребренд — убрать «YClients» везде</span></li>
+        </ul>
+      </section>
+
+      <!-- F -->
+      <section class="axis">
+        <div class="axis-head"><span class="axis-letter">F</span><span class="axis-title">Аналитика</span></div>
+        <div class="mini" aria-hidden="true"><i class="done" style="width:33%"></i></div>
+        <ul class="items">
+          <li><i class="dot done"></i><span>Дашборды, отчёты, Metabase-views</span></li>
+          <li><i class="dot todo"></i><span>Налоги/IVA из tenant-настроек, не хардкод</span></li>
+          <li><i class="dot todo"></i><span>Кросс-бизнес сопоставимость метрик</span></li>
+        </ul>
+      </section>
+
+      <!-- G -->
+      <section class="axis">
+        <div class="axis-head"><span class="axis-letter">G</span><span class="axis-title">Продуктизация</span></div>
+        <div class="mini" aria-hidden="true"><i class="part" style="width:12.5%"></i></div>
+        <ul class="items">
+          <li><i class="dot part"></i><span>Trial / demo-данные (есть <code>seed_fake_data</code>)</span></li>
+          <li><i class="dot todo"></i><span>Self-serve онбординг источника + первый синк</span></li>
+          <li><i class="dot todo"></i><span>Биллинг / подписки / лимиты (Stripe для ЕС)</span></li>
+          <li><i class="dot todo"></i><span>Юр. оболочка — оферта, тарифы EU/RU</span></li>
+        </ul>
+      </section>
+
+      <!-- H -->
+      <section class="axis">
+        <div class="axis-head"><span class="axis-letter">H</span><span class="axis-title">Инфраструктура</span></div>
+        <div class="mini" aria-hidden="true"><i class="part" style="width:25%"></i></div>
+        <ul class="items">
+          <li><i class="dot part"></i><span>Шифрование credentials (расширить на новые источники)</span></li>
+          <li><i class="dot part"></i><span>CI-гейты: ruff + gitleaks + тесты</span></li>
+          <li><i class="dot todo"></i><span>Per-region деплой (EU + RU)</span></li>
+          <li><i class="dot todo"></i><span>Масштаб воркера / изоляция долгих синков</span></li>
+        </ul>
+      </section>
+
+      <!-- I -->
+      <section class="axis">
+        <div class="axis-head"><span class="axis-letter">I</span><span class="axis-title">Комплаенс (ЕС)</span></div>
+        <div class="mini" aria-hidden="true"></div>
+        <ul class="items">
+          <li><i class="dot todo"></i><span>GDPR — основание, удаление/экспорт, consent, retention</span></li>
+          <li><i class="dot todo"></i><span>DPA с салоном (ты — processor)</span></li>
+          <li><i class="dot todo"></i><span>Хостинг ПДн в ЕС + журнал обработки</span></li>
+        </ul>
+        <p class="tagline">Не блокирует разработку — блокирует продажу.</p>
+      </section>
+
+      <!-- J -->
+      <section class="axis">
+        <div class="axis-head"><span class="axis-letter">J</span><span class="axis-title">Качество</span></div>
+        <div class="mini" aria-hidden="true"><i class="done" style="width:25%"></i></div>
+        <ul class="items">
+          <li><i class="dot done"></i><span>163 теста зелёные, ruff clean</span></li>
+          <li><i class="dot todo"></i><span>Интеграционные тесты file_import → pipeline → БД</span></li>
+          <li><i class="dot todo"></i><span>Тесты изоляции тенантов под мульти-источник</span></li>
+        </ul>
+      </section>
+
+    </div>
+
+    <!-- critical path -->
+    <section class="cp">
+      <h2>Критический путь</h2>
+      <p class="sub">Что за чем. Порядок обусловлен зависимостями, а не приоритетом «важности».</p>
+      <div class="steps">
+        <div class="step">
+          <div class="rail"><div class="num">1</div><div class="line"></div></div>
+          <div class="body">
+            <h3>Phase 0 — реальный экспорт Area</h3>
+            <p>Получить настоящий файл выгрузки (или лог приватного API). Разблокирует профиль маппинга и весь file_import.</p>
+            <p class="gate">GATE · без этого профиль Area — догадка</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="rail"><div class="num">2</div><div class="line"></div></div>
+          <div class="body">
+            <h3>file_import до end-to-end</h3>
+            <p>Upload-эндпоинт + модель файлового источника + прогон через <code>execute_sync</code> + интеграционный тест.</p>
+            <p class="gate">→ первый итальянский клиент технически возможен</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="rail"><div class="num">3</div><div class="line"></div></div>
+          <div class="body">
+            <h3>Локализация «в бой»</h3>
+            <p>i18n на все страницы + письма + EUR/IVA/форматы + финальный ребренд.</p>
+            <p class="gate">→ продукт выглядит итальянским</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="rail"><div class="num">4</div><div class="line"></div></div>
+          <div class="body">
+            <h3>Self-serve онбординг + биллинг</h3>
+            <p>Подключение источника и оплата без ручного вмешательства.</p>
+            <p class="gate">→ продукт продаётся сам</p>
+          </div>
+        </div>
+      </div>
+      <div class="parallel">
+        <div class="num">5</div>
+        <div>
+          <h3>GDPR + EU-хостинг — параллельно шагам 2–4</h3>
+          <p>Не блокирует разработку, но блокирует легальный запуск в ЕС. Вести отдельным треком с самого начала.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- mvp -->
+    <section class="mvp">
+      <p class="eyebrow">Минимальный релиз</p>
+      <h2>Первый платящий итальянский клиент</h2>
+      <p>Достаточно шагов 1 + 2 + 3 (бизнес заведён вручную, без биллинга) и базового GDPR-минимума. Всё остальное — масштабирование, а не условие запуска.</p>
+      <div class="chips">
+        <span class="chip key">1 · Экспорт Area</span>
+        <span class="chip key">2 · file_import E2E</span>
+        <span class="chip key">3 · Локализация IT</span>
+        <span class="chip">+ GDPR-минимум</span>
+      </div>
+    </section>
+  </main>
+
+  <footer>Roadmap · мультиисточниковый BI-продукт · внутренний документ</footer>
+</div>

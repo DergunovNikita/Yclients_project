@@ -9,6 +9,11 @@ import {
   setSelectedPortalAccountId,
 } from './auth.js';
 import * as XLSX from 'xlsx';
+import { applyTranslations, getLocale, mountLanguageSwitcher } from './i18n.js';
+
+document.documentElement.lang = getLocale();
+applyTranslations();
+mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListener('change', () => location.reload());
 
 const errorEl = document.getElementById('error');
 const successEl = document.getElementById('success');

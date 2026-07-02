@@ -1,5 +1,14 @@
 import './auth.css';
 import { authFetch } from './auth.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
+
+document.documentElement.lang = getLocale();
+applyTranslations();
+const syncTitle = () => {
+  document.title = `${t('register.title')} — ${t('brand.name')}`;
+};
+syncTitle();
+mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListener('change', syncTitle);
 
 const form = document.getElementById('auth-form');
 const errorEl = document.getElementById('error');

@@ -40,7 +40,6 @@ from models import (
     Service,
     ServiceCatalog,
     ServiceKpiAssignment,
-    ServiceKpiGroup,
     ServiceLabel,
     Staff,
     StaffSchedule,
@@ -70,6 +69,8 @@ async def test_dashboard_reports_registry_contract(async_session):
     assert by_id['revenue_dynamics']['filters']['compare'] is True
     assert by_id['year_over_year']['status'] == 'ready'
     assert by_id['year_over_year']['group'] == 'finance'
+    assert by_id['new_vs_returning_cross']['status'] == 'ready'
+    assert by_id['new_vs_returning_cross']['group'] == 'clients'
 
 
 @pytest.mark.asyncio
@@ -160,6 +161,67 @@ async def test_dashboard_report_data_ready_report_and_compare(async_session):
     assert data['comparison']['rows'][0]['delta_pct'] == 50.0
     assert data['charts']
     assert data['tables']
+
+
+@pytest.mark.asyncio
+async def test_dashboard_client_reports_are_aggregated_without_client_pii(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add_all([
+        Client(id=1, name='Alice Personal', phone='+100000001', company_id=1),
+        Client(id=2, name='Bob Personal', phone='+100000002', company_id=1),
+        Client(id=3, name='Carol Personal', phone='+100000003', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 10), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2024, 12, 20), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=2, date=date(2025, 1, 11), attendance=1),
+        Appointment(id=4, company_id=1, staff_id=1, client_id=3, date=date(2024, 6, 1), attendance=1),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        recency = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'new_vs_returning_cross',
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+            },
+        )
+        churn = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'lost_clients_list',
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert recency.status_code == 200
+    recency_data = recency.json()['data']
+    assert recency_data['source_status'] == 'ready'
+    assert recency_data['cards'][1]['value'] == 1
+    assert recency_data['cards'][3]['value'] == 1
+
+    assert churn.status_code == 200
+    assert churn.json()['data']['tables'][0]['id'] == 'risk_segments'
+
+    combined_payload = recency.text + churn.text
+    assert 'Alice Personal' not in combined_payload
+    assert 'Bob Personal' not in combined_payload
+    assert 'Carol Personal' not in combined_payload
+    assert '+100000001' not in combined_payload
+    assert '+100000002' not in combined_payload
+    assert '+100000003' not in combined_payload
 
 
 @pytest.mark.asyncio
@@ -725,6 +787,89 @@ async def test_dashboard_summary_split_revenue_and_average_checks(async_session)
     assert frequency['two_to_three_visits']['pct'] == 50.0
     assert frequency['four_plus_visits']['count'] == 0
     assert frequency['four_plus_visits']['pct'] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_dashboard_summary_counts_new_and_repeat_clients(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add_all([
+        Client(id=1, name='New Client', company_id=1),
+        Client(id=2, name='Repeat Client', company_id=1),
+        Client(id=3, name='Cancelled Client', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 10), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2024, 12, 20), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=2, date=date(2025, 1, 11), attendance=1),
+        Appointment(id=4, company_id=1, staff_id=1, client_id=3, date=date(2025, 1, 12), attendance=-1),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    visit_metrics = response.json()['data']['visit_metrics']
+    assert visit_metrics['unique_clients'] == 2
+    assert visit_metrics['new_clients'] == 1
+    assert visit_metrics['new_clients_pct'] == 50.0
+    assert visit_metrics['repeat_clients'] == 1
+    assert visit_metrics['repeat_clients_pct'] == 50.0
+
+
+@pytest.mark.asyncio
+async def test_dashboard_summary_staff_filter_counts_new_clients_by_business_scope(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        Staff(id=1, name='Selected Master', position='Барбер', company_id=1),
+        Staff(id=2, name='Previous Master', position='Барбер', company_id=1),
+    ])
+    async_session.add_all([
+        Client(id=1, name='Existing Business Client', company_id=1),
+        Client(id=2, name='New Business Client', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=2, client_id=1, date=date(2024, 12, 20), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 11), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=2, date=date(2025, 1, 12), attendance=1),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/dashboard/widget/summary',
+            params={
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+                'staff_id': '1',
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    visit_metrics = response.json()['data']['visit_metrics']
+    assert visit_metrics['unique_clients'] == 2
+    assert visit_metrics['new_clients'] == 1
+    assert visit_metrics['repeat_clients'] == 1
 
 
 @pytest.mark.asyncio

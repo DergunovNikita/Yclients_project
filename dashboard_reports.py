@@ -24,13 +24,11 @@ from dashboard_service import (
 )
 from models import (
     Appointment,
-    Client,
     Comment,
     Company,
     FinancialTransaction,
     GoodTransaction,
     Staff,
-    Transaction,
 )
 
 REPORT_GRANULARITIES = {'day', 'week', 'month'}
@@ -132,6 +130,7 @@ READY_REPORTS = {
     'lost_clients_list',
     'master_avg_check',
     'masters_rating',
+    'new_vs_returning_cross',
     'peak_load',
     'plan_execution',
     'plan_fact_master',
@@ -158,7 +157,6 @@ SOURCE_MISSING_REPORTS = {
     'devices_vs_booking',
     'goal_conversions_report',
     'market_benchmarks',
-    'new_vs_returning_cross',
     'peak_hours_site_vs_salon',
     'search_phrases_efficiency',
     'traffic_source_roi',
@@ -188,6 +186,7 @@ CLIENT_REPORTS = {
     'client_cohorts',
     'client_journey',
     'client_labels',
+    'new_vs_returning_cross',
     'retention_3_6_12',
     'rfm_analysis',
     'top_clients_pareto',
@@ -238,7 +237,7 @@ TITLE_OVERRIDES = {
     'masters_rating': 'Рейтинг мастеров',
     'mind_index': 'MInd индекс мастеров',
     'month_return': 'Возвратность месяц к месяцу',
-    'new_vs_returning_cross': 'Новые и повторные: сайт и CRM',
+    'new_vs_returning_cross': 'Новые и повторные клиенты',
     'nps_dashboard': 'NPS и отзывы',
     'opz_report': 'ОПЗ',
     'peak_hours_site_vs_salon': 'Пиковые часы: сайт и салон',
@@ -266,7 +265,7 @@ TITLE_OVERRIDES = {
     'staff_salary': 'Зарплата сотрудников',
     'staff_services': 'Услуги по мастерам',
     'staff_time_heatmap': 'Тепловая карта мастеров',
-    'top_clients_pareto': 'Топ клиентов и Парето',
+    'top_clients_pareto': 'Клиентская выручка и Парето',
     'top_goods_revenue': 'Топ товаров по выручке',
     'traffic_source_roi': 'ROI источников трафика',
     'visit_forecast': 'Прогноз визитов',
@@ -554,6 +553,8 @@ async def _fetch_report_payload(
         return await _staff_payload(db, base, start, end, company_id, staff_id, allowed_company_ids)
     if report_id in SERVICE_REPORTS:
         return await _services_payload(db, base, start, end, company_id, staff_id, granularity, allowed_company_ids)
+    if report_id == 'new_vs_returning_cross':
+        return await _client_recency_payload(db, base, start, end, company_id, staff_id, allowed_company_ids)
     if report_id in CLIENT_REPORTS:
         return await _clients_payload(db, base, start, end, company_id, staff_id, allowed_company_ids)
     if report_id in CHURN_REPORTS:
@@ -1212,17 +1213,15 @@ async def _clients_rows(
     stmt = (
         select(
             Appointment.client_id.label('client_id'),
-            func.min(Client.name).label('client_name'),
-            func.min(Client.phone).label('phone'),
             func.count(func.distinct(Appointment.id)).label('visits'),
             func.max(Appointment.date).label('last_visit'),
             func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
         )
-        .outerjoin(Client, Client.id == Appointment.client_id)
         .outerjoin(FinancialTransaction, FinancialTransaction.record_id == Appointment.id)
         .where(and_(*_appointment_conditions(
             start, end, company_id, staff_id, attended_only=True, allowed_company_ids=allowed_company_ids
         )))
+        .where(Appointment.client_id.is_not(None))
         .group_by(Appointment.client_id)
     )
     rows = []
@@ -1233,8 +1232,6 @@ async def _clients_rows(
         recency = (end - last_visit).days if last_visit else None
         rows.append({
             'client_id': row.client_id,
-            'client_name': row.client_name or f"Клиент {row.client_id or '—'}",
-            'phone': row.phone,
             'visits': visits,
             'last_visit': last_visit.isoformat() if last_visit else None,
             'days_since_last_visit': recency,
@@ -1243,6 +1240,85 @@ async def _clients_rows(
         })
     rows.sort(key=lambda item: item['revenue'], reverse=True)
     return rows
+
+
+def _client_segment_rows(rows: list[dict[str, Any]], avg_revenue: float) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = defaultdict(lambda: {
+        'segment': '',
+        'clients': 0,
+        'visits': 0,
+        'revenue': 0.0,
+    })
+    for row in rows:
+        segment = _segment_client(row, avg_revenue)
+        row['segment'] = segment
+        bucket = grouped[segment]
+        bucket['segment'] = segment
+        bucket['clients'] += 1
+        bucket['visits'] += int(row.get('visits') or 0)
+        bucket['revenue'] += float(row.get('revenue') or 0)
+    out = []
+    for item in grouped.values():
+        clients = int(item['clients'] or 0)
+        visits = int(item['visits'] or 0)
+        revenue = float(item['revenue'] or 0)
+        item['avg_revenue_per_client'] = revenue / clients if clients else 0.0
+        item['avg_visits_per_client'] = visits / clients if clients else 0.0
+        out.append(item)
+    return sorted(out, key=lambda item: item['clients'], reverse=True)
+
+
+def _client_visit_frequency_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets = {
+        '1 визит': {'bucket': '1 визит', 'clients': 0, 'revenue': 0.0},
+        '2-3 визита': {'bucket': '2-3 визита', 'clients': 0, 'revenue': 0.0},
+        '4+ визита': {'bucket': '4+ визита', 'clients': 0, 'revenue': 0.0},
+    }
+    for row in rows:
+        visits = int(row.get('visits') or 0)
+        if visits <= 1:
+            key = '1 визит'
+        elif visits <= 3:
+            key = '2-3 визита'
+        else:
+            key = '4+ визита'
+        buckets[key]['clients'] += 1
+        buckets[key]['revenue'] += float(row.get('revenue') or 0)
+    total_clients = len(rows)
+    out = []
+    for item in buckets.values():
+        clients = int(item['clients'] or 0)
+        item['clients_pct'] = 100.0 * clients / total_clients if total_clients else 0.0
+        out.append(item)
+    return out
+
+
+def _client_pareto_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    sorted_rows = sorted(rows, key=lambda item: float(item.get('revenue') or 0), reverse=True)
+    total_revenue = sum(float(row.get('revenue') or 0) for row in sorted_rows)
+    total_clients = len(sorted_rows)
+    top_count = max(1, (total_clients + 9) // 10)
+    middle_count = max(0, (total_clients * 5 + 9) // 10 - top_count)
+    buckets = [
+        ('Топ 10% клиентов', sorted_rows[:top_count]),
+        ('Следующие 40%', sorted_rows[top_count:top_count + middle_count]),
+        ('Остальные 50%', sorted_rows[top_count + middle_count:]),
+    ]
+    out = []
+    for label, bucket_rows in buckets:
+        revenue = sum(float(row.get('revenue') or 0) for row in bucket_rows)
+        clients = len(bucket_rows)
+        out.append({
+            'bucket': label,
+            'clients': clients,
+            'clients_pct': 100.0 * clients / total_clients if total_clients else 0.0,
+            'revenue': revenue,
+            'revenue_pct': 100.0 * revenue / total_revenue if total_revenue else 0.0,
+            'avg_revenue_per_client': revenue / clients if clients else 0.0,
+        })
+    return out
 
 
 def _segment_client(row: dict[str, Any], avg_revenue: float) -> str:
@@ -1260,6 +1336,73 @@ def _segment_client(row: dict[str, Any], avg_revenue: float) -> str:
     return 'Потерянные'
 
 
+async def _client_recency_payload(
+    db: AsyncSession,
+    base: dict[str, Any],
+    start: date,
+    end: date,
+    company_id: int | None,
+    staff_id: int | None,
+    allowed_company_ids: list[int] | None,
+) -> dict[str, Any]:
+    summary = await fetch_summary(db, start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids)
+    visits = summary.get('visit_metrics', {})
+    rows = [
+        {
+            'segment': 'Новые',
+            'clients': int(visits.get('new_clients') or 0),
+            'share': float(visits.get('new_clients_pct') or 0),
+            'clients_change_pct': visits.get('new_clients_change_pct'),
+            'share_change_pct': visits.get('new_clients_pct_change_pct'),
+        },
+        {
+            'segment': 'Повторные',
+            'clients': int(visits.get('repeat_clients') or 0),
+            'share': float(visits.get('repeat_clients_pct') or 0),
+            'clients_change_pct': visits.get('repeat_clients_change_pct'),
+            'share_change_pct': visits.get('repeat_clients_pct_change_pct'),
+        },
+    ]
+    base['notes'].append({
+        'kind': 'formula',
+        'title': 'Обезличенный расчет',
+        'text': 'Отчет показывает только агрегаты по сегментам клиентов без имен, телефонов и клиентских карточек.',
+    })
+    base['cards'] = [
+        _card('Уникальные клиенты', visits.get('unique_clients', 0), NUMBER_FORMAT),
+        _card('Новые клиенты', visits.get('new_clients', 0), NUMBER_FORMAT),
+        _card('Доля новых', visits.get('new_clients_pct', 0), PERCENT_FORMAT),
+        _card('Повторные клиенты', visits.get('repeat_clients', 0), NUMBER_FORMAT),
+        _card('Доля повторных', visits.get('repeat_clients_pct', 0), PERCENT_FORMAT),
+        _card('Визитов на клиента', visits.get('visits_per_client', 0), DECIMAL_FORMAT),
+    ]
+    base['charts'] = [
+        _chart(
+            'new_repeat_clients',
+            'Новые и повторные клиенты',
+            'doughnut',
+            [row['segment'] for row in rows],
+            [{'label': 'Клиентов', 'data': [row['clients'] for row in rows], 'format': NUMBER_FORMAT}],
+        )
+    ]
+    base['tables'] = [
+        _table(
+            'segments',
+            'Сегменты за период',
+            [
+                ('segment', 'Сегмент', 'text'),
+                ('clients', 'Клиентов', NUMBER_FORMAT),
+                ('share', 'Доля', PERCENT_FORMAT),
+                ('clients_change_pct', 'Изменение клиентов', PERCENT_FORMAT),
+                ('share_change_pct', 'Изменение доли', PERCENT_FORMAT),
+            ],
+            rows,
+        )
+    ]
+    base['raw'] = {'segments': rows, 'summary_metrics': visits}
+    return base
+
+
 async def _clients_payload(
     db: AsyncSession,
     base: dict[str, Any],
@@ -1273,10 +1416,9 @@ async def _clients_payload(
     total_revenue = sum(row['revenue'] for row in rows)
     total_visits = sum(row['visits'] for row in rows)
     avg_revenue = total_revenue / len(rows) if rows else 0.0
-    segment_counts: dict[str, int] = defaultdict(int)
-    for row in rows:
-        row['segment'] = _segment_client(row, avg_revenue)
-        segment_counts[row['segment']] += 1
+    segment_rows = _client_segment_rows(rows, avg_revenue)
+    frequency_rows = _client_visit_frequency_rows(rows)
+    pareto_rows = _client_pareto_rows(rows)
     base['cards'] = [
         _card('Клиентов', len(rows), NUMBER_FORMAT),
         _card('Визитов', total_visits, NUMBER_FORMAT),
@@ -1288,35 +1430,66 @@ async def _clients_payload(
             'client_segments',
             'Сегменты клиентов',
             'doughnut',
-            list(segment_counts.keys()),
-            [{'label': 'Клиентов', 'data': list(segment_counts.values()), 'format': NUMBER_FORMAT}],
+            [row['segment'] for row in segment_rows],
+            [{'label': 'Клиентов', 'data': [row['clients'] for row in segment_rows], 'format': NUMBER_FORMAT}],
         ),
         _chart(
-            'top_clients',
-            'Топ клиентов по выручке',
+            'client_pareto',
+            'Концентрация выручки по клиентским бакетам',
             'bar',
-            [row['client_name'] for row in rows[:12]],
-            [{'label': 'Выручка', 'data': [row['revenue'] for row in rows[:12]], 'format': MONEY_FORMAT}],
+            [row['bucket'] for row in pareto_rows],
+            [{'label': 'Выручка', 'data': [row['revenue'] for row in pareto_rows], 'format': MONEY_FORMAT}],
         ),
     ]
     base['tables'] = [
         _table(
-            'clients',
-            'Клиенты',
+            'client_segments',
+            'Сегменты клиентов',
             [
-                ('client_name', 'Клиент', 'text'),
-                ('phone', 'Телефон', 'text'),
-                ('visits', 'Визиты', NUMBER_FORMAT),
-                ('last_visit', 'Последний визит', 'date'),
-                ('days_since_last_visit', 'Дней нет', NUMBER_FORMAT),
-                ('revenue', 'Выручка', MONEY_FORMAT),
-                ('avg_check', 'Доход на визит', MONEY_FORMAT),
                 ('segment', 'Сегмент', 'text'),
+                ('clients', 'Клиентов', NUMBER_FORMAT),
+                ('visits', 'Визиты', NUMBER_FORMAT),
+                ('revenue', 'Выручка', MONEY_FORMAT),
+                ('avg_revenue_per_client', 'Доход на клиента', MONEY_FORMAT),
+                ('avg_visits_per_client', 'Визитов на клиента', DECIMAL_FORMAT),
             ],
-            rows[:100],
-        )
+            segment_rows,
+        ),
+        _table(
+            'client_pareto',
+            'Pareto-бакеты клиентов',
+            [
+                ('bucket', 'Бакет', 'text'),
+                ('clients', 'Клиентов', NUMBER_FORMAT),
+                ('clients_pct', 'Доля клиентов', PERCENT_FORMAT),
+                ('revenue', 'Выручка', MONEY_FORMAT),
+                ('revenue_pct', 'Доля выручки', PERCENT_FORMAT),
+                ('avg_revenue_per_client', 'Доход на клиента', MONEY_FORMAT),
+            ],
+            pareto_rows,
+        ),
+        _table(
+            'visit_frequency',
+            'Частотность визитов',
+            [
+                ('bucket', 'Частотность', 'text'),
+                ('clients', 'Клиентов', NUMBER_FORMAT),
+                ('clients_pct', 'Доля клиентов', PERCENT_FORMAT),
+                ('revenue', 'Выручка', MONEY_FORMAT),
+            ],
+            frequency_rows,
+        ),
     ]
-    base['raw'] = {'clients': rows, 'segments': dict(segment_counts)}
+    base['notes'].append({
+        'kind': 'formula',
+        'title': 'Без персональных данных',
+        'text': 'Клиентские отчеты показывают только агрегированные сегменты и бизнес-метрики.',
+    })
+    base['raw'] = {
+        'segments': segment_rows,
+        'pareto': pareto_rows,
+        'visit_frequency': frequency_rows,
+    }
     return base
 
 
@@ -1368,6 +1541,12 @@ async def _churn_payload(
     client_ids = [int(row['client_id']) for row in risk_rows if row.get('client_id') is not None]
     last_staff = await _last_staff_by_client(db, client_ids, company_id, staff_id, allowed_company_ids)
     staff_losses: dict[str, dict[str, Any]] = defaultdict(lambda: {'staff_name': 'Без мастера', 'clients': 0, 'revenue': 0.0})
+    segment_rows_by_name: dict[str, dict[str, Any]] = defaultdict(lambda: {
+        'segment': '',
+        'clients': 0,
+        'visits': 0,
+        'revenue': 0.0,
+    })
     for row in risk_rows:
         days = int(row['days_since_last_visit'])
         row['segment'] = 'Под риском' if days < 90 else 'Спящие' if days < 180 else 'Потерянные'
@@ -1377,7 +1556,19 @@ async def _churn_payload(
         bucket['staff_name'] = row['last_staff']
         bucket['clients'] += 1
         bucket['revenue'] += float(row.get('revenue') or 0)
+        segment_bucket = segment_rows_by_name[row['segment']]
+        segment_bucket['segment'] = row['segment']
+        segment_bucket['clients'] += 1
+        segment_bucket['visits'] += int(row.get('visits') or 0)
+        segment_bucket['revenue'] += float(row.get('revenue') or 0)
     staff_rows = sorted(staff_losses.values(), key=lambda item: item['revenue'], reverse=True)
+    segment_rows = []
+    for item in segment_rows_by_name.values():
+        clients_count = int(item['clients'] or 0)
+        item['avg_revenue_per_client'] = float(item['revenue'] or 0) / clients_count if clients_count else 0.0
+        item['avg_visits_per_client'] = float(item['visits'] or 0) / clients_count if clients_count else 0.0
+        segment_rows.append(item)
+    segment_rows.sort(key=lambda item: item['clients'], reverse=True)
     at_risk = sum(1 for row in risk_rows if row['segment'] == 'Под риском')
     sleeping = sum(1 for row in risk_rows if row['segment'] == 'Спящие')
     lost = sum(1 for row in risk_rows if row['segment'] == 'Потерянные')
@@ -1406,18 +1597,17 @@ async def _churn_payload(
     ]
     base['tables'] = [
         _table(
-            'risk_clients',
-            'Клиенты для возврата',
+            'risk_segments',
+            'Сегменты оттока',
             [
-                ('client_name', 'Клиент', 'text'),
-                ('phone', 'Телефон', 'text'),
-                ('days_since_last_visit', 'Дней нет', NUMBER_FORMAT),
-                ('last_staff', 'Последний мастер', 'text'),
+                ('segment', 'Сегмент', 'text'),
+                ('clients', 'Клиентов', NUMBER_FORMAT),
                 ('visits', 'Визиты', NUMBER_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
-                ('segment', 'Сегмент', 'text'),
+                ('avg_revenue_per_client', 'Доход на клиента', MONEY_FORMAT),
+                ('avg_visits_per_client', 'Визитов на клиента', DECIMAL_FORMAT),
             ],
-            risk_rows[:100],
+            segment_rows,
         ),
         _table(
             'losses_by_staff',
@@ -1430,7 +1620,12 @@ async def _churn_payload(
             staff_rows,
         ),
     ]
-    base['raw'] = {'clients': risk_rows, 'staff': staff_rows}
+    base['notes'].append({
+        'kind': 'formula',
+        'title': 'Обезличенный отток',
+        'text': 'Отчет считает клиентов по сегментам оттока и мастерам без раскрытия клиентских карточек.',
+    })
+    base['raw'] = {'segments': segment_rows, 'staff': staff_rows}
     return base
 
 

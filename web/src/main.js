@@ -16,6 +16,11 @@ if (!hasSessionHint() && !import.meta.env.VITE_API_KEY) {
 }
 
 import { initReports } from './reports/index.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher } from './i18n.js';
+
+document.documentElement.lang = getLocale();
+applyTranslations();
+mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListener('change', () => location.reload());
 
 const apiBase = import.meta.env.VITE_API_BASE || '';
 const apiKey = import.meta.env.VITE_API_KEY || '';
@@ -24,6 +29,7 @@ let currentUser = null;
 const els = {
   kpi: document.getElementById('kpi'),
   visitMetrics: document.getElementById('visit-metrics'),
+  clientsMetrics: document.getElementById('clients-metrics'),
   error: document.getElementById('error'),
   apiState: document.getElementById('api-state'),
   syncState: document.getElementById('sync-state'),
@@ -418,16 +424,35 @@ function formatShortDate(value) {
   return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
 }
 
+function overviewReportUrl(reportId) {
+  const filter = filterEls.overview;
+  const params = new URLSearchParams();
+  if (filter.start.value) params.set('start_date', filter.start.value);
+  if (filter.end.value) params.set('end_date', filter.end.value);
+  if (filter.branch.value) params.set('company_id', filter.branch.value);
+  if (filter.staff.value) params.set('staff_id', filter.staff.value);
+  params.set('granularity', 'month');
+  return `/reports/${encodeURIComponent(reportId)}?${params.toString()}`;
+}
+
 function renderCards(target, cards) {
   target.innerHTML = cards
     .map(
-      (card) => `
-        <article class="card">
+      (card) => {
+        const tag = card.href ? 'a' : 'article';
+        const actionLabel = card.href ? `Открыть отчет: ${card.label}` : '';
+        const attrs = card.href
+          ? ` href="${escapeHtml(card.href)}" data-report-link class="card card--link" aria-label="${escapeHtml(actionLabel)}" title="${escapeHtml(actionLabel)}"`
+          : ' class="card"';
+        return `
+        <${tag}${attrs}>
           <div class="label">${escapeHtml(card.label)}</div>
           <div class="value">${escapeHtml(card.value)}</div>
           ${card.delta ? `<div class="delta ${deltaClass(card.deltaValue)}">${escapeHtml(card.delta)}</div>` : ''}
-        </article>
-      `,
+          ${card.action ? `<div class="card__action">${escapeHtml(card.action)}</div>` : ''}
+        </${tag}>
+      `;
+      },
     )
     .join('');
 }
@@ -579,6 +604,46 @@ function renderVisitMetrics(summary) {
   ];
 
   renderCards(els.visitMetrics, cards);
+}
+
+function renderClientsMetrics(summary) {
+  const visitMetrics = summary.visit_metrics || {};
+  const cards = [
+    {
+      label: 'Новые клиенты',
+      value: formatNumber(visitMetrics.new_clients),
+      delta: formatPct(visitMetrics.new_clients_change_pct),
+      deltaValue: visitMetrics.new_clients_change_pct,
+      href: overviewReportUrl('new_vs_returning_cross'),
+      action: 'Открыть отчет',
+    },
+    {
+      label: 'Доля новых клиентов',
+      value: formatMetricValue(visitMetrics.new_clients_pct, 'percent'),
+      delta: formatPct(visitMetrics.new_clients_pct_change_pct),
+      deltaValue: visitMetrics.new_clients_pct_change_pct,
+      href: overviewReportUrl('new_vs_returning_cross'),
+      action: 'Открыть отчет',
+    },
+    {
+      label: 'Повторные клиенты',
+      value: formatNumber(visitMetrics.repeat_clients),
+      delta: formatPct(visitMetrics.repeat_clients_change_pct),
+      deltaValue: visitMetrics.repeat_clients_change_pct,
+      href: overviewReportUrl('new_vs_returning_cross'),
+      action: 'Открыть отчет',
+    },
+    {
+      label: 'Доля повторных клиентов',
+      value: formatMetricValue(visitMetrics.repeat_clients_pct, 'percent'),
+      delta: formatPct(visitMetrics.repeat_clients_pct_change_pct),
+      deltaValue: visitMetrics.repeat_clients_pct_change_pct,
+      href: overviewReportUrl('new_vs_returning_cross'),
+      action: 'Открыть отчет',
+    },
+  ];
+
+  renderCards(els.clientsMetrics, cards);
 }
 
 function renderAppointmentsMetrics(summary) {
@@ -1814,6 +1879,7 @@ function renderBundle(bundle) {
   } = bundle;
   renderKpi(summary);
   renderVisitMetrics(summary);
+  renderClientsMetrics(summary);
   renderAppointmentsMetrics(summary);
   renderRevenueChart(daily);
   renderAppointmentsChart(daily);
@@ -2233,6 +2299,17 @@ els.serviceManagementReset.addEventListener('click', () => {
   }
 });
 els.serviceGroupAdd.addEventListener('click', () => addServiceKpiGroup());
+
+document.addEventListener('click', async (event) => {
+  const link = event.target.closest('[data-report-link]');
+  if (!link) return;
+  const href = link.getAttribute('href');
+  if (!href || !href.startsWith('/reports')) return;
+  event.preventDefault();
+  history.pushState({ view: 'reports' }, '', href);
+  setActiveView('reports');
+  await loadCurrentView();
+});
 
 els.viewLinks.forEach((link) => {
   link.addEventListener('click', (event) => {
