@@ -128,7 +128,12 @@ def _auto_sync_session():
     )
     with engine.begin() as conn:
         conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(engine, tables=[YClientsCredential.__table__, SyncJob.__table__])
+    Base.metadata.create_all(engine, tables=[
+        YClientsCredential.__table__,
+        SyncJob.__table__,
+        SyncRun.__table__,
+        SyncState.__table__,
+    ])
     session_local = sessionmaker(bind=engine)
     return engine, session_local()
 
@@ -210,6 +215,30 @@ def test_auto_sync_skips_recent_or_active_jobs(monkeypatch):
         assert result['enqueued'] == 0
         assert result['skipped'] == 2
         assert session.query(SyncJob).count() == 2
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_auto_sync_skips_after_recent_global_sync(monkeypatch):
+    engine, session = _auto_sync_session()
+    now = datetime(2026, 5, 1, 12, 0, 0)
+    monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_ENABLED', True)
+    monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
+
+    try:
+        session.add(_credential(7))
+        SyncControlService().set_state(session, 'last_successful_sync_at', now - timedelta(minutes=30))
+
+        result = sync_worker.enqueue_auto_sync_jobs_if_due(session, now)
+
+        assert result == {
+            'status': 'ok',
+            'enqueued': 0,
+            'skipped': 1,
+            'reason': 'recent_global_sync',
+        }
+        assert session.query(SyncJob).count() == 0
     finally:
         session.close()
         engine.dispose()

@@ -125,6 +125,15 @@ def enqueue_auto_sync_jobs_if_due(db, now: datetime | None = None) -> dict:
 
     now = now or datetime.now()
     due_before = now - timedelta(minutes=SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES)
+    control = SyncControlService()
+    if control.get_running_run(db) is not None:
+        return {'status': 'ok', 'enqueued': 0, 'skipped': 1, 'reason': 'sync_running'}
+    last_successful_sync_at = _parse_state_datetime(
+        control.get_state_values(db, ['last_successful_sync_at']).get('last_successful_sync_at')
+    )
+    if last_successful_sync_at is not None and last_successful_sync_at > due_before:
+        return {'status': 'ok', 'enqueued': 0, 'skipped': 1, 'reason': 'recent_global_sync'}
+
     jobs = SyncJobService()
     portal_account_ids = [
         int(portal_account_id)
