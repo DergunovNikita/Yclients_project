@@ -20,11 +20,16 @@ export function getLocale() {
  * Translate a dotted key for the active locale.
  * Falls back to the `ru` source language, then to the key itself.
  */
-export function t(key, locale = getLocale()) {
+export function t(key, paramsOrLocale = {}, maybeLocale) {
+  const params = typeof paramsOrLocale === 'string' ? {} : paramsOrLocale;
+  const locale = typeof paramsOrLocale === 'string' ? paramsOrLocale : (maybeLocale || getLocale());
   const value = lookup(messages[locale], key);
-  if (value != null) return value;
   const fallback = lookup(messages[DEFAULT_LOCALE], key);
-  return fallback != null ? fallback : key;
+  const template = value != null ? value : (fallback != null ? fallback : key);
+  if (!params || typeof template !== 'string') return template;
+  return template.replace(/\{(\w+)\}/g, (match, name) => (
+    params[name] === undefined || params[name] === null ? match : String(params[name])
+  ));
 }
 
 export function applyTranslations(root = document) {

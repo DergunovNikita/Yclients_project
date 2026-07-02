@@ -1,11 +1,11 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import sync_worker
-from models import Base, SyncRun, SyncState
+from models import Base, SyncJob, SyncRun, SyncState, YClientsCredential
 from sync_control import SyncControlService
 
 
@@ -114,6 +114,102 @@ def test_services_label_weekly_sync_records_result_state(monkeypatch):
         assert session.get(SyncState, sync_worker.SERVICES_LABEL_SYNC_PROCESSED_KEY).value == '144'
         assert session.get(SyncState, sync_worker.SERVICES_LABEL_SYNC_SKIPPED_KEY).value == '0'
         assert session.get(SyncState, sync_worker.SERVICES_LABEL_SYNC_SUCCESS_KEY).value == '2026-05-01T10:00:00'
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def _auto_sync_session():
+    engine = create_engine(
+        'sqlite+pysqlite:///:memory:',
+        future=True,
+        connect_args={'check_same_thread': False},
+        poolclass=StaticPool,
+    )
+    with engine.begin() as conn:
+        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
+    Base.metadata.create_all(engine, tables=[YClientsCredential.__table__, SyncJob.__table__])
+    session_local = sessionmaker(bind=engine)
+    return engine, session_local()
+
+
+def _credential(portal_account_id: int) -> YClientsCredential:
+    now = datetime(2026, 5, 1, 10, 0, 0)
+    return YClientsCredential(
+        portal_account_id=portal_account_id,
+        title=f'Tenant {portal_account_id}',
+        partner_token_encrypted='token',
+        login_encrypted='login',
+        password_encrypted='password',
+        is_active=True,
+        needs_reauth=False,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_auto_sync_enqueues_due_tenant(monkeypatch):
+    engine, session = _auto_sync_session()
+    now = datetime(2026, 5, 1, 12, 0, 0)
+    monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_ENABLED', True)
+    monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
+
+    try:
+        session.add(_credential(7))
+        session.commit()
+
+        result = sync_worker.enqueue_auto_sync_jobs_if_due(session, now)
+        jobs = session.query(SyncJob).all()
+
+        assert result['enqueued'] == 1
+        assert len(jobs) == 1
+        assert jobs[0].portal_account_id == 7
+        assert jobs[0].initiator == sync_worker.AUTO_SYNC_INITIATOR
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_auto_sync_skips_recent_or_active_jobs(monkeypatch):
+    engine, session = _auto_sync_session()
+    now = datetime(2026, 5, 1, 12, 0, 0)
+    monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_ENABLED', True)
+    monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
+
+    try:
+        session.add_all([_credential(7), _credential(8)])
+        session.add(SyncJob(
+            mode='incremental',
+            initiator='pytest',
+            status='success',
+            portal_account_id=7,
+            company_ids=[],
+            progress_pct=100,
+            current_stage='success',
+            step_results=[],
+            cancel_requested=False,
+            requested_at=now - timedelta(hours=1),
+            finished_at=now - timedelta(hours=1),
+        ))
+        session.add(SyncJob(
+            mode='incremental',
+            initiator='pytest',
+            status='queued',
+            portal_account_id=8,
+            company_ids=[],
+            progress_pct=0,
+            current_stage='queued',
+            step_results=[],
+            cancel_requested=False,
+            requested_at=now - timedelta(hours=5),
+        ))
+        session.commit()
+
+        result = sync_worker.enqueue_auto_sync_jobs_if_due(session, now)
+
+        assert result['enqueued'] == 0
+        assert result['skipped'] == 2
+        assert session.query(SyncJob).count() == 2
     finally:
         session.close()
         engine.dispose()

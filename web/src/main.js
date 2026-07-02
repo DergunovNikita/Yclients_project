@@ -16,7 +16,7 @@ if (!hasSessionHint() && !import.meta.env.VITE_API_KEY) {
 }
 
 import { initReports } from './reports/index.js';
-import { applyTranslations, getLocale, mountLanguageSwitcher } from './i18n.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 document.documentElement.lang = getLocale();
 applyTranslations();
@@ -122,8 +122,8 @@ const filterEls = {
 
 const customFilterDropdowns = {};
 Object.values(filterEls).forEach((filter) => {
-  customFilterDropdowns[filter.branch.id] = enhanceSelect(filter.branch, { placeholder: 'Все филиалы' });
-  customFilterDropdowns[filter.staff.id] = enhanceSelect(filter.staff, { placeholder: 'Все работники' });
+  customFilterDropdowns[filter.branch.id] = enhanceSelect(filter.branch, { placeholder: t('dash.allBranches') });
+  customFilterDropdowns[filter.staff.id] = enhanceSelect(filter.staff, { placeholder: t('dash.allWorkers') });
 });
 
 const charts = {
@@ -185,28 +185,32 @@ function apiUrlCandidates(path, params = {}) {
 }
 
 function formatMoney(value) {
-  return `${Math.round(Number(value || 0)).toLocaleString('ru-RU')} ₽`;
+  return `${Math.round(Number(value || 0)).toLocaleString(intlLocale())} ₽`;
 }
 
 function formatNumber(value) {
-  return Number(value || 0).toLocaleString('ru-RU');
+  return Number(value || 0).toLocaleString(intlLocale());
 }
 
 function formatDecimal(value) {
-  return Number(value || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 });
+  return Number(value || 0).toLocaleString(intlLocale(), { maximumFractionDigits: 2 });
 }
 
 function formatPct(value) {
-  if (value === null || value === undefined) return 'нет базы';
+  if (value === null || value === undefined) return t('dash.noBase');
   const sign = value > 0 ? '+' : '';
-  return `${sign}${Number(value).toLocaleString('ru-RU')}% к прошлому периоду`;
+  return t('dash.changeVsPrevious', { value: `${sign}${Number(value).toLocaleString(intlLocale())}%` });
 }
 
 function formatMetricValue(value, format) {
   if (value === null || value === undefined) return '—';
   if (format === 'money') return formatMoney(value);
-  if (format === 'percent') return `${Number(value).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%`;
+  if (format === 'percent') return `${Number(value).toLocaleString(intlLocale(), { maximumFractionDigits: 2 })}%`;
   return formatNumber(value);
+}
+
+function intlLocale() {
+  return ({ ru: 'ru-RU', en: 'en-US', it: 'it-IT' })[getLocale()] || 'ru-RU';
 }
 
 function formatInputNumber(value) {
@@ -440,7 +444,7 @@ function renderCards(target, cards) {
     .map(
       (card) => {
         const tag = card.href ? 'a' : 'article';
-        const actionLabel = card.href ? `Открыть отчет: ${card.label}` : '';
+        const actionLabel = card.href ? t('dash.openReportWithLabel', { label: card.label }) : '';
         const attrs = card.href
           ? ` href="${escapeHtml(card.href)}" data-report-link class="card card--link" aria-label="${escapeHtml(actionLabel)}" title="${escapeHtml(actionLabel)}"`
           : ' class="card"';
@@ -462,75 +466,75 @@ function renderKpi(summary) {
   const averageCheck = summary.average_check || {};
   const cards = [
     {
-      label: 'Общая выручка',
+      label: t('dash.cardTotalRevenue'),
       value: formatMoney(revenue.total),
       delta: formatPct(revenue.change_pct),
       deltaValue: revenue.change_pct,
     },
     {
-      label: 'Посещенные записи',
+      label: t('dash.cardVisitedAppointments'),
       value: formatNumber(revenue.appointments),
       delta: formatPct(revenue.appointments_change_pct),
       deltaValue: revenue.appointments_change_pct,
     },
     {
       label: averageCheck.source_status === 'partial'
-        ? 'Средний чек общий (предварительно)'
-        : 'Средний чек общий',
+        ? t('dash.cardAverageCheckTotalPartial')
+        : t('dash.cardAverageCheckTotal'),
       value: formatMoney(averageCheck.total),
       delta: formatPct(averageCheck.total_change_pct),
       deltaValue: averageCheck.total_change_pct,
     },
     {
-      label: 'Выручка по услугам',
+      label: t('dash.cardServiceRevenue'),
       value: formatMoney(revenue.service_revenue),
       delta: formatPct(revenue.service_revenue_change_pct),
       deltaValue: revenue.service_revenue_change_pct,
     },
     {
-      label: 'Кол-во оказанных услуг',
+      label: t('dash.cardServiceCount'),
       value: formatNumber(revenue.service_count),
       delta: formatPct(revenue.service_count_change_pct),
       deltaValue: revenue.service_count_change_pct,
     },
     {
-      label: 'Средний чек по услугам',
+      label: t('dash.cardServiceAverageCheck'),
       value: formatMoney(averageCheck.services),
       delta: formatPct(averageCheck.services_change_pct),
       deltaValue: averageCheck.services_change_pct,
     },
     {
-      label: 'Выручка по товарам',
+      label: t('dash.cardGoodsRevenue'),
       value: formatMoney(revenue.goods_revenue),
       delta: formatPct(revenue.goods_revenue_change_pct),
       deltaValue: revenue.goods_revenue_change_pct,
     },
     {
-      label: 'Кол-во проданных товаров',
+      label: t('dash.cardGoodsCount'),
       value: formatNumber(revenue.goods_count),
       delta: formatPct(revenue.goods_count_change_pct),
       deltaValue: revenue.goods_count_change_pct,
     },
     {
-      label: 'Средний чек по товарам',
+      label: t('dash.cardGoodsAverageCheck'),
       value: formatMoney(averageCheck.goods),
       delta: formatPct(averageCheck.goods_change_pct),
       deltaValue: averageCheck.goods_change_pct,
     },
     {
-      label: 'Выручка по доп. услугам',
+      label: t('dash.cardExtraServiceRevenue'),
       value: formatMoney(revenue.extra_service_revenue),
       delta: formatPct(revenue.extra_service_revenue_change_pct),
       deltaValue: revenue.extra_service_revenue_change_pct,
     },
     {
-      label: 'Кол-во оказанных доп. услуг',
+      label: t('dash.cardExtraServiceCount'),
       value: formatNumber(revenue.extra_service_count),
       delta: formatPct(revenue.extra_service_count_change_pct),
       deltaValue: revenue.extra_service_count_change_pct,
     },
     {
-      label: 'Средний чек по доп. услугам',
+      label: t('dash.cardExtraServiceAverageCheck'),
       value: formatMoney(averageCheck.extra_services),
       delta: formatPct(averageCheck.extra_services_change_pct),
       deltaValue: averageCheck.extra_services_change_pct,
@@ -548,57 +552,57 @@ function renderVisitMetrics(summary) {
   const fourPlusVisits = clientFrequency.four_plus_visits || {};
   const cards = [
     {
-      label: 'Количество ОПЗ',
+      label: t('dash.cardOpzQty'),
       value: formatNumber(visitMetrics.opz_qty),
       delta: formatPct(visitMetrics.opz_qty_change_pct),
       deltaValue: visitMetrics.opz_qty_change_pct,
     },
     {
-      label: 'Доля ОПЗ от визитов',
+      label: t('dash.cardOpzPct'),
       value: formatMetricValue(visitMetrics.opz_pct, 'percent'),
       delta: formatPct(visitMetrics.opz_pct_change_pct),
       deltaValue: visitMetrics.opz_pct_change_pct,
     },
     {
-      label: 'Доп. услуги от посещений',
+      label: t('dash.cardExtraServicesPerAppointment'),
       value: formatMetricValue(visitMetrics.extra_services_per_appointment_pct, 'percent'),
       delta: formatPct(visitMetrics.extra_services_per_appointment_pct_change_pct),
       deltaValue: visitMetrics.extra_services_per_appointment_pct_change_pct,
     },
     {
-      label: 'Уникальные клиенты',
+      label: t('dash.cardUniqueClients'),
       value: formatNumber(visitMetrics.unique_clients),
       delta: formatPct(visitMetrics.unique_clients_change_pct),
       deltaValue: visitMetrics.unique_clients_change_pct,
     },
     {
-      label: 'Визитов на клиента',
+      label: t('dash.cardVisitsPerClient'),
       value: formatDecimal(visitMetrics.visits_per_client),
       delta: formatPct(visitMetrics.visits_per_client_change_pct),
       deltaValue: visitMetrics.visits_per_client_change_pct,
     },
     {
-      label: 'Уникальные клиенты с доп. услугами',
+      label: t('dash.cardExtraServiceClients'),
       value: formatMetricValue(visitMetrics.extra_service_clients_pct, 'percent'),
-      delta: `${formatNumber(visitMetrics.extra_service_clients)} уник. клиентов`,
+      delta: t('dash.uniqueClientsCount', { count: formatNumber(visitMetrics.extra_service_clients) }),
       deltaValue: null,
     },
     {
-      label: 'Клиенты с 1 визитом',
+      label: t('dash.cardOneVisitClients'),
       value: formatNumber(oneVisit.count),
-      delta: `${formatMetricValue(oneVisit.pct, 'percent')} от клиентов`,
+      delta: t('dash.ofClients', { value: formatMetricValue(oneVisit.pct, 'percent') }),
       deltaValue: null,
     },
     {
-      label: 'Клиенты с 2-3 визитами',
+      label: t('dash.cardTwoThreeVisitClients'),
       value: formatNumber(twoToThreeVisits.count),
-      delta: `${formatMetricValue(twoToThreeVisits.pct, 'percent')} от клиентов`,
+      delta: t('dash.ofClients', { value: formatMetricValue(twoToThreeVisits.pct, 'percent') }),
       deltaValue: null,
     },
     {
-      label: 'Клиенты с 4+ визитами',
+      label: t('dash.cardFourPlusVisitClients'),
       value: formatNumber(fourPlusVisits.count),
-      delta: `${formatMetricValue(fourPlusVisits.pct, 'percent')} от клиентов`,
+      delta: t('dash.ofClients', { value: formatMetricValue(fourPlusVisits.pct, 'percent') }),
       deltaValue: null,
     },
   ];
@@ -610,36 +614,36 @@ function renderClientsMetrics(summary) {
   const visitMetrics = summary.visit_metrics || {};
   const cards = [
     {
-      label: 'Новые клиенты',
+      label: t('dash.cardNewClients'),
       value: formatNumber(visitMetrics.new_clients),
       delta: formatPct(visitMetrics.new_clients_change_pct),
       deltaValue: visitMetrics.new_clients_change_pct,
       href: overviewReportUrl('new_vs_returning_cross'),
-      action: 'Открыть отчет',
+      action: t('dash.openReport'),
     },
     {
-      label: 'Доля новых клиентов',
+      label: t('dash.cardNewClientsPct'),
       value: formatMetricValue(visitMetrics.new_clients_pct, 'percent'),
       delta: formatPct(visitMetrics.new_clients_pct_change_pct),
       deltaValue: visitMetrics.new_clients_pct_change_pct,
       href: overviewReportUrl('new_vs_returning_cross'),
-      action: 'Открыть отчет',
+      action: t('dash.openReport'),
     },
     {
-      label: 'Повторные клиенты',
+      label: t('dash.cardRepeatClients'),
       value: formatNumber(visitMetrics.repeat_clients),
       delta: formatPct(visitMetrics.repeat_clients_change_pct),
       deltaValue: visitMetrics.repeat_clients_change_pct,
       href: overviewReportUrl('new_vs_returning_cross'),
-      action: 'Открыть отчет',
+      action: t('dash.openReport'),
     },
     {
-      label: 'Доля повторных клиентов',
+      label: t('dash.cardRepeatClientsPct'),
       value: formatMetricValue(visitMetrics.repeat_clients_pct, 'percent'),
       delta: formatPct(visitMetrics.repeat_clients_pct_change_pct),
       deltaValue: visitMetrics.repeat_clients_pct_change_pct,
       href: overviewReportUrl('new_vs_returning_cross'),
-      action: 'Открыть отчет',
+      action: t('dash.openReport'),
     },
   ];
 
@@ -650,29 +654,29 @@ function renderAppointmentsMetrics(summary) {
   const breakdown = summary.appointments_breakdown || {};
   const exact = breakdown.source_status === 'ready';
   const ready = exact || breakdown.source_status === 'local';
-  const metricValue = (value) => (ready ? formatNumber(value) : 'Нет данных');
-  const metricShare = (value) => (ready ? `${formatNumber(value)}% от общего` : '');
+  const metricValue = (value) => (ready ? formatNumber(value) : t('dash.noData'));
+  const metricShare = (value) => (ready ? t('dash.ofTotal', { value: `${formatNumber(value)}%` }) : '');
   const cards = [
     {
-      label: 'Всего записей',
+      label: t('dash.cardTotalAppointments'),
       value: metricValue(breakdown.total),
       delta: metricShare(breakdown.total_share_pct),
       deltaValue: null,
     },
     {
-      label: 'Отменённые записи',
+      label: t('dash.cardCancelledAppointments'),
       value: metricValue(breakdown.cancelled),
       delta: metricShare(breakdown.cancelled_share_pct),
       deltaValue: null,
     },
     {
-      label: 'Завершённые записи',
+      label: t('dash.cardCompletedAppointments'),
       value: metricValue(breakdown.completed),
       delta: metricShare(breakdown.completed_share_pct),
       deltaValue: null,
     },
     {
-      label: 'Незавершённые записи',
+      label: t('dash.cardIncompleteAppointments'),
       value: metricValue(breakdown.incomplete),
       delta: metricShare(breakdown.incomplete_share_pct),
       deltaValue: null,
@@ -681,8 +685,8 @@ function renderAppointmentsMetrics(summary) {
 
   renderCards(els.appointmentsMetrics, cards);
   els.appointmentsWarning.textContent = ready
-    ? exact ? '' : 'Точные метрики YClients временно недоступны, показана локальная оценка по синхронизированным записям.'
-    : 'Точные метрики записей временно недоступны в YCLIENTS.';
+    ? exact ? '' : t('dash.appointmentsLocalEstimate')
+    : t('dash.appointmentsUnavailable');
   els.appointmentsWarning.classList.toggle('visible', !exact);
 }
 
@@ -701,7 +705,7 @@ function renderRevenueChart(daily) {
       labels: daily.map((item) => item.date),
       datasets: [
         {
-          label: 'Выручка',
+          label: t('dash.revenue'),
           data: daily.map((item) => item.revenue),
           borderColor: '#0f766e',
           backgroundColor: 'rgba(15, 118, 110, 0.12)',
@@ -738,7 +742,7 @@ function renderAppointmentsChart(daily) {
       labels: daily.map((item) => item.date),
       datasets: [
         {
-          label: 'Записи',
+          label: t('dash.appointments'),
           data: daily.map((item) => item.appointments),
           backgroundColor: '#2563eb',
           borderRadius: 4,
@@ -761,7 +765,7 @@ function renderOpzChart(daily) {
       labels: daily.map((item) => item.date),
       datasets: [
         {
-          label: 'Количество ОПЗ',
+          label: t('dash.cardOpzQty'),
           data: daily.map((item) => item.opz_qty || 0),
           backgroundColor: '#7c3aed',
           borderRadius: 4,
@@ -769,7 +773,7 @@ function renderOpzChart(daily) {
         },
         {
           type: 'line',
-          label: 'Доля от завершённых визитов',
+          label: t('dash.completedVisitShare'),
           data: daily.map((item) => item.opz_pct || 0),
           borderColor: '#ea580c',
           backgroundColor: '#ea580c',
@@ -784,7 +788,7 @@ function renderOpzChart(daily) {
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       scales: {
-        y: { beginAtZero: true, title: { display: true, text: 'ОПЗ' } },
+        y: { beginAtZero: true, title: { display: true, text: t('dash.opzShort') } },
         y1: {
           beginAtZero: true,
           position: 'right',
@@ -802,10 +806,10 @@ function renderServicesChart(services) {
   charts.services = new Chart(els.servicesChart, {
     type: 'bar',
     data: {
-      labels: services.map((item) => item.title || `Услуга ${item.service_id || ''}`),
+      labels: services.map((item) => item.title || t('dash.serviceFallback', { id: item.service_id || '' })),
       datasets: [
         {
-          label: 'Выручка',
+          label: t('dash.revenue'),
           data: services.map((item) => item.revenue),
           backgroundColor: '#b45309',
           borderRadius: 4,
@@ -834,7 +838,7 @@ function renderServicesChart(services) {
 
 function renderServicesTable(services) {
   if (!services.length) {
-    els.servicesTable.innerHTML = '<div class="empty">Нет услуг за выбранный период</div>';
+    els.servicesTable.innerHTML = `<div class="empty">${escapeHtml(t('dash.noServicesForPeriod'))}</div>`;
     return;
   }
 
@@ -842,9 +846,9 @@ function renderServicesTable(services) {
     <table>
       <thead>
         <tr>
-          <th>Услуга</th>
-          <th class="number">Продано</th>
-          <th class="number">Выручка</th>
+          <th>${escapeHtml(t('dash.service'))}</th>
+          <th class="number">${escapeHtml(t('dash.sold'))}</th>
+          <th class="number">${escapeHtml(t('dash.revenue'))}</th>
         </tr>
       </thead>
       <tbody>
@@ -852,7 +856,7 @@ function renderServicesTable(services) {
           .map(
             (item) => `
               <tr>
-                <td>${escapeHtml(item.title || `Услуга ${item.service_id || ''}`)}</td>
+                <td>${escapeHtml(item.title || t('dash.serviceFallback', { id: item.service_id || '' }))}</td>
                 <td class="number">${formatNumber(item.sold)}</td>
                 <td class="number">${formatMoney(item.revenue)}</td>
               </tr>
@@ -866,7 +870,7 @@ function renderServicesTable(services) {
 
 function renderExtraServicesTable(services) {
   if (!services.length) {
-    els.extraServicesTable.innerHTML = '<div class="empty">Нет доп. услуг за выбранный период</div>';
+    els.extraServicesTable.innerHTML = `<div class="empty">${escapeHtml(t('dash.noExtraServicesForPeriod'))}</div>`;
     return;
   }
 
@@ -875,10 +879,10 @@ function renderExtraServicesTable(services) {
     <table>
       <thead>
         <tr>
-          <th>Доп. услуга</th>
-          <th class="number">Сделано</th>
-          <th class="number">Филиалов</th>
-          <th class="number">Выручка</th>
+          <th>${escapeHtml(t('dash.extraService'))}</th>
+          <th class="number">${escapeHtml(t('dash.doneCount'))}</th>
+          <th class="number">${escapeHtml(t('dash.branchesCount'))}</th>
+          <th class="number">${escapeHtml(t('dash.revenue'))}</th>
         </tr>
       </thead>
       <tbody>
@@ -886,7 +890,7 @@ function renderExtraServicesTable(services) {
           .map(
             (item) => `
               <tr>
-                <td>${escapeHtml(item.title || `Услуга ${item.service_id || ''}`)}</td>
+                <td>${escapeHtml(item.title || t('dash.serviceFallback', { id: item.service_id || '' }))}</td>
                 <td class="number">${formatNumber(item.sold)}</td>
                 <td class="number">${formatNumber(item.branch_count)}</td>
                 <td class="number">${formatMoney(item.revenue)}</td>
