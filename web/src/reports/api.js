@@ -1,4 +1,5 @@
 import { authHeaders, requestWithReauth } from '../auth.js';
+import { userDataLoadErrorMessage } from '../i18n.js';
 
 const apiBase = import.meta.env.VITE_API_BASE || '';
 
@@ -46,15 +47,18 @@ export async function fetchJson(path, params = {}) {
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`API вернул ${response.status} для ${url}\n\n${body.slice(0, 1000)}`);
+      console.error('Reports API request failed', { status: response.status, url, body: body.slice(0, 1000) });
+      throw new Error(userDataLoadErrorMessage());
     }
 
     const payload = await response.json();
     if (payload.success === false) {
-      throw new Error(`API вернул success=false для ${url}`);
+      console.error('Reports API returned success=false', { url, payload });
+      throw new Error(userDataLoadErrorMessage());
     }
     return payload;
   }
 
-  throw new Error(`Не удалось подключиться к API.\n\n${errors.join('\n\n')}`);
+  console.error('Reports API connection failed', errors);
+  throw new Error(userDataLoadErrorMessage());
 }

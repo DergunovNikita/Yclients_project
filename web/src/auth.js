@@ -1,3 +1,5 @@
+import { t } from './i18n.js';
+
 const TOKEN_KEY = 'portal_access_token';
 const PORTAL_ACCOUNT_KEY = 'portal_account_id';
 const USER_EMAIL_KEY = 'portal_user_email';
@@ -108,10 +110,26 @@ function errorMessage(response, payload) {
   } else if (message && typeof message === 'object') {
     message = JSON.stringify(message);
   }
-  if (response.status === 404 && message === 'Not Found') {
-    message = 'Сервис недоступен. Перезапустите API (uvicorn) и обновите страницу.';
+  if (response.status === 401 && String(message).toLowerCase().includes('invalid email')) {
+    message = t('authErrors.invalidCredentials');
+  } else if (response.status === 403 && String(message).toLowerCase().includes('account disabled')) {
+    message = t('authErrors.accountDisabled');
+  } else if ([502, 503, 504].includes(response.status)) {
+    message = t('authErrors.temporaryUnavailable');
+  } else if (response.status === 404 && message === 'Not Found') {
+    message = t('authErrors.serviceUnavailable');
   }
   return String(message);
+}
+
+export function isTransientAuthError(error) {
+  return [502, 503, 504].includes(Number(error?.status));
+}
+
+export function wait(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 async function refreshSession() {
@@ -126,7 +144,7 @@ async function refreshSession() {
   }
   const response = await refreshInFlight;
   if (!response.ok) {
-    throw new Error('Authentication required');
+    throw new Error(t('authErrors.authenticationRequired'));
   }
   const payload = await parsePayload(response);
   if (payload?.data?.access_token) {
@@ -162,14 +180,14 @@ function ensureReauthModal() {
   modal.hidden = true;
   modal.innerHTML = `
     <form class="reauth-modal__dialog" id="reauth-form">
-      <h2>Повторный вход</h2>
-      <p>Сессия истекла. Введите пароль, чтобы продолжить без потери текущего экрана.</p>
+      <h2>${t('reauth.title')}</h2>
+      <p>${t('reauth.text')}</p>
       <div class="reauth-modal__error" id="reauth-error" hidden></div>
       <label>Email<input type="email" id="reauth-email" autocomplete="username" readonly /></label>
-      <label>Пароль<input type="password" id="reauth-password" autocomplete="current-password" required /></label>
+      <label>${t('common.password')}<input type="password" id="reauth-password" autocomplete="current-password" required /></label>
       <div class="reauth-modal__actions">
-        <button type="button" id="reauth-cancel">Отмена</button>
-        <button type="submit" id="reauth-submit">Войти</button>
+        <button type="button" id="reauth-cancel">${t('common.cancel')}</button>
+        <button type="submit" id="reauth-submit">${t('login.submit')}</button>
       </div>
     </form>
   `;
@@ -179,7 +197,7 @@ function ensureReauthModal() {
 
 async function promptReauth() {
   if (typeof document === 'undefined') {
-    throw new Error('Authentication required');
+    throw new Error(t('authErrors.authenticationRequired'));
   }
   if (reauthInFlight) return reauthInFlight;
 
@@ -210,7 +228,7 @@ async function promptReauth() {
 
     const onCancel = () => {
       cleanup();
-      reject(new Error('Authentication required'));
+      reject(new Error(t('authErrors.authenticationRequired')));
     };
 
     const onSubmit = async (event) => {
@@ -229,7 +247,9 @@ async function promptReauth() {
         });
         const payload = await parsePayload(response);
         if (!response.ok) {
-          throw new Error(errorMessage(response, payload));
+          const nextError = new Error(errorMessage(response, payload));
+          nextError.status = response.status;
+          throw nextError;
         }
         if (payload?.data?.access_token) {
           setToken(payload.data.access_token);
@@ -278,7 +298,9 @@ export async function authFetch(path, options = {}) {
   const response = await requestWithReauth(path, options, doFetch);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(errorMessage(response, payload));
+    const error = new Error(errorMessage(response, payload));
+    error.status = response.status;
+    throw error;
   }
   rememberUser(payload);
   return payload;

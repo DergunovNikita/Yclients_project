@@ -8,6 +8,7 @@ const HOP_BY_HOP_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
 ]);
+const PROXY_TIMEOUT_MS = Number(process.env.PROXY_TIMEOUT_MS || 10000);
 
 export function env(name) {
   const value = process.env[name];
@@ -45,12 +46,29 @@ export async function proxyToVm(req, res, target) {
 
   const method = req.method.toUpperCase();
   const hasBody = method !== 'GET' && method !== 'HEAD';
-  const upstream = await fetch(target, {
-    method,
-    headers: forwardedHeaders(req),
-    body: hasBody ? await readBody(req) : undefined,
-    redirect: 'manual',
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
+  let upstream;
+  try {
+    upstream = await fetch(target, {
+      method,
+      headers: forwardedHeaders(req),
+      body: hasBody ? await readBody(req) : undefined,
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+  } catch (error) {
+    res.statusCode = 503;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({
+      success: false,
+      detail: 'Upstream API is temporarily unavailable',
+      error: error.name === 'AbortError' ? 'upstream_timeout' : 'upstream_unavailable',
+    }));
+    return;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   res.statusCode = upstream.status;
   for (const [name, value] of upstream.headers.entries()) {

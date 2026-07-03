@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="it">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Личный кабинет — Salon Analytics</title>
+  <title>Area personale — Salon Analytics</title>
   <link rel="stylesheet" href="/src/auth.css" />
 </head>
 <body class="admin-page profile-page">
@@ -14,7 +14,7 @@
     </div>
     <div class="admin-topbar__nav">
       <div class="auth-lang" id="lang-switcher"></div>
-      <button type="button" class="btn btn--ghost" id="back-dashboard" data-i18n="common.toDashboard">К дашборду</button>
+      <button type="button" class="btn btn--ghost" id="back-dashboard" data-i18n="common.toDashboard">Alla dashboard</button>
     </div>
   </header>
 
@@ -27,21 +27,21 @@
             <path d="M5 20c0-3.3 3.1-5 7-5s7 1.7 7 5"></path>
           </svg>
         </div>
-        <button type="button" class="btn btn--danger btn--sm profile-card__logout" id="logout" data-i18n="profile.logout">Выйти из аккаунта</button>
+        <button type="button" class="btn btn--danger btn--sm profile-card__logout" id="logout" data-i18n="profile.logout">Esci dall'account</button>
       </div>
-      <span class="auth-card__eyebrow" data-i18n="profile.eyebrow">Личный кабинет</span>
+      <span class="auth-card__eyebrow" data-i18n="profile.eyebrow">Area personale</span>
       <div class="profile-card__identity">
         <div class="profile-card__identity-text">
-          <h1 id="profile-name" data-i18n="profile.greeting">Здравствуйте!</h1>
+          <h1 id="profile-name" data-i18n="profile.greeting">Ciao</h1>
           <p class="auth-subhead" id="profile-email"></p>
           <p class="profile-card__role" id="profile-role"></p>
         </div>
-        <button type="button" class="btn btn--ghost btn--sm profile-card__change-password" id="open-change-password" data-i18n="profile.changePassword">Сменить пароль</button>
+        <button type="button" class="btn btn--ghost btn--sm profile-card__change-password" id="open-change-password" data-i18n="profile.changePassword">Cambia password</button>
       </div>
 
       <div class="profile-card__actions">
-        <a href="/settings.html" class="btn btn--ghost" data-i18n="profile.settingsLink">Настройки и интеграции</a>
-        <a href="/admin.html" class="btn btn--ghost" id="manage-users" hidden data-i18n="profile.manageUsers">Редактирование пользователей</a>
+        <a href="/settings.html" class="btn btn--ghost" data-i18n="profile.settingsLink">Impostazioni e integrazioni</a>
+        <a href="/admin.html" class="btn btn--ghost" id="manage-users" hidden data-i18n="profile.manageUsers">Gestione utenti</a>
       </div>
     </section>
   </main>
@@ -50,18 +50,18 @@
     <div class="admin-modal__backdrop" data-close-modal="change-password"></div>
     <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="change-password-title">
       <header class="admin-modal__header">
-        <h2 id="change-password-title" data-i18n="profile.modalTitle">Смена пароля</h2>
+        <h2 id="change-password-title" data-i18n="profile.modalTitle">Cambio password</h2>
         <button type="button" class="admin-modal__close" id="close-change-password" data-i18n-attr="aria-label:common.close">×</button>
       </header>
       <div class="alert error" id="password-error" hidden></div>
       <div class="alert success" id="password-success" hidden></div>
       <form id="change-password-form" class="admin-toolbar admin-toolbar--create profile-password__form">
-        <label><span data-i18n="profile.currentPassword">Текущий пароль</span><input type="password" id="current-password" required minlength="1" autocomplete="current-password" /></label>
-        <label><span data-i18n="profile.newPassword">Новый пароль</span><input type="password" id="new-password" required minlength="8" autocomplete="new-password" placeholder="минимум 8 символов" data-i18n-attr="placeholder:profile.newPasswordPlaceholder" /></label>
-        <label><span data-i18n="profile.confirmPassword">Повторите новый пароль</span><input type="password" id="confirm-password" required minlength="8" autocomplete="new-password" /></label>
+        <label><span data-i18n="profile.currentPassword">Password attuale</span><input type="password" id="current-password" required minlength="1" autocomplete="current-password" /></label>
+        <label><span data-i18n="profile.newPassword">Nuova password</span><input type="password" id="new-password" required minlength="8" autocomplete="new-password" placeholder="almeno 8 caratteri" data-i18n-attr="placeholder:profile.newPasswordPlaceholder" /></label>
+        <label><span data-i18n="profile.confirmPassword">Ripeti la nuova password</span><input type="password" id="confirm-password" required minlength="8" autocomplete="new-password" /></label>
         <div class="admin-modal__actions">
-          <button type="button" class="btn btn--ghost" id="cancel-change-password" data-i18n="common.cancel">Отмена</button>
-          <button type="submit" class="btn btn--primary" id="change-password-btn" data-i18n="profile.submit">Сменить пароль</button>
+          <button type="button" class="btn btn--ghost" id="cancel-change-password" data-i18n="common.cancel">Annulla</button>
+          <button type="submit" class="btn btn--primary" id="change-password-btn" data-i18n="profile.submit">Cambia password</button>
         </div>
       </form>
     </div>

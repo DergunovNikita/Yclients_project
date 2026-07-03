@@ -1,5 +1,5 @@
 import './auth.css';
-import { authFetch, setToken } from './auth.js';
+import { authFetch, isTransientAuthError, setToken, wait } from './auth.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 document.documentElement.lang = getLocale();
@@ -14,6 +14,23 @@ const form = document.getElementById('auth-form');
 const errorEl = document.getElementById('error');
 const submitBtn = document.getElementById('submit');
 
+async function loginWithRetry(email, password) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await authFetch('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+      });
+    } catch (error) {
+      lastError = error;
+      if (!isTransientAuthError(error) || attempt === 1) break;
+      await wait(450);
+    }
+  }
+  throw lastError;
+}
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   errorEl.hidden = true;
@@ -22,10 +39,7 @@ form.addEventListener('submit', async (event) => {
   try {
     const email = document.getElementById('email').value.trim();
     const password = document.getElementById('password').value;
-    const payload = await authFetch('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ email, password }),
-    });
+    const payload = await loginWithRetry(email, password);
     setToken(payload.data.access_token);
     const user = payload.data.user;
     if (user?.role === 'owner') {

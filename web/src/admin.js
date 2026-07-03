@@ -9,7 +9,7 @@ import {
   setSelectedPortalAccountId,
 } from './auth.js';
 import * as XLSX from 'xlsx';
-import { applyTranslations, getLocale, mountLanguageSwitcher } from './i18n.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 document.documentElement.lang = getLocale();
 applyTranslations();
@@ -80,19 +80,19 @@ const tenantSwitcherSection = document.getElementById('tenant-switcher-section')
 const tenantSelect = document.getElementById('tenant-select');
 const tenantMeta = document.getElementById('tenant-meta');
 
-const createRoleDropdown = enhanceSelect(createRoleSelect, { placeholder: 'Выберите роль' });
-const createBranchDropdown = enhanceSelect(createBranchSelect, { placeholder: 'Выберите филиалы' });
-const editRoleDropdown = enhanceSelect(editRoleSelect, { placeholder: 'Выберите роль' });
-const editBranchDropdown = enhanceSelect(editBranchSelect, { placeholder: 'Выберите филиалы' });
-const editStaffBranchDropdown = enhanceSelect(editStaffBranchSelect, { placeholder: 'Выберите филиал' });
-const yclientsCredentialBranchDropdown = enhanceSelect(yclientsCredentialBranchSelect, { placeholder: 'Выберите филиалы' });
+const createRoleDropdown = enhanceSelect(createRoleSelect, { placeholder: t('admin.selectRole') });
+const createBranchDropdown = enhanceSelect(createBranchSelect, { placeholder: t('admin.selectBranches') });
+const editRoleDropdown = enhanceSelect(editRoleSelect, { placeholder: t('admin.selectRole') });
+const editBranchDropdown = enhanceSelect(editBranchSelect, { placeholder: t('admin.selectBranches') });
+const editStaffBranchDropdown = enhanceSelect(editStaffBranchSelect, { placeholder: t('admin.selectBranch') });
+const yclientsCredentialBranchDropdown = enhanceSelect(yclientsCredentialBranchSelect, { placeholder: t('admin.selectBranches') });
 
 const ROLE_LABELS = {
-  viewer: 'viewer — только просмотр',
-  manager: 'manager — метрики филиала',
-  branch_admin: 'branch_admin — админ филиала',
-  owner: 'owner — владелец сети',
-  platform_admin: 'platform_admin — платформа',
+  viewer: t('admin.roleViewer'),
+  manager: t('admin.roleManager'),
+  branch_admin: t('admin.roleBranchAdmin'),
+  owner: t('admin.roleOwner'),
+  platform_admin: t('admin.rolePlatformAdmin'),
 };
 
 const MANAGER_ROLES = new Set(['platform_admin', 'owner', 'branch_admin', 'manager']);
@@ -230,7 +230,7 @@ function selectedPortalAccountId() {
 }
 
 function portalAccountLabel(account) {
-  const branchText = account.branch_count === 1 ? '1 филиал' : `${account.branch_count || 0} филиалов`;
+  const branchText = t('admin.branchCount', { count: account.branch_count || 0 });
   return `${account.label || `Tenant ${account.id}`} · ${branchText}`;
 }
 
@@ -252,7 +252,7 @@ function renderTenantSwitcher() {
     tenantSelect.disabled = true;
     setSelectedPortalAccountId('');
     if (tenantMeta) {
-      tenantMeta.textContent = 'Нет созданных business tenants.';
+      tenantMeta.textContent = t('admin.noBusinessTenants');
     }
     return;
   }
@@ -267,8 +267,8 @@ function renderTenantSwitcher() {
   const account = portalAccounts.find((item) => String(item.id) === selected);
   if (tenantMeta) {
     tenantMeta.textContent = account?.branch_count
-      ? 'Настройки и credentials применяются к выбранной сети.'
-      : 'У выбранной сети пока нет филиалов. Можно сохранить credentials без выбора филиалов, и система подтянет доступные филиалы из YClients.';
+      ? t('admin.tenantApplies')
+      : t('admin.tenantNoBranchesHint');
   }
 }
 
@@ -425,11 +425,11 @@ function openDeleteConfirm({ type, id, label, subjectType }) {
   const safeLabel = escapeHtml(label);
   const lead =
     subjectType === 'staff'
-      ? 'Вы уверены, что хотите удалить работника '
-      : 'Вы уверены, что хотите удалить пользователя ';
+      ? t('admin.deleteStaffLead')
+      : t('admin.deleteUserLead');
   deleteConfirmMessage.innerHTML = `
     <p class="admin-modal__confirm-text">${lead}<strong class="admin-modal__confirm-target">${safeLabel}</strong>?</p>
-    <p class="admin-modal__confirm-warning">Это действие нельзя отменить — восстановить запись будет невозможно.</p>
+    <p class="admin-modal__confirm-warning">${t('admin.deleteIrreversible')}</p>
   `;
   deleteConfirmModal.hidden = false;
   document.body.classList.add('admin-modal-open');
@@ -463,13 +463,13 @@ function showCredentialsModal(items) {
       (item) => `
         <div class="credentials-row">
           <strong>${escapeHtml(item.full_name || item.email)}</strong>
-          <div>Логин: <code>${escapeHtml(item.email)}</code></div>
-          <div>Пароль: <code>${escapeHtml(item.initial_password)}</code></div>
+          <div>${t('admin.loginLabel')}: <code>${escapeHtml(item.email)}</code></div>
+          <div>${t('common.password')}: <code>${escapeHtml(item.initial_password)}</code></div>
         </div>`
     )
     .join('');
   credentialsMessage.innerHTML = `
-    <p class="admin-modal__confirm-text">Сохраните данные — пароль можно посмотреть позже в разделе «Первичные пароли».</p>
+    <p class="admin-modal__confirm-text">${t('admin.saveCredentialsHint')}</p>
     <div class="credentials-list">${rows}</div>
   `;
   credentialsModal.hidden = false;
@@ -481,16 +481,16 @@ function saveCredentialsAsExcel() {
 
   const rows = currentCredentialsItems.map((item) => ({
     ID: item.staff_id ?? item.user_id ?? '',
-    Имя: item.full_name || '',
-    'Логин (email)': item.email,
-    Пароль: item.initial_password,
+    [t('admin.colName')]: item.full_name || '',
+    [t('admin.colLoginEmail')]: item.email,
+    [t('admin.colPassword')]: item.initial_password,
   }));
 
   const worksheet = XLSX.utils.json_to_sheet(rows);
   worksheet['!cols'] = [{ wch: 12 }, { wch: 28 }, { wch: 36 }, { wch: 18 }];
 
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Пароли');
+  XLSX.utils.book_append_sheet(workbook, worksheet, t('admin.passwordsSheet'));
 
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
   XLSX.writeFile(workbook, `portal-credentials-${stamp}.xlsx`);
@@ -502,7 +502,7 @@ async function distributeCredentials() {
 
   const userIds = currentCredentialsItems.map((item) => item.user_id).filter(Boolean);
   if (!userIds.length) {
-    credentialsErrorEl.textContent = 'Нет идентификаторов пользователей для рассылки';
+    credentialsErrorEl.textContent = t('admin.noUserIdsForDistribution');
     credentialsErrorEl.hidden = false;
     return;
   }
@@ -515,12 +515,12 @@ async function distributeCredentials() {
       body: JSON.stringify({ user_ids: userIds }),
     });
     const { sent_count: sentCount, skipped, errors } = payload.data || {};
-    const parts = [`Отправлено писем: ${sentCount || 0}`];
+    const parts = [t('admin.sentEmailsCount', { count: sentCount || 0 })];
     if (skipped?.length) {
-      parts.push(`Пропущено: ${skipped.length} (нет реального email или пароль уже изменён)`);
+      parts.push(t('admin.skippedEmailsCount', { count: skipped.length }));
     }
     if (errors?.length) {
-      parts.push(`Ошибок: ${errors.length}`);
+      parts.push(t('admin.errorsCount', { count: errors.length }));
     }
     credentialsSuccessEl.textContent = parts.join('. ');
     credentialsSuccessEl.hidden = false;
@@ -560,7 +560,7 @@ async function loadBranches() {
 
 function roleBadge(role) {
   if (role === 'staff') {
-    return '<span class="role-badge">staff · без аккаунта</span>';
+    return `<span class="role-badge">${t('admin.staffNoAccount')}</span>`;
   }
   const classes = {
     platform_admin: 'role-badge role-badge--super',
@@ -598,14 +598,14 @@ function closeAllRowMenus() {
 
 function renderRowMenu({ editAttr, deleteAttr, createAccountAttr }) {
   const createItem = createAccountAttr
-    ? `<button type="button" class="row-menu__item" role="menuitem" ${createAccountAttr}>Создать аккаунт</button>`
+    ? `<button type="button" class="row-menu__item" role="menuitem" ${createAccountAttr}>${t('admin.createAccount')}</button>`
     : '';
   return `<div class="row-menu" data-row-menu>
     <button
       type="button"
       class="row-menu__trigger"
       data-row-menu-toggle
-      aria-label="Действия"
+      aria-label="${t('admin.colActions')}"
       aria-haspopup="menu"
       aria-expanded="false"
     >
@@ -613,8 +613,8 @@ function renderRowMenu({ editAttr, deleteAttr, createAccountAttr }) {
     </button>
     <div class="row-menu__dropdown" role="menu" hidden>
       ${createItem}
-      <button type="button" class="row-menu__item" role="menuitem" ${editAttr}>Редактировать</button>
-      <button type="button" class="row-menu__item row-menu__item--danger" role="menuitem" ${deleteAttr}>Удалить</button>
+      <button type="button" class="row-menu__item" role="menuitem" ${editAttr}>${t('admin.edit')}</button>
+      <button type="button" class="row-menu__item row-menu__item--danger" role="menuitem" ${deleteAttr}>${t('admin.delete')}</button>
     </div>
   </div>`;
 }
@@ -629,7 +629,7 @@ function filterUsers(rows, query) {
       user.email,
       user.full_name,
       user.role,
-      user.is_portal_user ? (user.email_verified ? 'подтверждён' : 'ожидает') : '',
+      user.is_portal_user ? (user.email_verified ? t('admin.confirmed') : t('admin.pending')) : '',
       branchTitles(user.company_ids),
     ]
       .filter((value) => value !== undefined && value !== null && value !== '—')
@@ -663,17 +663,17 @@ function renderUsers() {
           return `
       <tr>
         <td>${user.staff_id ?? user.id ?? '—'}</td>
-        <td>${user.is_portal_user ? user.email : '—'}${user.id === currentUserId ? ' <span class="user-you">(вы)</span>' : ''}</td>
+        <td>${user.is_portal_user ? user.email : '—'}${user.id === currentUserId ? ` <span class="user-you">${t('admin.you')}</span>` : ''}</td>
         <td>${user.full_name || '—'}</td>
         <td>${roleBadge(user.role)}</td>
-        <td><span class="status-dot ${user.email_verified ? 'ok' : ''}">${user.is_portal_user ? (user.email_verified ? 'подтверждён' : 'ожидает') : '—'}</span></td>
+        <td><span class="status-dot ${user.email_verified ? 'ok' : ''}">${user.is_portal_user ? (user.email_verified ? t('admin.confirmed') : t('admin.pending')) : '—'}</span></td>
         <td>${branchTitles(user.company_ids)}</td>
         <td class="admin-table__cell-actions">${actions}</td>
       </tr>`;
         })
         .join('')
     : `<tr><td colspan="7" class="admin-table__empty">${
-        users.length ? 'Ничего не найдено' : 'Пользователи не найдены'
+        users.length ? t('admin.nothingFound') : t('admin.usersNotFound')
       }</td></tr>`;
 }
 
@@ -720,7 +720,7 @@ function renderInitialPasswordsTable() {
         )
         .join('')
     : `<tr><td colspan="6" class="admin-table__empty">${
-        initialPasswords.length ? 'Ничего не найдено' : 'Нет сохранённых первичных паролей'
+        initialPasswords.length ? t('admin.nothingFound') : t('admin.noInitialPasswords')
       }</td></tr>`;
 }
 
@@ -762,18 +762,18 @@ function renderYclientsCredentialsTable() {
       <tr>
         <td>${credential.id}</td>
         <td>${escapeHtml(credential.title)}</td>
-        <td><span class="status-dot ${credential.is_active ? 'ok' : ''}">${credential.is_active ? 'активен' : 'выключен'}</span></td>
+        <td><span class="status-dot ${credential.is_active ? 'ok' : ''}">${credential.is_active ? t('admin.activeStatus') : t('admin.disabledStatus')}</span></td>
         <td>${branchTitles(credential.company_ids)}</td>
         <td>${escapeHtml(secretStatus || '—')}</td>
         <td class="admin-table__cell-actions">
-          <button type="button" class="btn btn--ghost btn--small" data-edit-yclients-credential="${credential.id}">Редактировать</button>
-          <button type="button" class="btn btn--ghost btn--small" data-test-yclients-credential="${credential.id}">Проверить</button>
-          <button type="button" class="btn btn--ghost btn--small" data-delete-yclients-credential="${credential.id}">Удалить</button>
+          <button type="button" class="btn btn--ghost btn--small" data-edit-yclients-credential="${credential.id}">${t('admin.edit')}</button>
+          <button type="button" class="btn btn--ghost btn--small" data-test-yclients-credential="${credential.id}">${t('admin.test')}</button>
+          <button type="button" class="btn btn--ghost btn--small" data-delete-yclients-credential="${credential.id}">${t('admin.delete')}</button>
         </td>
       </tr>`;
         })
         .join('')
-    : '<tr><td colspan="6" class="admin-table__empty">Credentials ещё не добавлены</td></tr>';
+    : `<tr><td colspan="6" class="admin-table__empty">${t('admin.noCredentials')}</td></tr>`;
 }
 
 async function loadYclientsCredentials() {
@@ -794,7 +794,7 @@ function resetYclientsCredentialForm() {
     cancelYclientsCredentialEditBtn.hidden = true;
   }
   if (saveYclientsCredentialBtn) {
-    saveYclientsCredentialBtn.textContent = 'Сохранить';
+    saveYclientsCredentialBtn.textContent = t('admin.save');
   }
 }
 
@@ -812,7 +812,7 @@ function editYclientsCredential(credentialId) {
   if (cancelYclientsCredentialEditBtn) {
     cancelYclientsCredentialEditBtn.hidden = false;
   }
-  saveYclientsCredentialBtn.textContent = 'Обновить';
+  saveYclientsCredentialBtn.textContent = t('admin.update');
   yclientsCredentialTitle.focus();
 }
 
@@ -834,7 +834,7 @@ async function provisionAllAccounts() {
       showCredentialsModal(created);
     }
     const skippedCount = errors?.length || 0;
-    showSuccess(`Создано аккаунтов: ${count || 0}${skippedCount ? `. Пропущено без real email: ${skippedCount}` : ''}`);
+    showSuccess(t('admin.accountsCreated', { count: count || 0, skipped: skippedCount ? t('admin.skippedNoRealEmail', { count: skippedCount }) : '' }));
     await Promise.all([loadUsers(), loadInitialPasswords()]);
   } catch (error) {
     showError(error.message);
@@ -856,7 +856,7 @@ async function createStaffAccount(staffId, email = null) {
     });
     closeCreateStaffAccountModal();
     showCredentialsModal([payload.data]);
-    showSuccess(`Аккаунт для ${selected.full_name} создан`);
+    showSuccess(t('admin.accountForCreated', { name: selected.full_name }));
     await Promise.all([loadUsers(), loadInitialPasswords()]);
   } catch (error) {
     if (!createStaffAccountModal.hidden) {
@@ -874,7 +874,7 @@ async function deleteUser(userId) {
   hideAlerts();
   try {
     await authFetch(`/auth/admin/users/${userId}`, { method: 'DELETE' });
-    showSuccess(`Пользователь ${selected.email} удалён`);
+    showSuccess(t('admin.userDeleted', { email: selected.email }));
     await loadUsers();
   } catch (error) {
     showError(error.message);
@@ -888,7 +888,7 @@ async function deleteStaff(staffId) {
   hideAlerts();
   try {
     await authFetch(`/auth/admin/staff/${staffId}`, { method: 'DELETE' });
-    showSuccess(`Работник ${selected.full_name} удалён`);
+    showSuccess(t('admin.staffDeleted', { name: selected.full_name }));
     await loadUsers();
   } catch (error) {
     showError(error.message);
@@ -1009,7 +1009,7 @@ editStaffForm.addEventListener('submit', async (event) => {
       }),
     });
     closeEditStaffModal();
-    showSuccess('Изменения сохранены');
+    showSuccess(t('admin.changesSaved'));
     await loadUsers();
   } catch (error) {
     showEditStaffError(error.message);
@@ -1025,7 +1025,7 @@ createStaffAccountForm?.addEventListener('submit', async (event) => {
   if (!pendingStaffAccountId) return;
   const email = createStaffAccountEmail.value.trim();
   if (!email) {
-    showCreateStaffAccountError('Укажите реальный email сотрудника');
+    showCreateStaffAccountError(t('admin.realStaffEmailRequired'));
     return;
   }
   await createStaffAccount(pendingStaffAccountId, email);
@@ -1049,7 +1049,7 @@ editForm.addEventListener('submit', async (event) => {
       }),
     });
     closeEditModal();
-    showSuccess('Изменения сохранены');
+    showSuccess(t('admin.changesSaved'));
     await loadUsers();
   } catch (error) {
     showEditError(error.message);
@@ -1072,7 +1072,7 @@ async function testDraftYclientsCredential() {
         password: yclientsCredentialPassword.value,
       }),
     });
-    showSuccess('YClients credentials корректны');
+    showSuccess(t('admin.credentialsValid'));
   } catch (error) {
     showYclientsCredentialsError(error.message);
   } finally {
@@ -1097,7 +1097,7 @@ async function saveYclientsCredential(event) {
     if (isPlatformAdmin()) {
       const portalAccountId = selectedPortalAccountId();
       if (!portalAccountId) {
-        throw new Error('Выберите business tenant для YClients credentials');
+        throw new Error(t('admin.selectTenantForCredentials'));
       }
       body.portal_account_id = Number(portalAccountId);
     }
@@ -1111,7 +1111,7 @@ async function saveYclientsCredential(event) {
       body.password = yclientsCredentialPassword.value;
     }
     if (!editingYclientsCredentialId && (!body.partner_token || !body.login || !body.password)) {
-      throw new Error('Для нового credentials нужны partner token, login и password');
+      throw new Error(t('admin.newCredentialsRequired'));
     }
     const editedCredentialId = editingYclientsCredentialId;
     const url = editedCredentialId
@@ -1122,7 +1122,7 @@ async function saveYclientsCredential(event) {
       body: JSON.stringify(body),
     });
     resetYclientsCredentialForm();
-    showSuccess(editedCredentialId ? 'YClients credentials обновлены' : 'YClients credentials сохранены');
+    showSuccess(editedCredentialId ? t('admin.credentialsUpdated') : t('admin.credentialsSaved'));
     await loadYclientsCredentials();
   } catch (error) {
     showYclientsCredentialsError(error.message);
@@ -1147,7 +1147,7 @@ yclientsCredentialsBody?.addEventListener('click', async (event) => {
       await authFetch(`/auth/admin/yclients-credentials/${testBtn.dataset.testYclientsCredential}/test`, {
         method: 'POST',
       });
-      showSuccess('YClients credentials корректны');
+      showSuccess(t('admin.credentialsValid'));
     } catch (error) {
       showYclientsCredentialsError(error.message);
     } finally {
@@ -1161,7 +1161,7 @@ yclientsCredentialsBody?.addEventListener('click', async (event) => {
       await authFetch(`/auth/admin/yclients-credentials/${deleteBtn.dataset.deleteYclientsCredential}`, {
         method: 'DELETE',
       });
-      showSuccess('YClients credentials удалены');
+      showSuccess(t('admin.credentialsDeleted'));
       await loadYclientsCredentials();
     } catch (error) {
       showYclientsCredentialsError(error.message);
@@ -1194,7 +1194,7 @@ createForm.addEventListener('submit', async (event) => {
     if (payload.data?.initial_password) {
       showCredentialsModal([payload.data]);
     }
-    showSuccess(`Пользователь ${payload.data.email} создан`);
+    showSuccess(t('admin.userCreated', { email: payload.data.email }));
     await Promise.all([loadUsers(), loadInitialPasswords()]);
   } catch (error) {
     showCreateError(error.message);
@@ -1262,7 +1262,7 @@ async function init() {
     await loadAdminMeta();
     await loadPortalAccounts();
     if (isPlatformAdmin() && !selectedPortalAccountId()) {
-      showError('Выберите business tenant для настроек.');
+      showError(t('admin.selectTenantForSettings'));
       return;
     }
     await loadBranches();
@@ -1281,7 +1281,7 @@ tenantSelect?.addEventListener('change', async () => {
   hideAlerts();
   try {
     await reloadTenantScopedAdminData();
-    showSuccess('Business tenant выбран');
+    showSuccess(t('admin.businessTenantSelected'));
   } catch (error) {
     showError(error.message);
   }

@@ -1,4 +1,5 @@
 import './custom-select.css';
+import { t } from './i18n.js';
 
 const registry = new WeakMap();
 
@@ -17,7 +18,7 @@ function normalizeSearch(value) {
 }
 
 class CustomSelect {
-  constructor(selectEl, { placeholder = 'Выберите…', searchable = true, searchPlaceholder = 'Поиск…' } = {}) {
+  constructor(selectEl, { placeholder = t('common.select'), searchable = true, searchPlaceholder = t('common.search') } = {}) {
     this.select = selectEl;
     this.multiple = selectEl.multiple;
     this.placeholder = placeholder;
@@ -66,7 +67,7 @@ class CustomSelect {
 
     this.emptyState = document.createElement('div');
     this.emptyState.className = 'custom-select__empty';
-    this.emptyState.textContent = 'Ничего не найдено';
+    this.emptyState.textContent = t('common.nothingFound');
     this.emptyState.hidden = true;
 
     this.menu.appendChild(this.searchWrap);
@@ -258,7 +259,7 @@ class CustomSelect {
         this.valueEl.textContent = selected.map((option) => option.textContent).join(', ');
         this.root.classList.add('has-value');
       } else {
-        this.valueEl.textContent = `Выбрано: ${selected.length}`;
+        this.valueEl.textContent = t('common.selectedCount', { count: selected.length });
         this.root.classList.add('has-value');
       }
       return;

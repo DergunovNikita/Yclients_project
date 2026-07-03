@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="it">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Подключение — Salon Analytics</title>
+  <title>Collegamento — Salon Analytics</title>
   <link rel="stylesheet" href="/src/auth.css" />
   <link rel="stylesheet" href="/src/onboarding.css" />
 </head>
@@ -15,30 +15,28 @@
         <span data-i18n="brand.name">Salon Analytics</span>
       </div>
       <div class="auth-brand__content">
-        <h2 data-i18n="onboarding.aside.title">Подключите YClients</h2>
-        <p data-i18n="onboarding.aside.subtitle">2 шага: добавьте токены доступа и выберите филиалы для синхронизации.</p>
+        <h2 data-i18n="onboarding.aside.title">Collega YClients</h2>
+        <p data-i18n="onboarding.aside.subtitle">2 passaggi: aggiungi i token di accesso e scegli le filiali da sincronizzare.</p>
       </div>
       <ol class="onboarding-progress" id="progress">
         <li data-step="pending_credentials" data-i18n="onboarding.progressCredentials">YClients API</li>
-        <li data-step="pending_branches" data-i18n="onboarding.progressBranches">Выбор филиалов</li>
+        <li data-step="pending_branches" data-i18n="onboarding.progressBranches">Scelta filiali</li>
       </ol>
       <div class="auth-lang" id="lang-switcher"></div>
     </aside>
 
     <main class="auth-panel">
       <section class="auth-card auth-card--wide">
-        <div id="step-loading" class="onboarding-loading" data-i18n="onboarding.loadingState">Загружаем состояние…</div>
+        <div id="step-loading" class="onboarding-loading" data-i18n="onboarding.loadingState">Caricamento dello stato…</div>
 
         <div id="step-credentials" hidden>
-          <span class="auth-card__eyebrow" data-i18n="onboarding.step1Eyebrow">Шаг 1 из 2</span>
-          <h1 data-i18n="onboarding.step1Title">Токены доступа к YClients</h1>
-          <p class="auth-subhead" data-i18n="onboarding.step1Subhead">
-            Создайте партнёрский ключ и логин/пароль в админке YClients. Мы зашифруем их и используем только для синхронизации.
-          </p>
+          <span class="auth-card__eyebrow" data-i18n="onboarding.step1Eyebrow">Passaggio 1 di 2</span>
+          <h1 data-i18n="onboarding.step1Title">Token di accesso a YClients</h1>
+          <p class="auth-subhead" data-i18n="onboarding.step1Subhead">Crea una partner key e login/password nel pannello di amministrazione YClients. Li cifriamo e li usiamo solo per la sincronizzazione.</p>
           <div class="alert error" id="creds-error" hidden></div>
           <form class="auth-form" id="creds-form">
             <div class="field">
-              <label for="title" data-i18n="onboarding.integrationTitle">Название интеграции</label>
+              <label for="title" data-i18n="onboarding.integrationTitle">Nome dell'integrazione</label>
               <input type="text" id="title" value="YClients integration" maxlength="255" />
             </div>
             <div class="field">
@@ -46,33 +44,33 @@
               <input type="text" id="partner_token" required autocomplete="off" />
             </div>
             <div class="field">
-              <label for="login" data-i18n="onboarding.login">Логин</label>
+              <label for="login" data-i18n="onboarding.login">Login</label>
               <input type="text" id="login" required autocomplete="username" />
             </div>
             <div class="field">
-              <label for="password" data-i18n="common.password">Пароль</label>
+              <label for="password" data-i18n="common.password">Password</label>
               <input type="password" id="password" required autocomplete="current-password" />
             </div>
-            <button type="submit" class="btn btn--primary" id="creds-submit" data-i18n="onboarding.credsSubmit">Проверить и сохранить</button>
+            <button type="submit" class="btn btn--primary" id="creds-submit" data-i18n="onboarding.credsSubmit">Verifica e salva</button>
           </form>
         </div>
 
         <div id="step-branches" hidden>
-          <span class="auth-card__eyebrow" data-i18n="onboarding.step2Eyebrow">Шаг 2 из 2</span>
-          <h1 data-i18n="onboarding.step2Title">Выберите филиалы</h1>
-          <p class="auth-subhead" data-i18n="onboarding.step2Subhead">Отметьте филиалы, по которым мы будем тянуть данные. Можно вернуться к настройке позже.</p>
+          <span class="auth-card__eyebrow" data-i18n="onboarding.step2Eyebrow">Passaggio 2 di 2</span>
+          <h1 data-i18n="onboarding.step2Title">Scegli le filiali</h1>
+          <p class="auth-subhead" data-i18n="onboarding.step2Subhead">Seleziona le filiali per cui recuperare i dati. Puoi tornarci più tardi.</p>
           <div class="alert error" id="branches-error" hidden></div>
           <form class="auth-form" id="branches-form">
             <div id="branches-list" class="onboarding-branches"></div>
-            <button type="submit" class="btn btn--primary" id="branches-submit" disabled data-i18n="onboarding.branchesSubmit">Завершить настройку</button>
+            <button type="submit" class="btn btn--primary" id="branches-submit" disabled data-i18n="onboarding.branchesSubmit">Completa la configurazione</button>
           </form>
         </div>
 
         <div id="step-done" hidden>
-          <span class="auth-card__eyebrow" data-i18n="onboarding.doneEyebrow">Готово</span>
-          <h1 data-i18n="onboarding.doneTitle">Настройка завершена</h1>
-          <p class="auth-subhead" data-i18n="onboarding.doneSubhead">Синхронизация запустится автоматически в ближайший цикл. Перейдите в кабинет, чтобы посмотреть прогресс.</p>
-          <a class="btn btn--primary" href="/" data-i18n="onboarding.doneCta">Открыть кабинет</a>
+          <span class="auth-card__eyebrow" data-i18n="onboarding.doneEyebrow">Fatto</span>
+          <h1 data-i18n="onboarding.doneTitle">Configurazione completata</h1>
+          <p class="auth-subhead" data-i18n="onboarding.doneSubhead">La sincronizzazione partirà automaticamente al prossimo ciclo. Apri la tua area per vedere l'avanzamento.</p>
+          <a class="btn btn--primary" href="/" data-i18n="onboarding.doneCta">Apri l'area di lavoro</a>
         </div>
       </section>
     </main>

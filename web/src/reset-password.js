@@ -31,11 +31,11 @@ form.addEventListener('submit', async (event) => {
   submitBtn.classList.add('is-loading');
   try {
     const password = document.getElementById('password').value;
-    const payload = await authFetch('/auth/reset-password', {
+    await authFetch('/auth/reset-password', {
       method: 'POST',
       body: JSON.stringify({ token, password }),
     });
-    successEl.textContent = `${payload.message} ${t('reset.redirecting')}`;
+    successEl.textContent = `${t('reset.success')} ${t('reset.redirecting')}`;
     successEl.hidden = false;
     setTimeout(() => {
       window.location.href = '/login.html';

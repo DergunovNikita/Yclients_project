@@ -3,6 +3,7 @@ import { ReportChartManager } from './charts.js';
 import { defaultReportDates, escapeHtml, formatDate } from './format.js';
 import { GROUP_LABELS, STATUS_LABELS, sourceLabel } from './registry.js';
 import { renderReportData } from './renderers/generic.js';
+import { t } from '../i18n.js';
 
 const FAVORITES_KEY = 'yclients_reports_favorites';
 
@@ -182,19 +183,19 @@ export function initReports({ clearError, showError, setApiState }) {
     const statuses = uniqueSorted(state.reports.map((report) => report.status));
     const roles = uniqueSorted(state.reports.flatMap((report) => report.roles || []));
     const themes = uniqueSorted(state.reports.flatMap((report) => report.themes || []));
-    els.group.innerHTML = optionHtml('', 'Все группы', selected.group)
+    els.group.innerHTML = optionHtml('', t('dash.allGroups'), selected.group)
       + groups.map((group) => optionHtml(group, GROUP_LABELS[group] || group, selected.group)).join('');
-    els.status.innerHTML = optionHtml('', 'Все статусы', selected.status)
+    els.status.innerHTML = optionHtml('', t('dash.allStatuses'), selected.status)
       + statuses.map((status) => optionHtml(status, STATUS_LABELS[status] || status, selected.status)).join('');
-    els.role.innerHTML = optionHtml('', 'Все роли', selected.role)
+    els.role.innerHTML = optionHtml('', t('dash.allRoles'), selected.role)
       + roles.map((role) => optionHtml(role, role, selected.role)).join('');
-    els.theme.innerHTML = optionHtml('', 'Все темы', selected.theme)
+    els.theme.innerHTML = optionHtml('', t('dash.allThemes'), selected.theme)
       + themes.map((theme) => optionHtml(theme, theme, selected.theme)).join('');
   }
 
   function renderBranches() {
     const selected = els.branch.value;
-    els.branch.innerHTML = '<option value="">Все филиалы</option>'
+    els.branch.innerHTML = optionHtml('', t('dash.allBranches'), selected)
       + state.branches.map((branch) => optionHtml(branch.id, branch.title, selected)).join('');
   }
 
@@ -202,7 +203,7 @@ export function initReports({ clearError, showError, setApiState }) {
     const selected = els.staff.value;
     const payload = await fetchJson('/dashboard/staff', { company_id: els.branch.value });
     const staff = payload.data || [];
-    els.staff.innerHTML = '<option value="">Все сотрудники</option>'
+    els.staff.innerHTML = optionHtml('', t('dash.allStaff'), selected)
       + staff.map((person) => optionHtml(
         person.id,
         els.branch.value ? person.name : `${person.name} · ${person.company_title || person.company_id}`,
@@ -224,11 +225,11 @@ export function initReports({ clearError, showError, setApiState }) {
     setCatalogVisible(true);
     const favorites = getFavorites();
     const filtered = state.reports.filter((report) => reportMatches(report, state.filters, favorites));
-    els.count.textContent = `${state.reports.length} отчет · показано ${filtered.length}`;
+    els.count.textContent = t('reports.catalogCount', { total: state.reports.length, shown: filtered.length });
     els.viewer.classList.remove('visible');
     charts.clear();
     if (!filtered.length) {
-      els.catalog.innerHTML = '<div class="empty compact">Отчеты не найдены</div>';
+      els.catalog.innerHTML = `<div class="empty compact">${t('reports.notFound')}</div>`;
       return;
     }
     const grouped = filtered.reduce((acc, report) => {
@@ -244,7 +245,7 @@ export function initReports({ clearError, showError, setApiState }) {
         <div class="reports-grid">
           ${reports.map((report) => `
             <article class="report-card report-card--${escapeHtml(report.status)}" data-report-id="${escapeHtml(report.id)}">
-              <button class="report-card__pin${favorites.has(report.id) ? ' active' : ''}" type="button" data-report-pin="${escapeHtml(report.id)}" title="${favorites.has(report.id) ? 'Убрать из избранного' : 'В избранное'}">★</button>
+              <button class="report-card__pin${favorites.has(report.id) ? ' active' : ''}" type="button" data-report-pin="${escapeHtml(report.id)}" title="${favorites.has(report.id) ? t('reports.removeFavorite') : t('reports.addFavorite')}">★</button>
               <div class="report-card__status">${escapeHtml(statusText(report))}</div>
               <h4>${escapeHtml(report.title)}</h4>
               <p>${escapeHtml(report.description)}</p>
@@ -312,22 +313,22 @@ export function initReports({ clearError, showError, setApiState }) {
     setCatalogVisible(false);
     els.viewer.classList.add('visible');
     els.viewerTitle.textContent = meta.title;
-    els.viewerSubtitle.textContent = 'Загрузка';
-    els.content.innerHTML = '<div class="empty compact">Загрузка отчета</div>';
+    els.viewerSubtitle.textContent = t('common.loadingShort');
+    els.content.innerHTML = `<div class="empty compact">${t('reports.loadingReport')}</div>`;
     clearError();
-    setApiState('API: загрузка', 'warn');
+    setApiState(t('dash.apiLoading'), 'warn');
     try {
       const payload = await fetchJson('/dashboard/reports/data', reportParams());
       const data = payload.data;
       els.viewerTitle.textContent = data.title || meta.title;
       els.viewerSubtitle.textContent = periodSubtitle(data);
       renderReportData(els.content, data, charts);
-      setApiState('API: подключен', 'ok');
+      setApiState(t('dash.apiConnected'), 'ok');
     } catch (error) {
       charts.clear();
       showError(error.message);
-      els.viewerSubtitle.textContent = 'Ошибка';
-      els.content.innerHTML = '<div class="empty compact">Не удалось загрузить отчет</div>';
+      els.viewerSubtitle.textContent = t('common.errorPrefix');
+      els.content.innerHTML = `<div class="empty compact">${t('reports.loadFailed')}</div>`;
     }
   }
 

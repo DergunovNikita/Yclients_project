@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="it">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>YClients Dashboard</title>
+  <title>Salon Analytics Dashboard</title>
   <style>
     :root {
       color-scheme: light;
@@ -1245,20 +1245,20 @@
   <main class="shell">
     <section class="topbar">
       <div>
-        <h1 data-i18n="dash.title">Панель аналитики</h1>
-        <p class="subhead" id="period-label" data-i18n="dash.subhead">Метрики по филиалам и услугам</p>
+        <h1 data-i18n="dash.title">Dashboard di analisi</h1>
+        <p class="subhead" id="period-label" data-i18n="dash.subhead">Metriche per filiale e servizio</p>
       </div>
       <div class="status">
-        <span class="pill warn" id="api-state" data-i18n="dash.apiChecking">API: проверка</span>
-        <span id="sync-state" data-i18n="dash.syncNoData">данные актуальны: нет данных</span>
+        <span class="pill warn" id="api-state" data-i18n="dash.apiChecking">API: verifica</span>
+        <span id="sync-state" data-i18n="dash.syncNoData">aggiornamento dati: nessun dato</span>
         <div class="auth-lang" id="lang-switcher"></div>
         <div class="tenant-switcher" id="tenant-switcher" hidden>
-          <label for="tenant-select" data-i18n="dash.businessNetwork">Бизнес-сеть</label>
+          <label for="tenant-select" data-i18n="dash.businessNetwork">Rete aziendale</label>
           <select id="tenant-select"></select>
           <span class="tenant-switcher__meta" id="tenant-meta"></span>
         </div>
         <div class="user-profile" id="user-profile-link" hidden>
-          <a href="/settings.html" class="user-icon-btn" data-i18n-attr="aria-label:dash.settings" aria-label="Настройки">
+          <a href="/settings.html" class="user-icon-btn" data-i18n-attr="aria-label:dash.settings" aria-label="Impostazioni">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
               <circle cx="12" cy="8" r="4"></circle>
               <path d="M5 20c0-3.3 3.1-5 7-5s7 1.7 7 5"></path>
@@ -1272,70 +1272,70 @@
       </div>
     </section>
 
-    <nav class="tabs" data-i18n-attr="aria-label:dash.ariaSections" aria-label="Разделы дашборда">
-      <a class="tab active" href="#overview" data-view-link="overview" data-i18n="dash.tabOverview">Обзор</a>
-      <a class="tab" href="#plan-fact" data-view-link="plan" data-i18n="dash.tabPlanFact">План / факт</a>
-      <a class="tab" href="#plan-settings" data-view-link="planSettings" data-i18n="dash.tabPlanSettings">Установка планов</a>
-      <a class="tab" href="#services" data-view-link="serviceManagement" data-i18n="dash.tabServices">Услуги</a>
-      <a class="tab" href="#review-facts" data-view-link="reviewFacts" data-i18n="dash.tabReviewFacts">Отзывы факт</a>
-      <a class="tab" href="/reports" data-view-link="reports" data-i18n="dash.tabReports">Отчеты</a>
+    <nav class="tabs" data-i18n-attr="aria-label:dash.ariaSections" aria-label="Sezioni della dashboard">
+      <a class="tab active" href="#overview" data-view-link="overview" data-i18n="dash.tabOverview">Panoramica</a>
+      <a class="tab" href="#plan-fact" data-view-link="plan" data-i18n="dash.tabPlanFact">Piano / consuntivo</a>
+      <a class="tab" href="#plan-settings" data-view-link="planSettings" data-i18n="dash.tabPlanSettings">Impostazione piani</a>
+      <a class="tab" href="#services" data-view-link="serviceManagement" data-i18n="dash.tabServices">Servizi</a>
+      <a class="tab" href="#review-facts" data-view-link="reviewFacts" data-i18n="dash.tabReviewFacts">Consuntivo recensioni</a>
+      <a class="tab" href="/reports" data-view-link="reports" data-i18n="dash.tabReports">Report</a>
     </nav>
 
     <div class="alert" id="error"></div>
 
     <section class="view active" id="overview-view" data-view="overview">
-      <section class="toolbar" data-i18n-attr="aria-label:dash.ariaOverviewFilters" aria-label="Фильтры обзора">
+      <section class="toolbar" data-i18n-attr="aria-label:dash.ariaOverviewFilters" aria-label="Filtri panoramica">
         <label>
-          <span data-i18n="dash.from">С</span>
+          <span data-i18n="dash.from">Da</span>
           <input type="date" id="overview-start" />
         </label>
         <label>
-          <span data-i18n="dash.to">По</span>
+          <span data-i18n="dash.to">A</span>
           <input type="date" id="overview-end" />
         </label>
         <label>
-          <span data-i18n="dash.branch">Филиал</span>
+          <span data-i18n="dash.branch">Filiale</span>
           <select id="overview-branch">
-            <option value="" data-i18n="dash.allBranches">Все филиалы</option>
+            <option value="" data-i18n="dash.allBranches">Tutte le filiali</option>
           </select>
         </label>
         <label>
-          <span data-i18n="dash.worker">Работник</span>
+          <span data-i18n="dash.worker">Operatore</span>
           <select id="overview-staff">
-            <option value="" data-i18n="dash.allWorkers">Все работники</option>
+            <option value="" data-i18n="dash.allWorkers">Tutti gli operatori</option>
           </select>
         </label>
-        <button type="button" id="overview-load" data-i18n="dash.refresh">Обновить</button>
+        <button type="button" id="overview-load" data-i18n="dash.refresh">Aggiorna</button>
       </section>
 
-      <nav class="segmented" data-i18n-attr="aria-label:dash.ariaQuickPeriods" aria-label="Быстрые периоды обзора">
-        <button type="button" data-overview-preset="today" data-i18n="dash.today">Сегодня</button>
-        <button type="button" data-overview-preset="week" data-i18n="dash.week">Неделя</button>
-        <button type="button" data-overview-preset="month" data-i18n="dash.month">Месяц</button>
-        <button type="button" data-overview-preset="quarter" data-i18n="dash.quarter">Квартал</button>
-        <button type="button" data-overview-preset="year" data-i18n="dash.year">Год</button>
+      <nav class="segmented" data-i18n-attr="aria-label:dash.ariaQuickPeriods" aria-label="Periodi rapidi panoramica">
+        <button type="button" data-overview-preset="today" data-i18n="dash.today">Oggi</button>
+        <button type="button" data-overview-preset="week" data-i18n="dash.week">Settimana</button>
+        <button type="button" data-overview-preset="month" data-i18n="dash.month">Mese</button>
+        <button type="button" data-overview-preset="quarter" data-i18n="dash.quarter">Trimestre</button>
+        <button type="button" data-overview-preset="year" data-i18n="dash.year">Anno</button>
       </nav>
 
-      <nav class="segmented" data-i18n-attr="aria-label:dash.ariaChartGroups" aria-label="Группы графиков обзора">
-        <button type="button" data-overview-jump="appointments" data-i18n="dash.jumpAppointments">Записи</button>
-        <button type="button" data-overview-jump="clients" data-i18n="dash.jumpClients">Клиенты</button>
-        <button type="button" data-overview-jump="revenue" data-i18n="dash.jumpRevenue">Выручка</button>
-        <button type="button" data-overview-jump="services" data-i18n="dash.jumpServices">Услуги</button>
+      <nav class="segmented" data-i18n-attr="aria-label:dash.ariaChartGroups" aria-label="Gruppi di grafici panoramica">
+        <button type="button" data-overview-jump="appointments" data-i18n="dash.jumpAppointments">Appuntamenti</button>
+        <button type="button" data-overview-jump="clients" data-i18n="dash.jumpClients">Clienti</button>
+        <button type="button" data-overview-jump="revenue" data-i18n="dash.jumpRevenue">Ricavi</button>
+        <button type="button" data-overview-jump="services" data-i18n="dash.jumpServices">Servizi</button>
       </nav>
 
       <section class="kpi" id="kpi"></section>
-      <section class="visit-metrics" id="visit-metrics" data-i18n-attr="aria-label:dash.ariaVisits" aria-label="Посещения и доп. услуги"></section>
-      <section data-overview-section="clients" data-i18n-attr="aria-label:dash.ariaClients" aria-label="Клиенты">
+      <section class="visit-metrics" id="visit-metrics" data-i18n-attr="aria-label:dash.ariaVisits" aria-label="Visite e servizi extra"></section>
+      <section data-overview-section="clients" data-i18n-attr="aria-label:dash.ariaClients" aria-label="Clienti">
         <div class="panel-title">
-          <h2 data-i18n="dash.clients">Клиенты</h2>
+          <h2 data-i18n="dash.clients">Clienti</h2>
         </div>
-        <section class="clients-metrics" id="clients-metrics" data-i18n-attr="aria-label:dash.ariaNewRepeat" aria-label="Новые и повторные клиенты"></section>
+        <section class="clients-metrics" id="clients-metrics" data-i18n-attr="aria-label:dash.ariaNewRepeat" aria-label="Clienti nuovi e di ritorno"></section>
       </section>
 
       <section class="grid">
         <div class="panel wide" data-overview-section="revenue">
           <div class="panel-title">
-            <h2 data-i18n="dash.revenueByDay">Выручка по дням</h2>
+            <h2 data-i18n="dash.revenueByDay">Ricavi per giorno</h2>
             <span class="meta" id="revenue-meta"></span>
           </div>
           <div class="chart-box"><canvas id="revenue-chart"></canvas></div>
@@ -1343,24 +1343,24 @@
 
         <div class="panel" data-overview-section="appointments">
           <div class="panel-title">
-            <h2 data-i18n="dash.appointmentsByDay">Записи по дням</h2>
+            <h2 data-i18n="dash.appointmentsByDay">Appuntamenti per giorno</h2>
             <span class="meta" id="appointments-meta"></span>
           </div>
           <div class="appointments-warning" id="appointments-warning" role="status"></div>
-          <section class="appointments-metrics" id="appointments-metrics" data-i18n-attr="aria-label:dash.ariaStatuses" aria-label="Статусы записей"></section>
+          <section class="appointments-metrics" id="appointments-metrics" data-i18n-attr="aria-label:dash.ariaStatuses" aria-label="Stati degli appuntamenti"></section>
           <div class="chart-box short"><canvas id="appointments-chart"></canvas></div>
         </div>
 
         <div class="panel wide" data-overview-section="appointments">
           <div class="panel-title">
-            <h2 data-i18n="dash.opzShare">ОПЗ и доля от завершённых визитов</h2>
+            <h2 data-i18n="dash.opzShare">Vendite aggiuntive e quota sulle visite completate</h2>
           </div>
           <div class="chart-box"><canvas id="opz-chart"></canvas></div>
         </div>
 
         <div class="panel wide" data-overview-section="services">
           <div class="panel-title">
-            <h2 data-i18n="dash.extraServices">Доп. услуги</h2>
+            <h2 data-i18n="dash.extraServices">Servizi extra</h2>
             <span class="meta" id="extra-services-meta"></span>
           </div>
           <div id="extra-services-table"></div>
@@ -1368,7 +1368,7 @@
 
         <div class="panel" data-overview-section="services">
           <div class="panel-title">
-            <h2 data-i18n="dash.topServices">Топ услуг</h2>
+            <h2 data-i18n="dash.topServices">Servizi principali</h2>
             <span class="meta" id="services-meta"></span>
           </div>
           <div class="chart-box short"><canvas id="services-chart"></canvas></div>
@@ -1376,7 +1376,7 @@
 
         <div class="panel wide" data-overview-section="services">
           <div class="panel-title">
-            <h2 data-i18n="dash.topRevenueServices">Услуги с максимальной выручкой</h2>
+            <h2 data-i18n="dash.topRevenueServices">Servizi con maggiori ricavi</h2>
             <span class="meta" id="table-meta"></span>
           </div>
           <div id="services-table"></div>
@@ -1385,35 +1385,35 @@
     </section>
 
     <section class="view" id="plan-view" data-view="plan">
-      <section class="toolbar" data-i18n-attr="aria-label:dash.ariaPlanFactFilters" aria-label="Фильтры план-факт">
+      <section class="toolbar" data-i18n-attr="aria-label:dash.ariaPlanFactFilters" aria-label="Filtri piano/consuntivo">
         <label>
-          <span data-i18n="dash.from">С</span>
+          <span data-i18n="dash.from">Da</span>
           <input type="date" id="plan-start" />
         </label>
         <label>
-          <span data-i18n="dash.to">По</span>
+          <span data-i18n="dash.to">A</span>
           <input type="date" id="plan-end" />
         </label>
         <label>
-          <span data-i18n="dash.branch">Филиал</span>
+          <span data-i18n="dash.branch">Filiale</span>
           <select id="plan-branch">
-            <option value="" data-i18n="dash.allBranches">Все филиалы</option>
+            <option value="" data-i18n="dash.allBranches">Tutte le filiali</option>
           </select>
         </label>
         <label>
-          <span data-i18n="dash.worker">Работник</span>
+          <span data-i18n="dash.worker">Operatore</span>
           <select id="plan-staff">
-            <option value="" data-i18n="dash.allWorkers">Все работники</option>
+            <option value="" data-i18n="dash.allWorkers">Tutti gli operatori</option>
           </select>
         </label>
-        <button type="button" id="plan-load" data-i18n="dash.refresh">Обновить</button>
+        <button type="button" id="plan-load" data-i18n="dash.refresh">Aggiorna</button>
       </section>
 
       <div class="plan-insights" id="plan-insights"></div>
 
       <div class="panel wide">
         <div class="panel-title">
-          <h2 data-i18n="dash.planFact">План / факт</h2>
+          <h2 data-i18n="dash.planFact">Piano / consuntivo</h2>
           <span class="meta" id="plan-meta"></span>
         </div>
         <div id="plan-fact-table"></div>
@@ -1421,23 +1421,23 @@
     </section>
 
     <section class="view" id="plan-settings-view" data-view="planSettings">
-      <section class="toolbar plan-settings-toolbar" data-i18n-attr="aria-label:dash.ariaPlanSettingsFilters" aria-label="Фильтры установки планов">
+      <section class="toolbar plan-settings-toolbar" data-i18n-attr="aria-label:dash.ariaPlanSettingsFilters" aria-label="Filtri impostazione piani">
         <label>
-          <span data-i18n="dash.month">Месяц</span>
+          <span data-i18n="dash.month">Mese</span>
           <input type="month" id="plan-settings-month" />
         </label>
-        <button type="button" id="plan-settings-load" data-i18n="dash.load">Загрузить</button>
-        <button type="button" class="secondary" id="plan-settings-copy" data-i18n="dash.copyLastMonth">Скопировать прошлый месяц</button>
-        <button type="button" class="secondary" id="plan-settings-reset" data-i18n="dash.resetChanges">Сбросить изменения</button>
+        <button type="button" id="plan-settings-load" data-i18n="dash.load">Carica</button>
+        <button type="button" class="secondary" id="plan-settings-copy" data-i18n="dash.copyLastMonth">Copia il mese scorso</button>
+        <button type="button" class="secondary" id="plan-settings-reset" data-i18n="dash.resetChanges">Annulla modifiche</button>
         <div class="plan-settings-status">
-          <span id="plan-settings-dirty" class="plan-settings-dirty" data-i18n="dash.unsavedChanges">Есть несохранённые изменения</span>
-          <span id="plan-settings-saved" data-i18n="dash.lastSaveNone">Последнее сохранение: нет</span>
+          <span id="plan-settings-dirty" class="plan-settings-dirty" data-i18n="dash.unsavedChanges">Ci sono modifiche non salvate</span>
+          <span id="plan-settings-saved" data-i18n="dash.lastSaveNone">Ultimo salvataggio: mai</span>
         </div>
       </section>
 
       <div class="panel wide">
         <div class="panel-title">
-          <h2 data-i18n="dash.branchSettings">Настройки филиалов</h2>
+          <h2 data-i18n="dash.branchSettings">Impostazioni filiali</h2>
           <span class="meta" id="plan-settings-branch-meta"></span>
         </div>
         <div id="plan-settings-branches"></div>
@@ -1445,166 +1445,166 @@
 
       <div class="panel wide review-fact-panel">
         <div class="panel-title">
-          <h2 data-i18n="dash.staffPlans">Планы сотрудников</h2>
+          <h2 data-i18n="dash.staffPlans">Piani dei dipendenti</h2>
           <span class="meta" id="plan-settings-staff-meta"></span>
         </div>
         <div id="plan-settings-staff"></div>
         <div class="plan-settings-actions">
-          <a class="tab" href="#review-facts" data-view-link="reviewFacts" data-i18n="dash.tabReviewFacts">Отзывы факт</a>
-          <button type="button" id="plan-settings-save" data-i18n="dash.save">Сохранить</button>
+          <a class="tab" href="#review-facts" data-view-link="reviewFacts" data-i18n="dash.tabReviewFacts">Consuntivo recensioni</a>
+          <button type="button" id="plan-settings-save" data-i18n="dash.save">Salva</button>
         </div>
       </div>
     </section>
 
     <section class="view" id="service-management-view" data-view="serviceManagement">
-      <section class="toolbar services-toolbar" data-i18n-attr="aria-label:dash.ariaServiceFilters" aria-label="Фильтры услуг">
+      <section class="toolbar services-toolbar" data-i18n-attr="aria-label:dash.ariaServiceFilters" aria-label="Filtri servizi">
         <label>
-          <span data-i18n="dash.branch">Филиал</span>
+          <span data-i18n="dash.branch">Filiale</span>
           <select id="service-filter-branch">
-            <option value="" data-i18n="dash.allBranches">Все филиалы</option>
+            <option value="" data-i18n="dash.allBranches">Tutte le filiali</option>
           </select>
         </label>
         <label>
-          <span data-i18n="dash.category">Категория</span>
+          <span data-i18n="dash.category">Categoria</span>
           <select id="service-filter-category">
-            <option value="" data-i18n="dash.allCategories">Все категории</option>
+            <option value="" data-i18n="dash.allCategories">Tutte le categorie</option>
           </select>
         </label>
         <label>
-          <span data-i18n="dash.kpiGroup">KPI-группа</span>
+          <span data-i18n="dash.kpiGroup">Gruppo KPI</span>
           <select id="service-filter-group">
-            <option value="" data-i18n="dash.allGroups">Все группы</option>
+            <option value="" data-i18n="dash.allGroups">Tutti i gruppi</option>
           </select>
         </label>
         <label>
-          <span data-i18n="dash.search">Поиск</span>
-          <input type="search" id="service-filter-query" placeholder="Название или ID" data-i18n-attr="placeholder:dash.searchNameId" />
+          <span data-i18n="dash.search">Cerca</span>
+          <input type="search" id="service-filter-query" placeholder="Nome o ID" data-i18n-attr="placeholder:dash.searchNameId" />
         </label>
         <label class="checkline">
           <input type="checkbox" id="service-filter-extra" />
-          <span data-i18n="dash.onlyExtra">Только доп. услуги</span>
+          <span data-i18n="dash.onlyExtra">Solo servizi extra</span>
         </label>
-        <button type="button" id="service-filter-load" data-i18n="dash.refresh">Обновить</button>
+        <button type="button" id="service-filter-load" data-i18n="dash.refresh">Aggiorna</button>
       </section>
 
       <div class="panel wide">
         <div class="panel-title">
-          <h2 data-i18n="dash.currentServices">Актуальные услуги</h2>
+          <h2 data-i18n="dash.currentServices">Servizi attuali</h2>
           <span class="meta" id="service-catalog-meta"></span>
         </div>
         <div id="service-catalog-table"></div>
         <div class="plan-settings-actions">
-          <span id="service-management-dirty" class="plan-settings-dirty" data-i18n="dash.unsavedChanges">Есть несохранённые изменения</span>
-          <button type="button" class="secondary" id="service-management-reset" data-i18n="dash.resetChanges">Сбросить изменения</button>
-          <button type="button" id="service-management-save" data-i18n="dash.save">Сохранить</button>
+          <span id="service-management-dirty" class="plan-settings-dirty" data-i18n="dash.unsavedChanges">Ci sono modifiche non salvate</span>
+          <button type="button" class="secondary" id="service-management-reset" data-i18n="dash.resetChanges">Annulla modifiche</button>
+          <button type="button" id="service-management-save" data-i18n="dash.save">Salva</button>
         </div>
       </div>
 
       <div class="panel wide">
         <div class="panel-title">
-          <h2 data-i18n="dash.kpiGroups">KPI-группы услуг</h2>
+          <h2 data-i18n="dash.kpiGroups">Gruppi KPI dei servizi</h2>
           <span class="meta" id="service-kpi-groups-meta"></span>
         </div>
         <div class="service-group-create">
           <label>
-            <span data-i18n="dash.name">Название</span>
+            <span data-i18n="dash.name">Nome</span>
             <input type="text" id="service-group-title" />
           </label>
           <label>
-            <span data-i18n="dash.code">Код</span>
+            <span data-i18n="dash.code">Codice</span>
             <input type="text" id="service-group-code" placeholder="auto" />
           </label>
           <label>
-            <span data-i18n="dash.description">Описание</span>
+            <span data-i18n="dash.description">Descrizione</span>
             <input type="text" id="service-group-description" />
           </label>
-          <button type="button" id="service-group-add" data-i18n="dash.add">Добавить</button>
+          <button type="button" id="service-group-add" data-i18n="dash.add">Aggiungi</button>
         </div>
         <div id="service-kpi-groups-table"></div>
       </div>
     </section>
 
     <section class="view" id="review-facts-view" data-view="reviewFacts">
-      <section class="toolbar" data-i18n-attr="aria-label:dash.ariaReviewFilters" aria-label="Фильтры факта отзывов">
+      <section class="toolbar" data-i18n-attr="aria-label:dash.ariaReviewFilters" aria-label="Filtri consuntivo recensioni">
         <label>
-          <span data-i18n="dash.month">Месяц</span>
+          <span data-i18n="dash.month">Mese</span>
           <input type="month" id="review-fact-month" />
         </label>
         <label>
-          <span data-i18n="dash.from">С</span>
+          <span data-i18n="dash.from">Da</span>
           <input type="date" id="review-fact-start" />
         </label>
         <label>
-          <span data-i18n="dash.to">По</span>
+          <span data-i18n="dash.to">A</span>
           <input type="date" id="review-fact-end" />
         </label>
         <label>
-          <span data-i18n="dash.branch">Филиал</span>
+          <span data-i18n="dash.branch">Filiale</span>
           <select id="review-fact-branch">
-            <option value="" data-i18n="dash.allBranches">Все филиалы</option>
+            <option value="" data-i18n="dash.allBranches">Tutte le filiali</option>
           </select>
         </label>
         <label>
-          <span data-i18n="dash.staff">Сотрудник</span>
+          <span data-i18n="dash.staff">Dipendente</span>
           <select id="review-fact-staff">
-            <option value="" data-i18n="dash.allStaff">Все сотрудники</option>
+            <option value="" data-i18n="dash.allStaff">Tutti i dipendenti</option>
           </select>
         </label>
-        <button type="button" id="review-fact-load" data-i18n="dash.refresh">Обновить</button>
+        <button type="button" id="review-fact-load" data-i18n="dash.refresh">Aggiorna</button>
       </section>
 
       <div class="panel wide review-fact-panel">
         <div class="panel-title">
-          <h2 data-i18n="dash.reviewFacts">Отзывы факт</h2>
+          <h2 data-i18n="dash.reviewFacts">Consuntivo recensioni</h2>
           <span class="meta" id="review-fact-meta"></span>
         </div>
         <div id="review-fact-editor"></div>
         <div class="review-fact-actions">
-          <button type="button" id="review-fact-save" data-i18n="dash.saveFact">Сохранить факт</button>
+          <button type="button" id="review-fact-save" data-i18n="dash.saveFact">Salva consuntivo</button>
         </div>
       </div>
     </section>
 
     <section class="view" id="reports-view" data-view="reports">
-      <section class="toolbar reports-toolbar" id="reports-catalog-toolbar" data-i18n-attr="aria-label:dash.ariaCatalogFilters" aria-label="Фильтры каталога отчетов">
+      <section class="toolbar reports-toolbar" id="reports-catalog-toolbar" data-i18n-attr="aria-label:dash.ariaCatalogFilters" aria-label="Filtri catalogo report">
         <label>
-          <span data-i18n="dash.search">Поиск</span>
-          <input type="search" id="reports-search" placeholder="Название или ID отчета" data-i18n-attr="placeholder:dash.searchReport" autocomplete="off" />
+          <span data-i18n="dash.search">Cerca</span>
+          <input type="search" id="reports-search" placeholder="Nome o ID del report" data-i18n-attr="placeholder:dash.searchReport" autocomplete="off" />
         </label>
         <label>
-          <span data-i18n="dash.group">Группа</span>
+          <span data-i18n="dash.group">Gruppo</span>
           <select id="reports-group">
-            <option value="" data-i18n="dash.allGroups">Все группы</option>
+            <option value="" data-i18n="dash.allGroups">Tutti i gruppi</option>
           </select>
         </label>
         <label>
-          <span data-i18n="dash.status">Статус</span>
+          <span data-i18n="dash.status">Stato</span>
           <select id="reports-status">
-            <option value="" data-i18n="dash.allStatuses">Все статусы</option>
+            <option value="" data-i18n="dash.allStatuses">Tutti gli stati</option>
           </select>
         </label>
         <label>
-          <span data-i18n="dash.role">Роль</span>
+          <span data-i18n="dash.role">Ruolo</span>
           <select id="reports-role">
-            <option value="" data-i18n="dash.allRoles">Все роли</option>
+            <option value="" data-i18n="dash.allRoles">Tutti i ruoli</option>
           </select>
         </label>
         <label>
-          <span data-i18n="dash.theme">Тема</span>
+          <span data-i18n="dash.theme">Tema</span>
           <select id="reports-theme">
-            <option value="" data-i18n="dash.allThemes">Все темы</option>
+            <option value="" data-i18n="dash.allThemes">Tutti i temi</option>
           </select>
         </label>
         <label class="checkline">
           <input type="checkbox" id="reports-favorites" />
-          <span data-i18n="dash.favorites">Избранное</span>
+          <span data-i18n="dash.favorites">Preferiti</span>
         </label>
-        <button type="button" class="secondary" id="reports-reset" data-i18n="dash.reset">Сбросить</button>
+        <button type="button" class="secondary" id="reports-reset" data-i18n="dash.reset">Reimposta</button>
       </section>
 
       <div class="panel wide" id="reports-catalog-panel">
         <div class="panel-title">
-          <h2 data-i18n="dash.reportsCatalog">Каталог отчетов</h2>
+          <h2 data-i18n="dash.reportsCatalog">Catalogo dei report</h2>
           <span class="meta" id="reports-count"></span>
         </div>
         <div id="reports-catalog"></div>
@@ -1613,54 +1613,54 @@
       <section class="reports-viewer" id="reports-viewer" aria-live="polite">
         <div class="reports-viewer__head">
           <div>
-            <h2 id="reports-viewer-title" data-i18n="dash.report">Отчет</h2>
+            <h2 id="reports-viewer-title" data-i18n="dash.report">Report</h2>
             <p class="subhead" id="reports-viewer-subtitle"></p>
           </div>
-          <button type="button" class="secondary" id="reports-viewer-back" data-i18n="dash.toCatalog">К каталогу</button>
+          <button type="button" class="secondary" id="reports-viewer-back" data-i18n="dash.toCatalog">Torna al catalogo</button>
         </div>
 
-        <section class="report-filter-row" data-i18n-attr="aria-label:dash.ariaReportFilters" aria-label="Фильтры отчета">
+        <section class="report-filter-row" data-i18n-attr="aria-label:dash.ariaReportFilters" aria-label="Filtri report">
           <label>
-            <span data-i18n="dash.from">С</span>
+            <span data-i18n="dash.from">Da</span>
             <input type="date" id="report-start" />
           </label>
           <label>
-            <span data-i18n="dash.to">По</span>
+            <span data-i18n="dash.to">A</span>
             <input type="date" id="report-end" />
           </label>
           <label>
-            <span data-i18n="dash.branch">Филиал</span>
+            <span data-i18n="dash.branch">Filiale</span>
             <select id="report-branch">
-              <option value="" data-i18n="dash.allBranches">Все филиалы</option>
+              <option value="" data-i18n="dash.allBranches">Tutte le filiali</option>
             </select>
           </label>
           <label>
-            <span data-i18n="dash.staff">Сотрудник</span>
+            <span data-i18n="dash.staff">Dipendente</span>
             <select id="report-staff">
-              <option value="" data-i18n="dash.allStaff">Все сотрудники</option>
+              <option value="" data-i18n="dash.allStaff">Tutti i dipendenti</option>
             </select>
           </label>
           <label>
-            <span data-i18n="dash.granularity">Гранулярность</span>
+            <span data-i18n="dash.granularity">Granularità</span>
             <select id="report-granularity">
-              <option value="day" data-i18n="dash.day">День</option>
-              <option value="week" data-i18n="dash.week">Неделя</option>
-              <option value="month" data-i18n="dash.month">Месяц</option>
+              <option value="day" data-i18n="dash.day">Giorno</option>
+              <option value="week" data-i18n="dash.week">Settimana</option>
+              <option value="month" data-i18n="dash.month">Mese</option>
             </select>
           </label>
-          <button type="button" id="report-refresh" data-i18n="dash.refresh">Обновить</button>
-          <button type="button" class="secondary" id="report-data-labels" aria-pressed="false" data-i18n="dash.values">Значения</button>
+          <button type="button" id="report-refresh" data-i18n="dash.refresh">Aggiorna</button>
+          <button type="button" class="secondary" id="report-data-labels" aria-pressed="false" data-i18n="dash.values">Valori</button>
           <div class="report-compare-row">
             <label class="checkline">
               <input type="checkbox" id="report-compare-enabled" />
-              <span data-i18n="dash.comparePeriod">Сравнить период</span>
+              <span data-i18n="dash.comparePeriod">Confronta periodo</span>
             </label>
             <label>
-              <span data-i18n="dash.compareWith">Сравнить с</span>
+              <span data-i18n="dash.compareWith">Confronta da</span>
               <input type="date" id="report-compare-start" />
             </label>
             <label>
-              <span data-i18n="dash.compareBy">Сравнить по</span>
+              <span data-i18n="dash.compareBy">Confronta a</span>
               <input type="date" id="report-compare-end" />
             </label>
           </div>

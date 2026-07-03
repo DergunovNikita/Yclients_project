@@ -22,11 +22,11 @@ async function verify() {
     return;
   }
   try {
-    const payload = await authFetch('/auth/verify-email', {
+    await authFetch('/auth/verify-email', {
       method: 'POST',
       body: JSON.stringify({ token }),
     });
-    successEl.textContent = payload.message;
+    successEl.textContent = t('verify.success');
     successEl.hidden = false;
   } catch (error) {
     errorEl.textContent = error.message;

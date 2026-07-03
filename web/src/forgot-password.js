@@ -23,11 +23,11 @@ form.addEventListener('submit', async (event) => {
   submitBtn.classList.add('is-loading');
   try {
     const email = document.getElementById('email').value.trim();
-    const payload = await authFetch('/auth/forgot-password', {
+    await authFetch('/auth/forgot-password', {
       method: 'POST',
       body: JSON.stringify({ email }),
     });
-    successEl.textContent = payload.message;
+    successEl.textContent = t('forgot.success');
     successEl.hidden = false;
   } catch (error) {
     errorEl.textContent = error.message;

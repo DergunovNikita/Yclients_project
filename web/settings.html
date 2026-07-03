@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="it">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Настройки — Salon Analytics</title>
+  <title>Impostazioni — Salon Analytics</title>
   <link rel="stylesheet" href="/src/auth.css" />
   <link rel="stylesheet" href="/src/settings.css" />
 </head>
@@ -11,56 +11,56 @@
   <header class="admin-topbar">
     <div class="admin-topbar__brand">
       <span class="admin-topbar__brand-mark" data-i18n="brand.mark">S</span>
-      <span><span data-i18n="brand.name">Salon Analytics</span> · <span data-i18n="settings.brandSuffix">Настройки</span></span>
+      <span><span data-i18n="brand.name">Salon Analytics</span> · <span data-i18n="settings.brandSuffix">Impostazioni</span></span>
     </div>
     <div class="admin-topbar__nav">
       <div class="auth-lang" id="lang-switcher"></div>
-      <a href="/" class="btn btn--ghost" data-i18n="common.toDashboard">К дашборду</a>
-      <button type="button" class="btn btn--danger btn--sm" id="logout" data-i18n="common.logout">Выйти</button>
+      <a href="/" class="btn btn--ghost" data-i18n="common.toDashboard">Alla dashboard</a>
+      <button type="button" class="btn btn--danger btn--sm" id="logout" data-i18n="common.logout">Esci</button>
     </div>
   </header>
 
   <main class="admin-shell settings-shell">
     <nav class="settings-tabs" role="tablist">
-      <button type="button" class="settings-tab is-active" data-tab="profile" role="tab" data-i18n="settings.tabProfile">Профиль</button>
-      <button type="button" class="settings-tab" data-tab="security" role="tab" data-i18n="settings.tabSecurity">Безопасность и сессии</button>
-      <button type="button" class="settings-tab" data-tab="sources" role="tab" hidden data-i18n="settings.tabSources">Источники YClients</button>
-      <a href="/admin.html" class="settings-tab settings-tab--link" data-tab="team" hidden data-i18n="settings.tabTeam">Команда</a>
+      <button type="button" class="settings-tab is-active" data-tab="profile" role="tab" data-i18n="settings.tabProfile">Profilo</button>
+      <button type="button" class="settings-tab" data-tab="security" role="tab" data-i18n="settings.tabSecurity">Sicurezza e sessioni</button>
+      <button type="button" class="settings-tab" data-tab="sources" role="tab" hidden data-i18n="settings.tabSources">Fonti YClients</button>
+      <a href="/admin.html" class="settings-tab settings-tab--link" data-tab="team" hidden data-i18n="settings.tabTeam">Team</a>
     </nav>
 
     <section class="settings-panel" data-panel="profile">
-      <h1 data-i18n="settings.profileTitle">Профиль</h1>
+      <h1 data-i18n="settings.profileTitle">Profilo</h1>
       <dl class="settings-kv">
-        <dt data-i18n="settings.fieldName">Имя</dt><dd id="profile-name">—</dd>
+        <dt data-i18n="settings.fieldName">Nome</dt><dd id="profile-name">—</dd>
         <dt data-i18n="common.email">Email</dt><dd id="profile-email">—</dd>
-        <dt data-i18n="settings.fieldRole">Роль</dt><dd id="profile-role">—</dd>
-        <dt data-i18n="settings.fieldTenant">Тенант</dt><dd id="profile-tenant">—</dd>
-        <dt data-i18n="settings.fieldBranches">Филиалы</dt><dd id="profile-branches">—</dd>
+        <dt data-i18n="settings.fieldRole">Ruolo</dt><dd id="profile-role">—</dd>
+        <dt data-i18n="settings.fieldTenant">Tenant</dt><dd id="profile-tenant">—</dd>
+        <dt data-i18n="settings.fieldBranches">Filiali</dt><dd id="profile-branches">—</dd>
       </dl>
     </section>
 
     <section class="settings-panel" data-panel="security" hidden>
-      <h1 data-i18n="settings.securityTitle">Безопасность и сессии</h1>
+      <h1 data-i18n="settings.securityTitle">Sicurezza e sessioni</h1>
 
       <article class="settings-card">
-        <h2 data-i18n="settings.changePasswordTitle">Сменить пароль</h2>
+        <h2 data-i18n="settings.changePasswordTitle">Cambia password</h2>
         <div class="alert error" id="password-error" hidden></div>
         <div class="alert success" id="password-success" hidden></div>
         <form class="settings-form" id="change-password-form">
-          <label><span data-i18n="settings.currentPassword">Текущий пароль</span><input type="password" id="current-password" required autocomplete="current-password" /></label>
-          <label><span data-i18n="settings.newPassword">Новый пароль</span><input type="password" id="new-password" required minlength="8" autocomplete="new-password" /></label>
-          <label><span data-i18n="settings.confirmPassword">Повтор</span><input type="password" id="confirm-password" required minlength="8" autocomplete="new-password" /></label>
-          <button type="submit" class="btn btn--primary" id="change-password-btn" data-i18n="settings.changePasswordSubmit">Сменить</button>
+          <label><span data-i18n="settings.currentPassword">Password attuale</span><input type="password" id="current-password" required autocomplete="current-password" /></label>
+          <label><span data-i18n="settings.newPassword">Nuova password</span><input type="password" id="new-password" required minlength="8" autocomplete="new-password" /></label>
+          <label><span data-i18n="settings.confirmPassword">Ripeti</span><input type="password" id="confirm-password" required minlength="8" autocomplete="new-password" /></label>
+          <button type="submit" class="btn btn--primary" id="change-password-btn" data-i18n="settings.changePasswordSubmit">Cambia</button>
         </form>
-        <p class="settings-hint" data-i18n="settings.changePasswordHint">После смены пароля все активные сессии будут завершены и вам потребуется войти заново.</p>
+        <p class="settings-hint" data-i18n="settings.changePasswordHint">Dopo il cambio della password tutte le sessioni attive verranno chiuse e dovrai accedere di nuovo.</p>
       </article>
 
       <article class="settings-card">
         <div class="settings-card__head">
-          <h2 data-i18n="settings.sessionsTitle">Активные сессии</h2>
+          <h2 data-i18n="settings.sessionsTitle">Sessioni attive</h2>
           <div>
-            <button type="button" class="btn btn--ghost btn--sm" id="refresh-sessions" data-i18n="common.refresh">Обновить</button>
-            <button type="button" class="btn btn--danger btn--sm" id="logout-all" data-i18n="settings.logoutAll">Выйти со всех устройств</button>
+            <button type="button" class="btn btn--ghost btn--sm" id="refresh-sessions" data-i18n="common.refresh">Aggiorna</button>
+            <button type="button" class="btn btn--danger btn--sm" id="logout-all" data-i18n="settings.logoutAll">Esci da tutti i dispositivi</button>
           </div>
         </div>
         <div class="alert error" id="sessions-error" hidden></div>
@@ -69,28 +69,28 @@
     </section>
 
     <section class="settings-panel" data-panel="sources" hidden>
-      <h1 data-i18n="settings.sourcesTitle">Источники YClients</h1>
-      <p class="settings-hint" data-i18n="settings.sourcesHint">Каждая запись — отдельный набор partner_token / login / password. Один филиал может принадлежать только одной записи.</p>
+      <h1 data-i18n="settings.sourcesTitle">Fonti YClients</h1>
+      <p class="settings-hint" data-i18n="settings.sourcesHint">Ogni voce è un set separato di partner_token / login / password. Una filiale può appartenere a una sola voce.</p>
 
       <article class="settings-card">
         <div class="settings-card__head">
-          <h2 data-i18n="settings.existingTitle">Существующие интеграции</h2>
-          <button type="button" class="btn btn--ghost btn--sm" id="refresh-credentials" data-i18n="common.refresh">Обновить</button>
+          <h2 data-i18n="settings.existingTitle">Integrazioni esistenti</h2>
+          <button type="button" class="btn btn--ghost btn--sm" id="refresh-credentials" data-i18n="common.refresh">Aggiorna</button>
         </div>
         <div class="alert error" id="credentials-error" hidden></div>
         <div id="credentials-list" class="settings-credentials"></div>
       </article>
 
       <article class="settings-card">
-        <h2 data-i18n="settings.addTitle">Добавить интеграцию</h2>
+        <h2 data-i18n="settings.addTitle">Aggiungi integrazione</h2>
         <div class="alert error" id="add-cred-error" hidden></div>
         <div class="alert success" id="add-cred-success" hidden></div>
         <form class="settings-form" id="add-cred-form">
-          <label><span data-i18n="settings.credTitleLabel">Название</span><input type="text" id="cred-title" required maxlength="255" value="YClients integration" /></label>
+          <label><span data-i18n="settings.credTitleLabel">Nome</span><input type="text" id="cred-title" required maxlength="255" value="YClients integration" /></label>
           <label>Partner token<input type="text" id="cred-token" required autocomplete="off" /></label>
-          <label><span data-i18n="onboarding.login">Логин</span><input type="text" id="cred-login" required /></label>
-          <label><span data-i18n="common.password">Пароль</span><input type="password" id="cred-password" required /></label>
-          <button type="submit" class="btn btn--primary" id="cred-submit" data-i18n="settings.credSubmit">Сохранить и подключить</button>
+          <label><span data-i18n="onboarding.login">Login</span><input type="text" id="cred-login" required /></label>
+          <label><span data-i18n="common.password">Password</span><input type="password" id="cred-password" required /></label>
+          <button type="submit" class="btn btn--primary" id="cred-submit" data-i18n="settings.credSubmit">Salva e collega</button>
         </form>
       </article>
     </section>

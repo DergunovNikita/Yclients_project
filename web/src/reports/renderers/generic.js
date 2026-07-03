@@ -1,4 +1,5 @@
 import { escapeHtml, formatValue } from '../format.js';
+import { getLocale, t } from '../../i18n.js';
 import { sourceLabel } from '../registry.js';
 
 function renderCards(cards = []) {
@@ -17,12 +18,12 @@ function renderCards(cards = []) {
 
 function renderNotes(notes = [], missingSources = []) {
   const sourceText = missingSources.length
-    ? `<div class="reports-note__sources">Не хватает: ${missingSources.map(sourceLabel).map(escapeHtml).join(', ')}</div>`
+    ? `<div class="reports-note__sources">${t('reports.missingSources')}: ${missingSources.map(sourceLabel).map(escapeHtml).join(', ')}</div>`
     : '';
   return `
     ${notes.map((note) => `
       <div class="reports-note reports-note--${escapeHtml(note.kind || 'info')}">
-        <strong>${escapeHtml(note.title || 'Примечание')}</strong>
+        <strong>${escapeHtml(note.title || t('reports.note'))}</strong>
         <span>${escapeHtml(note.text || '')}</span>
         ${sourceText}
       </div>
@@ -37,7 +38,7 @@ function renderCharts(charts = []) {
       ${charts.map((chart) => `
         <section class="reports-panel">
           <div class="reports-panel__head">
-            <h3>${escapeHtml(chart.title || 'График')}</h3>
+            <h3>${escapeHtml(chart.title || t('reports.chart'))}</h3>
           </div>
           <div class="reports-chart-box">
             <canvas data-report-chart="${escapeHtml(chart.id)}"></canvas>
@@ -55,8 +56,8 @@ function renderTables(tables = []) {
     return `
       <section class="reports-panel reports-panel--wide">
         <div class="reports-panel__head">
-          <h3>${escapeHtml(table.title || 'Таблица')}</h3>
-          <span>${rows.length.toLocaleString('ru-RU')} строк</span>
+          <h3>${escapeHtml(table.title || t('reports.table'))}</h3>
+          <span>${t('reports.rowsCount', { count: rows.length.toLocaleString(getLocale() === 'it' ? 'it-IT' : getLocale() === 'en' ? 'en-US' : 'ru-RU') })}</span>
         </div>
         ${rows.length ? `
           <div class="reports-table-scroll">
@@ -79,14 +80,14 @@ function renderTables(tables = []) {
               </tbody>
             </table>
           </div>
-        ` : '<div class="empty compact">Нет строк за выбранный период</div>'}
+        ` : `<div class="empty compact">${t('reports.noRowsForPeriod')}</div>`}
       </section>
     `;
   }).join('');
 }
 
 function renderUnavailable(data) {
-  const label = data.source_status === 'planned' ? 'Отчет запланирован' : 'Источник данных не подключен';
+  const label = data.source_status === 'planned' ? t('reports.plannedReport') : t('reports.sourceNotConnected');
   return `
     <div class="reports-unavailable">
       <h3>${escapeHtml(label)}</h3>
@@ -114,16 +115,16 @@ function renderComparison(data) {
   return `
     <section class="reports-panel reports-panel--wide reports-compare">
       <div class="reports-panel__head">
-        <h3>Сравнение</h3>
+        <h3>${t('reports.comparison')}</h3>
         <span>${escapeHtml(currentPeriod)} / ${escapeHtml(comparePeriod)}</span>
       </div>
       <div class="reports-table-scroll">
         <table class="reports-table">
           <thead>
             <tr>
-              <th>Метрика</th>
-              <th class="number">Текущий период</th>
-              <th class="number">Период сравнения</th>
+              <th>${t('reports.metric')}</th>
+              <th class="number">${t('reports.currentPeriod')}</th>
+              <th class="number">${t('reports.comparePeriod')}</th>
               <th class="number">Δ</th>
               <th class="number">Δ%</th>
             </tr>
@@ -148,7 +149,7 @@ function renderComparison(data) {
 export function renderReportData(container, data, chartManager) {
   chartManager.clear();
   if (!data) {
-    container.innerHTML = '<div class="empty compact">Нет данных отчета</div>';
+    container.innerHTML = `<div class="empty compact">${t('reports.noReportData')}</div>`;
     return;
   }
   if (data.source_status === 'missing' || data.source_status === 'planned') {

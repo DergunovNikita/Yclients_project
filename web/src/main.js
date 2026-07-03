@@ -16,7 +16,7 @@ if (!hasSessionHint() && !import.meta.env.VITE_API_KEY) {
 }
 
 import { initReports } from './reports/index.js';
-import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher, t, userDataLoadErrorMessage } from './i18n.js';
 
 document.documentElement.lang = getLocale();
 applyTranslations();
@@ -258,7 +258,7 @@ function setApiState(text, kind = 'warn') {
 function showError(message) {
   els.error.textContent = message;
   els.error.classList.add('visible');
-  setApiState('API: ошибка', 'error');
+  setApiState(t('dash.apiError'), 'error');
 }
 
 function clearError() {
@@ -279,19 +279,20 @@ async function fetchJson(path, params) {
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`API вернул ${response.status} для ${url}\n\n${body.slice(0, 1000)}`);
+      console.error('Dashboard API request failed', { status: response.status, url, body: body.slice(0, 1000) });
+      throw new Error(userDataLoadErrorMessage());
     }
 
     const payload = await response.json();
     if (payload.success === false) {
-      throw new Error(`API вернул success=false для ${url}`);
+      console.error('Dashboard API returned success=false', { url, payload });
+      throw new Error(userDataLoadErrorMessage());
     }
     return payload;
   }
 
-  throw new Error(
-    `Не удалось подключиться к API.\n\n${errors.join('\n\n')}\n\nПроверь, что локальный API открыт в браузере по http://127.0.0.1:8000/health или http://localhost:8000/health.`,
-  );
+  console.error('Dashboard API connection failed', errors);
+  throw new Error(userDataLoadErrorMessage());
 }
 
 async function requestJson(path, { method = 'GET', body = null } = {}) {
@@ -311,19 +312,20 @@ async function requestJson(path, { method = 'GET', body = null } = {}) {
 
     if (!response.ok) {
       const responseBody = await response.text();
-      throw new Error(`API вернул ${response.status} для ${url}\n\n${responseBody.slice(0, 1000)}`);
+      console.error('Dashboard API request failed', { status: response.status, url, body: responseBody.slice(0, 1000) });
+      throw new Error(userDataLoadErrorMessage());
     }
 
     const payload = await response.json();
     if (payload.success === false) {
-      throw new Error(`API вернул success=false для ${url}`);
+      console.error('Dashboard API returned success=false', { url, payload });
+      throw new Error(userDataLoadErrorMessage());
     }
     return payload;
   }
 
-  throw new Error(
-    `Не удалось подключиться к API.\n\n${errors.join('\n\n')}\n\nПроверь, что локальный API открыт в браузере по http://127.0.0.1:8000/health или http://localhost:8000/health.`,
-  );
+  console.error('Dashboard API connection failed', errors);
+  throw new Error(userDataLoadErrorMessage());
 }
 
 async function postJson(path, body) {
@@ -906,10 +908,10 @@ function renderExtraServicesTable(services) {
 
 function renderPlanTable(groups, metrics) {
   const rowTypes = [
-    ['plan', 'План'],
-    ['fact', 'Факт'],
-    ['remaining', 'Осталось'],
-    ['completion_pct', '% выполнения'],
+    ['plan', t('dash.plan')],
+    ['fact', t('dash.fact')],
+    ['remaining', t('dash.remaining')],
+    ['completion_pct', t('dash.completionPct')],
   ];
 
   return `
@@ -917,8 +919,8 @@ function renderPlanTable(groups, metrics) {
       <table class="plan-table">
         <thead>
           <tr>
-            <th>Разрез</th>
-            <th>Показатель</th>
+            <th>${t('dash.dimension')}</th>
+            <th>${t('dash.metric')}</th>
             ${metrics.map((metric) => `<th class="number" data-metric="${escapeHtml(metric.code)}">${escapeHtml(metric.label)}</th>`).join('')}
           </tr>
         </thead>
@@ -981,7 +983,7 @@ function renderStaffCategorySections(prefix, groups, metricSets, metrics) {
     const categoryMetrics = metricsForDisplay(category, metricSets[category] || metrics);
     const label = categoryGroups[0].category_label || category;
     const title = prefix ? `${prefix} · ${label}` : label;
-    sections.push(renderPlanSection(title, categoryGroups, categoryMetrics, `${categoryGroups.length} сотрудников`));
+    sections.push(renderPlanSection(title, categoryGroups, categoryMetrics, t('dash.staffCount', { count: categoryGroups.length })));
   });
   return sections;
 }
@@ -991,7 +993,7 @@ function renderSelectedStaffPlanTable(staffPlan) {
   return `
     <section class="plan-section selected-staff-plan">
       <div class="plan-section-title">
-        <h3>План сотрудника: ${escapeHtml(staffPlan.title || 'сотрудник')}</h3>
+        <h3>${t('dash.staffPlanTitle', { name: escapeHtml(staffPlan.title || t('dash.staffFallbackLower')) })}</h3>
         <span class="meta">${escapeHtml(staffPlan.category_label || '')}</span>
       </div>
       <div class="table-scroll staff-plan-scroll">
@@ -999,9 +1001,9 @@ function renderSelectedStaffPlanTable(staffPlan) {
           <thead>
             <tr>
               <th>KPI</th>
-              <th class="number">План</th>
-              <th class="number">Факт</th>
-              <th class="number">% выполнения</th>
+              <th class="number">${t('dash.plan')}</th>
+              <th class="number">${t('dash.fact')}</th>
+              <th class="number">${t('dash.completionPct')}</th>
             </tr>
           </thead>
           <tbody>
@@ -1027,14 +1029,14 @@ function renderSelectedStaffPlanTable(staffPlan) {
 }
 
 function renderRankingList(rows, format) {
-  if (!rows?.length) return '<div class="empty compact">Нет сотрудников за выбранный период</div>';
+  if (!rows?.length) return `<div class="empty compact">${t('dash.noStaffForPeriod')}</div>`;
   return `
     <ol class="ranking-list">
       ${rows
         .map((row, index) => `
           <li>
             <span class="rank">${index + 1}</span>
-            <span class="name">${escapeHtml(row.title || `Сотрудник ${row.staff_id || ''}`)}</span>
+            <span class="name">${escapeHtml(row.title || t('dash.staffFallback', { id: row.staff_id || '' }))}</span>
             <span class="score">${escapeHtml(formatMetricValue(row.value, format))}</span>
           </li>
         `)
@@ -1062,7 +1064,7 @@ function renderPlanInsights(planFact) {
     panels.push(`
       <div class="panel wide">
         <div class="panel-title">
-          <h2>План vs факт: ${escapeHtml(selectedStaffPlan.title || 'сотрудник')}</h2>
+          <h2>${t('dash.planVsFactTitle', { name: escapeHtml(selectedStaffPlan.title || t('dash.staffFallbackLower')) })}</h2>
           <span class="meta">${escapeHtml(selectedStaffPlan.category_label || '')}</span>
         </div>
         <div class="chart-box short"><canvas id="selected-staff-plan-chart"></canvas></div>
@@ -1074,8 +1076,8 @@ function renderPlanInsights(planFact) {
     panels.push(`
       <div class="panel">
         <div class="panel-title">
-          <h2>Топ-5 по выручке</h2>
-          <span class="meta">${formatNumber(rankings.revenue_top?.length || 0)} сотрудников</span>
+          <h2>${t('dash.topRevenue')}</h2>
+          <span class="meta">${t('dash.staffCount', { count: formatNumber(rankings.revenue_top?.length || 0) })}</span>
         </div>
         ${renderRankingList(rankings.revenue_top || [], 'money')}
       </div>
@@ -1083,8 +1085,8 @@ function renderPlanInsights(planFact) {
     panels.push(`
       <div class="panel">
         <div class="panel-title">
-          <h2>Топ-5 по СЧ</h2>
-          <span class="meta">${formatNumber(rankings.avg_check_top?.length || 0)} сотрудников</span>
+          <h2>${t('dash.topAverageCheck')}</h2>
+          <span class="meta">${t('dash.staffCount', { count: formatNumber(rankings.avg_check_top?.length || 0) })}</span>
         </div>
         ${renderRankingList(rankings.avg_check_top || [], 'money')}
       </div>
@@ -1095,7 +1097,7 @@ function renderPlanInsights(planFact) {
     panels.push(`
       <div class="panel wide">
         <div class="panel-title">
-          <h2>Выполнение товарных KPI</h2>
+          <h2>${t('dash.goodsKpiCompletion')}</h2>
           <span class="meta">${goodsKpis.length} KPI</span>
         </div>
         <div class="chart-box short"><canvas id="goods-kpi-chart"></canvas></div>
@@ -1116,13 +1118,13 @@ function renderPlanInsights(planFact) {
         labels: visibleMetrics.map((metric) => metric.label),
         datasets: [
           {
-            label: 'План',
+            label: t('dash.plan'),
             data: visibleMetrics.map((metric) => chartValue(metric.plan)),
             backgroundColor: '#94a3b8',
             borderRadius: 4,
           },
           {
-            label: 'Факт',
+            label: t('dash.fact'),
             data: visibleMetrics.map((metric) => chartValue(metric.fact)),
             backgroundColor: '#0f766e',
             borderRadius: 4,
@@ -1145,13 +1147,13 @@ function renderPlanInsights(planFact) {
         labels: goodsKpis.map((metric) => metric.label),
         datasets: [
           {
-            label: 'План',
+            label: t('dash.plan'),
             data: goodsKpis.map((metric) => chartValue(metric.plan)),
             backgroundColor: '#94a3b8',
             borderRadius: 4,
           },
           {
-            label: 'Факт',
+            label: t('dash.fact'),
             data: goodsKpis.map((metric) => chartValue(metric.fact)),
             backgroundColor: '#b45309',
             borderRadius: 4,
@@ -1167,7 +1169,7 @@ function renderPlanInsights(planFact) {
             callbacks: {
               afterBody: (items) => {
                 const item = goodsKpis[items[0]?.dataIndex];
-                return item ? [`Выполнение: ${formatMetricValue(item.completion_pct, 'percent')}`] : [];
+                return item ? [t('dash.completionTooltip', { value: formatMetricValue(item.completion_pct, 'percent') })] : [];
               },
             },
           },
@@ -1184,13 +1186,13 @@ function renderPlanDiagnostics(diagnostics) {
       ${diagnostics
         .map((item) => {
           const details = [
-            `барберы: ${formatNumber(item.barber_clients_fact)}`,
-            `администраторы: ${formatNumber(item.administrator_clients_fact)}`,
-            `записей без корректного администратора: ${formatNumber(item.unassigned_records_count)}`,
+            t('dash.diagnosticBarbers', { count: formatNumber(item.barber_clients_fact) }),
+            t('dash.diagnosticAdmins', { count: formatNumber(item.administrator_clients_fact) }),
+            t('dash.diagnosticUnassigned', { count: formatNumber(item.unassigned_records_count) }),
           ];
           return `
             <div class="diagnostic warning">
-              <strong>${escapeHtml(item.message || 'Проверка данных')}</strong>
+              <strong>${escapeHtml(item.message || t('dash.dataCheck'))}</strong>
               <span>${escapeHtml(details.join(' · '))}</span>
             </div>
           `;
@@ -1207,7 +1209,7 @@ function renderPlanFact(planFact) {
   if (!groups.length && !planFact?.parent_group) {
     renderPlanInsights(null);
     if (els.planInsights) els.planInsights.innerHTML = '';
-    els.planFactTable.innerHTML = `${diagnosticsHtml}<div class="empty">Нет плана за выбранный период</div>`;
+    els.planFactTable.innerHTML = `${diagnosticsHtml}<div class="empty">${t('dash.noPlanForPeriod')}</div>`;
     els.planMeta.textContent = '';
     return;
   }
@@ -1221,26 +1223,26 @@ function renderPlanFact(planFact) {
     }
 
     if (planFact.parent_group) {
-      const branchTitle = planFact.branch?.title || planFact.parent_group.title || 'Филиал';
+      const branchTitle = planFact.branch?.title || planFact.parent_group.title || t('dash.branch');
       sections.push(renderPlanSection(branchTitle, [planFact.parent_group], metricSets.branch || metrics));
     }
 
     sections.push(...renderStaffCategorySections('', groups, metricSets, metrics));
 
     els.planFactTable.innerHTML = diagnosticsHtml + (
-      sections.join('') || '<div class="empty">Нет сотрудников для выбранного филиала</div>'
+      sections.join('') || `<div class="empty">${t('dash.noStaffForBranch')}</div>`
     );
   } else {
     els.planFactTable.innerHTML = diagnosticsHtml + renderPlanTable(groups, metrics);
   }
 
   const planPeriod = planFact?.plan_period;
-  const planPeriodText = planPeriod ? ` · план ${planPeriod.start} .. ${planPeriod.end}` : '';
+  const planPeriodText = planPeriod ? t('dash.planPeriodMeta', { start: planPeriod.start, end: planPeriod.end }) : '';
   const selectedStaff = planFact?.selected_staff;
   const scopeText = planFact?.view_scope === 'staff'
-    ? `${planFact.branch?.title || 'Филиал'} · ${selectedStaff?.name || 'сотрудники'}`
-    : 'сеть и филиалы';
-  els.planMeta.textContent = `${scopeText} · ${groups.length} строк${planPeriodText}`;
+    ? `${planFact.branch?.title || t('dash.branch')} · ${selectedStaff?.name || t('dash.staffPlural')}`
+    : t('dash.networkAndBranches');
+  els.planMeta.textContent = t('dash.planMeta', { scope: scopeText, count: groups.length, period: planPeriodText });
 }
 
 function renderPlanSettingInput(scope, row, field) {
@@ -1259,25 +1261,25 @@ function renderPlanSettingInput(scope, row, field) {
 
 function renderPlanSettingsBranches(rows) {
   if (!rows.length) {
-    els.planSettingsBranches.innerHTML = '<div class="empty compact">Нет филиалов</div>';
+    els.planSettingsBranches.innerHTML = `<div class="empty compact">${t('dash.noBranches')}</div>`;
     return;
   }
   const fields = [
-    ['wax_pct', 'Воск, %'],
-    ['head_care_pct', 'Уход голова, %'],
-    ['face_care_pct', 'Уход лицо, %'],
-    ['camouflage_pct', 'Камуфляж, %'],
-    ['cosmo_pct', 'Космо, %'],
-    ['opz_pct', 'ОПЗ, %'],
-    ['cosmo_price', 'Цена космо'],
+    ['wax_pct', t('dash.waxPct')],
+    ['head_care_pct', t('dash.headCarePct')],
+    ['face_care_pct', t('dash.faceCarePct')],
+    ['camouflage_pct', t('dash.camouflagePct')],
+    ['cosmo_pct', t('dash.cosmoPct')],
+    ['opz_pct', t('dash.opzPct')],
+    ['cosmo_price', t('dash.cosmoPrice')],
   ];
-  els.planSettingsBranchMeta.textContent = `${rows.length} филиалов`;
+  els.planSettingsBranchMeta.textContent = t('dash.branchesMeta', { count: rows.length });
   els.planSettingsBranches.innerHTML = `
     <div class="table-scroll plan-settings-scroll">
       <table class="plan-settings-table">
         <thead>
           <tr>
-            <th>Филиал</th>
+            <th>${t('dash.branch')}</th>
             ${fields.map(([, label]) => `<th class="number">${escapeHtml(label)}</th>`).join('')}
           </tr>
         </thead>
@@ -1285,7 +1287,7 @@ function renderPlanSettingsBranches(rows) {
           ${rows
             .map((row) => `
               <tr>
-                <td>${escapeHtml(row.company_title || `Филиал ${row.company_id}`)}</td>
+                <td>${escapeHtml(row.company_title || t('dash.branchFallbackWithId', { id: row.company_id }))}</td>
                 ${fields.map(([field]) => `<td class="number">${renderPlanSettingInput('branch', row, field)}</td>`).join('')}
               </tr>
             `)
@@ -1302,14 +1304,14 @@ function renderPlanSettingsStaffSection(title, rows, fields) {
     <section class="plan-section">
       <div class="plan-section-title">
         <h3>${escapeHtml(title)}</h3>
-        <span class="meta">${rows.length} сотрудников</span>
+        <span class="meta">${t('dash.staffCount', { count: rows.length })}</span>
       </div>
       <div class="table-scroll plan-settings-scroll">
         <table class="plan-settings-table">
           <thead>
             <tr>
-              <th>Филиал</th>
-              <th>Имя</th>
+              <th>${t('dash.branch')}</th>
+              <th>${t('dash.name')}</th>
               <th class="number">staff_id</th>
               <th class="number">user_id</th>
               ${fields.map(([, label]) => `<th class="number">${escapeHtml(label)}</th>`).join('')}
@@ -1319,8 +1321,8 @@ function renderPlanSettingsStaffSection(title, rows, fields) {
             ${rows
               .map((row) => `
                 <tr>
-                  <td>${escapeHtml(row.company_title || `Филиал ${row.company_id}`)}</td>
-                  <td>${escapeHtml(row.staff_name || `Сотрудник ${row.staff_id}`)}</td>
+                  <td>${escapeHtml(row.company_title || t('dash.branchFallbackWithId', { id: row.company_id }))}</td>
+                  <td>${escapeHtml(row.staff_name || t('dash.staffFallback', { id: row.staff_id }))}</td>
                   <td class="number readonly">${escapeHtml(row.staff_id)}</td>
                   <td class="number readonly">${escapeHtml(row.user_id || '')}</td>
                   ${fields.map(([field]) => `<td class="number">${renderPlanSettingInput('staff', row, field)}</td>`).join('')}
@@ -1337,18 +1339,18 @@ function renderPlanSettingsStaffSection(title, rows, fields) {
 function renderPlanSettingsStaff(rows) {
   const barbers = rows.filter((row) => row.staff_category === 'barber');
   const admins = rows.filter((row) => row.staff_category === 'administrator');
-  els.planSettingsStaffMeta.textContent = `${barbers.length} барберов · ${admins.length} администраторов`;
+  els.planSettingsStaffMeta.textContent = t('dash.planSettingsStaffMeta', { barbers: barbers.length, admins: admins.length });
   els.planSettingsStaff.innerHTML = [
-    renderPlanSettingsStaffSection('Барберы', barbers, [
-      ['clients', 'Клиентов'],
-      ['avg_check_total', 'СЧ общий'],
+    renderPlanSettingsStaffSection(t('dash.barbers'), barbers, [
+      ['clients', t('dash.clientsCount')],
+      ['avg_check_total', t('dash.averageCheckShort')],
     ]),
-    renderPlanSettingsStaffSection('Администраторы', admins, [
-      ['clients', 'Клиентов'],
-      ['reviews_qty', 'Отзывы'],
-      ['cosmo_qty', 'Космо шт'],
+    renderPlanSettingsStaffSection(t('dash.administrators'), admins, [
+      ['clients', t('dash.clientsCount')],
+      ['reviews_qty', t('dash.reviews')],
+      ['cosmo_qty', t('dash.cosmoQty')],
     ]),
-  ].join('') || '<div class="empty compact">Нет активных сотрудников</div>';
+  ].join('') || `<div class="empty compact">${t('dash.noActiveStaff')}</div>`;
 }
 
 function setPlanSettingsDirty(isDirty) {
@@ -1403,8 +1405,8 @@ function renderPlanSettings(data, { updateSnapshot = true, dirty = false } = {})
   renderPlanSettingsBranches(data.branches || []);
   renderPlanSettingsStaff(data.staff || []);
   els.planSettingsSaved.textContent = data.last_saved_at
-    ? `Последнее сохранение: ${formatMoscowDateTime(data.last_saved_at)}`
-    : 'Последнее сохранение: нет';
+    ? t('dash.lastSaveAt', { value: formatMoscowDateTime(data.last_saved_at) })
+    : t('dash.lastSaveNone');
 
   if (updateSnapshot) {
     planSettingsSavedData = JSON.parse(JSON.stringify(data));
@@ -1416,11 +1418,11 @@ function renderPlanSettings(data, { updateSnapshot = true, dirty = false } = {})
 }
 
 function confirmDiscardPlanSettings() {
-  return !planSettingsDirty || window.confirm('Есть несохранённые изменения. Перейти без сохранения?');
+  return !planSettingsDirty || window.confirm(t('dash.confirmDiscardPlanSettings'));
 }
 
 function confirmDiscardServiceManagement() {
-  return !serviceManagementDirty || window.confirm('Есть несохранённые изменения в услугах. Перейти без сохранения?');
+  return !serviceManagementDirty || window.confirm(t('dash.confirmDiscardServiceManagement'));
 }
 
 function setPlanSettingsLoading(isLoading) {
@@ -1428,20 +1430,20 @@ function setPlanSettingsLoading(isLoading) {
   els.planSettingsCopy.disabled = isLoading;
   els.planSettingsSave.disabled = isLoading || !planSettingsData;
   els.planSettingsReset.disabled = isLoading || !planSettingsDirty || !planSettingsSavedData;
-  els.planSettingsLoad.textContent = isLoading ? 'Загрузка' : 'Загрузить';
-  els.planSettingsSave.textContent = isLoading ? 'Сохранение' : 'Сохранить';
+  els.planSettingsLoad.textContent = isLoading ? t('common.loadingShort') : t('dash.load');
+  els.planSettingsSave.textContent = isLoading ? t('common.saving') : t('dash.save');
 }
 
 async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom = null, dirty = false } = {}) {
   clearError();
   setPlanSettingsLoading(true);
-  setApiState('API: загрузка', 'warn');
+  setApiState(t('dash.apiLoading'), 'warn');
   try {
     const params = { month };
     if (copyFrom) params.copy_from = copyFrom;
     const payload = await fetchJson('/dashboard/plan/settings', params);
     renderPlanSettings(payload.data, { updateSnapshot: !copyFrom, dirty });
-    setApiState('API: подключен', 'ok');
+    setApiState(t('dash.apiConnected'), 'ok');
     await loadSyncStatus();
   } catch (error) {
     showError(error.message);
@@ -1453,11 +1455,11 @@ async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom 
 async function savePlanSettings() {
   clearError();
   setPlanSettingsLoading(true);
-  setApiState('API: сохранение', 'warn');
+  setApiState(t('dash.apiSaving'), 'warn');
   try {
     const payload = await postJson('/dashboard/plan/settings', collectPlanSettingsPayload());
     renderPlanSettings(payload.data);
-    setApiState('API: подключен', 'ok');
+    setApiState(t('dash.apiConnected'), 'ok');
   } catch (error) {
     showError(error.message);
   } finally {
@@ -1481,7 +1483,7 @@ async function reloadPlanSettingsMonth() {
 
 function renderServiceBranchOptions() {
   const selected = els.serviceFilterBranch.value;
-  els.serviceFilterBranch.innerHTML = '<option value="">Все филиалы</option>';
+  els.serviceFilterBranch.innerHTML = `<option value="">${t('dash.allBranches')}</option>`;
   branchOptions.forEach((branch) => {
     const option = document.createElement('option');
     option.value = branch.id;
@@ -1493,7 +1495,7 @@ function renderServiceBranchOptions() {
 
 function renderServiceFilterOptions(data) {
   const selectedCategory = els.serviceFilterCategory.value;
-  els.serviceFilterCategory.innerHTML = '<option value="">Все категории</option>';
+  els.serviceFilterCategory.innerHTML = `<option value="">${t('dash.allCategories')}</option>`;
   (data.categories || []).forEach((category) => {
     const option = document.createElement('option');
     option.value = category;
@@ -1503,11 +1505,11 @@ function renderServiceFilterOptions(data) {
   els.serviceFilterCategory.value = (data.categories || []).includes(selectedCategory) ? selectedCategory : '';
 
   const selectedGroup = els.serviceFilterGroup.value;
-  els.serviceFilterGroup.innerHTML = '<option value="">Все группы</option>';
+  els.serviceFilterGroup.innerHTML = `<option value="">${t('dash.allGroups')}</option>`;
   (data.groups || []).forEach((group) => {
     const option = document.createElement('option');
     option.value = group.id;
-    option.textContent = group.is_active ? group.title : `${group.title} (архив)`;
+    option.textContent = group.is_active ? group.title : t('dash.archivedName', { name: group.title });
     els.serviceFilterGroup.appendChild(option);
   });
   els.serviceFilterGroup.value = (data.groups || []).some((group) => String(group.id) === selectedGroup) ? selectedGroup : '';
@@ -1518,20 +1520,20 @@ function serviceGroupOptionsHtml(selectedGroupId) {
   const selected = selectedGroupId === null || selectedGroupId === undefined ? '' : String(selectedGroupId);
   const assignedInactive = groups.find((group) => String(group.id) === selected && !group.is_active);
   const activeGroups = groups.filter((group) => group.is_active);
-  const options = ['<option value="">Без группы</option>'];
+  const options = [`<option value="">${t('dash.noGroup')}</option>`];
   activeGroups.forEach((group) => {
     options.push(`<option value="${escapeHtml(group.id)}" ${String(group.id) === selected ? 'selected' : ''}>${escapeHtml(group.title)}</option>`);
   });
   if (assignedInactive) {
-    options.push(`<option value="${escapeHtml(assignedInactive.id)}" selected disabled>${escapeHtml(assignedInactive.title)} (архив)</option>`);
+    options.push(`<option value="${escapeHtml(assignedInactive.id)}" selected disabled>${escapeHtml(t('dash.archivedName', { name: assignedInactive.title }))}</option>`);
   }
   return options.join('');
 }
 
 function renderServiceCatalog(rows) {
-  els.serviceCatalogMeta.textContent = `${rows.length} услуг`;
+  els.serviceCatalogMeta.textContent = t('dash.servicesCount', { count: rows.length });
   if (!rows.length) {
-    els.serviceCatalogTable.innerHTML = '<div class="empty compact">Нет услуг по выбранным фильтрам</div>';
+    els.serviceCatalogTable.innerHTML = `<div class="empty compact">${t('dash.noServicesForFilters')}</div>`;
     return;
   }
   els.serviceCatalogTable.innerHTML = `
@@ -1539,19 +1541,19 @@ function renderServiceCatalog(rows) {
       <table class="service-table">
         <thead>
           <tr>
-            <th>Филиал</th>
-            <th>Категория</th>
+            <th>${t('dash.branch')}</th>
+            <th>${t('dash.category')}</th>
             <th class="number">ID</th>
-            <th>Название</th>
-            <th>Доп услуга</th>
-            <th>KPI-группа</th>
-            <th>Обновлено</th>
+            <th>${t('dash.name')}</th>
+            <th>${t('dash.extraService')}</th>
+            <th>${t('dash.kpiGroup')}</th>
+            <th>${t('dash.updated')}</th>
           </tr>
         </thead>
         <tbody>
           ${rows.map((row) => `
             <tr>
-              <td>${escapeHtml(row.company_title || `Филиал ${row.company_id}`)}</td>
+              <td>${escapeHtml(row.company_title || t('dash.branchFallbackWithId', { id: row.company_id }))}</td>
               <td>${escapeHtml(row.category_title || '')}</td>
               <td class="number readonly">${escapeHtml(row.service_id)}</td>
               <td>${escapeHtml(row.title)}</td>
@@ -1583,9 +1585,9 @@ function renderServiceCatalog(rows) {
 }
 
 function renderServiceKpiGroups(groups) {
-  els.serviceKpiGroupsMeta.textContent = `${groups.length} групп`;
+  els.serviceKpiGroupsMeta.textContent = t('dash.groupsCount', { count: groups.length });
   if (!groups.length) {
-    els.serviceKpiGroupsTable.innerHTML = '<div class="empty compact">Нет KPI-групп</div>';
+    els.serviceKpiGroupsTable.innerHTML = `<div class="empty compact">${t('dash.noKpiGroups')}</div>`;
     return;
   }
   els.serviceKpiGroupsTable.innerHTML = `
@@ -1593,11 +1595,11 @@ function renderServiceKpiGroups(groups) {
       <table class="service-group-table">
         <thead>
           <tr>
-            <th>Название</th>
-            <th>Код</th>
-            <th>Описание</th>
-            <th class="number">Порядок</th>
-            <th>Активна</th>
+            <th>${t('dash.name')}</th>
+            <th>${t('dash.code')}</th>
+            <th>${t('dash.description')}</th>
+            <th class="number">${t('dash.sortOrder')}</th>
+            <th>${t('dash.active')}</th>
             <th></th>
           </tr>
         </thead>
@@ -1609,7 +1611,7 @@ function renderServiceKpiGroups(groups) {
               <td><input type="text" data-group-field="description" value="${escapeHtml(group.description || '')}" /></td>
               <td class="number"><input type="number" data-group-field="sort_order" value="${escapeHtml(group.sort_order || 0)}" /></td>
               <td><input class="service-group-active" type="checkbox" data-group-field="is_active" ${group.is_active ? 'checked' : ''} /></td>
-              <td class="number"><button type="button" class="secondary" data-service-group-archive>В архив</button></td>
+              <td class="number"><button type="button" class="secondary" data-service-group-archive>${t('dash.archive')}</button></td>
             </tr>
           `).join('')}
         </tbody>
@@ -1688,18 +1690,18 @@ function setServiceManagementLoading(isLoading) {
   els.serviceManagementSave.disabled = isLoading || !serviceManagementData;
   els.serviceManagementReset.disabled = isLoading || !serviceManagementDirty || !serviceManagementSavedData;
   els.serviceGroupAdd.disabled = isLoading;
-  els.serviceFilterLoad.textContent = isLoading ? 'Загрузка' : 'Обновить';
-  els.serviceManagementSave.textContent = isLoading ? 'Сохранение' : 'Сохранить';
+  els.serviceFilterLoad.textContent = isLoading ? t('common.loadingShort') : t('dash.refresh');
+  els.serviceManagementSave.textContent = isLoading ? t('common.saving') : t('dash.save');
 }
 
 async function loadServiceManagement() {
   clearError();
   setServiceManagementLoading(true);
-  setApiState('API: загрузка', 'warn');
+  setApiState(t('dash.apiLoading'), 'warn');
   try {
     const payload = await fetchJson('/dashboard/services', serviceManagementParams());
     renderServiceManagement(payload.data);
-    setApiState('API: подключен', 'ok');
+    setApiState(t('dash.apiConnected'), 'ok');
     await loadSyncStatus();
   } catch (error) {
     showError(error.message);
@@ -1711,7 +1713,7 @@ async function loadServiceManagement() {
 async function saveServiceManagement() {
   clearError();
   setServiceManagementLoading(true);
-  setApiState('API: сохранение', 'warn');
+  setApiState(t('dash.apiSaving'), 'warn');
   const current = collectServiceManagementPayload();
   const saved = serviceManagementSavedSnapshot ? JSON.parse(serviceManagementSavedSnapshot) : { rows: [], groups: [] };
   const savedRows = new Map(saved.rows.map((row) => [`${row.company_id}:${row.service_id}`, row]));
@@ -1733,7 +1735,7 @@ async function saveServiceManagement() {
       }
     }
     await loadServiceManagement();
-    setApiState('API: подключен', 'ok');
+    setApiState(t('dash.apiConnected'), 'ok');
   } catch (error) {
     showError(error.message);
   } finally {
@@ -1745,11 +1747,11 @@ async function addServiceKpiGroup() {
   clearError();
   const title = els.serviceGroupTitle.value.trim();
   if (!title) {
-    showError('Название KPI-группы обязательно');
+    showError(t('dash.kpiGroupTitleRequired'));
     return;
   }
   setServiceManagementLoading(true);
-  setApiState('API: сохранение', 'warn');
+  setApiState(t('dash.apiSaving'), 'warn');
   try {
     await postJson('/dashboard/services/kpi_groups', {
       title,
@@ -1761,7 +1763,7 @@ async function addServiceKpiGroup() {
     els.serviceGroupCode.value = '';
     els.serviceGroupDescription.value = '';
     await loadServiceManagement();
-    setApiState('API: подключен', 'ok');
+    setApiState(t('dash.apiConnected'), 'ok');
   } catch (error) {
     showError(error.message);
   } finally {
@@ -1772,10 +1774,10 @@ async function addServiceKpiGroup() {
 function renderReviewFactEditor(data) {
   reviewFactRows = data?.rows || [];
   const totalValue = data?.total_value || 0;
-  els.reviewFactMeta.textContent = `${reviewFactRows.length} администраторов · ${formatNumber(totalValue)} отзывов`;
+  els.reviewFactMeta.textContent = t('dash.reviewFactMeta', { admins: reviewFactRows.length, reviews: formatNumber(totalValue) });
 
   if (!reviewFactRows.length) {
-    els.reviewFactEditor.innerHTML = '<div class="empty compact">Нет активных администраторов</div>';
+    els.reviewFactEditor.innerHTML = `<div class="empty compact">${t('dash.noActiveAdministrators')}</div>`;
     els.reviewFactSave.disabled = true;
     return;
   }
@@ -1786,9 +1788,9 @@ function renderReviewFactEditor(data) {
       <table class="review-fact-table">
         <thead>
           <tr>
-            <th>Филиал</th>
-            <th>Администратор</th>
-            <th class="number">Отзывы факт</th>
+            <th>${t('dash.branch')}</th>
+            <th>${t('dash.administrator')}</th>
+            <th class="number">${t('dash.reviewsFact')}</th>
           </tr>
         </thead>
         <tbody>
@@ -1796,7 +1798,7 @@ function renderReviewFactEditor(data) {
             .map((row) => {
               return `
                 <tr>
-                  <td>${escapeHtml(row.company_title || `Филиал ${row.company_id}`)}</td>
+                  <td>${escapeHtml(row.company_title || t('dash.branchFallbackWithId', { id: row.company_id }))}</td>
                   <td>${escapeHtml(row.staff_name)}</td>
                   <td class="number">
                     <input
@@ -1838,7 +1840,7 @@ function reviewFactPayload() {
     }
     const value = Number(rawValue);
     if (!Number.isFinite(value) || value < 0) {
-      throw new Error('Отзывы факт должны быть неотрицательным числом');
+      throw new Error(t('dash.reviewFactNonNegative'));
     }
     return {
       company_id: Number(input.dataset.companyId),
@@ -1859,17 +1861,17 @@ function reviewFactPayload() {
 async function saveReviewFactEditor() {
   clearError();
   els.reviewFactSave.disabled = true;
-  els.reviewFactSave.textContent = 'Сохранение';
-  setApiState('API: сохранение', 'warn');
+  els.reviewFactSave.textContent = t('common.saving');
+  setApiState(t('dash.apiSaving'), 'warn');
 
   try {
     const payload = await postJson('/dashboard/plan/reviews_fact', reviewFactPayload());
     renderReviewFactEditor(payload.data);
-    setApiState('API: подключен', 'ok');
+    setApiState(t('dash.apiConnected'), 'ok');
   } catch (error) {
     showError(error.message);
   } finally {
-    els.reviewFactSave.textContent = 'Сохранить факт';
+    els.reviewFactSave.textContent = t('dash.saveFact');
     els.reviewFactSave.disabled = !reviewFactRows.length;
   }
 }
@@ -1892,15 +1894,15 @@ function renderBundle(bundle) {
   renderServicesTable(services);
   renderExtraServicesTable(extraServices);
 
-  els.periodLabel.textContent = `${summary.period.start} .. ${summary.period.end}`;
-  els.revenueMeta.textContent = `${daily.length} дней`;
+  els.periodLabel.textContent = t('dash.subhead');
+  els.revenueMeta.textContent = t('dash.daysCount', { count: daily.length });
   const appointmentsBreakdown = summary.appointments_breakdown || {};
   els.appointmentsMeta.textContent = appointmentsBreakdown.source_status === 'ready' || appointmentsBreakdown.source_status === 'local'
-    ? `${formatNumber(appointmentsBreakdown.total)} записей`
-    : 'Нет точных данных';
-  els.servicesMeta.textContent = `${services.length} услуг`;
-  els.extraServicesMeta.textContent = `${formatNumber(summary.revenue.extra_service_count)} оказано`;
-  els.tableMeta.textContent = `${formatMoney(summary.revenue.total)} всего`;
+    ? t('dash.appointmentsCount', { count: formatNumber(appointmentsBreakdown.total) })
+    : t('dash.noExactData');
+  els.servicesMeta.textContent = t('dash.servicesCount', { count: services.length });
+  els.extraServicesMeta.textContent = t('dash.doneMeta', { count: formatNumber(summary.revenue.extra_service_count) });
+  els.tableMeta.textContent = t('dash.totalMoneyMeta', { value: formatMoney(summary.revenue.total) });
 }
 
 async function loadBranches() {
@@ -1916,7 +1918,7 @@ async function loadBranches() {
 
 function renderBranchOptions(filter) {
   const selected = filter.branch.value;
-  filter.branch.innerHTML = '<option value="">Все филиалы</option>';
+  filter.branch.innerHTML = `<option value="">${t('dash.allBranches')}</option>`;
   branchOptions.forEach((branch) => {
     const option = document.createElement('option');
     option.value = branch.id;
@@ -1934,14 +1936,14 @@ async function loadStaff(filter) {
       company_id: filter.branch.value,
     });
     const staffOptions = payload.data || [];
-    const defaultLabel = filter === filterEls.reviewFacts ? 'Все сотрудники' : 'Все работники';
+    const defaultLabel = filter === filterEls.reviewFacts ? t('dash.allStaff') : t('dash.allWorkers');
     filter.staff.innerHTML = `<option value="">${defaultLabel}</option>`;
     staffOptions.forEach((staff) => {
       const option = document.createElement('option');
       option.value = staff.id;
       option.textContent = filter.branch.value
         ? staff.name
-        : `${staff.name} · ${staff.company_title || `Филиал ${staff.company_id}`}`;
+        : `${staff.name} · ${staff.company_title || t('dash.branchFallbackWithId', { id: staff.company_id })}`;
       filter.staff.appendChild(option);
     });
     filter.staff.value = staffOptions.some((staff) => String(staff.id) === selected) ? selected : '';
@@ -1962,7 +1964,7 @@ function filterParams(filter) {
 
 function setFilterLoading(filter, isLoading) {
   filter.load.disabled = isLoading;
-  filter.load.textContent = isLoading ? 'Загрузка' : 'Обновить';
+  filter.load.textContent = isLoading ? t('common.loadingShort') : t('dash.refresh');
 }
 
 async function loadSyncStatus() {
@@ -1973,10 +1975,10 @@ async function loadSyncStatus() {
     const lastSuccessfulAt = sync.last_successful_sync_at
       || (lastRun?.status === 'success' ? lastRun.finished_at : null);
     els.syncState.textContent = lastSuccessfulAt
-      ? `данные актуальны на ${formatMoscowDateTime(lastSuccessfulAt)}`
-      : 'данные актуальны: нет успешных обновлений';
+      ? t('dash.syncUpdatedAt', { value: formatMoscowDateTime(lastSuccessfulAt) })
+      : t('dash.syncNoSuccessfulUpdates');
   } catch {
-    els.syncState.textContent = 'данные актуальны: статус недоступен';
+    els.syncState.textContent = t('dash.syncStatusUnavailable');
   }
 }
 
@@ -2001,12 +2003,12 @@ function setActiveView(view) {
     link.classList.toggle('active', link.dataset.viewLink === view);
   });
   const labels = {
-    overview: 'Метрики по филиалам и услугам',
-    plan: 'План/факт по филиалам и сотрудникам',
-    planSettings: 'Установка планов по месяцам',
-    serviceManagement: 'Актуальные услуги и KPI-группы',
-    reviewFacts: 'Ручной факт отзывов по администраторам',
-    reports: 'Каталог отчетов и аналитика',
+    overview: t('dash.subhead'),
+    plan: t('dash.planSubhead'),
+    planSettings: t('dash.planSettingsSubhead'),
+    serviceManagement: t('dash.serviceManagementSubhead'),
+    reviewFacts: t('dash.reviewFactsSubhead'),
+    reports: t('dash.reportsSubhead'),
   };
   els.periodLabel.textContent = labels[view] || labels.overview;
 }
@@ -2015,12 +2017,12 @@ async function loadPlanFact() {
   const filter = filterEls.plan;
   clearError();
   setFilterLoading(filter, true);
-  setApiState('API: загрузка', 'warn');
+  setApiState(t('dash.apiLoading'), 'warn');
 
   try {
     const payload = await fetchJson('/dashboard/widget/plan_fact', filterParams(filter));
     renderPlanFact(payload.data);
-    setApiState('API: подключен', 'ok');
+    setApiState(t('dash.apiConnected'), 'ok');
     await loadSyncStatus();
   } catch (error) {
     showError(error.message);
@@ -2033,11 +2035,11 @@ async function loadReviewFacts() {
   const filter = filterEls.reviewFacts;
   clearError();
   setFilterLoading(filter, true);
-  setApiState('API: загрузка', 'warn');
+  setApiState(t('dash.apiLoading'), 'warn');
 
   try {
     await loadReviewFactEditor();
-    setApiState('API: подключен', 'ok');
+    setApiState(t('dash.apiConnected'), 'ok');
     await loadSyncStatus();
   } catch (error) {
     showError(error.message);
@@ -2050,12 +2052,12 @@ async function loadDashboard() {
   const filter = filterEls.overview;
   clearError();
   setFilterLoading(filter, true);
-  setApiState('API: загрузка', 'warn');
+  setApiState(t('dash.apiLoading'), 'warn');
 
   try {
     const payload = await fetchJson('/dashboard/bundle', filterParams(filter));
     renderBundle(payload.data);
-    setApiState('API: подключен', 'ok');
+    setApiState(t('dash.apiConnected'), 'ok');
     await loadSyncStatus();
   } catch (error) {
     showError(error.message);
@@ -2081,11 +2083,11 @@ async function loadCurrentView() {
 }
 
 const ROLE_LABELS = {
-  platform_admin: 'Platform Admin — платформа',
-  owner: 'Owner — владелец сети',
-  branch_admin: 'Branch Admin — админ филиала',
-  manager: 'Manager — метрики филиала',
-  viewer: 'Viewer — только просмотр',
+  platform_admin: t('dash.rolePlatformAdmin'),
+  owner: t('dash.roleOwner'),
+  branch_admin: t('dash.roleBranchAdmin'),
+  manager: t('dash.roleManager'),
+  viewer: t('dash.roleViewer'),
 };
 
 function accountDisplayName(user) {
@@ -2095,7 +2097,7 @@ function accountDisplayName(user) {
 }
 
 function tenantOptionLabel(tenant) {
-  const branchText = tenant.branch_count === 1 ? '1 филиал' : `${tenant.branch_count || 0} филиалов`;
+  const branchText = t('dash.branchesMeta', { count: tenant.branch_count || 0 });
   return `${tenant.label || `Tenant ${tenant.id}`} · ${branchText}`;
 }
 
@@ -2129,9 +2131,9 @@ async function setupPlatformTenantSelector() {
     setSelectedPortalAccountId('');
     els.tenantSelect.disabled = true;
     if (els.tenantMeta) {
-      els.tenantMeta.textContent = 'Нет созданных бизнес-сетей';
+      els.tenantMeta.textContent = t('dash.noBusinessNetworks');
     }
-    showError('Для platform admin нет доступных business tenants.');
+    showError(t('dash.noPlatformTenants'));
     return false;
   }
 
@@ -2144,12 +2146,12 @@ async function setupPlatformTenantSelector() {
   els.tenantSelect.value = String(selectedTenant.id);
   if (els.tenantMeta) {
     els.tenantMeta.textContent = selectedTenant.branch_count
-      ? 'Dashboard показывает данные выбранной сети'
-      : 'У выбранной сети пока нет филиалов';
+      ? t('dash.selectedNetworkData')
+      : t('dash.selectedNetworkNoBranches');
   }
 
   if (!selectedTenant.branch_count) {
-    showError('У выбранной business-сети нет подключенных филиалов.');
+    showError(t('dash.selectedNetworkNoConnectedBranches'));
     return false;
   }
   return true;
@@ -2194,12 +2196,12 @@ async function init() {
     try {
       const canLoadTenantData = await setupPlatformTenantSelector();
       if (!canLoadTenantData) {
-        setApiState('API: нет tenant', 'warn');
+        setApiState(t('dash.apiNoTenant'), 'warn');
         return;
       }
     } catch (error) {
       showError(error.message);
-      setApiState('API: tenant ошибка', 'error');
+      setApiState(t('dash.apiTenantError'), 'error');
       return;
     }
   } else if (!apiKey) {

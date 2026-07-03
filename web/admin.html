@@ -1,20 +1,20 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="it">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Управление пользователями — Salon Analytics</title>
+  <title>Utenti — Salon Analytics</title>
   <link rel="stylesheet" href="/src/auth.css" />
 </head>
 <body class="admin-page">
   <header class="admin-topbar">
     <div class="admin-topbar__brand">
       <span class="admin-topbar__brand-mark" data-i18n="brand.mark">S</span>
-      <span><span data-i18n="brand.name">Salon Analytics</span> · <span data-i18n="admin.brandSuffix">Пользователи</span></span>
+      <span><span data-i18n="brand.name">Salon Analytics</span> · <span data-i18n="admin.brandSuffix">Utenti</span></span>
     </div>
     <div class="admin-topbar__nav">
       <div class="auth-lang" id="lang-switcher"></div>
-      <button type="button" class="btn btn--ghost" id="back-profile" data-i18n="admin.backProfile">К личному кабинету</button>
+      <button type="button" class="btn btn--ghost" id="back-profile" data-i18n="admin.backProfile">Torna all'area personale</button>
     </div>
   </header>
 
@@ -22,8 +22,8 @@
     <header class="admin-header">
       <div>
         <span class="auth-card__eyebrow" id="admin-role-label">Admin</span>
-        <h1 data-i18n="admin.usersTitle">Пользователи платформы</h1>
-        <p class="auth-subhead" data-i18n="admin.usersSubhead">Список пользователей вашей сети и ниже. В фильтре «Работник» на дашборде появляются пользователи с назначенным филиалом.</p>
+        <h1 data-i18n="admin.usersTitle">Utenti della piattaforma</h1>
+        <p class="auth-subhead" data-i18n="admin.usersSubhead">Gli utenti della tua rete e sottostanti. Gli utenti con una filiale assegnata compaiono nel filtro «Operatore» della dashboard.</p>
       </div>
     </header>
 
@@ -33,8 +33,8 @@
     <section class="admin-card admin-card--tenant" id="tenant-switcher-section" hidden>
       <div class="admin-card__header">
         <div>
-          <h2 data-i18n="admin.businessNetwork">Бизнес-сеть</h2>
-          <p class="admin-card__hint" data-i18n="admin.tenantHint">Для platform admin выбранная сеть определяет филиалы, credentials и данные дашборда.</p>
+          <h2 data-i18n="admin.businessNetwork">Rete aziendale</h2>
+          <p class="admin-card__hint" data-i18n="admin.tenantHint">Per un platform admin, la rete selezionata definisce filiali, credenziali e dati della dashboard.</p>
         </div>
         <label class="admin-search">
           <span class="admin-search__label">Tenant</span>
@@ -47,12 +47,12 @@
     <section class="admin-card">
       <div class="admin-card__header">
         <label class="admin-search admin-search--header">
-          <span class="visually-hidden" data-i18n="admin.searchUser">Поиск пользователя</span>
-          <input type="search" id="users-search" placeholder="Поиск пользователя…" data-i18n-attr="placeholder:admin.searchUserPlaceholder" autocomplete="off" />
+          <span class="visually-hidden" data-i18n="admin.searchUser">Cerca utenti</span>
+          <input type="search" id="users-search" placeholder="Cerca utenti…" data-i18n-attr="placeholder:admin.searchUserPlaceholder" autocomplete="off" />
         </label>
         <div class="admin-card__header-actions">
-          <button type="button" class="btn btn--ghost" id="provision-accounts" hidden data-i18n="admin.provisionAccounts">Создать аккаунты с email</button>
-          <button type="button" class="btn btn--primary" id="open-create-user" data-i18n="admin.createUser">Создать пользователя</button>
+          <button type="button" class="btn btn--ghost" id="provision-accounts" hidden data-i18n="admin.provisionAccounts">Crea account con email</button>
+          <button type="button" class="btn btn--primary" id="open-create-user" data-i18n="admin.createUser">Crea utente</button>
         </div>
       </div>
       <div class="admin-table-wrap">
@@ -61,11 +61,11 @@
             <tr>
               <th>ID</th>
               <th data-i18n="common.email">Email</th>
-              <th data-i18n="admin.colName">Имя</th>
-              <th data-i18n="admin.colRole">Роль</th>
-              <th data-i18n="admin.colConfirmation">Подтверждение</th>
-              <th data-i18n="admin.colBranches">Филиалы</th>
-              <th data-i18n="admin.colActions">Действия</th>
+              <th data-i18n="admin.colName">Nome</th>
+              <th data-i18n="admin.colRole">Ruolo</th>
+              <th data-i18n="admin.colConfirmation">Conferma</th>
+              <th data-i18n="admin.colBranches">Filiali</th>
+              <th data-i18n="admin.colActions">Azioni</th>
             </tr>
           </thead>
           <tbody id="users-body"></tbody>
@@ -76,12 +76,12 @@
     <section class="admin-card" id="initial-passwords-section" hidden>
       <div class="admin-card__header admin-card__header--stacked">
         <div>
-          <h2 data-i18n="admin.initialPasswordsTitle">Первичные пароли</h2>
-          <p class="admin-card__hint" data-i18n="admin.initialPasswordsHint">Логин — email пользователя. Пароль исчезает из списка после смены пользователем.</p>
+          <h2 data-i18n="admin.initialPasswordsTitle">Password iniziali</h2>
+          <p class="admin-card__hint" data-i18n="admin.initialPasswordsHint">Il login è l'email dell'utente. La password scompare dall'elenco dopo che l'utente la cambia.</p>
         </div>
         <label class="admin-search">
-          <span class="admin-search__label" data-i18n="admin.search">Поиск</span>
-          <input type="search" id="initial-passwords-search" placeholder="Email, имя, филиал, роль…" data-i18n-attr="placeholder:admin.initialPasswordsSearchPlaceholder" autocomplete="off" />
+          <span class="admin-search__label" data-i18n="admin.search">Cerca</span>
+          <input type="search" id="initial-passwords-search" placeholder="Email, nome, filiale, ruolo…" data-i18n-attr="placeholder:admin.initialPasswordsSearchPlaceholder" autocomplete="off" />
         </label>
       </div>
       <div class="admin-table-wrap">
@@ -89,11 +89,11 @@
           <thead>
             <tr>
               <th>ID</th>
-              <th data-i18n="admin.colLoginEmail">Логин (email)</th>
-              <th data-i18n="admin.colName">Имя</th>
-              <th data-i18n="admin.colRole">Роль</th>
-              <th data-i18n="admin.colBranches">Филиалы</th>
-              <th data-i18n="admin.colPassword">Пароль</th>
+              <th data-i18n="admin.colLoginEmail">Login (email)</th>
+              <th data-i18n="admin.colName">Nome</th>
+              <th data-i18n="admin.colRole">Ruolo</th>
+              <th data-i18n="admin.colBranches">Filiali</th>
+              <th data-i18n="admin.colPassword">Password</th>
             </tr>
           </thead>
           <tbody id="initial-passwords-body"></tbody>
@@ -104,32 +104,32 @@
     <section class="admin-card" id="yclients-credentials-section" hidden>
       <div class="admin-card__header admin-card__header--stacked">
         <div>
-          <h2 data-i18n="admin.credentialsTitle">YClients credentials</h2>
-          <p class="admin-card__hint" data-i18n="admin.credentialsHint">Секреты сохраняются в зашифрованном виде. После сохранения токены и пароли не отображаются.</p>
+          <h2 data-i18n="admin.credentialsTitle">Credenziali YClients</h2>
+          <p class="admin-card__hint" data-i18n="admin.credentialsHint">I segreti sono memorizzati cifrati. Dopo il salvataggio, token e password non vengono mostrati.</p>
         </div>
       </div>
       <div class="alert error" id="yclients-credentials-error" hidden></div>
       <form class="admin-toolbar admin-toolbar--create" id="yclients-credentials-form">
-        <label><span data-i18n="admin.credName">Название</span><input type="text" id="yclients-credential-title" required autocomplete="off" placeholder="Основная сеть" data-i18n-attr="placeholder:admin.credNamePlaceholder" /></label>
+        <label><span data-i18n="admin.credName">Nome</span><input type="text" id="yclients-credential-title" required autocomplete="off" placeholder="Rete principale" data-i18n-attr="placeholder:admin.credNamePlaceholder" /></label>
         <label>Partner token<input type="password" id="yclients-credential-partner-token" autocomplete="off" /></label>
         <label><span data-i18n="admin.credLogin">YClients login</span><input type="text" id="yclients-credential-login" autocomplete="off" /></label>
         <label><span data-i18n="admin.credPassword">YClients password</span><input type="password" id="yclients-credential-password" autocomplete="off" /></label>
-        <label><span data-i18n="admin.branches">Филиалы</span><select id="yclients-credential-branches" multiple></select></label>
-        <label class="admin-checkbox"><input type="checkbox" id="yclients-credential-active" checked /> <span data-i18n="admin.active">Активен</span></label>
-        <button type="button" class="btn btn--ghost" id="test-yclients-credential-draft" data-i18n="admin.test">Проверить</button>
-        <button type="button" class="btn btn--ghost" id="cancel-yclients-credential-edit" hidden data-i18n="common.cancel">Отмена</button>
-        <button type="submit" class="btn btn--primary" id="save-yclients-credential" data-i18n="admin.save">Сохранить</button>
+        <label><span data-i18n="admin.branches">Filiali</span><select id="yclients-credential-branches" multiple></select></label>
+        <label class="admin-checkbox"><input type="checkbox" id="yclients-credential-active" checked /> <span data-i18n="admin.active">Attivo</span></label>
+        <button type="button" class="btn btn--ghost" id="test-yclients-credential-draft" data-i18n="admin.test">Verifica</button>
+        <button type="button" class="btn btn--ghost" id="cancel-yclients-credential-edit" hidden data-i18n="common.cancel">Annulla</button>
+        <button type="submit" class="btn btn--primary" id="save-yclients-credential" data-i18n="admin.save">Salva</button>
       </form>
       <div class="admin-table-wrap">
         <table class="admin-table">
           <thead>
             <tr>
               <th>ID</th>
-              <th data-i18n="admin.credName">Название</th>
-              <th data-i18n="admin.colStatus">Статус</th>
-              <th data-i18n="admin.colBranches">Филиалы</th>
-              <th data-i18n="admin.colSecrets">Секреты</th>
-              <th data-i18n="admin.colActions">Действия</th>
+              <th data-i18n="admin.credName">Nome</th>
+              <th data-i18n="admin.colStatus">Stato</th>
+              <th data-i18n="admin.colBranches">Filiali</th>
+              <th data-i18n="admin.colSecrets">Segreti</th>
+              <th data-i18n="admin.colActions">Azioni</th>
             </tr>
           </thead>
           <tbody id="yclients-credentials-body"></tbody>
@@ -142,16 +142,16 @@
     <div class="admin-modal__backdrop" data-close-modal="credentials"></div>
     <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="credentials-title">
       <header class="admin-modal__header">
-        <h2 id="credentials-title" data-i18n="admin.modalCredsTitle">Данные для входа</h2>
-        <button type="button" class="admin-modal__close" id="close-credentials" data-i18n-attr="aria-label:common.close" aria-label="Закрыть">×</button>
+        <h2 id="credentials-title" data-i18n="admin.modalCredsTitle">Dati di accesso</h2>
+        <button type="button" class="admin-modal__close" id="close-credentials" data-i18n-attr="aria-label:common.close" aria-label="Chiudi">×</button>
       </header>
       <div class="alert error" id="credentials-error" hidden></div>
       <div class="alert success" id="credentials-success" hidden></div>
       <div class="admin-modal__message" id="credentials-message"></div>
       <div class="admin-modal__actions admin-modal__actions--center">
-        <button type="button" class="btn btn--ghost" id="save-credentials-excel" data-i18n="admin.saveExcel">Сохранить Excel</button>
-        <button type="button" class="btn btn--ghost" id="distribute-credentials" data-i18n="admin.distribute">Разослать</button>
-        <button type="button" class="btn btn--primary" id="close-credentials-btn" data-i18n="admin.done">Готово</button>
+        <button type="button" class="btn btn--ghost" id="save-credentials-excel" data-i18n="admin.saveExcel">Salva Excel</button>
+        <button type="button" class="btn btn--ghost" id="distribute-credentials" data-i18n="admin.distribute">Invia</button>
+        <button type="button" class="btn btn--primary" id="close-credentials-btn" data-i18n="admin.done">Fatto</button>
       </div>
     </div>
   </div>
@@ -160,19 +160,19 @@
     <div class="admin-modal__backdrop" data-close-modal="create"></div>
     <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="create-user-title">
       <header class="admin-modal__header">
-        <h2 id="create-user-title" data-i18n="admin.createUserTitle">Новый пользователь</h2>
-        <button type="button" class="admin-modal__close" id="close-create-user" data-i18n-attr="aria-label:common.close" aria-label="Закрыть">×</button>
+        <h2 id="create-user-title" data-i18n="admin.createUserTitle">Nuovo utente</h2>
+        <button type="button" class="admin-modal__close" id="close-create-user" data-i18n-attr="aria-label:common.close" aria-label="Chiudi">×</button>
       </header>
       <div class="alert error" id="create-error" hidden></div>
       <form class="admin-toolbar admin-toolbar--create" id="create-user-form">
         <label><span data-i18n="common.email">Email</span><input type="email" id="create-email" required autocomplete="off" placeholder="user@company.com" /></label>
-        <label><span data-i18n="admin.password">Пароль</span><input type="password" id="create-password" required minlength="8" autocomplete="new-password" placeholder="минимум 8 символов" data-i18n-attr="placeholder:admin.passwordPlaceholder" /></label>
-        <label><span data-i18n="admin.name">Имя</span><input type="text" id="create-name" autocomplete="off" placeholder="Иван Иванов" data-i18n-attr="placeholder:admin.namePlaceholder" /></label>
-        <label><span data-i18n="admin.role">Роль</span><select id="create-role-select"></select></label>
-        <label><span data-i18n="admin.branches">Филиалы</span><select id="create-branch-select" multiple></select></label>
+        <label><span data-i18n="admin.password">Password</span><input type="password" id="create-password" required minlength="8" autocomplete="new-password" placeholder="almeno 8 caratteri" data-i18n-attr="placeholder:admin.passwordPlaceholder" /></label>
+        <label><span data-i18n="admin.name">Nome</span><input type="text" id="create-name" autocomplete="off" placeholder="Mario Rossi" data-i18n-attr="placeholder:admin.namePlaceholder" /></label>
+        <label><span data-i18n="admin.role">Ruolo</span><select id="create-role-select"></select></label>
+        <label><span data-i18n="admin.branches">Filiali</span><select id="create-branch-select" multiple></select></label>
         <div class="admin-modal__actions">
-          <button type="button" class="btn btn--ghost" id="cancel-create-user" data-i18n="common.cancel">Отмена</button>
-          <button type="submit" class="btn btn--primary" id="create-user" data-i18n="admin.create">Создать</button>
+          <button type="button" class="btn btn--ghost" id="cancel-create-user" data-i18n="common.cancel">Annulla</button>
+          <button type="submit" class="btn btn--primary" id="create-user" data-i18n="admin.create">Crea</button>
         </div>
       </form>
     </div>
@@ -182,18 +182,18 @@
     <div class="admin-modal__backdrop" data-close-modal="edit"></div>
     <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="edit-user-title">
       <header class="admin-modal__header">
-        <h2 id="edit-user-title" data-i18n="admin.editUserTitle">Редактирование пользователя</h2>
-        <button type="button" class="admin-modal__close" id="close-edit-user" data-i18n-attr="aria-label:common.close" aria-label="Закрыть">×</button>
+        <h2 id="edit-user-title" data-i18n="admin.editUserTitle">Modifica utente</h2>
+        <button type="button" class="admin-modal__close" id="close-edit-user" data-i18n-attr="aria-label:common.close" aria-label="Chiudi">×</button>
       </header>
       <div class="alert error" id="edit-error" hidden></div>
       <form class="admin-toolbar admin-toolbar--create" id="edit-user-form">
         <label><span data-i18n="common.email">Email</span><input type="email" id="edit-email" required autocomplete="off" /></label>
-        <label><span data-i18n="admin.name">Имя</span><input type="text" id="edit-name" autocomplete="off" placeholder="Иван Иванов" data-i18n-attr="placeholder:admin.namePlaceholder" /></label>
-        <label><span data-i18n="admin.role">Роль</span><select id="edit-role-select"></select></label>
-        <label><span data-i18n="admin.branches">Филиалы</span><select id="edit-branch-select" multiple></select></label>
+        <label><span data-i18n="admin.name">Nome</span><input type="text" id="edit-name" autocomplete="off" placeholder="Mario Rossi" data-i18n-attr="placeholder:admin.namePlaceholder" /></label>
+        <label><span data-i18n="admin.role">Ruolo</span><select id="edit-role-select"></select></label>
+        <label><span data-i18n="admin.branches">Filiali</span><select id="edit-branch-select" multiple></select></label>
         <div class="admin-modal__actions">
-          <button type="button" class="btn btn--ghost" id="cancel-edit-user" data-i18n="common.cancel">Отмена</button>
-          <button type="submit" class="btn btn--primary" id="save-user" data-i18n="admin.save">Сохранить</button>
+          <button type="button" class="btn btn--ghost" id="cancel-edit-user" data-i18n="common.cancel">Annulla</button>
+          <button type="submit" class="btn btn--primary" id="save-user" data-i18n="admin.save">Salva</button>
         </div>
       </form>
     </div>
@@ -203,17 +203,17 @@
     <div class="admin-modal__backdrop" data-close-modal="edit-staff"></div>
     <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="edit-staff-title">
       <header class="admin-modal__header">
-        <h2 id="edit-staff-title" data-i18n="admin.editStaffTitle">Редактирование работника</h2>
-        <button type="button" class="admin-modal__close" id="close-edit-staff" data-i18n-attr="aria-label:common.close" aria-label="Закрыть">×</button>
+        <h2 id="edit-staff-title" data-i18n="admin.editStaffTitle">Modifica operatore</h2>
+        <button type="button" class="admin-modal__close" id="close-edit-staff" data-i18n-attr="aria-label:common.close" aria-label="Chiudi">×</button>
       </header>
       <div class="alert error" id="edit-staff-error" hidden></div>
       <form class="admin-toolbar admin-toolbar--create" id="edit-staff-form">
-        <label><span data-i18n="admin.name">Имя</span><input type="text" id="edit-staff-name" required autocomplete="off" placeholder="Иван Иванов" data-i18n-attr="placeholder:admin.namePlaceholder" /></label>
-        <label><span data-i18n="admin.position">Должность</span><input type="text" id="edit-staff-position" autocomplete="off" placeholder="Мастер" data-i18n-attr="placeholder:admin.positionPlaceholder" /></label>
-        <label><span data-i18n="admin.branch">Филиал</span><select id="edit-staff-branch-select"></select></label>
+        <label><span data-i18n="admin.name">Nome</span><input type="text" id="edit-staff-name" required autocomplete="off" placeholder="Mario Rossi" data-i18n-attr="placeholder:admin.namePlaceholder" /></label>
+        <label><span data-i18n="admin.position">Ruolo/posizione</span><input type="text" id="edit-staff-position" autocomplete="off" placeholder="Parrucchiere" data-i18n-attr="placeholder:admin.positionPlaceholder" /></label>
+        <label><span data-i18n="admin.branch">Filiale</span><select id="edit-staff-branch-select"></select></label>
         <div class="admin-modal__actions">
-          <button type="button" class="btn btn--ghost" id="cancel-edit-staff" data-i18n="common.cancel">Отмена</button>
-          <button type="submit" class="btn btn--primary" id="save-staff" data-i18n="admin.save">Сохранить</button>
+          <button type="button" class="btn btn--ghost" id="cancel-edit-staff" data-i18n="common.cancel">Annulla</button>
+          <button type="submit" class="btn btn--primary" id="save-staff" data-i18n="admin.save">Salva</button>
         </div>
       </form>
     </div>
@@ -223,16 +223,16 @@
     <div class="admin-modal__backdrop" data-close-modal="create-staff-account"></div>
     <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="create-staff-account-title">
       <header class="admin-modal__header">
-        <h2 id="create-staff-account-title" data-i18n="admin.staffAccountTitle">Аккаунт сотрудника</h2>
-        <button type="button" class="admin-modal__close" id="close-create-staff-account" data-i18n-attr="aria-label:common.close" aria-label="Закрыть">×</button>
+        <h2 id="create-staff-account-title" data-i18n="admin.staffAccountTitle">Account dipendente</h2>
+        <button type="button" class="admin-modal__close" id="close-create-staff-account" data-i18n-attr="aria-label:common.close" aria-label="Chiudi">×</button>
       </header>
       <div class="alert error" id="create-staff-account-error" hidden></div>
       <form class="admin-toolbar admin-toolbar--create" id="create-staff-account-form">
-        <label><span data-i18n="admin.name">Имя</span><input type="text" id="create-staff-account-name" disabled /></label>
+        <label><span data-i18n="admin.name">Nome</span><input type="text" id="create-staff-account-name" disabled /></label>
         <label><span data-i18n="common.email">Email</span><input type="email" id="create-staff-account-email" required autocomplete="off" placeholder="user@company.com" /></label>
         <div class="admin-modal__actions">
-          <button type="button" class="btn btn--ghost" id="cancel-create-staff-account" data-i18n="common.cancel">Отмена</button>
-          <button type="submit" class="btn btn--primary" id="create-staff-account" data-i18n="admin.create">Создать</button>
+          <button type="button" class="btn btn--ghost" id="cancel-create-staff-account" data-i18n="common.cancel">Annulla</button>
+          <button type="submit" class="btn btn--primary" id="create-staff-account" data-i18n="admin.create">Crea</button>
         </div>
       </form>
     </div>
@@ -242,13 +242,13 @@
     <div class="admin-modal__backdrop" data-close-modal="delete"></div>
     <div class="admin-modal__dialog admin-modal__dialog--confirm" role="dialog" aria-modal="true" aria-labelledby="delete-confirm-title">
       <header class="admin-modal__header">
-        <h2 id="delete-confirm-title" data-i18n="admin.deleteConfirmTitle">Подтверждение удаления</h2>
-        <button type="button" class="admin-modal__close" id="close-delete-confirm" data-i18n-attr="aria-label:common.close" aria-label="Закрыть">×</button>
+        <h2 id="delete-confirm-title" data-i18n="admin.deleteConfirmTitle">Conferma eliminazione</h2>
+        <button type="button" class="admin-modal__close" id="close-delete-confirm" data-i18n-attr="aria-label:common.close" aria-label="Chiudi">×</button>
       </header>
       <div class="admin-modal__message" id="delete-confirm-message"></div>
       <div class="admin-modal__actions admin-modal__actions--center">
-        <button type="button" class="btn btn--ghost" id="cancel-delete-confirm" data-i18n="common.cancel">Отмена</button>
-        <button type="button" class="btn btn--danger admin-modal__confirm-delete" id="confirm-delete" data-i18n="admin.delete">Удалить</button>
+        <button type="button" class="btn btn--ghost" id="cancel-delete-confirm" data-i18n="common.cancel">Annulla</button>
+        <button type="button" class="btn btn--danger admin-modal__confirm-delete" id="confirm-delete" data-i18n="admin.delete">Elimina</button>
       </div>
     </div>
   </div>

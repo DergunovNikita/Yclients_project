@@ -1,3 +1,11 @@
+import { getLocale } from '../i18n.js';
+
+const INTL_LOCALE = { ru: 'ru-RU', en: 'en-US', it: 'it-IT' };
+
+function intlLocale() {
+  return INTL_LOCALE[getLocale()] || INTL_LOCALE.it;
+}
+
 export function escapeHtml(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -9,22 +17,22 @@ export function escapeHtml(value) {
 
 export function formatMoney(value) {
   if (value === null || value === undefined || value === '') return '—';
-  return `${Math.round(Number(value || 0)).toLocaleString('ru-RU')} ₽`;
+  return `${Math.round(Number(value || 0)).toLocaleString(intlLocale())} ₽`;
 }
 
 export function formatNumber(value) {
   if (value === null || value === undefined || value === '') return '—';
-  return Number(value || 0).toLocaleString('ru-RU');
+  return Number(value || 0).toLocaleString(intlLocale());
 }
 
 export function formatDecimal(value) {
   if (value === null || value === undefined || value === '') return '—';
-  return Number(value || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 });
+  return Number(value || 0).toLocaleString(intlLocale(), { maximumFractionDigits: 2 });
 }
 
 export function formatPercent(value) {
   if (value === null || value === undefined || value === '') return '—';
-  return `${Number(value || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`;
+  return `${Number(value || 0).toLocaleString(intlLocale(), { maximumFractionDigits: 1 })}%`;
 }
 
 export function formatDate(value) {
@@ -32,7 +40,7 @@ export function formatDate(value) {
   const text = String(value);
   const match = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (!match) return text;
-  return `${match[3]}.${match[2]}.${match[1]}`;
+  return new Intl.DateTimeFormat(intlLocale()).format(new Date(`${match[1]}-${match[2]}-${match[3]}T00:00:00`));
 }
 
 export function formatValue(value, format = 'text') {
