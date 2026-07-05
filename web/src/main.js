@@ -30,6 +30,8 @@ const els = {
   kpi: document.getElementById('kpi'),
   visitMetrics: document.getElementById('visit-metrics'),
   clientsMetrics: document.getElementById('clients-metrics'),
+  revenueMetrics: document.getElementById('revenue-metrics'),
+  servicesMetrics: document.getElementById('services-metrics'),
   error: document.getElementById('error'),
   apiState: document.getElementById('api-state'),
   syncState: document.getElementById('sync-state'),
@@ -487,12 +489,53 @@ function renderKpi(summary) {
       delta: formatPct(averageCheck.total_change_pct),
       deltaValue: averageCheck.total_change_pct,
     },
+  ];
+
+  renderCards(els.kpi, cards);
+}
+
+function goodsRevenueShare(revenue) {
+  const total = Number(revenue.total || 0);
+  if (!total) return null;
+  return (Number(revenue.goods_revenue || 0) / total) * 100;
+}
+
+function renderRevenueMetrics(summary) {
+  const revenue = summary.revenue || {};
+  const cards = [
     {
       label: t('dash.cardServiceRevenue'),
       value: formatMoney(revenue.service_revenue),
       delta: formatPct(revenue.service_revenue_change_pct),
       deltaValue: revenue.service_revenue_change_pct,
     },
+    {
+      label: t('dash.cardGoodsRevenue'),
+      value: formatMoney(revenue.goods_revenue),
+      delta: formatPct(revenue.goods_revenue_change_pct),
+      deltaValue: revenue.goods_revenue_change_pct,
+    },
+    {
+      label: t('dash.cardExtraServiceRevenue'),
+      value: formatMoney(revenue.extra_service_revenue),
+      delta: formatPct(revenue.extra_service_revenue_change_pct),
+      deltaValue: revenue.extra_service_revenue_change_pct,
+    },
+    {
+      label: t('dash.cardGoodsRevenueShare'),
+      value: formatMetricValue(goodsRevenueShare(revenue), 'percent'),
+      delta: t('dash.ofTotalRevenue'),
+      deltaValue: null,
+    },
+  ];
+
+  renderCards(els.revenueMetrics, cards);
+}
+
+function renderServicesMetrics(summary) {
+  const revenue = summary.revenue || {};
+  const averageCheck = summary.average_check || {};
+  const cards = [
     {
       label: t('dash.cardServiceCount'),
       value: formatNumber(revenue.service_count),
@@ -506,12 +549,6 @@ function renderKpi(summary) {
       deltaValue: averageCheck.services_change_pct,
     },
     {
-      label: t('dash.cardGoodsRevenue'),
-      value: formatMoney(revenue.goods_revenue),
-      delta: formatPct(revenue.goods_revenue_change_pct),
-      deltaValue: revenue.goods_revenue_change_pct,
-    },
-    {
       label: t('dash.cardGoodsCount'),
       value: formatNumber(revenue.goods_count),
       delta: formatPct(revenue.goods_count_change_pct),
@@ -522,12 +559,6 @@ function renderKpi(summary) {
       value: formatMoney(averageCheck.goods),
       delta: formatPct(averageCheck.goods_change_pct),
       deltaValue: averageCheck.goods_change_pct,
-    },
-    {
-      label: t('dash.cardExtraServiceRevenue'),
-      value: formatMoney(revenue.extra_service_revenue),
-      delta: formatPct(revenue.extra_service_revenue_change_pct),
-      deltaValue: revenue.extra_service_revenue_change_pct,
     },
     {
       label: t('dash.cardExtraServiceCount'),
@@ -543,7 +574,7 @@ function renderKpi(summary) {
     },
   ];
 
-  renderCards(els.kpi, cards);
+  renderCards(els.servicesMetrics, cards);
 }
 
 function renderVisitMetrics(summary) {
@@ -1028,23 +1059,6 @@ function renderSelectedStaffPlanTable(staffPlan) {
   `;
 }
 
-function renderRankingList(rows, format) {
-  if (!rows?.length) return `<div class="empty compact">${t('dash.noStaffForPeriod')}</div>`;
-  return `
-    <ol class="ranking-list">
-      ${rows
-        .map((row, index) => `
-          <li>
-            <span class="rank">${index + 1}</span>
-            <span class="name">${escapeHtml(row.title || t('dash.staffFallback', { id: row.staff_id || '' }))}</span>
-            <span class="score">${escapeHtml(formatMetricValue(row.value, format))}</span>
-          </li>
-        `)
-        .join('')}
-    </ol>
-  `;
-}
-
 function chartValue(value) {
   return Number(value || 0);
 }
@@ -1054,10 +1068,8 @@ function renderPlanInsights(planFact) {
   destroyChart('goodsKpi');
   if (!els.planInsights) return;
 
-  const rankings = planFact?.staff_rankings || {};
   const goodsKpis = planFact?.goods_kpi_execution || [];
   const selectedStaffPlan = planFact?.selected_staff_plan;
-  const hasSelectedStaff = Boolean(planFact?.selected_staff);
   const panels = [];
 
   if (selectedStaffPlan?.metrics?.length) {
@@ -1068,27 +1080,6 @@ function renderPlanInsights(planFact) {
           <span class="meta">${escapeHtml(selectedStaffPlan.category_label || '')}</span>
         </div>
         <div class="chart-box short"><canvas id="selected-staff-plan-chart"></canvas></div>
-      </div>
-    `);
-  }
-
-  if (!hasSelectedStaff) {
-    panels.push(`
-      <div class="panel">
-        <div class="panel-title">
-          <h2>${t('dash.topRevenue')}</h2>
-          <span class="meta">${t('dash.staffCount', { count: formatNumber(rankings.revenue_top?.length || 0) })}</span>
-        </div>
-        ${renderRankingList(rankings.revenue_top || [], 'money')}
-      </div>
-    `);
-    panels.push(`
-      <div class="panel">
-        <div class="panel-title">
-          <h2>${t('dash.topAverageCheck')}</h2>
-          <span class="meta">${t('dash.staffCount', { count: formatNumber(rankings.avg_check_top?.length || 0) })}</span>
-        </div>
-        ${renderRankingList(rankings.avg_check_top || [], 'money')}
       </div>
     `);
   }
@@ -1886,6 +1877,8 @@ function renderBundle(bundle) {
   renderKpi(summary);
   renderVisitMetrics(summary);
   renderClientsMetrics(summary);
+  renderRevenueMetrics(summary);
+  renderServicesMetrics(summary);
   renderAppointmentsMetrics(summary);
   renderRevenueChart(daily);
   renderAppointmentsChart(daily);

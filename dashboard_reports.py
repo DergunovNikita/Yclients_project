@@ -38,7 +38,6 @@ PERCENT_FORMAT = 'percent'
 DECIMAL_FORMAT = 'decimal'
 
 REPORT_ORDER = (
-    'admin_performance',
     'avg_check_by_service',
     'avg_check_dynamics',
     'booking_channels',
@@ -66,9 +65,7 @@ REPORT_ORDER = (
     'lost_clients_list',
     'market_benchmarks',
     'marketing_funnel',
-    'master_avg_check',
     'master_motivation',
-    'masters_rating',
     'milena_dynamics',
     'milena_lost',
     'milena_pl',
@@ -79,11 +76,8 @@ REPORT_ORDER = (
     'month_return',
     'new_vs_returning_cross',
     'nps_dashboard',
-    'opz_report',
     'peak_hours_site_vs_salon',
     'peak_load',
-    'plan_execution',
-    'plan_fact_master',
     'price_elasticity',
     'retention_3_6_12',
     'retention_opz_dynamics',
@@ -102,6 +96,7 @@ REPORT_ORDER = (
     'service_staff_profit',
     'service_trends',
     'staff_efficiency',
+    'staff_leaderboard',
     'staff_salary',
     'staff_services',
     'staff_time_heatmap',
@@ -128,12 +123,8 @@ READY_REPORTS = {
     'goods_dynamics',
     'losses_by_staff',
     'lost_clients_list',
-    'master_avg_check',
-    'masters_rating',
     'new_vs_returning_cross',
     'peak_load',
-    'plan_execution',
-    'plan_fact_master',
     'retention_3_6_12',
     'return_priorities',
     'revenue_at_risk',
@@ -144,6 +135,7 @@ READY_REPORTS = {
     'service_staff_profit',
     'service_trends',
     'staff_efficiency',
+    'staff_leaderboard',
     'staff_services',
     'staff_time_heatmap',
     'top_clients_pareto',
@@ -175,12 +167,12 @@ FINANCE_REPORTS = {
 }
 BOOKING_REPORTS = {'bookings_dynamics', 'cancellation_analysis', 'peak_load'}
 STAFF_REPORTS = {
-    'master_avg_check',
-    'masters_rating',
     'staff_efficiency',
+    'staff_leaderboard',
     'staff_services',
     'staff_time_heatmap',
 }
+LEADERBOARD_REPORTS = {'staff_leaderboard'}
 SERVICE_REPORTS = {'avg_check_by_service', 'service_combos', 'service_staff_profit', 'service_trends'}
 CLIENT_REPORTS = {
     'client_cohorts',
@@ -193,7 +185,6 @@ CLIENT_REPORTS = {
 }
 CHURN_REPORTS = {'losses_by_staff', 'lost_clients_list', 'return_priorities', 'revenue_at_risk'}
 GOODS_REPORTS = {'goods_by_staff', 'goods_conversion', 'goods_dynamics', 'top_goods_revenue'}
-PLAN_REPORTS = {'plan_execution', 'plan_fact_master'}
 MILENA_REPORTS = {
     'milena_dynamics',
     'milena_lost',
@@ -204,7 +195,6 @@ MILENA_REPORTS = {
 }
 
 TITLE_OVERRIDES = {
-    'admin_performance': 'Эффективность администраторов',
     'avg_check_by_service': 'Средний чек по услугам',
     'avg_check_dynamics': 'Динамика среднего чека',
     'booking_channels': 'Каналы записи',
@@ -232,18 +222,13 @@ TITLE_OVERRIDES = {
     'lost_clients_list': 'Потерянные клиенты',
     'market_benchmarks': 'Рыночные бенчмарки',
     'marketing_funnel': 'Воронка новых клиентов',
-    'master_avg_check': 'Выручка / завершенная запись по мастерам',
     'master_motivation': 'Мотивация мастеров',
-    'masters_rating': 'Рейтинг мастеров',
     'mind_index': 'MInd индекс мастеров',
     'month_return': 'Возвратность месяц к месяцу',
     'new_vs_returning_cross': 'Новые и повторные клиенты',
     'nps_dashboard': 'NPS и отзывы',
-    'opz_report': 'ОПЗ',
     'peak_hours_site_vs_salon': 'Пиковые часы: сайт и салон',
     'peak_load': 'Пиковая загрузка',
-    'plan_execution': 'Выполнение плана',
-    'plan_fact_master': 'План/факт мастеров',
     'price_elasticity': 'Эластичность цены',
     'retention_3_6_12': 'Возвратность 3/6/12',
     'retention_opz_dynamics': 'Динамика удержания и ОПЗ',
@@ -262,6 +247,7 @@ TITLE_OVERRIDES = {
     'service_staff_profit': 'Услуги x мастера',
     'service_trends': 'Тренды услуг',
     'staff_efficiency': 'Эффективность сотрудников',
+    'staff_leaderboard': 'Рейтинги и топы',
     'staff_salary': 'Зарплата сотрудников',
     'staff_services': 'Услуги по мастерам',
     'staff_time_heatmap': 'Тепловая карта мастеров',
@@ -302,8 +288,6 @@ class ReportDefinition:
 
 
 def _group_for(report_id: str) -> str:
-    if report_id in PLAN_REPORTS:
-        return 'plans'
     if report_id in FINANCE_REPORTS:
         return 'finance'
     if report_id in BOOKING_REPORTS:
@@ -545,10 +529,10 @@ async def _fetch_report_payload(
         return _planned_payload(base, definition)
     if report_id == 'nps_dashboard':
         return await _nps_payload(db, base, definition, start, end, company_id, allowed_company_ids)
-    if report_id in PLAN_REPORTS:
-        return await _plan_payload(db, base, start, end, company_id, staff_id, allowed_company_ids)
     if report_id in GOODS_REPORTS:
         return await _goods_payload(db, base, start, end, company_id, staff_id, granularity, allowed_company_ids)
+    if report_id in LEADERBOARD_REPORTS:
+        return await _leaderboard_payload(db, base, start, end, company_id, staff_id, allowed_company_ids)
     if report_id in STAFF_REPORTS:
         return await _staff_payload(db, base, start, end, company_id, staff_id, allowed_company_ids)
     if report_id in SERVICE_REPORTS:
@@ -1866,7 +1850,7 @@ async def _operations_payload(
     return base
 
 
-async def _plan_payload(
+async def _leaderboard_payload(
     db: AsyncSession,
     base: dict[str, Any],
     start: date,
@@ -1884,41 +1868,79 @@ async def _plan_payload(
         allowed_company_ids=allowed_company_ids,
         force_allowed=allowed_company_ids is not None,
     )
-    rows = []
-    for group in plan.get('groups', []):
-        for metric in group.get('metrics', []):
-            rows.append({
-                'scope': group.get('title'),
-                'metric': metric.get('label') or metric.get('code'),
-                'plan': metric.get('plan'),
-                'fact': metric.get('fact'),
-                'remaining': metric.get('remaining'),
-                'completion_pct': metric.get('completion_pct'),
-                'status': metric.get('status'),
-            })
-    completion_values = [float(row['completion_pct']) for row in rows if row.get('completion_pct') is not None]
+    boards = plan.get('staff_leaderboards', {})
+
+    staff_col = ('staff', 'Сотрудник', 'text')
+    qty_col = ('qty', 'Кол-во, шт', NUMBER_FORMAT)
+    share_col = ('share_pct', 'Доля в топе, %', PERCENT_FORMAT)
+
+    revenue_top = boards.get('revenue_top', [])
     base['cards'] = [
-        _card('Строк плана', len(plan.get('groups', [])), NUMBER_FORMAT),
-        _card('Метрик', len(rows), NUMBER_FORMAT),
-        _card('Среднее выполнение', sum(completion_values) / len(completion_values) if completion_values else 0, PERCENT_FORMAT),
+        _card('Топ выручка', revenue_top[0]['value'] if revenue_top else 0, MONEY_FORMAT),
+        _card('Мастеров в рейтинге', len(boards.get('revenue_top', [])), NUMBER_FORMAT),
+        _card('Админов в рейтинге', len(boards.get('reviews_admin', [])), NUMBER_FORMAT),
     ]
+    if revenue_top:
+        base['charts'] = [
+            _chart(
+                'leaderboard_revenue',
+                'Топ по выручке',
+                'bar',
+                [row['staff'] for row in revenue_top],
+                [{'label': 'Выручка', 'data': [row['value'] for row in revenue_top], 'format': MONEY_FORMAT}],
+            )
+        ]
     base['tables'] = [
         _table(
-            'plan_fact',
-            'План/факт',
-            [
-                ('scope', 'Разрез', 'text'),
-                ('metric', 'Метрика', 'text'),
-                ('plan', 'План', DECIMAL_FORMAT),
-                ('fact', 'Факт', DECIMAL_FORMAT),
-                ('remaining', 'Осталось', DECIMAL_FORMAT),
-                ('completion_pct', '% выполнения', PERCENT_FORMAT),
-                ('status', 'Статус', 'text'),
-            ],
-            rows,
-        )
+            'extra_services',
+            'Топ по доп. услугам',
+            [staff_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), ('pct', 'Доп. услуги, %', PERCENT_FORMAT), share_col],
+            boards.get('extra_services', []),
+        ),
+        _table(
+            'cosmo_barber',
+            'Топ по косметике — мастера',
+            [staff_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), share_col],
+            boards.get('cosmo_barber', []),
+        ),
+        _table(
+            'cosmo_admin',
+            'Топ по косметике — админы',
+            [staff_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), share_col],
+            boards.get('cosmo_admin', []),
+        ),
+        _table(
+            'opz_barber',
+            'Топ по ОПЗ — мастера',
+            [staff_col, qty_col, ('pct', 'ОПЗ, %', PERCENT_FORMAT)],
+            boards.get('opz_barber', []),
+        ),
+        _table(
+            'opz_admin',
+            'Топ по ОПЗ — админы',
+            [staff_col, qty_col, ('pct', 'ОПЗ, %', PERCENT_FORMAT)],
+            boards.get('opz_admin', []),
+        ),
+        _table(
+            'reviews_admin',
+            'Топ по отзывам — админы',
+            [staff_col, ('value', 'Отзывы', NUMBER_FORMAT)],
+            boards.get('reviews_admin', []),
+        ),
+        _table(
+            'revenue_top',
+            'Топ по выручке',
+            [staff_col, ('value', 'Выручка', MONEY_FORMAT)],
+            revenue_top,
+        ),
+        _table(
+            'avg_check_top',
+            'Топ по среднему чеку',
+            [staff_col, ('value', 'Средний чек', MONEY_FORMAT)],
+            boards.get('avg_check_top', []),
+        ),
     ]
-    base['raw'] = {'plan_fact': plan}
+    base['raw'] = {'leaderboards': boards}
     return base
 
 

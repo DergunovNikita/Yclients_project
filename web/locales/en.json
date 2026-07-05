@@ -230,6 +230,8 @@
     "cardGoodsRevenue": "Product revenue",
     "cardGoodsCount": "Products sold",
     "cardGoodsAverageCheck": "Average product check",
+    "cardGoodsRevenueShare": "Product share of turnover",
+    "ofTotalRevenue": "of total turnover",
     "cardExtraServiceRevenue": "Extra service revenue",
     "cardExtraServiceCount": "Extra services delivered",
     "cardExtraServiceAverageCheck": "Average extra service check",

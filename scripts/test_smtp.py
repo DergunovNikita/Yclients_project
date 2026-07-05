@@ -8,8 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from auth_service import _email_delivery_mode, send_auth_email
-from config import APP_PUBLIC_URL, smtp_is_configured
+from auth_service import _email_delivery_mode, send_auth_email  # noqa: E402
+from config import APP_PUBLIC_URL, smtp_is_configured  # noqa: E402
 
 
 def main() -> int:

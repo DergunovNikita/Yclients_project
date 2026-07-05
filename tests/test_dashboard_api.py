@@ -61,7 +61,7 @@ async def test_dashboard_reports_registry_contract(async_session):
 
     assert r.status_code == 200
     data = r.json()['data']
-    assert len(data) == 72
+    assert len(data) == 67
     by_id = {item['id']: item for item in data}
     assert by_id['revenue_dynamics']['status'] == 'ready'
     assert by_id['conversion_funnel']['status'] == 'source_missing'
@@ -71,6 +71,10 @@ async def test_dashboard_reports_registry_contract(async_session):
     assert by_id['year_over_year']['group'] == 'finance'
     assert by_id['new_vs_returning_cross']['status'] == 'ready'
     assert by_id['new_vs_returning_cross']['group'] == 'clients'
+    assert by_id['staff_leaderboard']['status'] == 'ready'
+    assert by_id['staff_leaderboard']['group'] == 'team'
+    assert 'plan_execution' not in by_id
+    assert 'masters_rating' not in by_id
 
 
 @pytest.mark.asyncio
@@ -417,6 +421,31 @@ async def test_dashboard_report_data_missing_and_partial_sources(async_session):
     assert partial_data['source_status'] == 'partial'
     assert 'telegram_nps' in partial_data['missing_sources']
     assert partial_data['tables'][0]['rows'][0]['rating'] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_dashboard_staff_leaderboard_report_returns_top_tables(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        r = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'staff_leaderboard', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+    app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    data = r.json()['data']
+    assert data['source_status'] == 'ready'
+    table_ids = {table['id'] for table in data['tables']}
+    assert {'extra_services', 'cosmo_barber', 'opz_admin', 'reviews_admin', 'revenue_top'} <= table_ids
 
 
 @pytest.mark.asyncio
@@ -2011,7 +2040,7 @@ async def test_plan_fact_recognizes_current_face_and_head_care_titles(async_sess
 
 
 @pytest.mark.asyncio
-async def test_plan_fact_returns_staff_rankings_and_goods_kpis_by_scope(async_session):
+async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon 1', group_id=1))
     async_session.add(Company(id=2, title='Salon 2', group_id=1))
@@ -2154,15 +2183,21 @@ async def test_plan_fact_returns_staff_rankings_and_goods_kpis_by_scope(async_se
 
     assert network_response.status_code == 200
     network_data = network_response.json()['data']
-    assert [row['title'] for row in network_data['staff_rankings']['revenue_top']] == [
+    assert [row['staff'] for row in network_data['staff_leaderboards']['revenue_top']] == [
         'Bravo',
         'Charlie',
         'Alpha',
     ]
-    assert [row['title'] for row in network_data['staff_rankings']['avg_check_top']] == [
+    assert [row['staff'] for row in network_data['staff_leaderboards']['avg_check_top']] == [
         'Bravo',
         'Charlie',
         'Alpha',
+    ]
+    extra_top = network_data['staff_leaderboards']['extra_services']
+    assert [(row['staff'], row['qty'], row['sum']) for row in extra_top] == [
+        ('Charlie', 4.0, 1500.0),
+        ('Alpha', 3.0, 3000.0),
+        ('Bravo', 3.0, 5000.0),
     ]
     network_goods = {row['code']: row for row in network_data['goods_kpi_execution']}
     assert set(network_goods) == {'wax_qty', 'camouflage_qty', 'face_care_qty', 'head_care_qty'}
@@ -2176,7 +2211,7 @@ async def test_plan_fact_returns_staff_rankings_and_goods_kpis_by_scope(async_se
 
     assert branch_response.status_code == 200
     branch_data = branch_response.json()['data']
-    assert [row['title'] for row in branch_data['staff_rankings']['revenue_top']] == ['Bravo', 'Alpha']
+    assert [row['staff'] for row in branch_data['staff_leaderboards']['revenue_top']] == ['Bravo', 'Alpha']
     branch_goods = {row['code']: row for row in branch_data['goods_kpi_execution']}
     assert branch_goods['wax_qty']['plan'] == 2.0
     assert branch_goods['wax_qty']['fact'] == 1.0

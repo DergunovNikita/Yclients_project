@@ -2237,6 +2237,61 @@ async def _service_group_counts(
     }
 
 
+async def _extra_service_revenue_by_staff(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_ids: list[int] | None,
+) -> dict[int, float]:
+    """Paid revenue of the extra-service categories (wax/camouflage/face/head), per visit master.
+
+    Grouped by ``Appointment.staff_id`` to match how the plan/fact quantities are attributed.
+    """
+    if company_ids is not None and not company_ids:
+        return {}
+    tx_titles = (
+        select(
+            Transaction.appointment_id.label('record_id'),
+            Transaction.service_id.label('service_id'),
+            func.min(func.nullif(Transaction.service_title, '')).label('service_title'),
+        )
+        .group_by(Transaction.appointment_id, Transaction.service_id)
+        .subquery()
+    )
+    title_expr = func.lower(
+        func.coalesce(tx_titles.c.service_title, func.nullif(ServiceCatalog.title, ''), '')
+    )
+    extra_match = or_(
+        _title_matches(title_expr, WAX_TITLE_PARTS),
+        _title_matches(title_expr, CAMOUFLAGE_TITLE_PARTS),
+        _title_matches(title_expr, FACE_CARE_TITLE_PARTS),
+        _title_matches(title_expr, HEAD_CARE_TITLE_PARTS),
+    )
+    stmt = (
+        select(
+            Appointment.staff_id.label('staff_id'),
+            func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+        )
+        .select_from(FinancialTransaction)
+        .join(Appointment, Appointment.id == FinancialTransaction.record_id)
+        .outerjoin(
+            tx_titles,
+            and_(
+                tx_titles.c.record_id == FinancialTransaction.record_id,
+                tx_titles.c.service_id == FinancialTransaction.sold_item_id,
+            ),
+        )
+        .outerjoin(ServiceCatalog, _financial_service_catalog_join())
+        .where(
+            _service_paid_filters(start, end, None, None, allowed_company_ids=company_ids),
+            extra_match,
+            Appointment.staff_id.is_not(None),
+        )
+        .group_by(Appointment.staff_id)
+    )
+    return {int(row.staff_id): float(row.revenue or 0.0) for row in (await db.execute(stmt)).all()}
+
+
 async def _goods_sales_metrics(
     db: AsyncSession,
     start: date,
@@ -2816,27 +2871,67 @@ def _metric_plan_value(group: dict[str, Any], code: str) -> float | None:
     return None
 
 
-def _staff_rankings_payload(groups: list[dict[str, Any]], limit: int = 5) -> dict[str, list[dict[str, Any]]]:
-    def ranking(metric_code: str) -> list[dict[str, Any]]:
-        rows = [
-            {
-                'company_id': group.get('company_id'),
-                'staff_id': group.get('staff_id'),
-                'title': group.get('title'),
-                'position': group.get('position'),
-                'category': group.get('category'),
-                'category_label': group.get('category_label'),
-                'value': _round_optional(_metric_fact_value(group, metric_code)) or 0.0,
-            }
-            for group in groups
-            if group.get('staff_id') is not None
-        ]
-        rows.sort(key=lambda item: (-float(item['value'] or 0.0), str(item.get('title') or '')))
-        return rows[:limit]
+def _extra_service_qty(group: dict[str, Any]) -> float:
+    return sum(_metric_fact_value(group, code) for code in GOODS_KPI_CODES)
+
+
+def _staff_leaderboards_payload(
+    groups: list[dict[str, Any]],
+    limit: int = 5,
+    extra_revenue_by_staff: dict[int, float] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Top-N staff leaderboards per metric, used by the ratings report."""
+    extra_revenue_by_staff = extra_revenue_by_staff or {}
+    staff = [group for group in groups if group.get('staff_id') is not None]
+    barbers = [group for group in staff if (group.get('category') or 'unknown') == 'barber']
+    admins = [group for group in staff if (group.get('category') or 'unknown') == 'administrator']
+
+    def share(value: float, total: float) -> Optional[float]:
+        return _round_metric_value(100.0 * value / total, 'percent') if total else None
+
+    def leaderboard(source, value_fn, builder) -> list[dict[str, Any]]:
+        scored = [(float(value_fn(group) or 0.0), group) for group in source]
+        total = sum(value for value, _ in scored)
+        scored.sort(key=lambda item: (-item[0], str(item[1].get('title') or '')))
+        rows = []
+        for value, group in scored[:limit]:
+            row = {'staff': group.get('title'), 'company_id': group.get('company_id')}
+            builder(group, value, total, row)
+            rows.append(row)
+        return rows
+
+    def extra_builder(group, value, total, row):
+        row['qty'] = _round_metric_value(value, 'number')
+        row['sum'] = _round_metric_value(extra_revenue_by_staff.get(group.get('staff_id'), 0.0), 'money')
+        row['pct'] = _round_metric_value(_metric_fact_value(group, 'extra_services_pct'), 'percent')
+        row['share_pct'] = share(value, total)
+
+    def cosmo_builder(group, value, total, row):
+        row['qty'] = _round_metric_value(_metric_fact_value(group, 'cosmo_qty'), 'number')
+        row['sum'] = _round_metric_value(value, 'money')
+        row['share_pct'] = share(value, total)
+
+    def opz_builder(group, value, total, row):
+        row['qty'] = _round_metric_value(value, 'number')
+        row['pct'] = _round_metric_value(_metric_fact_value(group, 'opz_pct'), 'percent')
+
+    def value_builder(fmt):
+        def build(group, value, total, row):
+            row['value'] = _round_metric_value(value, fmt)
+        return build
+
+    def fact(code):
+        return lambda group: _metric_fact_value(group, code)
 
     return {
-        'revenue_top': ranking('revenue'),
-        'avg_check_top': ranking('avg_check_total'),
+        'extra_services': leaderboard(barbers, _extra_service_qty, extra_builder),
+        'cosmo_barber': leaderboard(barbers, fact('cosmo_sum'), cosmo_builder),
+        'cosmo_admin': leaderboard(admins, fact('cosmo_sum'), cosmo_builder),
+        'opz_barber': leaderboard(barbers, fact('opz_qty'), opz_builder),
+        'opz_admin': leaderboard(admins, fact('opz_qty'), opz_builder),
+        'reviews_admin': leaderboard(admins, fact('reviews_qty'), value_builder('number')),
+        'revenue_top': leaderboard(staff, fact('revenue'), value_builder('money')),
+        'avg_check_top': leaderboard(staff, fact('avg_check_total'), value_builder('money')),
     }
 
 
@@ -3927,7 +4022,7 @@ async def fetch_plan_fact(
                 'metrics': list(PLAN_FACT_METRICS),
                 'metric_sets': _metric_sets_payload(),
                 'diagnostics': [],
-                'staff_rankings': _staff_rankings_payload([]),
+                'staff_leaderboards': _staff_leaderboards_payload([]),
                 'goods_kpi_execution': _goods_kpi_execution_payload([]),
                 'groups': [],
             }
@@ -3955,6 +4050,7 @@ async def fetch_plan_fact(
         }
         selected_staff_plan = _selected_staff_plan_payload(selected_staff, groups)
         diagnostics = await _client_fact_diagnostics(db, start, end, branch_id, groups)
+        extra_revenue_by_staff = await _extra_service_revenue_by_staff(db, start, end, [branch_id])
 
         return {
             'period': {'start': start.isoformat(), 'end': end.isoformat()},
@@ -3967,7 +4063,7 @@ async def fetch_plan_fact(
             'metrics': list(PLAN_FACT_METRICS),
             'metric_sets': _metric_sets_payload(),
             'diagnostics': diagnostics,
-            'staff_rankings': _staff_rankings_payload(groups),
+            'staff_leaderboards': _staff_leaderboards_payload(groups, extra_revenue_by_staff=extra_revenue_by_staff),
             'goods_kpi_execution': _goods_kpi_execution_payload(groups),
             'groups': groups,
         }
@@ -4031,6 +4127,7 @@ async def fetch_plan_fact(
         for branch_id in company_ids
         for group in staff_groups_by_company.get(branch_id, [])
     ]
+    extra_revenue_by_staff = await _extra_service_revenue_by_staff(db, start, end, company_ids)
 
     return {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
@@ -4039,7 +4136,9 @@ async def fetch_plan_fact(
         'metrics': list(PLAN_FACT_METRICS),
         'metric_sets': _metric_sets_payload(),
         'diagnostics': [],
-        'staff_rankings': _staff_rankings_payload(all_staff_groups),
+        'staff_leaderboards': _staff_leaderboards_payload(
+            all_staff_groups, extra_revenue_by_staff=extra_revenue_by_staff
+        ),
         'goods_kpi_execution': _goods_kpi_execution_payload(all_staff_groups),
         'groups': groups,
     }

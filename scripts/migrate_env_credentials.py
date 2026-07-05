@@ -16,12 +16,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from sqlalchemy import select
+from sqlalchemy import select  # noqa: E402
 
-from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER, LOGIN, PARTNER_TOKEN, PASSWORD
-from database import init_database
-from models import Company, PortalAccount, PortalBranch, YClientsCredential, YClientsCredentialCompany
-from yclients_credentials import new_credential
+from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER, LOGIN, PARTNER_TOKEN, PASSWORD  # noqa: E402
+from database import init_database  # noqa: E402
+from models import Company, PortalAccount, PortalBranch, YClientsCredential, YClientsCredentialCompany  # noqa: E402
+from yclients_credentials import new_credential  # noqa: E402
 
 DEFAULT_TITLE = 'Environment credentials (migrated)'
 

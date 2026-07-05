@@ -230,6 +230,8 @@
     "cardGoodsRevenue": "Выручка по товарам",
     "cardGoodsCount": "Кол-во проданных товаров",
     "cardGoodsAverageCheck": "Средний чек по товарам",
+    "cardGoodsRevenueShare": "Доля товаров в обороте",
+    "ofTotalRevenue": "от общего оборота",
     "cardExtraServiceRevenue": "Выручка по доп. услугам",
     "cardExtraServiceCount": "Кол-во оказанных доп. услуг",
     "cardExtraServiceAverageCheck": "Средний чек по доп. услугам",
