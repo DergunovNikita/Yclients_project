@@ -116,6 +116,8 @@ export function initReports({ clearError, showError, setApiState }) {
     compareEnabled: document.getElementById('report-compare-enabled'),
     compareStart: document.getElementById('report-compare-start'),
     compareEnd: document.getElementById('report-compare-end'),
+    compareRow: document.querySelector('.report-compare-row'),
+    granularityField: document.getElementById('report-granularity')?.closest('label'),
     refresh: document.getElementById('report-refresh'),
     dataLabels: document.getElementById('report-data-labels'),
   };
@@ -302,6 +304,18 @@ export function initReports({ clearError, showError, setApiState }) {
     return params.toString();
   }
 
+  function applyReportFilterVisibility(meta) {
+    const filters = meta.filters || {};
+    if (els.granularityField) els.granularityField.hidden = filters.granularity === false;
+    const canCompare = filters.compare !== false;
+    if (els.compareRow) els.compareRow.hidden = !canCompare;
+    if (!canCompare) {
+      els.compareEnabled.checked = false;
+      els.compareStart.value = '';
+      els.compareEnd.value = '';
+    }
+  }
+
   async function openReport(reportId, push = true) {
     state.activeReportId = reportId;
     const meta = state.reports.find((report) => report.id === reportId);
@@ -309,6 +323,7 @@ export function initReports({ clearError, showError, setApiState }) {
       showCatalog(push);
       return;
     }
+    applyReportFilterVisibility(meta);
     if (push) history.pushState({ view: 'reports', report: reportId }, '', reportPath(reportId, reportSearch()));
     setCatalogVisible(false);
     els.viewer.classList.add('visible');

@@ -66,12 +66,6 @@ REPORT_ORDER = (
     'market_benchmarks',
     'marketing_funnel',
     'master_motivation',
-    'milena_dynamics',
-    'milena_lost',
-    'milena_pl',
-    'milena_ranking',
-    'milena_salary',
-    'milena_upsell',
     'mind_index',
     'month_return',
     'new_vs_returning_cross',
@@ -185,15 +179,6 @@ CLIENT_REPORTS = {
 }
 CHURN_REPORTS = {'losses_by_staff', 'lost_clients_list', 'return_priorities', 'revenue_at_risk'}
 GOODS_REPORTS = {'goods_by_staff', 'goods_conversion', 'goods_dynamics', 'top_goods_revenue'}
-MILENA_REPORTS = {
-    'milena_dynamics',
-    'milena_lost',
-    'milena_pl',
-    'milena_ranking',
-    'milena_salary',
-    'milena_upsell',
-}
-
 TITLE_OVERRIDES = {
     'avg_check_by_service': 'Средний чек по услугам',
     'avg_check_dynamics': 'Динамика среднего чека',
@@ -304,8 +289,6 @@ def _group_for(report_id: str) -> str:
         return 'goods'
     if report_id in SOURCE_MISSING_REPORTS:
         return 'marketing'
-    if report_id in MILENA_REPORTS:
-        return 'milena'
     if report_id in {'data_audit'}:
         return 'diagnostics'
     return 'advanced'
@@ -360,23 +343,34 @@ def _roles_for(group: str) -> tuple[str, ...]:
     return ('владельцу', 'управляющему')
 
 
+GRANULARITY_REPORTS = {
+    'avg_check_dynamics',
+    'booking_channels',
+    'bookings_dynamics',
+    'financial_overview',
+    'goods_conversion',
+    'goods_dynamics',
+    'revenue_decomposition',
+    'revenue_dynamics',
+    'service_trends',
+}
+
+# Reports where period-over-period comparison is meaningful: time-series and
+# headline aggregate KPIs. Rankings, lists, matrices and detail reports omit it.
+COMPARE_REPORTS = GRANULARITY_REPORTS | {
+    'cancellation_analysis',
+    'day_overview',
+    'new_vs_returning_cross',
+}
+
+
 def _filters_for(report_id: str, group: str, status: str) -> dict[str, bool]:
     return {
         'date_range': True,
         'branch': True,
         'staff': group in {'team', 'services', 'clients', 'churn', 'goods', 'operations'} or report_id in READY_REPORTS,
-        'granularity': report_id in {
-            'avg_check_dynamics',
-            'booking_channels',
-            'bookings_dynamics',
-            'financial_overview',
-            'goods_conversion',
-            'goods_dynamics',
-            'revenue_decomposition',
-            'revenue_dynamics',
-            'service_trends',
-        },
-        'compare': status == 'ready',
+        'granularity': report_id in GRANULARITY_REPORTS,
+        'compare': status == 'ready' and report_id in COMPARE_REPORTS,
     }
 
 
@@ -399,8 +393,6 @@ def _required_sources_for(report_id: str, status: str) -> tuple[str, ...]:
         return ('market_benchmark_data',)
     if status == 'source_missing':
         return ('yandex_metrika',)
-    if report_id in MILENA_REPORTS:
-        return ('yclients', 'milena_methodology_settings')
     return ('yclients', 'scheduled_report_calculation')
 
 

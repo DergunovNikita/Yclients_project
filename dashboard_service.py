@@ -11,7 +11,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Optional
 
 from sqlalchemy import String, and_, case, cast, delete, exists, func, or_, select
-from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
+from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -2289,7 +2289,14 @@ async def _extra_service_revenue_by_staff(
         )
         .group_by(Appointment.staff_id)
     )
-    return {int(row.staff_id): float(row.revenue or 0.0) for row in (await db.execute(stmt)).all()}
+    try:
+        rows = (await db.execute(stmt)).all()
+    except SQLAlchemyError as error:
+        # Degrade gracefully: the leaderboard still renders without the money column.
+        print(f'extra-service revenue aggregation failed: {error}')
+        await db.rollback()
+        return {}
+    return {int(row.staff_id): float(row.revenue or 0.0) for row in rows}
 
 
 async def _goods_sales_metrics(

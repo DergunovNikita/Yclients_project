@@ -61,7 +61,7 @@ async def test_dashboard_reports_registry_contract(async_session):
 
     assert r.status_code == 200
     data = r.json()['data']
-    assert len(data) == 67
+    assert len(data) == 61
     by_id = {item['id']: item for item in data}
     assert by_id['revenue_dynamics']['status'] == 'ready'
     assert by_id['conversion_funnel']['status'] == 'source_missing'
@@ -73,8 +73,12 @@ async def test_dashboard_reports_registry_contract(async_session):
     assert by_id['new_vs_returning_cross']['group'] == 'clients'
     assert by_id['staff_leaderboard']['status'] == 'ready'
     assert by_id['staff_leaderboard']['group'] == 'team'
+    # Compare is offered only for dynamics/aggregate reports, not rankings or plan duplicates.
+    assert by_id['staff_leaderboard']['filters']['compare'] is False
+    assert by_id['top_goods_revenue']['filters']['compare'] is False
     assert 'plan_execution' not in by_id
     assert 'masters_rating' not in by_id
+    assert not any(report_id.startswith('milena_') for report_id in by_id)
 
 
 @pytest.mark.asyncio
