@@ -3993,6 +3993,7 @@ async def fetch_plan_fact(
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
+    include_extra_service_revenue: bool = False,
 ) -> dict[str, Any]:
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
     selected_staff: dict[str, Any] | None = None
@@ -4057,7 +4058,10 @@ async def fetch_plan_fact(
         }
         selected_staff_plan = _selected_staff_plan_payload(selected_staff, groups)
         diagnostics = await _client_fact_diagnostics(db, start, end, branch_id, groups)
-        extra_revenue_by_staff = await _extra_service_revenue_by_staff(db, start, end, [branch_id])
+        extra_revenue_by_staff = (
+            await _extra_service_revenue_by_staff(db, start, end, [branch_id])
+            if include_extra_service_revenue else {}
+        )
 
         return {
             'period': {'start': start.isoformat(), 'end': end.isoformat()},
@@ -4134,7 +4138,10 @@ async def fetch_plan_fact(
         for branch_id in company_ids
         for group in staff_groups_by_company.get(branch_id, [])
     ]
-    extra_revenue_by_staff = await _extra_service_revenue_by_staff(db, start, end, company_ids)
+    extra_revenue_by_staff = (
+        await _extra_service_revenue_by_staff(db, start, end, company_ids)
+        if include_extra_service_revenue else {}
+    )
 
     return {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},

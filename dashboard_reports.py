@@ -1891,6 +1891,7 @@ async def _leaderboard_payload_impl(
         staff_id,
         allowed_company_ids=allowed_company_ids,
         force_allowed=allowed_company_ids is not None,
+        include_extra_service_revenue=True,
     )
     boards = plan.get('staff_leaderboards', {})
 

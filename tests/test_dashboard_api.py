@@ -2214,6 +2214,10 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
             '/dashboard/widget/plan_fact',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
+        report_response = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'staff_leaderboard', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
     app.dependency_overrides.clear()
 
     assert network_response.status_code == 200
@@ -2228,8 +2232,19 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
         'Charlie',
         'Alpha',
     ]
+    # The plan/fact widget skips the extra-service revenue query (report-only): qty is present, sum is 0.
     extra_top = network_data['staff_leaderboards']['extra_services']
-    assert [(row['staff'], row['qty'], row['sum']) for row in extra_top] == [
+    assert [(row['staff'], row['qty']) for row in extra_top] == [
+        ('Charlie', 4.0),
+        ('Alpha', 3.0),
+        ('Bravo', 3.0),
+    ]
+    # The ratings report enables the revenue query, so the money column is populated.
+    assert report_response.status_code == 200
+    report_extra = next(
+        table for table in report_response.json()['data']['tables'] if table['id'] == 'extra_services'
+    )
+    assert [(row['staff'], row['qty'], row['sum']) for row in report_extra['rows']] == [
         ('Charlie', 4.0, 1500.0),
         ('Alpha', 3.0, 3000.0),
         ('Bravo', 3.0, 5000.0),

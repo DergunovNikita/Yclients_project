@@ -4,7 +4,8 @@
   "framework": null,
   "installCommand": "npm install",
   "functions": {
-    "api/auth-proxy.js": { "maxDuration": 30 }
+    "api/auth-proxy.js": { "maxDuration": 30 },
+    "api/dashboard/**/*.js": { "maxDuration": 60 }
   },
   "rewrites": [
     { "source": "/auth/admin/yclients-credentials", "destination": "/api/auth/admin/yclients-credentials" },

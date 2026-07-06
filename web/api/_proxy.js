@@ -8,7 +8,7 @@ const HOP_BY_HOP_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
 ]);
-const PROXY_TIMEOUT_MS = Number(process.env.PROXY_TIMEOUT_MS || 10000);
+const PROXY_TIMEOUT_MS = Number(process.env.PROXY_TIMEOUT_MS || 55000);
 
 export function env(name) {
   const value = process.env[name];
