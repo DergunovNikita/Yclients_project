@@ -162,15 +162,19 @@ export function initReports({ clearError, showError, setApiState }) {
   async function ensureLoaded() {
     if (state.loaded) return;
     setDefaultDates();
-    const [reportsPayload, branchesPayload] = await Promise.all([
-      fetchJson('/dashboard/reports'),
-      fetchJson('/dashboard/branches'),
-    ]);
+    // The catalog itself is the essential payload; branch/staff filters are best-effort
+    // so a transient failure of a secondary endpoint never blanks the whole catalog.
+    const reportsPayload = await fetchJson('/dashboard/reports');
     state.reports = reportsPayload.data || [];
-    state.branches = branchesPayload.data || [];
     renderFilterOptions();
-    renderBranches();
-    await loadStaff();
+    try {
+      const branchesPayload = await fetchJson('/dashboard/branches');
+      state.branches = branchesPayload.data || [];
+      renderBranches();
+      await loadStaff();
+    } catch (error) {
+      console.error('Reports filters failed to load', error);
+    }
     state.loaded = true;
   }
 
@@ -348,9 +352,19 @@ export function initReports({ clearError, showError, setApiState }) {
   }
 
   async function loadFromLocation() {
-    await ensureLoaded();
+    try {
+      await ensureLoaded();
+    } catch (error) {
+      showError(error.message);
+      showCatalog(false);
+      return;
+    }
     applyReportParamsFromLocation(els);
-    await loadStaff();
+    try {
+      await loadStaff();
+    } catch (error) {
+      console.error('Reports staff filter failed to load', error);
+    }
     const reportId = reportIdFromLocation();
     if (reportId) {
       await openReport(reportId, false);
