@@ -1329,12 +1329,32 @@
       </nav>
 
       <section class="kpi" id="kpi"></section>
+
       <section data-overview-section="appointments" data-i18n-attr="aria-label:dash.jumpAppointments" aria-label="Appuntamenti">
         <div class="panel-title">
           <h2 data-i18n="dash.jumpAppointments">Appuntamenti</h2>
         </div>
         <section class="visit-metrics" id="visit-metrics" data-i18n-attr="aria-label:dash.ariaVisits" aria-label="Visite e servizi extra"></section>
+        <div class="grid">
+          <div class="panel wide">
+            <div class="panel-title">
+              <h2 data-i18n="dash.appointmentsByDay">Appuntamenti per giorno</h2>
+              <span class="meta" id="appointments-meta"></span>
+            </div>
+            <div class="appointments-warning" id="appointments-warning" role="status"></div>
+            <section class="appointments-metrics" id="appointments-metrics" data-i18n-attr="aria-label:dash.ariaStatuses" aria-label="Stati degli appuntamenti"></section>
+            <div class="chart-box short"><canvas id="appointments-chart"></canvas></div>
+          </div>
+
+          <div class="panel wide">
+            <div class="panel-title">
+              <h2 data-i18n="dash.opzShare">Vendite aggiuntive e quota sulle visite completate</h2>
+            </div>
+            <div class="chart-box"><canvas id="opz-chart"></canvas></div>
+          </div>
+        </div>
       </section>
+
       <section data-overview-section="clients" data-i18n-attr="aria-label:dash.ariaClients" aria-label="Clienti">
         <div class="panel-title">
           <h2 data-i18n="dash.clients">Clienti</h2>
@@ -1347,6 +1367,15 @@
           <h2 data-i18n="dash.jumpRevenue">Ricavi</h2>
         </div>
         <section class="visit-metrics" id="revenue-metrics"></section>
+        <div class="grid">
+          <div class="panel wide">
+            <div class="panel-title">
+              <h2 data-i18n="dash.revenueByDay">Ricavi per giorno</h2>
+              <span class="meta" id="revenue-meta"></span>
+            </div>
+            <div class="chart-box"><canvas id="revenue-chart"></canvas></div>
+          </div>
+        </div>
       </section>
 
       <section data-overview-section="services" data-i18n-attr="aria-label:dash.jumpServices" aria-label="Servizi">
@@ -1354,56 +1383,30 @@
           <h2 data-i18n="dash.jumpServices">Servizi</h2>
         </div>
         <section class="visit-metrics" id="services-metrics"></section>
-      </section>
-
-      <section class="grid">
-        <div class="panel wide" data-overview-section="revenue">
-          <div class="panel-title">
-            <h2 data-i18n="dash.revenueByDay">Ricavi per giorno</h2>
-            <span class="meta" id="revenue-meta"></span>
+        <div class="grid">
+          <div class="panel wide">
+            <div class="panel-title">
+              <h2 data-i18n="dash.extraServices">Servizi extra</h2>
+              <span class="meta" id="extra-services-meta"></span>
+            </div>
+            <div id="extra-services-table"></div>
           </div>
-          <div class="chart-box"><canvas id="revenue-chart"></canvas></div>
-        </div>
 
-        <div class="panel" data-overview-section="appointments">
-          <div class="panel-title">
-            <h2 data-i18n="dash.appointmentsByDay">Appuntamenti per giorno</h2>
-            <span class="meta" id="appointments-meta"></span>
+          <div class="panel">
+            <div class="panel-title">
+              <h2 data-i18n="dash.topServices">Servizi principali</h2>
+              <span class="meta" id="services-meta"></span>
+            </div>
+            <div class="chart-box short"><canvas id="services-chart"></canvas></div>
           </div>
-          <div class="appointments-warning" id="appointments-warning" role="status"></div>
-          <section class="appointments-metrics" id="appointments-metrics" data-i18n-attr="aria-label:dash.ariaStatuses" aria-label="Stati degli appuntamenti"></section>
-          <div class="chart-box short"><canvas id="appointments-chart"></canvas></div>
-        </div>
 
-        <div class="panel wide" data-overview-section="appointments">
-          <div class="panel-title">
-            <h2 data-i18n="dash.opzShare">Vendite aggiuntive e quota sulle visite completate</h2>
+          <div class="panel wide">
+            <div class="panel-title">
+              <h2 data-i18n="dash.topRevenueServices">Servizi con maggiori ricavi</h2>
+              <span class="meta" id="table-meta"></span>
+            </div>
+            <div id="services-table"></div>
           </div>
-          <div class="chart-box"><canvas id="opz-chart"></canvas></div>
-        </div>
-
-        <div class="panel wide" data-overview-section="services">
-          <div class="panel-title">
-            <h2 data-i18n="dash.extraServices">Servizi extra</h2>
-            <span class="meta" id="extra-services-meta"></span>
-          </div>
-          <div id="extra-services-table"></div>
-        </div>
-
-        <div class="panel" data-overview-section="services">
-          <div class="panel-title">
-            <h2 data-i18n="dash.topServices">Servizi principali</h2>
-            <span class="meta" id="services-meta"></span>
-          </div>
-          <div class="chart-box short"><canvas id="services-chart"></canvas></div>
-        </div>
-
-        <div class="panel wide" data-overview-section="services">
-          <div class="panel-title">
-            <h2 data-i18n="dash.topRevenueServices">Servizi con maggiori ricavi</h2>
-            <span class="meta" id="table-meta"></span>
-          </div>
-          <div id="services-table"></div>
         </div>
       </section>
     </section>
