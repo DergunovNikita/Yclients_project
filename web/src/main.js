@@ -579,10 +579,6 @@ function renderServicesMetrics(summary) {
 
 function renderVisitMetrics(summary) {
   const visitMetrics = summary.visit_metrics || {};
-  const clientFrequency = visitMetrics.client_visit_frequency || {};
-  const oneVisit = clientFrequency.one_visit || {};
-  const twoToThreeVisits = clientFrequency.two_to_three_visits || {};
-  const fourPlusVisits = clientFrequency.four_plus_visits || {};
   const cards = [
     {
       label: t('dash.cardOpzQty'),
@@ -602,6 +598,18 @@ function renderVisitMetrics(summary) {
       delta: formatPct(visitMetrics.extra_services_per_appointment_pct_change_pct),
       deltaValue: visitMetrics.extra_services_per_appointment_pct_change_pct,
     },
+  ];
+
+  renderCards(els.visitMetrics, cards);
+}
+
+function renderClientsMetrics(summary) {
+  const visitMetrics = summary.visit_metrics || {};
+  const clientFrequency = visitMetrics.client_visit_frequency || {};
+  const oneVisit = clientFrequency.one_visit || {};
+  const twoToThreeVisits = clientFrequency.two_to_three_visits || {};
+  const fourPlusVisits = clientFrequency.four_plus_visits || {};
+  const cards = [
     {
       label: t('dash.cardUniqueClients'),
       value: formatNumber(visitMetrics.unique_clients),
@@ -638,14 +646,6 @@ function renderVisitMetrics(summary) {
       delta: t('dash.ofClients', { value: formatMetricValue(fourPlusVisits.pct, 'percent') }),
       deltaValue: null,
     },
-  ];
-
-  renderCards(els.visitMetrics, cards);
-}
-
-function renderClientsMetrics(summary) {
-  const visitMetrics = summary.visit_metrics || {};
-  const cards = [
     {
       label: t('dash.cardNewClients'),
       value: formatNumber(visitMetrics.new_clients),

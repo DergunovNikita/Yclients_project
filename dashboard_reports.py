@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import traceback
 from collections import defaultdict
 from dataclasses import dataclass
 from calendar import monthrange
@@ -1843,6 +1844,37 @@ async def _operations_payload(
 
 
 async def _leaderboard_payload(
+    db: AsyncSession,
+    base: dict[str, Any],
+    start: date,
+    end: date,
+    company_id: int | None,
+    staff_id: int | None,
+    allowed_company_ids: list[int] | None,
+) -> dict[str, Any]:
+    """Never raise: a failure here must not turn the whole report into a 500."""
+    try:
+        return await _leaderboard_payload_impl(
+            db, base, start, end, company_id, staff_id, allowed_company_ids
+        )
+    except Exception:  # noqa: BLE001 - report degrades gracefully, traceback goes to the server log
+        traceback.print_exc()
+        try:
+            await db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        base['cards'] = []
+        base['charts'] = []
+        base['tables'] = []
+        base['notes'] = [{
+            'kind': 'partial',
+            'title': 'Отчёт временно недоступен',
+            'text': 'Не удалось рассчитать рейтинги за выбранный период. Ошибка записана в журнал сервера.',
+        }]
+        return base
+
+
+async def _leaderboard_payload_impl(
     db: AsyncSession,
     base: dict[str, Any],
     start: date,

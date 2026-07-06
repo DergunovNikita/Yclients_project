@@ -453,6 +453,37 @@ async def test_dashboard_staff_leaderboard_report_returns_top_tables(async_sessi
 
 
 @pytest.mark.asyncio
+async def test_dashboard_staff_leaderboard_report_degrades_without_500(async_session, monkeypatch):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    await async_session.commit()
+
+    import dashboard_reports
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError('boom')
+
+    monkeypatch.setattr(dashboard_reports, 'fetch_plan_fact', boom)
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        r = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'staff_leaderboard', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+    app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    data = r.json()['data']
+    assert data['tables'] == []
+    assert data['notes'] and data['notes'][0]['kind'] == 'partial'
+
+
+@pytest.mark.asyncio
 async def test_dashboard_bundle_requires_api_key(async_session, monkeypatch):
     monkeypatch.setattr(auth_deps, 'API_KEY', 'k')
 
