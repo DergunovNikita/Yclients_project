@@ -82,6 +82,7 @@ export class ReportChartManager {
     const previous = this.instances.get(spec.id);
     if (previous) previous.destroy();
 
+    const isArc = spec.type === 'doughnut' || spec.type === 'pie';
     const chart = new Chart(canvas, {
       type: spec.type || 'bar',
       data: {
@@ -89,10 +90,14 @@ export class ReportChartManager {
         datasets: (spec.datasets || []).map((dataset, index) => ({
           label: dataset.label,
           data: dataset.data || [],
-          borderColor: PALETTE[index % PALETTE.length],
-          backgroundColor: spec.type === 'line'
-            ? `${PALETTE[index % PALETTE.length]}22`
-            : PALETTE[index % PALETTE.length],
+          // Arc charts colour each segment individually; other charts colour per series.
+          borderColor: isArc ? '#ffffff' : PALETTE[index % PALETTE.length],
+          backgroundColor: isArc
+            ? (dataset.data || []).map((_, i) => PALETTE[i % PALETTE.length])
+            : spec.type === 'line'
+              ? `${PALETTE[index % PALETTE.length]}22`
+              : PALETTE[index % PALETTE.length],
+          borderWidth: isArc ? 2 : undefined,
           tension: 0.28,
           fill: dataset.fill ?? (spec.type === 'line'),
           borderRadius: spec.type === 'bar' ? 4 : 0,

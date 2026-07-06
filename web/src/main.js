@@ -133,9 +133,17 @@ const charts = {
   appointments: null,
   opz: null,
   services: null,
-  selectedStaffPlan: null,
+  staffPlanGroups: [],
   goodsKpi: null,
 };
+
+// Plan/fact metrics live on different scales (money vs counts vs %), so each
+// scale gets its own chart to stay readable.
+const PLAN_SCALE_GROUPS = [
+  { format: 'money', labelKey: 'dash.scaleMoney', color: '#0f766e' },
+  { format: 'number', labelKey: 'dash.scaleCount', color: '#2563eb' },
+  { format: 'percent', labelKey: 'dash.scalePercent', color: '#b45309' },
+];
 
 const pageOpenedAt = new Date();
 let activeView = 'overview';
@@ -1063,8 +1071,43 @@ function chartValue(value) {
   return Number(value || 0);
 }
 
+function buildStaffPlanChart(canvas, metrics, factColor) {
+  const format = metrics[0]?.format || 'number';
+  return new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: metrics.map((metric) => metric.label),
+      datasets: [
+        {
+          label: t('dash.plan'),
+          data: metrics.map((metric) => chartValue(metric.plan)),
+          backgroundColor: '#94a3b8',
+          borderRadius: 4,
+        },
+        {
+          label: t('dash.fact'),
+          data: metrics.map((metric) => chartValue(metric.fact)),
+          backgroundColor: factColor,
+          borderRadius: 4,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: { y: { beginAtZero: true, ticks: { callback: (value) => formatMetricValue(value, format) } } },
+      plugins: {
+        tooltip: {
+          callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${formatMetricValue(ctx.parsed.y, format)}` },
+        },
+      },
+    },
+  });
+}
+
 function renderPlanInsights(planFact) {
-  destroyChart('selectedStaffPlan');
+  charts.staffPlanGroups.forEach((chart) => chart.destroy());
+  charts.staffPlanGroups = [];
   destroyChart('goodsKpi');
   if (!els.planInsights) return;
 
@@ -1072,16 +1115,26 @@ function renderPlanInsights(planFact) {
   const selectedStaffPlan = planFact?.selected_staff_plan;
   const panels = [];
 
+  const staffPlanScaleGroups = [];
   if (selectedStaffPlan?.metrics?.length) {
-    panels.push(`
-      <div class="panel wide">
-        <div class="panel-title">
-          <h2>${t('dash.planVsFactTitle', { name: escapeHtml(selectedStaffPlan.title || t('dash.staffFallbackLower')) })}</h2>
-          <span class="meta">${escapeHtml(selectedStaffPlan.category_label || '')}</span>
+    const visibleMetrics = selectedStaffPlan.metrics.filter(
+      (metric) => (metric.plan !== null && metric.plan !== undefined) || chartValue(metric.fact) !== 0,
+    );
+    PLAN_SCALE_GROUPS.forEach((scale) => {
+      const groupMetrics = visibleMetrics.filter((metric) => (metric.format || 'number') === scale.format);
+      if (!groupMetrics.length) return;
+      const canvasId = `selected-staff-plan-${scale.format}`;
+      staffPlanScaleGroups.push({ canvasId, metrics: groupMetrics, color: scale.color });
+      panels.push(`
+        <div class="panel wide">
+          <div class="panel-title">
+            <h2>${t('dash.planVsFactTitle', { name: escapeHtml(selectedStaffPlan.title || t('dash.staffFallbackLower')) })} · ${t(scale.labelKey)}</h2>
+            <span class="meta">${escapeHtml(selectedStaffPlan.category_label || '')}</span>
+          </div>
+          <div class="chart-box short"><canvas id="${canvasId}"></canvas></div>
         </div>
-        <div class="chart-box short"><canvas id="selected-staff-plan-chart"></canvas></div>
-      </div>
-    `);
+      `);
+    });
   }
 
   if (goodsKpis.length) {
@@ -1098,37 +1151,11 @@ function renderPlanInsights(planFact) {
 
   els.planInsights.innerHTML = panels.join('');
 
-  const selectedCanvas = document.getElementById('selected-staff-plan-chart');
-  if (selectedCanvas && selectedStaffPlan?.metrics?.length) {
-    const visibleMetrics = selectedStaffPlan.metrics.filter(
-      (metric) => (metric.plan !== null && metric.plan !== undefined) || chartValue(metric.fact) !== 0,
-    );
-    charts.selectedStaffPlan = new Chart(selectedCanvas, {
-      type: 'bar',
-      data: {
-        labels: visibleMetrics.map((metric) => metric.label),
-        datasets: [
-          {
-            label: t('dash.plan'),
-            data: visibleMetrics.map((metric) => chartValue(metric.plan)),
-            backgroundColor: '#94a3b8',
-            borderRadius: 4,
-          },
-          {
-            label: t('dash.fact'),
-            data: visibleMetrics.map((metric) => chartValue(metric.fact)),
-            backgroundColor: '#0f766e',
-            borderRadius: 4,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        scales: { y: { beginAtZero: true } },
-      },
-    });
-  }
+  staffPlanScaleGroups.forEach((group) => {
+    const canvas = document.getElementById(group.canvasId);
+    if (!canvas) return;
+    charts.staffPlanGroups.push(buildStaffPlanChart(canvas, group.metrics, group.color));
+  });
 
   const goodsCanvas = document.getElementById('goods-kpi-chart');
   if (goodsCanvas && goodsKpis.length) {
