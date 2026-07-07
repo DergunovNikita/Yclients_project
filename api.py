@@ -26,6 +26,7 @@ from config import (
     DB_PASSWORD,
     DB_PORT,
     DB_USER,
+    IS_PRODUCTION,
     SYNC_API_TOKEN,
 )
 from dashboard_routes import router as dashboard_router
@@ -77,7 +78,9 @@ except Exception:
 MAX_PAGE_SIZE = 5000
 DEFAULT_PAGE_SIZE = 1000
 
-OPEN_PATHS = {"/health", "/openapi.json", "/docs", "/redoc"}
+OPEN_PATHS = {"/health"}
+if not IS_PRODUCTION:
+    OPEN_PATHS.update({"/openapi.json", "/docs", "/redoc"})
 
 
 async def require_api_key(
@@ -105,6 +108,9 @@ app = FastAPI(
     title="YClients BI System API",
     description="API для получения данных YClients в табличном формате",
     version="5.0.0",
+    docs_url=None if IS_PRODUCTION else '/docs',
+    redoc_url=None if IS_PRODUCTION else '/redoc',
+    openapi_url=None if IS_PRODUCTION else '/openapi.json',
     dependencies=[Depends(require_api_key)],
 )
 

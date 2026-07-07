@@ -10,15 +10,12 @@ import jwt
 from auth_scope import AccessContext
 from auth_service import decode_access_token, load_portal_account_branch_ids, load_user_access_branch_ids
 from auth_sessions import ACCESS_COOKIE_NAME, enforce_csrf
-from config import API_KEY, AUTH_REQUIRE_LOGIN
+from config import API_KEY, AUTH_REQUIRE_LOGIN, IS_PRODUCTION
 from database import get_async_db
 from models import PortalUser, Staff
 
 OPEN_PATH_PREFIXES = (
     '/health',
-    '/openapi.json',
-    '/docs',
-    '/redoc',
     '/auth/register',
     '/auth/login',
     '/auth/demo-login',
@@ -39,9 +36,11 @@ OPEN_PATH_PREFIXES = (
     '/dashboard/auth/resend-verification',
 )
 
+DOCS_OPEN_PATHS = set() if IS_PRODUCTION else {'/openapi.json', '/docs', '/redoc'}
+
 
 def _is_open_path(path: str) -> bool:
-    if path in {'/health', '/openapi.json', '/docs', '/redoc'}:
+    if path == '/health' or path in DOCS_OPEN_PATHS:
         return True
     return any(path.startswith(prefix) for prefix in OPEN_PATH_PREFIXES)
 
