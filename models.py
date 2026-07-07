@@ -683,6 +683,7 @@ class PortalAccount(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     label = Column(String(255), nullable=False, default='default')
+    is_demo = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, nullable=False)
 
 
@@ -717,6 +718,7 @@ class PortalUser(Base):
     full_name = Column(String(255))
     role = Column(String(32), nullable=False, default='viewer', index=True)
     is_active = Column(Boolean, nullable=False, default=True)
+    is_demo = Column(Boolean, nullable=False, default=False)
     email_verified_at = Column(DateTime)
     initial_password = Column(String(128))
     password_changed_at = Column(DateTime)
