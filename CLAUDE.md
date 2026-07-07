@@ -65,6 +65,7 @@ docker compose up -d                    # postgres, api, worker, metabase
 docker compose run --rm migrate         # alembic migrations
 docker compose run --rm sync            # разовая синхронизация
 docker compose --profile tools run --rm analytics  # обновить views
+python -m scripts.seed_demo             # host: провижининг общего read-only демо-стенда (только на демо-базе)
 ```
 
 - API: http://127.0.0.1:8000
