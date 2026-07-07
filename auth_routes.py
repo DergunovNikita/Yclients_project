@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
@@ -44,6 +45,7 @@ from auth_sessions import (
     REFRESH_COOKIE_NAME,
     bump_user_token_version,
     clear_auth_cookies,
+    extract_client_ip,
     issue_session,
     list_user_sessions,
     revoke_refresh,
@@ -188,6 +190,7 @@ def _user_payload(
         'role': user.role,
         'portal_account_id': user.portal_account_id,
         'is_active': user.is_active,
+        'is_demo': bool(user.is_demo),
         'email_verified': user.email_verified_at is not None,
         'company_ids': branch_ids,
         'is_portal_user': True,
@@ -284,6 +287,70 @@ async def login(
         raise HTTPException(status_code=401, detail='Invalid email or password')
     if not user_can_login(user):
         raise HTTPException(status_code=403, detail='Account disabled')
+
+    user.last_login_at = datetime.utcnow()
+    session = await issue_session(db, user, request, access_token_fn=_access_token_for)
+    await db.commit()
+    set_auth_cookies(response, session)
+    branch_ids = await load_user_access_branch_ids(db, user)
+    return {
+        'success': True,
+        'data': {
+            'access_token': session.access_token,
+            'token_type': 'bearer',
+            'csrf_token': session.csrf_token,
+            'user': _user_payload(user, branch_ids),
+        },
+    }
+
+
+# Best-effort in-memory rate limit for the unauthenticated demo login (per process,
+# per client IP). Caps refresh-token churn from abuse without pulling in a dependency.
+_DEMO_LOGIN_WINDOW_SECONDS = 60.0
+_DEMO_LOGIN_MAX_PER_WINDOW = 10
+_demo_login_hits: dict[str, list[float]] = {}
+
+
+def _demo_login_allowed(ip: str | None) -> bool:
+    now = time.monotonic()
+    key = ip or 'unknown'
+    recent = [ts for ts in _demo_login_hits.get(key, ()) if now - ts < _DEMO_LOGIN_WINDOW_SECONDS]
+    if len(recent) >= _DEMO_LOGIN_MAX_PER_WINDOW:
+        _demo_login_hits[key] = recent
+        return False
+    recent.append(now)
+    _demo_login_hits[key] = recent
+    return True
+
+
+@router.post('/demo-login')
+async def demo_login(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Passwordless login into the shared read-only demo tenant.
+
+    Issues a normal session for the seeded demo owner (``is_demo=True``). Returns
+    503 when the demo tenant has not been provisioned (see scripts/seed_demo.py).
+    """
+    if not _demo_login_allowed(extract_client_ip(request)):
+        raise HTTPException(status_code=429, detail='Too many demo login attempts, try again shortly')
+
+    user = (
+        await db.execute(
+            select(PortalUser)
+            .where(
+                PortalUser.is_demo.is_(True),
+                PortalUser.role == 'owner',
+                PortalUser.is_active.is_(True),
+            )
+            .order_by(PortalUser.id.asc())
+            .limit(1)
+        )
+    ).scalars().first()
+    if user is None:
+        raise HTTPException(status_code=503, detail='Demo mode is not available')
 
     user.last_login_at = datetime.utcnow()
     session = await issue_session(db, user, request, access_token_fn=_access_token_for)

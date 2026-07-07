@@ -76,6 +76,10 @@ async def _account_branches(db: AsyncSession, portal_account_id: int) -> list[in
 
 
 def _step_from_state(user: PortalUser, has_credentials: bool, has_branches: bool) -> str:
+    # Demo users skip the funnel: the demo tenant is preprovisioned with branches
+    # but no YClients credentials, so the credential/branch checks below don't apply.
+    if user.is_demo:
+        return 'done'
     if not has_credentials:
         return 'pending_credentials'
     if not has_branches:
