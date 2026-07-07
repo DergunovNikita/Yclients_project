@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
 import api
+import auth_routes
 from api import app
 from auth_sessions import ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME
 from auth_service import create_access_token, hash_password
@@ -1860,5 +1861,156 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
         assert data['sent_count'] == 1
         assert len(data['skipped']) == 1
         assert sent == [('real.user@example.com', 'RealUser123!')]
+
+    app.dependency_overrides.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Demo tenant: passwordless login, scope, onboarding bypass, read-only guard   #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture(autouse=True)
+def _reset_demo_login_limiter():
+    """The demo-login rate limiter is module-global; isolate it per test."""
+    auth_routes._demo_login_hits.clear()
+    yield
+
+
+async def _seed_demo_owner(db, user_id: int = 90):
+    db.add(
+        PortalUser(
+            id=user_id,
+            portal_account_id=1,
+            email='demo@portal.local',
+            password_hash=hash_password('DemoSeed123!'),
+            full_name='Demo',
+            role='owner',
+            is_active=True,
+            is_demo=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    await db.commit()
+    return user_id
+
+
+@pytest.mark.asyncio
+async def test_demo_login_returns_is_demo_and_scoped_companies(auth_db):
+    await _seed_demo_owner(auth_db)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        resp = await client.post('/auth/demo-login')
+        assert resp.status_code == 200
+        user = resp.json()['data']['user']
+        assert user['is_demo'] is True
+        assert sorted(user['company_ids']) == [1, 2]
+        assert client.cookies.get(ACCESS_COOKIE_NAME)
+        assert client.cookies.get(REFRESH_COOKIE_NAME)
+        assert client.cookies.get(AUTH_CSRF_COOKIE_NAME)
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_demo_login_returns_503_when_not_provisioned(auth_db):
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        resp = await client.post('/auth/demo-login')
+        assert resp.status_code == 503
+        assert resp.json()['detail'] == 'Demo mode is not available'
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_demo_login_rate_limited_after_window_cap(auth_db):
+    await _seed_demo_owner(auth_db)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        codes = [(await client.post('/auth/demo-login')).status_code for _ in range(11)]
+
+    app.dependency_overrides.clear()
+    assert codes[:10] == [200] * 10
+    assert codes[10] == 429
+
+
+@pytest.mark.asyncio
+async def test_onboarding_state_done_for_demo_user(auth_db):
+    # The demo tenant has branches but no YClients credentials, so a non-demo
+    # owner would report 'pending_credentials'; 'done' proves the is_demo bypass.
+    demo_id = await _seed_demo_owner(auth_db)
+    token = create_access_token(demo_id, 'owner')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        resp = await client.get('/onboarding/state', headers={'Authorization': f'Bearer {token}'})
+        assert resp.status_code == 200
+        assert resp.json()['data']['step'] == 'done'
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_forbid_demo_blocks_writes_but_allows_reads(auth_db):
+    demo_id = await _seed_demo_owner(auth_db)
+    headers = {'Authorization': f'Bearer {create_access_token(demo_id, "owner")}'}
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        for path in (
+            '/sync/trigger',
+            '/dashboard/services/kpi_groups',
+            '/onboarding/credentials',
+            '/auth/logout-all',
+        ):
+            resp = await client.post(path, headers=headers, json={})
+            assert resp.status_code == 403, (path, resp.status_code, resp.text)
+            assert resp.json()['detail'] == 'Demo account is read-only'
+
+        me = await client.get('/auth/me', headers=headers)
+        assert me.status_code == 200
+        assert me.json()['data']['is_demo'] is True
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_forbid_demo_does_not_block_non_demo_owner(auth_db):
+    headers = {'Authorization': f'Bearer {create_access_token(1, "owner")}'}
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        me = await client.get('/auth/me', headers=headers)
+        assert me.status_code == 200
+        assert me.json()['data']['is_demo'] is False
+        logout_all = await client.post('/auth/logout-all', headers=headers)
+        assert logout_all.status_code == 200
 
     app.dependency_overrides.clear()
