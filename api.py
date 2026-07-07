@@ -29,6 +29,7 @@ from config import (
     SYNC_API_TOKEN,
 )
 from dashboard_routes import router as dashboard_router
+from auth_deps import forbid_demo
 from auth_routes import router as auth_router
 from auth_scope import AccessContext, require_sync_company_ids, require_tenant_context
 from onboarding_routes import router as onboarding_router
@@ -784,7 +785,7 @@ class SyncTriggerRequest(BaseModel):
     global_sync: bool = False
 
 
-@app.post("/sync/trigger")
+@app.post("/sync/trigger", dependencies=[Depends(forbid_demo)])
 async def trigger_sync(
     payload: SyncTriggerRequest,
     request: Request,

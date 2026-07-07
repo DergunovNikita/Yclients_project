@@ -10,7 +10,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_deps import get_current_user, require_roles
+from auth_deps import forbid_demo, get_current_user, require_roles
 from auth_hierarchy import (
     USER_ADMIN_ROLES,
     USER_MANAGER_ROLES,
@@ -406,7 +406,7 @@ async def logout(
     return {'success': True}
 
 
-@router.post('/logout-all')
+@router.post('/logout-all', dependencies=[Depends(forbid_demo)])
 async def logout_all(
     response: Response,
     user: PortalUser = Depends(get_current_user),
@@ -419,7 +419,7 @@ async def logout_all(
     return {'success': True}
 
 
-@router.post('/logout-others')
+@router.post('/logout-others', dependencies=[Depends(forbid_demo)])
 async def logout_others(
     request: Request,
     user: PortalUser = Depends(get_current_user),
@@ -452,7 +452,7 @@ async def list_sessions(
     }
 
 
-@router.delete('/sessions/{session_id}')
+@router.delete('/sessions/{session_id}', dependencies=[Depends(forbid_demo)])
 async def delete_session(
     session_id: int,
     user: PortalUser = Depends(get_current_user),
@@ -522,7 +522,7 @@ async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(
     return {'success': True, 'message': 'Пароль обновлён. Теперь можно войти в кабинет.'}
 
 
-@router.post('/change-password')
+@router.post('/change-password', dependencies=[Depends(forbid_demo)])
 async def change_password(
     body: ChangePasswordRequest,
     user: PortalUser = Depends(get_current_user),
@@ -795,7 +795,7 @@ async def admin_list_users(
     return {'success': True, 'data': payload}
 
 
-@router.post('/admin/users')
+@router.post('/admin/users', dependencies=[Depends(forbid_demo)])
 async def admin_create_user(
     body: AdminUserCreateRequest,
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
@@ -878,7 +878,7 @@ async def admin_create_user(
     }
 
 
-@router.patch('/admin/users/{user_id}')
+@router.patch('/admin/users/{user_id}', dependencies=[Depends(forbid_demo)])
 async def admin_update_user(
     user_id: int,
     body: AdminUserUpdateRequest,
@@ -960,7 +960,7 @@ async def admin_list_yclients_credentials(
     return {'success': True, 'data': await list_credential_payloads(db, portal_account_id)}
 
 
-@router.post('/admin/yclients-credentials')
+@router.post('/admin/yclients-credentials', dependencies=[Depends(forbid_demo)])
 async def admin_create_yclients_credentials(
     body: YClientsCredentialCreateRequest,
     x_portal_account_id: int | None = Header(default=None),
@@ -1018,7 +1018,7 @@ async def admin_create_yclients_credentials(
     return {'success': True, 'data': created_payload}
 
 
-@router.patch('/admin/yclients-credentials/{credential_id}')
+@router.patch('/admin/yclients-credentials/{credential_id}', dependencies=[Depends(forbid_demo)])
 async def admin_update_yclients_credentials(
     credential_id: int,
     body: YClientsCredentialUpdateRequest,
@@ -1075,7 +1075,7 @@ async def admin_update_yclients_credentials(
     return {'success': True, 'data': await list_credential_payloads(db, credential.portal_account_id)}
 
 
-@router.delete('/admin/yclients-credentials/{credential_id}')
+@router.delete('/admin/yclients-credentials/{credential_id}', dependencies=[Depends(forbid_demo)])
 async def admin_delete_yclients_credentials(
     credential_id: int,
     x_portal_account_id: int | None = Header(default=None),
@@ -1098,7 +1098,7 @@ async def admin_delete_yclients_credentials(
     return {'success': True, 'message': 'YClients credentials deleted'}
 
 
-@router.post('/admin/yclients-credentials/{credential_id}/test')
+@router.post('/admin/yclients-credentials/{credential_id}/test', dependencies=[Depends(forbid_demo)])
 async def admin_test_saved_yclients_credentials(
     credential_id: int,
     x_portal_account_id: int | None = Header(default=None),
@@ -1123,7 +1123,7 @@ async def admin_test_saved_yclients_credentials(
     return result
 
 
-@router.post('/admin/yclients-credentials/test')
+@router.post('/admin/yclients-credentials/test', dependencies=[Depends(forbid_demo)])
 async def admin_test_yclients_credentials_payload(
     body: YClientsCredentialTestRequest,
     _actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
@@ -1134,7 +1134,7 @@ async def admin_test_yclients_credentials_payload(
     return _test_source_credentials(source_type, body.partner_token, body.login, body.password)
 
 
-@router.delete('/admin/users/{user_id}')
+@router.delete('/admin/users/{user_id}', dependencies=[Depends(forbid_demo)])
 async def admin_delete_user(
     user_id: int,
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
@@ -1167,7 +1167,7 @@ async def admin_delete_user(
     return {'success': True, 'message': 'User deleted'}
 
 
-@router.patch('/admin/staff/{staff_id}')
+@router.patch('/admin/staff/{staff_id}', dependencies=[Depends(forbid_demo)])
 async def admin_update_staff(
     staff_id: int,
     body: AdminStaffUpdateRequest,
@@ -1193,7 +1193,7 @@ async def admin_update_staff(
     }
 
 
-@router.delete('/admin/staff/{staff_id}')
+@router.delete('/admin/staff/{staff_id}', dependencies=[Depends(forbid_demo)])
 async def admin_delete_staff(
     staff_id: int,
     x_portal_account_id: int | None = Header(default=None),
@@ -1219,7 +1219,7 @@ def _provisioned_payload(account) -> dict:
     }
 
 
-@router.post('/admin/provision-accounts')
+@router.post('/admin/provision-accounts', dependencies=[Depends(forbid_demo)])
 async def admin_provision_accounts(
     x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
@@ -1239,7 +1239,7 @@ async def admin_provision_accounts(
     }
 
 
-@router.post('/admin/staff/{staff_id}/create-account')
+@router.post('/admin/staff/{staff_id}/create-account', dependencies=[Depends(forbid_demo)])
 async def admin_create_staff_account(
     staff_id: int,
     body: AdminStaffCreateAccountRequest,
@@ -1306,7 +1306,7 @@ async def admin_list_initial_passwords(
     return {'success': True, 'data': payload}
 
 
-@router.post('/admin/distribute-credentials')
+@router.post('/admin/distribute-credentials', dependencies=[Depends(forbid_demo)])
 async def admin_distribute_credentials(
     body: DistributeCredentialsRequest,
     x_portal_account_id: int | None = Header(default=None),

@@ -162,3 +162,31 @@ def require_roles(*roles: str):
         return user
 
     return _dep
+
+
+async def forbid_demo(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_async_db),
+) -> None:
+    """Reject mutating requests made by the shared read-only demo account.
+
+    Soft by design: only a valid demo JWT is blocked with 403. API-key,
+    X-Sync-Token and unauthenticated callers carry no JWT and pass through
+    unchanged, so token-based automation keeps working. Attach per write route
+    via ``dependencies=[Depends(forbid_demo)]`` — never at router level, since
+    the routers also serve demo-allowed reads.
+    """
+    token = _extract_access_token(request, authorization)
+    if not token:
+        return
+    try:
+        payload = decode_access_token(token)
+    except jwt.PyJWTError:
+        return
+    try:
+        user_id = int(payload.get('sub'))
+    except (TypeError, ValueError):
+        return
+    if await db.scalar(select(PortalUser.is_demo).where(PortalUser.id == user_id)):
+        raise HTTPException(status_code=403, detail='Demo account is read-only')
