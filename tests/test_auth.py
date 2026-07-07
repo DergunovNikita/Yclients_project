@@ -873,6 +873,7 @@ async def test_onboarding_claims_branch_from_admin_only_tenant_with_active_crede
 @pytest.mark.asyncio
 async def test_register_allows_login_without_email_verification(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setattr('auth_routes.AUTH_PUBLIC_REGISTRATION_ENABLED', True)
 
     async def override_db():
         yield auth_db
@@ -896,6 +897,42 @@ async def test_register_allows_login_without_email_verification(auth_db, monkeyp
     assert created_user.portal_account_id is None
 
     app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_register_is_blocked_when_public_registration_disabled(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setattr('auth_routes.AUTH_PUBLIC_REGISTRATION_ENABLED', False)
+    before_count = await auth_db.scalar(select(func.count()).select_from(PortalUser))
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        new_email = await client.post(
+            '/auth/register',
+            json={'email': 'blocked@example.com', 'password': 'Blocked123!', 'full_name': 'Blocked'},
+        )
+        duplicate_email = await client.post(
+            '/auth/register',
+            json={'email': 'admin@example.com', 'password': 'Blocked123!', 'full_name': 'Blocked'},
+        )
+        dashboard_prefix = await client.post(
+            '/dashboard/auth/register',
+            json={'email': 'blocked2@example.com', 'password': 'Blocked123!', 'full_name': 'Blocked'},
+        )
+
+    app.dependency_overrides.clear()
+    after_count = await auth_db.scalar(select(func.count()).select_from(PortalUser))
+
+    assert new_email.status_code == 403
+    assert duplicate_email.status_code == 403
+    assert dashboard_prefix.status_code == 403
+    assert new_email.json()['detail'] == 'Public registration is disabled'
+    assert duplicate_email.json()['detail'] == 'Public registration is disabled'
+    assert after_count == before_count
 
 
 @pytest.mark.asyncio

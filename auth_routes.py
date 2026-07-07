@@ -75,6 +75,7 @@ from yclients_credentials import (
     set_credential_companies,
     update_credential_secrets,
 )
+from config import AUTH_PUBLIC_REGISTRATION_ENABLED
 
 router = APIRouter()
 
@@ -246,6 +247,9 @@ async def _load_manageable_staff(
 
 @router.post('/register')
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_async_db)):
+    if not AUTH_PUBLIC_REGISTRATION_ENABLED:
+        raise HTTPException(status_code=403, detail='Public registration is disabled')
+
     email = normalize_email(body.email)
     existing = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
     if existing is not None:

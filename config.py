@@ -153,6 +153,10 @@ AUTH_JWT_SECRET = os.getenv('AUTH_JWT_SECRET', 'change_me_local_jwt_secret')
 AUTH_JWT_EXPIRE_MINUTES = _get_int('AUTH_JWT_EXPIRE_MINUTES', 30)
 AUTH_REFRESH_TOKEN_EXPIRE_DAYS = _get_int('AUTH_REFRESH_TOKEN_EXPIRE_DAYS', 30)
 AUTH_REQUIRE_LOGIN = _get_bool('AUTH_REQUIRE_LOGIN', not bool(API_KEY))
+AUTH_PUBLIC_REGISTRATION_ENABLED = _get_bool(
+    'AUTH_PUBLIC_REGISTRATION_ENABLED',
+    APP_ENV in {'local', 'test'},
+)
 AUTH_EMAIL_VERIFY_REQUIRED = _get_bool('AUTH_EMAIL_VERIFY_REQUIRED', True)
 AUTH_EMAIL_RESEND_COOLDOWN_SECONDS = _get_int('AUTH_EMAIL_RESEND_COOLDOWN_SECONDS', 60)
 AUTH_COOKIE_SECURE = _get_bool('AUTH_COOKIE_SECURE', False)
@@ -188,6 +192,7 @@ def collect_production_config_errors(
     *,
     api_key: str | None = API_KEY,
     auth_require_login: bool = AUTH_REQUIRE_LOGIN,
+    auth_public_registration_enabled: bool = AUTH_PUBLIC_REGISTRATION_ENABLED,
     auth_jwt_secret: str | None = AUTH_JWT_SECRET,
     sync_api_token: str | None = SYNC_API_TOKEN,
     db_password: str | None = DB_PASSWORD,
@@ -221,6 +226,8 @@ def collect_production_config_errors(
         errors.append('API_KEY must be unset or set to a strong non-default value')
     if not auth_require_login and _is_blank(api_key):
         errors.append('AUTH_REQUIRE_LOGIN must be true unless API_KEY is set')
+    if auth_public_registration_enabled:
+        errors.append('AUTH_PUBLIC_REGISTRATION_ENABLED must be false')
     if not auth_cookie_secure:
         errors.append('AUTH_COOKIE_SECURE must be true')
     if (auth_cookie_samesite or '').strip().lower() not in {'lax', 'strict', 'none'}:
