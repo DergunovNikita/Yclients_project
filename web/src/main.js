@@ -140,7 +140,9 @@ const charts = {
 // Plan/fact metrics live on different scales (money vs counts vs %), so each
 // scale gets its own chart to stay readable.
 const PLAN_SCALE_GROUPS = [
-  { format: 'money', labelKey: 'dash.scaleMoney', color: '#0f766e' },
+  // Money metrics differ in magnitude between themselves (revenue vs avg check),
+  // so each gets its own chart, laid out in a single row.
+  { format: 'money', labelKey: 'dash.scaleMoney', color: '#0f766e', perMetric: true },
   { format: 'number', labelKey: 'dash.scaleCount', color: '#2563eb' },
   { format: 'percent', labelKey: 'dash.scalePercent', color: '#b45309' },
 ];
@@ -1115,29 +1117,48 @@ function renderPlanInsights(planFact) {
   const selectedStaffPlan = planFact?.selected_staff_plan;
   const panels = [];
 
+  const hasSelectedStaffCharts = Boolean(selectedStaffPlan?.metrics?.length);
   const staffPlanScaleGroups = [];
-  if (selectedStaffPlan?.metrics?.length) {
+  if (hasSelectedStaffCharts) {
     const visibleMetrics = selectedStaffPlan.metrics.filter(
       (metric) => (metric.plan !== null && metric.plan !== undefined) || chartValue(metric.fact) !== 0,
     );
+    const title = t('dash.planVsFactTitle', { name: escapeHtml(selectedStaffPlan.title || t('dash.staffFallbackLower')) });
+    const meta = escapeHtml(selectedStaffPlan.category_label || '');
     PLAN_SCALE_GROUPS.forEach((scale) => {
       const groupMetrics = visibleMetrics.filter((metric) => (metric.format || 'number') === scale.format);
       if (!groupMetrics.length) return;
-      const canvasId = `selected-staff-plan-${scale.format}`;
-      staffPlanScaleGroups.push({ canvasId, metrics: groupMetrics, color: scale.color });
-      panels.push(`
-        <div class="panel wide">
-          <div class="panel-title">
-            <h2>${t('dash.planVsFactTitle', { name: escapeHtml(selectedStaffPlan.title || t('dash.staffFallbackLower')) })} · ${t(scale.labelKey)}</h2>
-            <span class="meta">${escapeHtml(selectedStaffPlan.category_label || '')}</span>
+      const heading = `${title} · ${t(scale.labelKey)}`;
+      if (scale.perMetric) {
+        const cells = groupMetrics
+          .map((metric, index) => {
+            const canvasId = `selected-staff-plan-${scale.format}-${index}`;
+            staffPlanScaleGroups.push({ canvasId, metrics: [metric], color: scale.color });
+            return `<div class="chart-box short"><canvas id="${canvasId}"></canvas></div>`;
+          })
+          .join('');
+        panels.push(`
+          <div class="panel wide">
+            <div class="panel-title"><h2>${heading}</h2><span class="meta">${meta}</span></div>
+            <div class="plan-scale-row">${cells}</div>
           </div>
-          <div class="chart-box short"><canvas id="${canvasId}"></canvas></div>
-        </div>
-      `);
+        `);
+      } else {
+        const canvasId = `selected-staff-plan-${scale.format}`;
+        staffPlanScaleGroups.push({ canvasId, metrics: groupMetrics, color: scale.color });
+        panels.push(`
+          <div class="panel wide">
+            <div class="panel-title"><h2>${heading}</h2><span class="meta">${meta}</span></div>
+            <div class="chart-box short"><canvas id="${canvasId}"></canvas></div>
+          </div>
+        `);
+      }
     });
   }
 
-  if (goodsKpis.length) {
+  // The goods KPI chart repeats the count chart's wax/camouflage/care metrics,
+  // so only show it in the network/branch view where per-staff charts are absent.
+  if (goodsKpis.length && !hasSelectedStaffCharts) {
     panels.push(`
       <div class="panel wide">
         <div class="panel-title">
