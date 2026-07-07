@@ -1,5 +1,5 @@
 import './auth.css';
-import { authFetch, isTransientAuthError, setToken, wait } from './auth.js';
+import { authFetch, isTransientAuthError, wait } from './auth.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 document.documentElement.lang = getLocale();
@@ -31,6 +31,23 @@ async function loginWithRetry(email, password) {
   throw lastError;
 }
 
+const demoBtn = document.getElementById('demo-login');
+demoBtn?.addEventListener('click', async () => {
+  errorEl.hidden = true;
+  demoBtn.disabled = true;
+  demoBtn.classList.add('is-loading');
+  try {
+    await authFetch('/auth/demo-login', { method: 'POST' });
+    window.location.href = '/';
+  } catch (error) {
+    errorEl.textContent = error.message;
+    errorEl.hidden = false;
+  } finally {
+    demoBtn.disabled = false;
+    demoBtn.classList.remove('is-loading');
+  }
+});
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   errorEl.hidden = true;
@@ -40,7 +57,6 @@ form.addEventListener('submit', async (event) => {
     const email = document.getElementById('email').value.trim();
     const password = document.getElementById('password').value;
     const payload = await loginWithRetry(email, password);
-    setToken(payload.data.access_token);
     const user = payload.data.user;
     if (user?.role === 'owner') {
       try {

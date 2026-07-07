@@ -9,7 +9,9 @@ from sqlalchemy import func, select
 
 import api
 from api import app
+from auth_sessions import ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME
 from auth_service import create_access_token, hash_password
+from config import AUTH_CSRF_COOKIE_NAME
 from models import (
     Company,
     Group,
@@ -87,12 +89,129 @@ async def test_login_and_me(auth_db, monkeypatch):
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         login = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})
         assert login.status_code == 200
-        token = login.json()['data']['access_token']
-        me = await client.get('/auth/me', headers={'Authorization': f'Bearer {token}'})
+        payload = login.json()
+        assert 'access_token' not in payload['data']
+        assert 'token_type' not in payload['data']
+        assert client.cookies.get(ACCESS_COOKIE_NAME)
+        assert client.cookies.get(REFRESH_COOKIE_NAME)
+        assert client.cookies.get(AUTH_CSRF_COOKIE_NAME)
+        set_cookie_headers = login.headers.get_list('set-cookie')
+        assert any(f'{ACCESS_COOKIE_NAME}=' in item and 'HttpOnly' in item for item in set_cookie_headers)
+        assert any(f'{REFRESH_COOKIE_NAME}=' in item and 'HttpOnly' in item for item in set_cookie_headers)
+        assert any(f'{AUTH_CSRF_COOKIE_NAME}=' in item and 'HttpOnly' not in item for item in set_cookie_headers)
+
+        me = await client.get('/auth/me')
         assert me.status_code == 200
         assert me.json()['data']['role'] == 'owner'
 
     app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_refresh_keeps_cookie_session_without_returning_access_token(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        login = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})
+        assert login.status_code == 200
+        refresh = await client.post('/auth/refresh')
+
+    app.dependency_overrides.clear()
+
+    assert refresh.status_code == 200
+    payload = refresh.json()
+    assert 'access_token' not in payload['data']
+    assert 'token_type' not in payload['data']
+    assert payload['data']['user']['email'] == 'admin@example.com'
+
+
+@pytest.mark.asyncio
+async def test_demo_login_keeps_cookie_session_without_returning_access_token(auth_db):
+    demo_user = PortalUser(
+        id=80,
+        portal_account_id=1,
+        email='demo@example.com',
+        password_hash=hash_password('Demo12345!'),
+        full_name='Demo',
+        role='owner',
+        is_active=True,
+        is_demo=True,
+        email_verified_at=datetime.utcnow(),
+        created_at=datetime.utcnow(),
+    )
+    auth_db.add(demo_user)
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post('/auth/demo-login')
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert 'access_token' not in payload['data']
+    assert 'token_type' not in payload['data']
+    assert payload['data']['user']['email'] == 'demo@example.com'
+    assert client.cookies.get(ACCESS_COOKIE_NAME)
+    assert client.cookies.get(REFRESH_COOKIE_NAME)
+
+
+@pytest.mark.asyncio
+async def test_cookie_mutation_requires_csrf_but_bearer_does_not(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as cookie_client:
+        login = await cookie_client.post(
+            '/auth/login',
+            json={'email': 'admin@example.com', 'password': 'Admin12345!'},
+        )
+        assert login.status_code == 200
+        missing_csrf = await cookie_client.post(
+            '/auth/change-password',
+            json={'current_password': 'Admin12345!', 'new_password': 'Changed12345!'},
+        )
+        csrf = cookie_client.cookies.get(AUTH_CSRF_COOKIE_NAME)
+        with_csrf = await cookie_client.post(
+            '/auth/change-password',
+            headers={'X-CSRF-Token': csrf},
+            json={'current_password': 'Admin12345!', 'new_password': 'Changed12345!'},
+        )
+
+    # Fresh database fixture is not available inside the same test, so restore
+    # the original password before verifying Bearer behavior.
+    admin = (await auth_db.execute(select(PortalUser).where(PortalUser.id == 1))).scalar_one()
+    admin.password_hash = hash_password('Admin12345!')
+    admin.token_version = 0
+    await auth_db.commit()
+
+    token = create_access_token(1, 'owner')
+    async with AsyncClient(transport=transport, base_url='http://test') as bearer_client:
+        bearer = await bearer_client.post(
+            '/auth/change-password',
+            headers={'Authorization': f'Bearer {token}'},
+            json={'current_password': 'Admin12345!', 'new_password': 'Bearer12345!'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert missing_csrf.status_code == 403
+    assert with_csrf.status_code == 200
+    assert bearer.status_code == 200
 
 
 @pytest.mark.asyncio

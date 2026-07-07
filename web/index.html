@@ -382,6 +382,24 @@
 
     .appointments-warning.visible { display: block; }
 
+    .demo-banner {
+      padding: 10px 16px;
+      background: #fffbeb;
+      border-bottom: 1px solid #fcd34d;
+      color: #92400e;
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+    }
+
+    .demo-mode #plan-settings-save,
+    .demo-mode #plan-settings-copy,
+    .demo-mode #plan-settings-reset,
+    .demo-mode #service-management-save,
+    .demo-mode #service-management-reset,
+    .demo-mode #service-group-add,
+    .demo-mode #review-fact-save { display: none !important; }
+
     .card,
     .panel {
       border: 1px solid #dbe3ef;
@@ -1254,6 +1272,7 @@
 </head>
 <body>
   <main class="shell">
+    <div id="demo-banner" class="demo-banner" hidden data-i18n="demo.banner"></div>
     <section class="topbar">
       <div>
         <h1 data-i18n="dash.title">Dashboard di analisi</h1>

@@ -4,6 +4,7 @@ import {
   authFetch,
   authHeaders,
   ensureOnboardingComplete,
+  getCsrfToken,
   getSelectedPortalAccountId,
   hasSessionHint,
   loadCurrentUser,
@@ -283,7 +284,7 @@ async function fetchJson(path, params) {
   for (const url of apiUrlCandidates(path, params)) {
     let response;
     try {
-      response = await fetch(url, { headers: headers() });
+      response = await fetch(url, { credentials: 'include', headers: headers() });
     } catch (error) {
       errors.push(`${url}\n${error.message}`);
       continue;
@@ -312,9 +313,15 @@ async function requestJson(path, { method = 'GET', body = null } = {}) {
   for (const url of apiUrlCandidates(path)) {
     let response;
     try {
+      const requestHeaders = { ...headers(), 'Content-Type': 'application/json' };
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(String(method).toUpperCase())) {
+        const csrf = getCsrfToken();
+        if (csrf) requestHeaders['X-CSRF-Token'] = csrf;
+      }
       response = await fetch(url, {
         method,
-        headers: { ...headers(), 'Content-Type': 'application/json' },
+        credentials: 'include',
+        headers: requestHeaders,
         body: body === null ? undefined : JSON.stringify(body),
       });
     } catch (error) {
@@ -325,6 +332,12 @@ async function requestJson(path, { method = 'GET', body = null } = {}) {
     if (!response.ok) {
       const responseBody = await response.text();
       console.error('Dashboard API request failed', { status: response.status, url, body: responseBody.slice(0, 1000) });
+      if (response.status === 403 && responseBody.includes('Demo account is read-only')) {
+        showError(t('demo.readOnly'));
+        const demoError = new Error(t('demo.readOnly'));
+        demoError.status = 403;
+        throw demoError;
+      }
       throw new Error(userDataLoadErrorMessage());
     }
 
@@ -2221,6 +2234,12 @@ async function init() {
     currentUser = me.data;
     const onboardingOk = await ensureOnboardingComplete(currentUser);
     if (!onboardingOk) return;
+    const isDemo = currentUser?.is_demo === true;
+    document.body.classList.toggle('demo-mode', isDemo);
+    const demoBanner = document.getElementById('demo-banner');
+    if (demoBanner) {
+      demoBanner.hidden = !isDemo;
+    }
     const profileLink = document.getElementById('user-profile-link');
     const profileName = document.getElementById('user-profile-name');
     const profileRole = document.getElementById('user-profile-role');

@@ -278,6 +278,13 @@ def _access_token_for(user: PortalUser) -> str:
     return create_access_token(user.id, user.role, user.token_version)
 
 
+def _session_payload(user: PortalUser, branch_ids: list[int], csrf_token: str) -> dict:
+    return {
+        'csrf_token': csrf_token,
+        'user': _user_payload(user, branch_ids),
+    }
+
+
 @router.post('/login')
 async def login(
     body: LoginRequest,
@@ -299,12 +306,7 @@ async def login(
     branch_ids = await load_user_access_branch_ids(db, user)
     return {
         'success': True,
-        'data': {
-            'access_token': session.access_token,
-            'token_type': 'bearer',
-            'csrf_token': session.csrf_token,
-            'user': _user_payload(user, branch_ids),
-        },
+        'data': _session_payload(user, branch_ids, session.csrf_token),
     }
 
 
@@ -363,12 +365,7 @@ async def demo_login(
     branch_ids = await load_user_access_branch_ids(db, user)
     return {
         'success': True,
-        'data': {
-            'access_token': session.access_token,
-            'token_type': 'bearer',
-            'csrf_token': session.csrf_token,
-            'user': _user_payload(user, branch_ids),
-        },
+        'data': _session_payload(user, branch_ids, session.csrf_token),
     }
 
 
@@ -387,12 +384,7 @@ async def refresh(
     branch_ids = await load_user_access_branch_ids(db, user)
     return {
         'success': True,
-        'data': {
-            'access_token': session.access_token,
-            'token_type': 'bearer',
-            'csrf_token': session.csrf_token,
-            'user': _user_payload(user, branch_ids),
-        },
+        'data': _session_payload(user, branch_ids, session.csrf_token),
     }
 
 
