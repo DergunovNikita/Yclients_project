@@ -160,11 +160,16 @@ async def test_sync_trigger_queues_job(async_session, monkeypatch):
     async def override_db():
         yield async_session
 
+    monkeypatch.setattr(api, 'SYNC_API_TOKEN', 'test-sync-token')
     monkeypatch.setattr(api.SyncJobService, 'async_enqueue_job', fake_enqueue)
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        response = await client.post('/sync/trigger', json={'mode': 'incremental', 'initiator': 'dashboard'})
+        response = await client.post(
+            '/sync/trigger',
+            json={'mode': 'incremental', 'initiator': 'dashboard'},
+            headers={'X-Sync-Token': 'test-sync-token'},
+        )
 
     app.dependency_overrides.clear()
 
@@ -185,6 +190,60 @@ async def test_sync_trigger_queues_job(async_session, monkeypatch):
         'credential_id': None,
         'company_ids': None,
     }
+
+
+@pytest.mark.asyncio
+async def test_sync_trigger_rejects_unconfigured_token(async_session, monkeypatch):
+    async def override_db():
+        yield async_session
+
+    monkeypatch.setattr(api, 'SYNC_API_TOKEN', '')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        no_header = await client.post('/sync/trigger', json={'mode': 'incremental'})
+        empty_header = await client.post(
+            '/sync/trigger',
+            json={'mode': 'incremental'},
+            headers={'X-Sync-Token': ''},
+        )
+        arbitrary_header = await client.post(
+            '/sync/trigger',
+            json={'mode': 'incremental'},
+            headers={'X-Sync-Token': 'anything'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert no_header.status_code == 401
+    assert empty_header.status_code == 401
+    assert arbitrary_header.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_sync_routes_reject_missing_or_wrong_token(async_session, monkeypatch):
+    async def override_db():
+        yield async_session
+
+    monkeypatch.setattr(api, 'SYNC_API_TOKEN', 'test-sync-token')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        missing_trigger = await client.post('/sync/trigger', json={'mode': 'incremental'})
+        wrong_trigger = await client.post(
+            '/sync/trigger',
+            json={'mode': 'incremental'},
+            headers={'X-Sync-Token': 'wrong'},
+        )
+        missing_status = await client.get('/sync/status')
+        wrong_status = await client.get('/sync/status', headers={'X-Sync-Token': 'wrong'})
+
+    app.dependency_overrides.clear()
+
+    assert missing_trigger.status_code == 401
+    assert wrong_trigger.status_code == 401
+    assert missing_status.status_code == 401
+    assert wrong_status.status_code == 401
 
 
 @pytest.mark.asyncio

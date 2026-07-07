@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import csv
 import io
 from datetime import date, datetime
@@ -116,7 +117,8 @@ def _parse_range(start: date, end: date) -> tuple[date, date]:
 
 
 def _require_sync_token(x_sync_token: str | None) -> None:
-    if SYNC_API_TOKEN and x_sync_token != SYNC_API_TOKEN:
+    configured_token = (SYNC_API_TOKEN or '').strip()
+    if not configured_token or not hmac.compare_digest(x_sync_token or '', configured_token):
         raise HTTPException(status_code=401, detail='Invalid sync token')
 
 

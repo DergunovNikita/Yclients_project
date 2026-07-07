@@ -4,6 +4,7 @@ API server for exposing YClients BI data and queued sync controls.
 from __future__ import annotations
 
 import csv
+import hmac
 import io
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -134,9 +135,8 @@ app.include_router(dashboard_router, prefix='/dashboard', tags=['dashboard'])
 
 
 def require_sync_token(x_sync_token: str | None = Header(default=None)):
-    if not SYNC_API_TOKEN:
-        return
-    if x_sync_token != SYNC_API_TOKEN:
+    configured_token = (SYNC_API_TOKEN or '').strip()
+    if not configured_token or not hmac.compare_digest(x_sync_token or '', configured_token):
         raise HTTPException(status_code=401, detail="Invalid sync token")
 
 
