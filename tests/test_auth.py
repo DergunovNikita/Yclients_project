@@ -11,12 +11,13 @@ import api
 import auth_routes
 from api import app
 from auth_sessions import ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME
-from auth_service import create_access_token, hash_password
+from auth_service import TOKEN_PURPOSE_RESET, create_access_token, create_email_token, hash_password
 from config import AUTH_CSRF_COOKIE_NAME
 from models import (
     Company,
     Group,
     PortalAccount,
+    PortalEmailToken,
     PortalBranch,
     PortalUser,
     PortalUserBranch,
@@ -1107,6 +1108,164 @@ async def test_register_is_blocked_when_public_registration_disabled(auth_db, mo
 
 
 @pytest.mark.asyncio
+async def test_login_rate_limit_is_scoped_by_email_and_ip(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_MAX_REQUESTS', 2)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_IP_MAX_REQUESTS', 10)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_WINDOW_SECONDS', 60.0)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+
+    async def post_login(ip: str, email: str, path: str = '/auth/login'):
+        transport = ASGITransport(app=app, client=(ip, 12345))
+        async with AsyncClient(transport=transport, base_url='http://test') as client:
+            return await client.post(path, json={'email': email, 'password': 'wrong'})
+
+    first = await post_login('203.0.113.10', 'ADMIN@example.com')
+    second = await post_login('203.0.113.10', ' admin@example.com ', '/dashboard/auth/login')
+    limited = await post_login('203.0.113.10', 'admin@example.com')
+    different_email = await post_login('203.0.113.10', 'other@example.com')
+    different_ip = await post_login('203.0.113.11', 'admin@example.com')
+
+    app.dependency_overrides.clear()
+
+    assert first.status_code == 401
+    assert second.status_code == 401
+    assert limited.status_code == 429
+    assert limited.headers['retry-after']
+    assert different_email.status_code == 401
+    assert different_ip.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_ignores_spoofed_forwarded_for_by_default(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_MAX_REQUESTS', 2)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_IP_MAX_REQUESTS', 10)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_WINDOW_SECONDS', 60.0)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app, client=('198.51.100.10', 12345))
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        first = await client.post(
+            '/auth/login',
+            json={'email': 'admin@example.com', 'password': 'wrong'},
+            headers={'X-Forwarded-For': '203.0.113.10'},
+        )
+        second = await client.post(
+            '/auth/login',
+            json={'email': 'admin@example.com', 'password': 'wrong'},
+            headers={'X-Forwarded-For': '203.0.113.11'},
+        )
+        limited = await client.post(
+            '/auth/login',
+            json={'email': 'admin@example.com', 'password': 'wrong'},
+            headers={'X-Forwarded-For': '203.0.113.12'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert first.status_code == 401
+    assert second.status_code == 401
+    assert limited.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_has_route_ip_aggregate_bucket(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_MAX_REQUESTS', 100)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_IP_MAX_REQUESTS', 2)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_WINDOW_SECONDS', 60.0)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app, client=('203.0.113.30', 12345))
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        first = await client.post('/auth/login', json={'email': 'one@example.com', 'password': 'wrong'})
+        second = await client.post('/auth/login', json={'email': 'two@example.com', 'password': 'wrong'})
+        limited = await client.post('/auth/login', json={'email': 'three@example.com', 'password': 'wrong'})
+
+    other_transport = ASGITransport(app=app, client=('203.0.113.31', 12345))
+    async with AsyncClient(transport=other_transport, base_url='http://test') as client:
+        other_ip = await client.post('/auth/login', json={'email': 'three@example.com', 'password': 'wrong'})
+
+    app.dependency_overrides.clear()
+
+    assert first.status_code == 401
+    assert second.status_code == 401
+    assert limited.status_code == 429
+    assert other_ip.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_forgot_password_rate_limit_preserves_email_cooldown_flow(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_MAX_REQUESTS', 5)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_IP_MAX_REQUESTS', 10)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_WINDOW_SECONDS', 60.0)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        first = await client.post('/auth/forgot-password', json={'email': 'admin@example.com'})
+        second = await client.post('/auth/forgot-password', json={'email': 'admin@example.com'})
+
+    app.dependency_overrides.clear()
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    reset_tokens = await auth_db.scalar(
+        select(func.count())
+        .select_from(PortalEmailToken)
+        .where(PortalEmailToken.user_id == 1, PortalEmailToken.purpose == TOKEN_PURPOSE_RESET)
+    )
+    assert reset_tokens == 1
+
+
+@pytest.mark.asyncio
+async def test_reset_password_rate_limit_does_not_consume_valid_token(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_MAX_REQUESTS', 1)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_IP_MAX_REQUESTS', 1)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_WINDOW_SECONDS', 60.0)
+    raw_token = await create_email_token(auth_db, 1, TOKEN_PURPOSE_RESET)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app, client=('203.0.113.20', 12345))
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        invalid = await client.post(
+            '/auth/reset-password',
+            json={'token': 'invalid-reset-token', 'password': 'Changed12345!'},
+        )
+        limited = await client.post(
+            '/auth/reset-password',
+            json={'token': raw_token, 'password': 'Changed12345!'},
+        )
+
+    other_transport = ASGITransport(app=app, client=('203.0.113.21', 12345))
+    async with AsyncClient(transport=other_transport, base_url='http://test') as client:
+        usable = await client.post(
+            '/auth/reset-password',
+            json={'token': raw_token, 'password': 'Changed12345!'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert invalid.status_code == 400
+    assert limited.status_code == 429
+    assert usable.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_onboarding_credentials_creates_tenant_for_new_owner(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
@@ -1922,7 +2081,8 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
 
 @pytest.fixture(autouse=True)
 def _reset_demo_login_limiter():
-    """The demo-login rate limiter is module-global; isolate it per test."""
+    """Auth rate limiters are module-global; isolate them per test."""
+    auth_routes._auth_rate_limit_hits.clear()
     auth_routes._demo_login_hits.clear()
     yield
 

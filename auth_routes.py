@@ -46,7 +46,6 @@ from auth_sessions import (
     bump_user_token_version,
     clear_auth_cookies,
     enforce_csrf,
-    extract_client_ip,
     issue_session,
     list_user_sessions,
     revoke_refresh,
@@ -76,9 +75,21 @@ from yclients_credentials import (
     set_credential_companies,
     update_credential_secrets,
 )
-from config import AUTH_PUBLIC_REGISTRATION_ENABLED
+from config import (
+    AUTH_PUBLIC_REGISTRATION_ENABLED,
+    AUTH_RATE_LIMIT_IP_MAX_REQUESTS,
+    AUTH_RATE_LIMIT_MAX_REQUESTS,
+    AUTH_RATE_LIMIT_WINDOW_SECONDS,
+)
 
 router = APIRouter()
+AUTH_RATE_LIMIT_ROUTES = {
+    'login': '/auth/login',
+    'register': '/auth/register',
+    'forgot_password': '/auth/forgot-password',
+    'reset_password': '/auth/reset-password',
+    'resend_verification': '/auth/resend-verification',
+}
 
 
 class RegisterRequest(BaseModel):
@@ -247,11 +258,12 @@ async def _load_manageable_staff(
 
 
 @router.post('/register')
-async def register(body: RegisterRequest, db: AsyncSession = Depends(get_async_db)):
+async def register(body: RegisterRequest, request: Request, db: AsyncSession = Depends(get_async_db)):
     if not AUTH_PUBLIC_REGISTRATION_ENABLED:
         raise HTTPException(status_code=403, detail='Public registration is disabled')
 
     email = normalize_email(body.email)
+    enforce_auth_rate_limit(request, AUTH_RATE_LIMIT_ROUTES['register'], email)
     existing = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
     if existing is not None:
         raise HTTPException(status_code=409, detail='Email already registered')
@@ -294,6 +306,7 @@ async def login(
     db: AsyncSession = Depends(get_async_db),
 ):
     email = normalize_email(body.email)
+    enforce_auth_rate_limit(request, AUTH_RATE_LIMIT_ROUTES['login'], email)
     user = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
     if user is None or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail='Invalid email or password')
@@ -316,6 +329,60 @@ async def login(
 _DEMO_LOGIN_WINDOW_SECONDS = 60.0
 _DEMO_LOGIN_MAX_PER_WINDOW = 10
 _demo_login_hits: dict[str, list[float]] = {}
+_auth_rate_limit_hits: dict[tuple[str, str, str, str], list[float]] = {}
+
+
+def _prune_rate_limit_hits(now: float, window_seconds: float) -> None:
+    for key, timestamps in list(_auth_rate_limit_hits.items()):
+        recent = [ts for ts in timestamps if now - ts < window_seconds]
+        if recent:
+            _auth_rate_limit_hits[key] = recent
+        else:
+            _auth_rate_limit_hits.pop(key, None)
+
+
+def _auth_rate_limit_client_ip(request: Request) -> str:
+    return request.client.host if request.client else 'unknown'
+
+
+def _check_rate_limit_bucket(
+    key: tuple[str, str, str, str],
+    max_requests: int,
+    window_seconds: float,
+    now: float,
+) -> None:
+    if max_requests <= 0:
+        return
+    recent = _auth_rate_limit_hits.get(key, [])
+    if len(recent) >= max_requests:
+        retry_after = max(1, int(window_seconds - (now - recent[0])))
+        raise HTTPException(
+            status_code=429,
+            detail='Too many authentication attempts, try again shortly',
+            headers={'Retry-After': str(retry_after)},
+        )
+    recent.append(now)
+    _auth_rate_limit_hits[key] = recent
+
+
+def enforce_auth_rate_limit(request: Request, route: str, email: str | None = None) -> None:
+    max_email_requests = int(AUTH_RATE_LIMIT_MAX_REQUESTS)
+    max_ip_requests = int(AUTH_RATE_LIMIT_IP_MAX_REQUESTS)
+    window_seconds = float(AUTH_RATE_LIMIT_WINDOW_SECONDS)
+    if (max_email_requests <= 0 and max_ip_requests <= 0) or window_seconds <= 0:
+        return
+
+    now = time.monotonic()
+    _prune_rate_limit_hits(now, window_seconds)
+    ip = _auth_rate_limit_client_ip(request)
+    _check_rate_limit_bucket(('ip', route, ip, ''), max_ip_requests, window_seconds, now)
+    if email:
+        _check_rate_limit_bucket(
+            ('email_ip', route, ip, normalize_email(email)),
+            max_email_requests,
+            window_seconds,
+            now,
+        )
 
 
 def _demo_login_allowed(ip: str | None) -> bool:
@@ -341,7 +408,7 @@ async def demo_login(
     Issues a normal session for the seeded demo owner (``is_demo=True``). Returns
     503 when the demo tenant has not been provisioned (see scripts/seed_demo.py).
     """
-    if not _demo_login_allowed(extract_client_ip(request)):
+    if not _demo_login_allowed(_auth_rate_limit_client_ip(request)):
         raise HTTPException(status_code=429, detail='Too many demo login attempts, try again shortly')
 
     user = (
@@ -484,8 +551,13 @@ async def verify_email(body: TokenRequest, db: AsyncSession = Depends(get_async_
 
 
 @router.post('/forgot-password')
-async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depends(get_async_db)):
+async def forgot_password(
+    body: ForgotPasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
     email = normalize_email(body.email)
+    enforce_auth_rate_limit(request, AUTH_RATE_LIMIT_ROUTES['forgot_password'], email)
     user = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
     if user is not None and user.is_active and not email_cooldown_active(user.password_reset_sent_at):
         await send_password_reset_email(db, user)
@@ -496,8 +568,13 @@ async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depend
 
 
 @router.post('/resend-verification')
-async def resend_verification(body: ResendVerificationRequest, db: AsyncSession = Depends(get_async_db)):
+async def resend_verification(
+    body: ResendVerificationRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
     email = normalize_email(body.email)
+    enforce_auth_rate_limit(request, AUTH_RATE_LIMIT_ROUTES['resend_verification'], email)
     user = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
     if user is not None and user.email_verified_at is None and not email_cooldown_active(user.email_verification_sent_at):
         await send_verification_email(db, user)
@@ -508,7 +585,12 @@ async def resend_verification(body: ResendVerificationRequest, db: AsyncSession 
 
 
 @router.post('/reset-password')
-async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(get_async_db)):
+async def reset_password(
+    body: ResetPasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    enforce_auth_rate_limit(request, AUTH_RATE_LIMIT_ROUTES['reset_password'])
     user = await consume_email_token(db, body.token, TOKEN_PURPOSE_RESET)
     if user is None:
         raise HTTPException(status_code=400, detail='Invalid or expired token')
