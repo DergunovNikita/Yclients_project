@@ -8,12 +8,18 @@ const apiBase = import.meta.env.VITE_API_BASE || '';
 let refreshInFlight = null;
 let reauthInFlight = null;
 
-function legacyAccessTokenKey() {
-  return ['portal', 'access', 'token'].join('_');
+function clearLegacyAccessToken() {
+  for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+    const key = localStorage.key(index);
+    const parts = key ? key.split('_') : [];
+    if (parts.length === 3 && parts[0] === 'portal' && parts[1] === 'access' && parts[2] === 'token') {
+      localStorage.removeItem(key);
+    }
+  }
 }
 
 function clearLocalAuthState({ clearPortalAccount = true } = {}) {
-  localStorage.removeItem(legacyAccessTokenKey());
+  clearLegacyAccessToken();
   if (clearPortalAccount) {
     localStorage.removeItem(PORTAL_ACCOUNT_KEY);
   }
@@ -57,7 +63,7 @@ export function setSelectedPortalAccountId(portalAccountId) {
 
 export function authHeaders(extra = {}) {
   const headers = { ...extra };
-  localStorage.removeItem(legacyAccessTokenKey());
+  clearLegacyAccessToken();
   const portalAccountId = getSelectedPortalAccountId();
   if (portalAccountId) {
     headers['X-Portal-Account-Id'] = portalAccountId;

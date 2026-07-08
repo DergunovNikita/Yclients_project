@@ -45,6 +45,7 @@ from auth_sessions import (
     REFRESH_COOKIE_NAME,
     bump_user_token_version,
     clear_auth_cookies,
+    enforce_csrf,
     extract_client_ip,
     issue_session,
     list_user_sessions,
@@ -375,6 +376,7 @@ async def refresh(
     response: Response,
     db: AsyncSession = Depends(get_async_db),
 ):
+    enforce_csrf(request, allow_bearer_skip=False)
     raw_refresh = request.cookies.get(REFRESH_COOKIE_NAME)
     if not raw_refresh:
         raise HTTPException(status_code=401, detail='Missing refresh token')
@@ -394,6 +396,7 @@ async def logout(
     response: Response,
     db: AsyncSession = Depends(get_async_db),
 ):
+    enforce_csrf(request, allow_bearer_skip=False)
     raw_refresh = request.cookies.get(REFRESH_COOKIE_NAME)
     if raw_refresh:
         await revoke_refresh(db, raw_refresh)

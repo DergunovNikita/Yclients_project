@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test:auth": "node --test tests/auth-runtime.test.mjs tests/proxy-runtime.test.mjs",
+    "scan:auth-tokens": "node tests/browser-auth-scan.mjs .",
+    "scan:auth-build": "node tests/browser-auth-scan.mjs dist",
     "preview": "vite preview"
   },
   "dependencies": {

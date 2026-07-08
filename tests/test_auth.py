@@ -120,15 +120,59 @@ async def test_refresh_keeps_cookie_session_without_returning_access_token(auth_
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         login = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})
         assert login.status_code == 200
-        refresh = await client.post('/auth/refresh')
+        missing_csrf = await client.post('/auth/refresh')
+        bearer_without_csrf = await client.post(
+            '/auth/refresh',
+            headers={'Authorization': 'Bearer not-a-valid-session-choice'},
+        )
+        csrf = client.cookies.get(AUTH_CSRF_COOKIE_NAME)
+        refresh = await client.post('/auth/refresh', headers={'X-CSRF-Token': csrf})
 
     app.dependency_overrides.clear()
 
+    assert missing_csrf.status_code == 403
+    assert bearer_without_csrf.status_code == 403
     assert refresh.status_code == 200
     payload = refresh.json()
     assert 'access_token' not in payload['data']
     assert 'token_type' not in payload['data']
     assert payload['data']['user']['email'] == 'admin@example.com'
+
+
+@pytest.mark.asyncio
+async def test_logout_requires_csrf_for_cookie_session(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        login = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})
+        assert login.status_code == 200
+
+        missing_csrf = await client.post('/auth/logout')
+        assert client.cookies.get(ACCESS_COOKIE_NAME)
+        assert client.cookies.get(REFRESH_COOKIE_NAME)
+        bearer_without_csrf = await client.post(
+            '/auth/logout',
+            headers={'Authorization': 'Bearer not-a-valid-session-choice'},
+        )
+        assert client.cookies.get(ACCESS_COOKIE_NAME)
+        assert client.cookies.get(REFRESH_COOKIE_NAME)
+
+        csrf = client.cookies.get(AUTH_CSRF_COOKIE_NAME)
+        logout = await client.post('/auth/logout', headers={'X-CSRF-Token': csrf})
+
+    app.dependency_overrides.clear()
+
+    assert missing_csrf.status_code == 403
+    assert bearer_without_csrf.status_code == 403
+    assert logout.status_code == 200
+    assert not client.cookies.get(ACCESS_COOKIE_NAME)
+    assert not client.cookies.get(REFRESH_COOKIE_NAME)
+    assert not client.cookies.get(AUTH_CSRF_COOKIE_NAME)
 
 
 @pytest.mark.asyncio
@@ -186,6 +230,12 @@ async def test_cookie_mutation_requires_csrf_but_bearer_does_not(auth_db, monkey
             '/auth/change-password',
             json={'current_password': 'Admin12345!', 'new_password': 'Changed12345!'},
         )
+        cookie_bearer = create_access_token(1, 'owner')
+        bearer_with_cookies_without_csrf = await cookie_client.post(
+            '/auth/change-password',
+            headers={'Authorization': f'Bearer {cookie_bearer}'},
+            json={'current_password': 'Admin12345!', 'new_password': 'CookieBearer12345!'},
+        )
         csrf = cookie_client.cookies.get(AUTH_CSRF_COOKIE_NAME)
         with_csrf = await cookie_client.post(
             '/auth/change-password',
@@ -211,6 +261,7 @@ async def test_cookie_mutation_requires_csrf_but_bearer_does_not(auth_db, monkey
     app.dependency_overrides.clear()
 
     assert missing_csrf.status_code == 403
+    assert bearer_with_cookies_without_csrf.status_code == 403
     assert with_csrf.status_code == 200
     assert bearer.status_code == 200
 
