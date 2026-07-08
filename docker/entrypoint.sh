@@ -20,6 +20,14 @@ case "$command" in
     shift
     exec python migrate.py "$@"
     ;;
+  bootstrap-db)
+    shift
+    exec python -m scripts.bootstrap_db "$@"
+    ;;
+  seed-demo)
+    shift
+    exec python -m scripts.seed_demo "$@"
+    ;;
   setup-analytics)
     shift
     exec python setup_analytics.py "$@"

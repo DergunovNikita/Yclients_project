@@ -1,0 +1,76 @@
+# Isolated demo stack: a dedicated Postgres + API seeded with synthetic data.
+#
+# Runs the SAME app image against a demo-only database, so seed_demo works
+# cleanly (no real companies -> no preflight refusal, no int32 id overflow) and
+# the production database/analytics stay untouched.
+#
+#   cp .env.demo.example .env.demo            # then set the secrets inside
+#   docker compose -f docker-compose.demo.yml --env-file .env.demo run --rm bootstrap-db
+#   docker compose -f docker-compose.demo.yml --env-file .env.demo run --rm seed-demo
+#   docker compose -f docker-compose.demo.yml --env-file .env.demo up -d api
+#
+# The demo API is then served on 127.0.0.1:${DEMO_API_PORT:-8001}. Point the
+# demo SPA (VITE_API_BASE) or the "View demo" button at that origin.
+
+x-demo-base: &demo-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      APP_REVISION: ${APP_REVISION:-demo}
+  image: yclients_bi_system-app:local
+  env_file:
+    - .env.demo
+  environment:
+    DB_HOST: postgres
+    DB_PORT: 5432
+  volumes:
+    - ./logs:/app/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "127.0.0.1:${DEMO_DB_PORT:-5434}:5432"
+    environment:
+      POSTGRES_DB: ${DB_NAME:-demo_db}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env.demo}
+    volumes:
+      - demo_pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # One-shot: build the current schema on a fresh DB and stamp Alembic head.
+  bootstrap-db:
+    <<: *demo-base
+    command: ["bootstrap-db"]
+    restart: "no"
+
+  # One-shot: provision the demo tenant (companies, branches, demo owner) + views.
+  seed-demo:
+    <<: *demo-base
+    command: ["seed-demo"]
+    restart: "no"
+
+  api:
+    <<: *demo-base
+    command: ["api"]
+    ports:
+      - "127.0.0.1:${DEMO_API_PORT:-8001}:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  demo_pg_data:

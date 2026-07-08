@@ -114,50 +114,65 @@ curl http://127.0.0.1:8000/health
 ## Демо-режим
 
 Общий read-only демо-стенд с синтетическими данными — чтобы показывать дашборд
-потенциальным клиентам без реальных данных YClients.
+потенциальным клиентам без реальных данных YClients. Кнопка «View demo» на странице
+входа делает беспарольный вход (`POST /auth/demo-login`) и открывает дашборд с
+демо-баннером; любой запрос на запись под демо-сессией возвращает `403`. Если стенд
+не провижинен, `/auth/demo-login` отвечает `503` — кнопка показывает ошибку.
 
-Провижининг выполняется **только на выделенной под демо базе**: `scripts/seed_demo.py`
-преднамеренно отказывается запускаться, если в базе есть хотя бы одна не-демо компания.
+Демо живёт в **отдельной, выделенной под демо базе**: `seed_demo` намеренно отказывается
+работать, если в базе есть хоть одна не-демо компания (иначе id-схема генератора
+переполняет int32 на реальных id, а демо-данные попадают в боевую аналитику). Поэтому
+рядом с продом демо разворачивают **отдельным стеком**, а не в боевой БД.
+
+### Отдельный демо-инстанс
+
+Изолированный стек (свой Postgres + API) из `docker-compose.demo.yml`:
+
+```bash
+cp .env.demo.example .env.demo   # затем задать секреты внутри (.env.demo в .gitignore)
+docker compose -f docker-compose.demo.yml --env-file .env.demo run --rm bootstrap-db
+docker compose -f docker-compose.demo.yml --env-file .env.demo run --rm seed-demo
+docker compose -f docker-compose.demo.yml --env-file .env.demo up -d api
+```
+
+Демо-API поднимется на `127.0.0.1:${DEMO_API_PORT:-8001}`. Направьте демо-SPA
+(`VITE_API_BASE`) или кнопку «View demo» на этот origin.
+
+- `bootstrap-db` создаёт текущую схему на пустой БД и делает Alembic `stamp head`
+  (обычный `alembic upgrade head` с нуля здесь не проходит: baseline `0001` строит
+  таблицы по текущим моделям, и поздние `add_column`-миграции конфликтуют).
+- `seed-demo` создаёт демо-тенант и обновляет аналитические views.
 
 ### Что создаётся
 
 - N синтетических компаний с `source_type='demo'` и активностью (клиенты, услуги, записи, продажи);
 - один `PortalAccount(is_demo=True)` и по одному `PortalBranch` на компанию;
-- беспарольный демо-владелец `demo@portal.local` (`is_demo=True`);
-- обновлённые аналитические views.
+- беспарольный демо-владелец `demo@portal.local` (`is_demo=True`).
 
-Нужны применённые миграции (`0031` добавляет `is_demo` в `portal_users`/`portal_accounts`).
+Флаги `seed_demo`: `--companies`, `--days`, `--seed`, `--clients-per-company`,
+`--staff-per-company`, `--goods-per-company`,
+`--appointments-per-day-min/--appointments-per-day-max`, `--skip-refresh-views`.
+Скрипт идемпотентен: повторный запуск переиспользует стенд и **не** перегенерирует данные.
 
-### Провижининг
+### Локально (одна dev-БД)
+
+На пустой локальной БД без Docker:
 
 ```bash
-docker compose run --rm migrate          # если миграции ещё не применены
-python -m scripts.seed_demo              # или: python scripts/seed_demo.py
+python -m scripts.bootstrap_db          # схема + stamp head (для свежей БД)
+python -m scripts.seed_demo             # демо-тенант + views
 ```
-
-Флаги: `--companies`, `--days`, `--seed`, `--clients-per-company`, `--staff-per-company`,
-`--goods-per-company`, `--appointments-per-day-min/--appointments-per-day-max`, `--skip-refresh-views`.
-
-Скрипт идемпотентен: повторный запуск переиспользует уже созданный стенд и **не**
-перегенерирует данные.
-
-### Кнопка и read-only
-
-На странице входа кнопка «View demo» вызывает `POST /auth/demo-login` — беспарольный вход
-под демо-владельцем и переход на дашборд с демо-баннером. Любой запрос на запись под
-демо-сессией возвращает `403` (демо только для чтения). Если стенд не провижинен,
-`/auth/demo-login` отвечает `503` — кнопка просто показывает ошибку.
 
 ### Свежие даты (пересев)
 
-При наличии демо-данных `seed_demo` пропускает генерацию, поэтому повторный запуск **не**
-сдвигает даты. Чтобы обновить даты, пересоздайте базу и пересейте (база выделена под демо):
+`seed_demo` при наличии демо-данных пропускает генерацию, поэтому повторный запуск
+**не** сдвигает даты. Чтобы обновить — пересоздайте демо-БД и пересейте:
 
 ```bash
-docker compose down -v                   # удаляет тома: БД + Metabase (только демо-инстанс!)
-docker compose up -d postgres
-docker compose run --rm migrate
-python -m scripts.seed_demo
+docker compose -f docker-compose.demo.yml --env-file .env.demo down -v
+docker compose -f docker-compose.demo.yml --env-file .env.demo run --rm bootstrap-db
+docker compose -f docker-compose.demo.yml --env-file .env.demo run --rm seed-demo
+docker compose -f docker-compose.demo.yml --env-file .env.demo up -d api
 ```
 
 ## Тесты
