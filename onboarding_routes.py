@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_deps import get_current_user
+from auth_deps import forbid_demo, get_current_user
 from database import get_async_db
 from data_sources import SOURCE_YCLIENTS, adapter_from_credential, adapter_from_payload, normalize_source_type
 from models import PortalAccount, PortalBranch, PortalUser, YClientsCredential, YClientsCredentialCompany
@@ -76,6 +76,10 @@ async def _account_branches(db: AsyncSession, portal_account_id: int) -> list[in
 
 
 def _step_from_state(user: PortalUser, has_credentials: bool, has_branches: bool) -> str:
+    # Demo users skip the funnel: the demo tenant is preprovisioned with branches
+    # but no YClients credentials, so the credential/branch checks below don't apply.
+    if user.is_demo:
+        return 'done'
     if not has_credentials:
         return 'pending_credentials'
     if not has_branches:
@@ -117,7 +121,7 @@ async def onboarding_state(
     }
 
 
-@router.post('/credentials')
+@router.post('/credentials', dependencies=[Depends(forbid_demo)])
 async def onboarding_credentials(
     body: OnboardingCredentialsRequest,
     user: PortalUser = Depends(get_current_user),
@@ -200,7 +204,7 @@ async def onboarding_credentials(
     }
 
 
-@router.post('/branches')
+@router.post('/branches', dependencies=[Depends(forbid_demo)])
 async def onboarding_branches(
     body: OnboardingBranchesRequest,
     user: PortalUser = Depends(get_current_user),

@@ -616,5 +616,10 @@
     "addFavorite": "Aggiungi ai preferiti",
     "loadingReport": "Caricamento report",
     "loadFailed": "Impossibile caricare il report"
+  },
+  "demo": {
+    "viewDemo": "Guarda la demo",
+    "banner": "Modalità demo · dati fittizi",
+    "readOnly": "Modalità demo: sola lettura"
   }
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
@@ -9,7 +10,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_deps import get_current_user, require_roles
+from auth_deps import forbid_demo, get_current_user, require_roles
 from auth_hierarchy import (
     USER_ADMIN_ROLES,
     USER_MANAGER_ROLES,
@@ -44,6 +45,8 @@ from auth_sessions import (
     REFRESH_COOKIE_NAME,
     bump_user_token_version,
     clear_auth_cookies,
+    enforce_csrf,
+    extract_client_ip,
     issue_session,
     list_user_sessions,
     revoke_refresh,
@@ -73,6 +76,7 @@ from yclients_credentials import (
     set_credential_companies,
     update_credential_secrets,
 )
+from config import AUTH_PUBLIC_REGISTRATION_ENABLED
 
 router = APIRouter()
 
@@ -188,6 +192,7 @@ def _user_payload(
         'role': user.role,
         'portal_account_id': user.portal_account_id,
         'is_active': user.is_active,
+        'is_demo': bool(user.is_demo),
         'email_verified': user.email_verified_at is not None,
         'company_ids': branch_ids,
         'is_portal_user': True,
@@ -243,6 +248,9 @@ async def _load_manageable_staff(
 
 @router.post('/register')
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_async_db)):
+    if not AUTH_PUBLIC_REGISTRATION_ENABLED:
+        raise HTTPException(status_code=403, detail='Public registration is disabled')
+
     email = normalize_email(body.email)
     existing = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
     if existing is not None:
@@ -271,6 +279,13 @@ def _access_token_for(user: PortalUser) -> str:
     return create_access_token(user.id, user.role, user.token_version)
 
 
+def _session_payload(user: PortalUser, branch_ids: list[int], csrf_token: str) -> dict:
+    return {
+        'csrf_token': csrf_token,
+        'user': _user_payload(user, branch_ids),
+    }
+
+
 @router.post('/login')
 async def login(
     body: LoginRequest,
@@ -292,12 +307,66 @@ async def login(
     branch_ids = await load_user_access_branch_ids(db, user)
     return {
         'success': True,
-        'data': {
-            'access_token': session.access_token,
-            'token_type': 'bearer',
-            'csrf_token': session.csrf_token,
-            'user': _user_payload(user, branch_ids),
-        },
+        'data': _session_payload(user, branch_ids, session.csrf_token),
+    }
+
+
+# Best-effort in-memory rate limit for the unauthenticated demo login (per process,
+# per client IP). Caps refresh-token churn from abuse without pulling in a dependency.
+_DEMO_LOGIN_WINDOW_SECONDS = 60.0
+_DEMO_LOGIN_MAX_PER_WINDOW = 10
+_demo_login_hits: dict[str, list[float]] = {}
+
+
+def _demo_login_allowed(ip: str | None) -> bool:
+    now = time.monotonic()
+    key = ip or 'unknown'
+    recent = [ts for ts in _demo_login_hits.get(key, ()) if now - ts < _DEMO_LOGIN_WINDOW_SECONDS]
+    if len(recent) >= _DEMO_LOGIN_MAX_PER_WINDOW:
+        _demo_login_hits[key] = recent
+        return False
+    recent.append(now)
+    _demo_login_hits[key] = recent
+    return True
+
+
+@router.post('/demo-login')
+async def demo_login(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Passwordless login into the shared read-only demo tenant.
+
+    Issues a normal session for the seeded demo owner (``is_demo=True``). Returns
+    503 when the demo tenant has not been provisioned (see scripts/seed_demo.py).
+    """
+    if not _demo_login_allowed(extract_client_ip(request)):
+        raise HTTPException(status_code=429, detail='Too many demo login attempts, try again shortly')
+
+    user = (
+        await db.execute(
+            select(PortalUser)
+            .where(
+                PortalUser.is_demo.is_(True),
+                PortalUser.role == 'owner',
+                PortalUser.is_active.is_(True),
+            )
+            .order_by(PortalUser.id.asc())
+            .limit(1)
+        )
+    ).scalars().first()
+    if user is None:
+        raise HTTPException(status_code=503, detail='Demo mode is not available')
+
+    user.last_login_at = datetime.utcnow()
+    session = await issue_session(db, user, request, access_token_fn=_access_token_for)
+    await db.commit()
+    set_auth_cookies(response, session)
+    branch_ids = await load_user_access_branch_ids(db, user)
+    return {
+        'success': True,
+        'data': _session_payload(user, branch_ids, session.csrf_token),
     }
 
 
@@ -307,6 +376,7 @@ async def refresh(
     response: Response,
     db: AsyncSession = Depends(get_async_db),
 ):
+    enforce_csrf(request, allow_bearer_skip=False)
     raw_refresh = request.cookies.get(REFRESH_COOKIE_NAME)
     if not raw_refresh:
         raise HTTPException(status_code=401, detail='Missing refresh token')
@@ -316,12 +386,7 @@ async def refresh(
     branch_ids = await load_user_access_branch_ids(db, user)
     return {
         'success': True,
-        'data': {
-            'access_token': session.access_token,
-            'token_type': 'bearer',
-            'csrf_token': session.csrf_token,
-            'user': _user_payload(user, branch_ids),
-        },
+        'data': _session_payload(user, branch_ids, session.csrf_token),
     }
 
 
@@ -331,6 +396,7 @@ async def logout(
     response: Response,
     db: AsyncSession = Depends(get_async_db),
 ):
+    enforce_csrf(request, allow_bearer_skip=False)
     raw_refresh = request.cookies.get(REFRESH_COOKIE_NAME)
     if raw_refresh:
         await revoke_refresh(db, raw_refresh)
@@ -339,7 +405,7 @@ async def logout(
     return {'success': True}
 
 
-@router.post('/logout-all')
+@router.post('/logout-all', dependencies=[Depends(forbid_demo)])
 async def logout_all(
     response: Response,
     user: PortalUser = Depends(get_current_user),
@@ -352,7 +418,7 @@ async def logout_all(
     return {'success': True}
 
 
-@router.post('/logout-others')
+@router.post('/logout-others', dependencies=[Depends(forbid_demo)])
 async def logout_others(
     request: Request,
     user: PortalUser = Depends(get_current_user),
@@ -385,7 +451,7 @@ async def list_sessions(
     }
 
 
-@router.delete('/sessions/{session_id}')
+@router.delete('/sessions/{session_id}', dependencies=[Depends(forbid_demo)])
 async def delete_session(
     session_id: int,
     user: PortalUser = Depends(get_current_user),
@@ -455,7 +521,7 @@ async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(
     return {'success': True, 'message': 'Пароль обновлён. Теперь можно войти в кабинет.'}
 
 
-@router.post('/change-password')
+@router.post('/change-password', dependencies=[Depends(forbid_demo)])
 async def change_password(
     body: ChangePasswordRequest,
     user: PortalUser = Depends(get_current_user),
@@ -728,7 +794,7 @@ async def admin_list_users(
     return {'success': True, 'data': payload}
 
 
-@router.post('/admin/users')
+@router.post('/admin/users', dependencies=[Depends(forbid_demo)])
 async def admin_create_user(
     body: AdminUserCreateRequest,
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
@@ -811,7 +877,7 @@ async def admin_create_user(
     }
 
 
-@router.patch('/admin/users/{user_id}')
+@router.patch('/admin/users/{user_id}', dependencies=[Depends(forbid_demo)])
 async def admin_update_user(
     user_id: int,
     body: AdminUserUpdateRequest,
@@ -893,7 +959,7 @@ async def admin_list_yclients_credentials(
     return {'success': True, 'data': await list_credential_payloads(db, portal_account_id)}
 
 
-@router.post('/admin/yclients-credentials')
+@router.post('/admin/yclients-credentials', dependencies=[Depends(forbid_demo)])
 async def admin_create_yclients_credentials(
     body: YClientsCredentialCreateRequest,
     x_portal_account_id: int | None = Header(default=None),
@@ -951,7 +1017,7 @@ async def admin_create_yclients_credentials(
     return {'success': True, 'data': created_payload}
 
 
-@router.patch('/admin/yclients-credentials/{credential_id}')
+@router.patch('/admin/yclients-credentials/{credential_id}', dependencies=[Depends(forbid_demo)])
 async def admin_update_yclients_credentials(
     credential_id: int,
     body: YClientsCredentialUpdateRequest,
@@ -1008,7 +1074,7 @@ async def admin_update_yclients_credentials(
     return {'success': True, 'data': await list_credential_payloads(db, credential.portal_account_id)}
 
 
-@router.delete('/admin/yclients-credentials/{credential_id}')
+@router.delete('/admin/yclients-credentials/{credential_id}', dependencies=[Depends(forbid_demo)])
 async def admin_delete_yclients_credentials(
     credential_id: int,
     x_portal_account_id: int | None = Header(default=None),
@@ -1031,7 +1097,7 @@ async def admin_delete_yclients_credentials(
     return {'success': True, 'message': 'YClients credentials deleted'}
 
 
-@router.post('/admin/yclients-credentials/{credential_id}/test')
+@router.post('/admin/yclients-credentials/{credential_id}/test', dependencies=[Depends(forbid_demo)])
 async def admin_test_saved_yclients_credentials(
     credential_id: int,
     x_portal_account_id: int | None = Header(default=None),
@@ -1056,7 +1122,7 @@ async def admin_test_saved_yclients_credentials(
     return result
 
 
-@router.post('/admin/yclients-credentials/test')
+@router.post('/admin/yclients-credentials/test', dependencies=[Depends(forbid_demo)])
 async def admin_test_yclients_credentials_payload(
     body: YClientsCredentialTestRequest,
     _actor: PortalUser = Depends(require_roles('platform_admin', 'owner')),
@@ -1067,7 +1133,7 @@ async def admin_test_yclients_credentials_payload(
     return _test_source_credentials(source_type, body.partner_token, body.login, body.password)
 
 
-@router.delete('/admin/users/{user_id}')
+@router.delete('/admin/users/{user_id}', dependencies=[Depends(forbid_demo)])
 async def admin_delete_user(
     user_id: int,
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
@@ -1100,7 +1166,7 @@ async def admin_delete_user(
     return {'success': True, 'message': 'User deleted'}
 
 
-@router.patch('/admin/staff/{staff_id}')
+@router.patch('/admin/staff/{staff_id}', dependencies=[Depends(forbid_demo)])
 async def admin_update_staff(
     staff_id: int,
     body: AdminStaffUpdateRequest,
@@ -1126,7 +1192,7 @@ async def admin_update_staff(
     }
 
 
-@router.delete('/admin/staff/{staff_id}')
+@router.delete('/admin/staff/{staff_id}', dependencies=[Depends(forbid_demo)])
 async def admin_delete_staff(
     staff_id: int,
     x_portal_account_id: int | None = Header(default=None),
@@ -1152,7 +1218,7 @@ def _provisioned_payload(account) -> dict:
     }
 
 
-@router.post('/admin/provision-accounts')
+@router.post('/admin/provision-accounts', dependencies=[Depends(forbid_demo)])
 async def admin_provision_accounts(
     x_portal_account_id: int | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
@@ -1172,7 +1238,7 @@ async def admin_provision_accounts(
     }
 
 
-@router.post('/admin/staff/{staff_id}/create-account')
+@router.post('/admin/staff/{staff_id}/create-account', dependencies=[Depends(forbid_demo)])
 async def admin_create_staff_account(
     staff_id: int,
     body: AdminStaffCreateAccountRequest,
@@ -1239,7 +1305,7 @@ async def admin_list_initial_passwords(
     return {'success': True, 'data': payload}
 
 
-@router.post('/admin/distribute-credentials')
+@router.post('/admin/distribute-credentials', dependencies=[Depends(forbid_demo)])
 async def admin_distribute_credentials(
     body: DistributeCredentialsRequest,
     x_portal_account_id: int | None = Header(default=None),

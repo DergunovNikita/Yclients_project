@@ -262,7 +262,7 @@ def clear_auth_cookies(response: Response) -> None:
 
 # ---------- CSRF ----------
 
-def enforce_csrf(request: Request) -> None:
+def enforce_csrf(request: Request, *, allow_bearer_skip: bool = True) -> None:
     """Double-submit-cookie CSRF for mutating cookie-authenticated requests.
 
     Skipped for safe methods, Bearer auth (no cookie ambient credential), and
@@ -270,10 +270,11 @@ def enforce_csrf(request: Request) -> None:
     """
     if request.method in SAFE_METHODS:
         return
+    has_session_cookie = bool(request.cookies.get(ACCESS_COOKIE_NAME) or request.cookies.get(REFRESH_COOKIE_NAME))
     auth_header = request.headers.get('authorization', '')
-    if auth_header.lower().startswith('bearer '):
+    if allow_bearer_skip and not has_session_cookie and auth_header.lower().startswith('bearer '):
         return
-    if not (request.cookies.get(ACCESS_COOKIE_NAME) or request.cookies.get(REFRESH_COOKIE_NAME)):
+    if not has_session_cookie:
         return
 
     cookie_token = request.cookies.get(AUTH_CSRF_COOKIE_NAME)

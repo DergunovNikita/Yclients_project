@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Fast local pre-commit gate. Everything is soft: missing tools emit a WARN
-# rather than fail the run so the script stays useful in bare environments.
+# Fast local pre-commit gate. Most optional tools emit WARN when missing; checks
+# that protect browser auth security fail closed.
 
 set -uo pipefail
 
@@ -29,9 +29,14 @@ else
 fi
 
 # 2) syntax check for staged .py files (falls back to changed files vs HEAD)
-mapfile -t py_files < <(git diff --name-only --cached --diff-filter=ACMR -- '*.py' 2>/dev/null || true)
+py_files=()
+while IFS= read -r file; do
+  [[ -n "$file" ]] && py_files+=("$file")
+done < <(git diff --name-only --cached --diff-filter=ACMR -- '*.py' 2>/dev/null || true)
 if [[ ${#py_files[@]} -eq 0 ]]; then
-  mapfile -t py_files < <(git diff --name-only --diff-filter=ACMR HEAD -- '*.py' 2>/dev/null || true)
+  while IFS= read -r file; do
+    [[ -n "$file" ]] && py_files+=("$file")
+  done < <(git diff --name-only --diff-filter=ACMR HEAD -- '*.py' 2>/dev/null || true)
 fi
 if [[ ${#py_files[@]} -gt 0 ]]; then
   info "compileall ${#py_files[@]} changed .py files"
@@ -52,7 +57,27 @@ else
   fail "pytest fast subset failed"
 fi
 
-# 4) gitleaks on staged diff, if available
+# 4) auth frontend/proxy runtime tests, if local Node/npm are available
+if [[ -x "$LOCAL_BIN/node" && -x "$LOCAL_BIN/npm" ]]; then
+  info "npm run test:auth"
+  if (cd web && "$LOCAL_BIN/npm" run test:auth); then
+    ok "npm test:auth"
+  else
+    fail "npm test:auth failed"
+  fi
+else
+  fail "local node/npm not installed — cannot run npm test:auth"
+fi
+if [[ -x "$LOCAL_BIN/node" && -x "$LOCAL_BIN/npm" && -d web/dist ]]; then
+  info "npm run scan:auth-build"
+  if (cd web && "$LOCAL_BIN/npm" run scan:auth-build); then
+    ok "npm scan:auth-build"
+  else
+    fail "npm scan:auth-build failed"
+  fi
+fi
+
+# 5) gitleaks on staged diff, if available
 if command -v gitleaks >/dev/null 2>&1; then
   info "gitleaks (staged)"
   if gitleaks git --config .gitleaks.toml --redact --staged; then

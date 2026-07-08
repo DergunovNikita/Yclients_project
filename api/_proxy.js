@@ -36,6 +36,63 @@ export function readBody(req) {
   });
 }
 
+function splitCombinedSetCookie(value) {
+  if (!value) return [];
+  const cookies = [];
+  let start = 0;
+  let inExpires = false;
+  let expiresSawGmt = false;
+  let inQuotes = false;
+  const source = String(value);
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (inQuotes) {
+      continue;
+    }
+    if (source.slice(index, index + 8).toLowerCase() === 'expires=') {
+      inExpires = true;
+      expiresSawGmt = false;
+      index += 7;
+      continue;
+    }
+    if (inExpires && source.slice(index, index + 3).toLowerCase() === 'gmt') {
+      expiresSawGmt = true;
+      index += 2;
+      continue;
+    }
+    if (inExpires && char === ';') {
+      inExpires = false;
+      expiresSawGmt = false;
+      continue;
+    }
+    if (char === ',' && (!inExpires || expiresSawGmt)) {
+      const item = source.slice(start, index).trim();
+      if (item) cookies.push(item);
+      start = index + 1;
+      inExpires = false;
+      expiresSawGmt = false;
+    }
+  }
+  const finalItem = source.slice(start).trim();
+  if (finalItem) cookies.push(finalItem);
+  return cookies;
+}
+
+export function responseSetCookies(headers) {
+  if (typeof headers.getSetCookie === 'function') {
+    return headers.getSetCookie();
+  }
+  if (typeof headers.raw === 'function') {
+    const rawSetCookie = headers.raw()['set-cookie'];
+    if (Array.isArray(rawSetCookie)) return rawSetCookie;
+  }
+  return splitCombinedSetCookie(headers.get?.('set-cookie'));
+}
+
 export async function proxyToVm(req, res, target) {
   if (!target) {
     res.statusCode = 404;
@@ -71,10 +128,15 @@ export async function proxyToVm(req, res, target) {
   }
 
   res.statusCode = upstream.status;
+  const setCookies = responseSetCookies(upstream.headers);
   for (const [name, value] of upstream.headers.entries()) {
-    if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase())) {
+    const lowerName = name.toLowerCase();
+    if (!HOP_BY_HOP_HEADERS.has(lowerName) && lowerName !== 'set-cookie') {
       res.setHeader(name, value);
     }
+  }
+  if (setCookies.length) {
+    res.setHeader('set-cookie', setCookies);
   }
 
   const body = Buffer.from(await upstream.arrayBuffer());

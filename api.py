@@ -4,6 +4,7 @@ API server for exposing YClients BI data and queued sync controls.
 from __future__ import annotations
 
 import csv
+import hmac
 import io
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -26,9 +27,11 @@ from config import (
     DB_PASSWORD,
     DB_PORT,
     DB_USER,
+    IS_PRODUCTION,
     SYNC_API_TOKEN,
 )
 from dashboard_routes import router as dashboard_router
+from auth_deps import forbid_demo
 from auth_routes import router as auth_router
 from auth_scope import AccessContext, require_sync_company_ids, require_tenant_context
 from onboarding_routes import router as onboarding_router
@@ -76,7 +79,9 @@ except Exception:
 MAX_PAGE_SIZE = 5000
 DEFAULT_PAGE_SIZE = 1000
 
-OPEN_PATHS = {"/health", "/openapi.json", "/docs", "/redoc"}
+OPEN_PATHS = {"/health"}
+if not IS_PRODUCTION:
+    OPEN_PATHS.update({"/openapi.json", "/docs", "/redoc"})
 
 
 async def require_api_key(
@@ -104,6 +109,9 @@ app = FastAPI(
     title="YClients BI System API",
     description="API для получения данных YClients в табличном формате",
     version="5.0.0",
+    docs_url=None if IS_PRODUCTION else '/docs',
+    redoc_url=None if IS_PRODUCTION else '/redoc',
+    openapi_url=None if IS_PRODUCTION else '/openapi.json',
     dependencies=[Depends(require_api_key)],
 )
 
@@ -127,9 +135,8 @@ app.include_router(dashboard_router, prefix='/dashboard', tags=['dashboard'])
 
 
 def require_sync_token(x_sync_token: str | None = Header(default=None)):
-    if not SYNC_API_TOKEN:
-        return
-    if x_sync_token != SYNC_API_TOKEN:
+    configured_token = (SYNC_API_TOKEN or '').strip()
+    if not configured_token or not hmac.compare_digest(x_sync_token or '', configured_token):
         raise HTTPException(status_code=401, detail="Invalid sync token")
 
 
@@ -784,7 +791,7 @@ class SyncTriggerRequest(BaseModel):
     global_sync: bool = False
 
 
-@app.post("/sync/trigger")
+@app.post("/sync/trigger", dependencies=[Depends(forbid_demo)])
 async def trigger_sync(
     payload: SyncTriggerRequest,
     request: Request,

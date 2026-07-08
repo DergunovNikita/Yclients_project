@@ -137,6 +137,7 @@ def seed_companies(
     clients_per_company: int,
     staff_per_company: int,
     goods_per_company: int,
+    source_type: str = "yclients",
 ) -> list[CompanyRefs]:
     group_id = next_pk(db, Group, "id", 1)
     group = Group(id=group_id, title=f"Synthetic Group {group_id}", access={"mode": "fake"})
@@ -150,7 +151,7 @@ def seed_companies(
 
     for idx in range(companies_count):
         company_id = company_base_id + idx
-        company = Company(id=company_id, title=f"Demo Branch {idx + 1}", group_id=group.id)
+        company = Company(id=company_id, title=f"Demo Branch {idx + 1}", group_id=group.id, source_type=source_type)
         db.add(company)
         db.flush()
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import csv
 import io
 from datetime import date, datetime
@@ -14,7 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_deps import get_dashboard_access
+from auth_deps import forbid_demo, get_dashboard_access
 from auth_scope import AccessContext, effective_staff_id, query_scope, require_tenant_context
 from config import SYNC_API_TOKEN
 from dashboard_service import (
@@ -116,7 +117,8 @@ def _parse_range(start: date, end: date) -> tuple[date, date]:
 
 
 def _require_sync_token(x_sync_token: str | None) -> None:
-    if SYNC_API_TOKEN and x_sync_token != SYNC_API_TOKEN:
+    configured_token = (SYNC_API_TOKEN or '').strip()
+    if not configured_token or not hmac.compare_digest(x_sync_token or '', configured_token):
         raise HTTPException(status_code=401, detail='Invalid sync token')
 
 
@@ -290,7 +292,7 @@ async def dashboard_service_kpi_groups(
     }
 
 
-@router.post('/services/kpi_groups')
+@router.post('/services/kpi_groups', dependencies=[Depends(forbid_demo)])
 async def dashboard_service_kpi_group_create(
     payload: ServiceKpiGroupPayload,
     db: AsyncSession = Depends(get_async_db),
@@ -311,7 +313,7 @@ async def dashboard_service_kpi_group_create(
     return {'success': True, 'data': data}
 
 
-@router.patch('/services/kpi_groups/{group_id}')
+@router.patch('/services/kpi_groups/{group_id}', dependencies=[Depends(forbid_demo)])
 async def dashboard_service_kpi_group_update(
     group_id: int,
     payload: ServiceKpiGroupPayload,
@@ -334,7 +336,7 @@ async def dashboard_service_kpi_group_update(
     return {'success': True, 'data': data}
 
 
-@router.delete('/services/kpi_groups/{group_id}')
+@router.delete('/services/kpi_groups/{group_id}', dependencies=[Depends(forbid_demo)])
 async def dashboard_service_kpi_group_delete(
     group_id: int,
     db: AsyncSession = Depends(get_async_db),
@@ -351,7 +353,7 @@ async def dashboard_service_kpi_group_delete(
     return {'success': True, 'data': data}
 
 
-@router.patch('/services/{company_id}/{service_id}/labels')
+@router.patch('/services/{company_id}/{service_id}/labels', dependencies=[Depends(forbid_demo)])
 async def dashboard_service_label_save(
     company_id: int,
     service_id: int,
@@ -374,7 +376,7 @@ async def dashboard_service_label_save(
     return {'success': True, 'data': data}
 
 
-@router.patch('/services/{company_id}/{service_id}/kpi_group')
+@router.patch('/services/{company_id}/{service_id}/kpi_group', dependencies=[Depends(forbid_demo)])
 async def dashboard_service_kpi_assignment_save(
     company_id: int,
     service_id: int,
@@ -618,7 +620,7 @@ async def dashboard_plan_settings(
     return {'success': True, 'data': data}
 
 
-@router.post('/plan/settings')
+@router.post('/plan/settings', dependencies=[Depends(forbid_demo)])
 async def dashboard_plan_settings_save(
     payload: PlanSettingsPayload,
     db: AsyncSession = Depends(get_async_db),
@@ -667,7 +669,7 @@ async def dashboard_plan_reviews_fact(
     return {'success': True, 'data': data}
 
 
-@router.post('/plan/reviews_fact')
+@router.post('/plan/reviews_fact', dependencies=[Depends(forbid_demo)])
 async def dashboard_plan_reviews_fact_save(
     payload: ManualReviewFactsPayload,
     db: AsyncSession = Depends(get_async_db),
@@ -693,7 +695,7 @@ async def dashboard_plan_reviews_fact_save(
     return {'success': True, 'data': data}
 
 
-@router.post('/plan/sync')
+@router.post('/plan/sync', dependencies=[Depends(forbid_demo)])
 async def dashboard_plan_sync(
     x_sync_token: str | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),

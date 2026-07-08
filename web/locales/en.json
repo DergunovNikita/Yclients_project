@@ -616,5 +616,10 @@
     "addFavorite": "Add to favorites",
     "loadingReport": "Loading report",
     "loadFailed": "Could not load report"
+  },
+  "demo": {
+    "viewDemo": "View demo",
+    "banner": "Demo mode · fictional data",
+    "readOnly": "Demo mode: view only"
   }
 }

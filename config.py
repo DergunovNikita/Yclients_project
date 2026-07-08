@@ -8,6 +8,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+PRODUCTION_ENV_NAMES = {'prod', 'production'}
+APP_ENV = os.getenv('APP_ENV', 'local').strip().lower() or 'local'
+IS_PRODUCTION = APP_ENV in PRODUCTION_ENV_NAMES
+PLACEHOLDER_SECRET_VALUES = {
+    'change_me_local_jwt_secret',
+    'change_me_sync_api_token',
+    'change_me_strong_api_key',
+    'change_me_long_random_secret',
+    'changeme',
+    'replace_with_openssl_rand_hex_32',
+    'your_app_password',
+    'your_login@yandex.ru',
+}
+PLACEHOLDER_SECRET_PREFIXES = ('change_me', 'replace_with_', 'your_')
+
 
 def _get_int(name: str, default: int) -> int:
     value = os.getenv(name)
@@ -44,6 +59,20 @@ def _get_date(name: str, default: date) -> date:
         return date.fromisoformat(value)
     except ValueError:
         return default
+
+
+def _is_blank(value: str | None) -> bool:
+    return value is None or not value.strip()
+
+
+def _is_placeholder(value: str | None) -> bool:
+    if _is_blank(value):
+        return True
+    normalized = value.strip().lower()
+    return (
+        normalized in PLACEHOLDER_SECRET_VALUES
+        or any(normalized.startswith(prefix) for prefix in PLACEHOLDER_SECRET_PREFIXES)
+    )
 
 # ============================================================================
 # Настройки YClients API
@@ -124,6 +153,10 @@ AUTH_JWT_SECRET = os.getenv('AUTH_JWT_SECRET', 'change_me_local_jwt_secret')
 AUTH_JWT_EXPIRE_MINUTES = _get_int('AUTH_JWT_EXPIRE_MINUTES', 30)
 AUTH_REFRESH_TOKEN_EXPIRE_DAYS = _get_int('AUTH_REFRESH_TOKEN_EXPIRE_DAYS', 30)
 AUTH_REQUIRE_LOGIN = _get_bool('AUTH_REQUIRE_LOGIN', not bool(API_KEY))
+AUTH_PUBLIC_REGISTRATION_ENABLED = _get_bool(
+    'AUTH_PUBLIC_REGISTRATION_ENABLED',
+    APP_ENV in {'local', 'test'},
+)
 AUTH_EMAIL_VERIFY_REQUIRED = _get_bool('AUTH_EMAIL_VERIFY_REQUIRED', True)
 AUTH_EMAIL_RESEND_COOLDOWN_SECONDS = _get_int('AUTH_EMAIL_RESEND_COOLDOWN_SECONDS', 60)
 AUTH_COOKIE_SECURE = _get_bool('AUTH_COOKIE_SECURE', False)
@@ -153,3 +186,66 @@ else:
 
 PORTAL_CREDENTIALS_ENCRYPTION_KEY = os.getenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', '').strip()
 PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD = os.getenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD', '').strip()
+
+
+def collect_production_config_errors(
+    *,
+    api_key: str | None = API_KEY,
+    auth_require_login: bool = AUTH_REQUIRE_LOGIN,
+    auth_public_registration_enabled: bool = AUTH_PUBLIC_REGISTRATION_ENABLED,
+    auth_jwt_secret: str | None = AUTH_JWT_SECRET,
+    sync_api_token: str | None = SYNC_API_TOKEN,
+    db_password: str | None = DB_PASSWORD,
+    portal_credentials_encryption_key: str | None = PORTAL_CREDENTIALS_ENCRYPTION_KEY,
+    auth_cookie_secure: bool = AUTH_COOKIE_SECURE,
+    auth_cookie_samesite: str | None = AUTH_COOKIE_SAMESITE,
+    auth_console_email: bool = AUTH_CONSOLE_EMAIL,
+    smtp_host: str | None = SMTP_HOST,
+    smtp_user: str | None = SMTP_USER,
+    smtp_password: str | None = SMTP_PASSWORD,
+    smtp_from: str | None = SMTP_FROM,
+) -> list[str]:
+    """Return production-only startup configuration errors.
+
+    Keep this side-effect free so tests can validate the policy without
+    reloading module globals or depending on the host process environment.
+    """
+    errors: list[str] = []
+    if _is_placeholder(auth_jwt_secret) or len(auth_jwt_secret.strip()) < 32:
+        errors.append('AUTH_JWT_SECRET must be set to a strong non-default value')
+    if _is_placeholder(sync_api_token):
+        errors.append('SYNC_API_TOKEN must be set to a non-default value')
+    if _is_placeholder(db_password):
+        errors.append('DB_PASSWORD must be set to a non-default value')
+    if (
+        _is_placeholder(portal_credentials_encryption_key)
+        or len(portal_credentials_encryption_key.strip()) < 32
+    ):
+        errors.append('PORTAL_CREDENTIALS_ENCRYPTION_KEY must be set to a strong non-default value')
+    if not _is_blank(api_key) and (_is_placeholder(api_key) or len(api_key.strip()) < 32):
+        errors.append('API_KEY must be unset or set to a strong non-default value')
+    if not auth_require_login and _is_blank(api_key):
+        errors.append('AUTH_REQUIRE_LOGIN must be true unless API_KEY is set')
+    if auth_public_registration_enabled:
+        errors.append('AUTH_PUBLIC_REGISTRATION_ENABLED must be false')
+    if not auth_cookie_secure:
+        errors.append('AUTH_COOKIE_SECURE must be true')
+    if (auth_cookie_samesite or '').strip().lower() not in {'lax', 'strict', 'none'}:
+        errors.append('AUTH_COOKIE_SAMESITE must be one of: lax, strict, none')
+    if auth_console_email:
+        errors.append('AUTH_CONSOLE_EMAIL must be false')
+    if any(_is_placeholder(value) for value in (smtp_host, smtp_user, smtp_password, smtp_from)):
+        errors.append('SMTP_HOST, SMTP_USER, SMTP_PASSWORD and SMTP_FROM must be configured')
+    return errors
+
+
+def validate_production_config() -> None:
+    if not IS_PRODUCTION:
+        return
+    errors = collect_production_config_errors()
+    if errors:
+        details = '; '.join(errors)
+        raise RuntimeError(f'Unsafe production configuration: {details}')
+
+
+validate_production_config()

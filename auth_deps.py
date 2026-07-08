@@ -10,17 +10,15 @@ import jwt
 from auth_scope import AccessContext
 from auth_service import decode_access_token, load_portal_account_branch_ids, load_user_access_branch_ids
 from auth_sessions import ACCESS_COOKIE_NAME, enforce_csrf
-from config import API_KEY, AUTH_REQUIRE_LOGIN
+from config import API_KEY, AUTH_REQUIRE_LOGIN, IS_PRODUCTION
 from database import get_async_db
 from models import PortalUser, Staff
 
 OPEN_PATH_PREFIXES = (
     '/health',
-    '/openapi.json',
-    '/docs',
-    '/redoc',
     '/auth/register',
     '/auth/login',
+    '/auth/demo-login',
     '/auth/refresh',
     '/auth/logout',
     '/auth/verify-email',
@@ -29,6 +27,7 @@ OPEN_PATH_PREFIXES = (
     '/auth/resend-verification',
     '/dashboard/auth/register',
     '/dashboard/auth/login',
+    '/dashboard/auth/demo-login',
     '/dashboard/auth/refresh',
     '/dashboard/auth/logout',
     '/dashboard/auth/verify-email',
@@ -37,9 +36,11 @@ OPEN_PATH_PREFIXES = (
     '/dashboard/auth/resend-verification',
 )
 
+DOCS_OPEN_PATHS = set() if IS_PRODUCTION else {'/openapi.json', '/docs', '/redoc'}
+
 
 def _is_open_path(path: str) -> bool:
-    if path in {'/health', '/openapi.json', '/docs', '/redoc'}:
+    if path == '/health' or path in DOCS_OPEN_PATHS:
         return True
     return any(path.startswith(prefix) for prefix in OPEN_PATH_PREFIXES)
 
@@ -160,3 +161,31 @@ def require_roles(*roles: str):
         return user
 
     return _dep
+
+
+async def forbid_demo(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_async_db),
+) -> None:
+    """Reject mutating requests made by the shared read-only demo account.
+
+    Soft by design: only a valid demo JWT is blocked with 403. API-key,
+    X-Sync-Token and unauthenticated callers carry no JWT and pass through
+    unchanged, so token-based automation keeps working. Attach per write route
+    via ``dependencies=[Depends(forbid_demo)]`` — never at router level, since
+    the routers also serve demo-allowed reads.
+    """
+    token = _extract_access_token(request, authorization)
+    if not token:
+        return
+    try:
+        payload = decode_access_token(token)
+    except jwt.PyJWTError:
+        return
+    try:
+        user_id = int(payload.get('sub'))
+    except (TypeError, ValueError):
+        return
+    if await db.scalar(select(PortalUser.is_demo).where(PortalUser.id == user_id)):
+        raise HTTPException(status_code=403, detail='Demo account is read-only')

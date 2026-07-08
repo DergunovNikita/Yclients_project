@@ -1,6 +1,5 @@
 import { t } from './i18n.js';
 
-const TOKEN_KEY = 'portal_access_token';
 const PORTAL_ACCOUNT_KEY = 'portal_account_id';
 const USER_EMAIL_KEY = 'portal_user_email';
 const CSRF_COOKIE_NAME = 'portal_csrf';
@@ -9,6 +8,25 @@ const apiBase = import.meta.env.VITE_API_BASE || '';
 let refreshInFlight = null;
 let reauthInFlight = null;
 
+function clearLegacyAccessToken() {
+  for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+    const key = localStorage.key(index);
+    const parts = key ? key.split('_') : [];
+    if (parts.length === 3 && parts[0] === 'portal' && parts[1] === 'access' && parts[2] === 'token') {
+      localStorage.removeItem(key);
+    }
+  }
+}
+
+function clearLocalAuthState({ clearPortalAccount = true } = {}) {
+  clearLegacyAccessToken();
+  if (clearPortalAccount) {
+    localStorage.removeItem(PORTAL_ACCOUNT_KEY);
+  }
+}
+
+clearLocalAuthState({ clearPortalAccount: false });
+
 export function resolveApiPath(path) {
   if (!apiBase) {
     return path;
@@ -16,17 +34,8 @@ export function resolveApiPath(path) {
   return `${apiBase.replace(/\/$/, '')}${path}`;
 }
 
-export function getToken() {
-  return localStorage.getItem(TOKEN_KEY) || '';
-}
-
-export function setToken(token) {
-  if (token) {
-    localStorage.setItem(TOKEN_KEY, token);
-  } else {
-    localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(PORTAL_ACCOUNT_KEY);
-  }
+export function setToken() {
+  clearLocalAuthState();
 }
 
 function rememberUser(payload) {
@@ -54,10 +63,7 @@ export function setSelectedPortalAccountId(portalAccountId) {
 
 export function authHeaders(extra = {}) {
   const headers = { ...extra };
-  const token = getToken();
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
+  clearLegacyAccessToken();
   const portalAccountId = getSelectedPortalAccountId();
   if (portalAccountId) {
     headers['X-Portal-Account-Id'] = portalAccountId;
@@ -75,7 +81,7 @@ export function getCsrfToken() {
 }
 
 export function hasSessionHint() {
-  return Boolean(getToken() || getCsrfToken());
+  return Boolean(getCsrfToken());
 }
 
 function isMutatingMethod(method) {
@@ -147,9 +153,6 @@ async function refreshSession() {
     throw new Error(t('authErrors.authenticationRequired'));
   }
   const payload = await parsePayload(response);
-  if (payload?.data?.access_token) {
-    setToken(payload.data.access_token);
-  }
   rememberUser(payload);
   return payload;
 }
@@ -251,9 +254,6 @@ async function promptReauth() {
           nextError.status = response.status;
           throw nextError;
         }
-        if (payload?.data?.access_token) {
-          setToken(payload.data.access_token);
-        }
         rememberUser(payload);
         cleanup();
         resolve(payload);
@@ -314,8 +314,17 @@ export function requireAuthRedirect(loginPath = '/login.html') {
   return true;
 }
 
-export function logout(loginPath = '/login.html') {
-  setToken('');
+export async function logout(loginPath = '/login.html') {
+  try {
+    await fetch(resolveApiPath('/auth/logout'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: normalizeHeaders('/auth/logout', { method: 'POST' }),
+    });
+  } catch {
+    /* local cleanup and redirect still happen */
+  }
+  clearLocalAuthState();
   window.location.href = loginPath;
 }
 
