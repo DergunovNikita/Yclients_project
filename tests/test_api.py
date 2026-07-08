@@ -1,17 +1,21 @@
 from datetime import datetime
+import json
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 import api
 from api import app
 from auth_service import create_access_token, hash_password
 from models import (
+    Client,
     Company,
     GoodCatalog,
     GoodTransaction,
     Group,
     PortalAccount,
+    PortalAuditEvent,
     PortalBranch,
     PortalUser,
     PortalUserBranch,
@@ -137,6 +141,246 @@ async def test_legacy_api_filters_jwt_users_by_tenant_scope(async_session, monke
     assert forbidden.status_code == 403
     assert '1,,1,,,,,2.0,,10.0,,,,1' in exported.text
     assert '2,,1,,,,,1.0,,20.0,,,,2' not in exported.text
+
+
+async def _seed_client_pii_scope(async_session):
+    async_session.add(Group(id=1, title='Group'))
+    async_session.add_all([
+        Company(id=1, title='Tenant A Branch', group_id=1),
+        Company(id=2, title='Tenant B Branch', group_id=1),
+    ])
+    async_session.add(PortalAccount(id=1, label='Tenant A', created_at=datetime.utcnow()))
+    async_session.add(PortalAccount(id=2, label='Tenant B', created_at=datetime.utcnow()))
+    async_session.add(PortalBranch(portal_account_id=1, company_id=1))
+    async_session.add(PortalBranch(portal_account_id=2, company_id=2))
+    async_session.add_all([
+        PortalUser(
+            id=201,
+            portal_account_id=1,
+            email='manager@example.com',
+            password_hash=hash_password('Manager123!'),
+            full_name='Manager',
+            role='manager',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+        PortalUser(
+            id=202,
+            portal_account_id=1,
+            email='viewer@example.com',
+            password_hash=hash_password('Viewer123!'),
+            full_name='Viewer',
+            role='viewer',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+        PortalUser(
+            id=203,
+            portal_account_id=None,
+            email='platform@example.com',
+            password_hash=hash_password('Platform123!'),
+            full_name='Platform',
+            role='platform_admin',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+    ])
+    async_session.add_all([
+        PortalUserBranch(user_id=201, company_id=1),
+        PortalUserBranch(user_id=202, company_id=1),
+    ])
+    async_session.add_all([
+        Client(
+            id=1,
+            name='Tenant A Client',
+            phone='+111111111',
+            email='tenant-a-client@example.com',
+            visits_count=3,
+            company_id=1,
+        ),
+        Client(
+            id=2,
+            name='Tenant B Client',
+            phone='+222222222',
+            email='tenant-b-client@example.com',
+            visits_count=5,
+            company_id=2,
+        ),
+    ])
+    await async_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_clients_endpoint_requires_jwt_user_even_when_login_not_required(async_session):
+    await _seed_client_pii_scope(async_session)
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get('/clients')
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 401
+    assert response.json()['detail'] == 'Authentication required'
+
+
+@pytest.mark.asyncio
+async def test_clients_endpoint_rejects_viewer_role(async_session):
+    await _seed_client_pii_scope(async_session)
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(202, 'viewer')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get('/clients', headers={'Authorization': f'Bearer {token}'})
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 403
+    assert response.json()['detail'] == 'Insufficient permissions'
+
+
+@pytest.mark.asyncio
+async def test_clients_endpoint_scopes_manager_and_logs_safe_audit(async_session):
+    await _seed_client_pii_scope(async_session)
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(201, 'manager')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get('/clients', headers={'Authorization': f'Bearer {token}'})
+        forbidden = await client.get(
+            '/clients',
+            params={'company_id': 2},
+            headers={'Authorization': f'Bearer {token}'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert [row['id'] for row in response.json()['data']] == [1]
+    assert response.json()['data'][0]['phone'] == '+111111111'
+    assert forbidden.status_code == 403
+    assert forbidden.json()['detail'] == 'Branch not allowed'
+
+    audit = (
+        await async_session.execute(
+            select(PortalAuditEvent).where(PortalAuditEvent.action == 'client_pii.read')
+        )
+    ).scalar_one()
+    assert audit.actor_user_id == 201
+    assert audit.portal_account_id == 1
+    assert audit.metadata_json == {
+        'company_id': None,
+        'min_visits': None,
+        'limit': 1000,
+        'offset': 0,
+        'row_count': 1,
+        'total': 1,
+    }
+    serialized_metadata = json.dumps(audit.metadata_json)
+    assert 'tenant-a-client@example.com' not in serialized_metadata
+    assert '+111111111' not in serialized_metadata
+    assert 'token' not in serialized_metadata.lower()
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_clients_requires_selected_tenant(async_session):
+    await _seed_client_pii_scope(async_session)
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(203, 'platform_admin')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        missing_tenant = await client.get('/clients', headers={'Authorization': f'Bearer {token}'})
+        tenant_b = await client.get(
+            '/clients',
+            headers={'Authorization': f'Bearer {token}', 'X-Portal-Account-Id': '2'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert missing_tenant.status_code == 400
+    assert missing_tenant.json()['detail'] == 'X-Portal-Account-Id is required'
+    assert tenant_b.status_code == 200
+    assert [row['id'] for row in tenant_b.json()['data']] == [2]
+
+
+@pytest.mark.asyncio
+async def test_clients_csv_export_is_scoped_and_audited(async_session):
+    await _seed_client_pii_scope(async_session)
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(201, 'manager')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get('/export/csv/clients', headers={'Authorization': f'Bearer {token}'})
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert 'Tenant A Client' in response.text
+    assert '+111111111' in response.text
+    assert 'Tenant B Client' not in response.text
+    assert '+222222222' not in response.text
+    audit = (
+        await async_session.execute(
+            select(PortalAuditEvent).where(PortalAuditEvent.action == 'client_pii.export')
+        )
+    ).scalar_one()
+    assert audit.actor_user_id == 201
+    assert audit.portal_account_id == 1
+    assert audit.metadata_json == {'table': 'clients', 'format': 'csv'}
+
+
+@pytest.mark.asyncio
+async def test_clients_csv_export_rejects_non_user_or_viewer_access(async_session, monkeypatch):
+    import auth_deps
+
+    await _seed_client_pii_scope(async_session)
+
+    async def override_db():
+        yield async_session
+
+    monkeypatch.setattr(api, 'API_KEY', 'legacy-api-key')
+    monkeypatch.setattr(auth_deps, 'API_KEY', 'legacy-api-key')
+    viewer_token = create_access_token(202, 'viewer')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        anonymous = await client.get('/export/csv/clients')
+        api_key_only = await client.get('/export/csv/clients', headers={'X-API-Key': 'legacy-api-key'})
+        viewer = await client.get(
+            '/export/csv/clients',
+            headers={'Authorization': f'Bearer {viewer_token}'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert anonymous.status_code == 401
+    assert api_key_only.status_code == 401
+    assert api_key_only.json()['detail'] == 'Authentication required'
+    assert viewer.status_code == 403
+    assert viewer.json()['detail'] == 'Insufficient permissions'
 
 
 @pytest.mark.asyncio

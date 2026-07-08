@@ -78,6 +78,7 @@ except Exception:
 
 MAX_PAGE_SIZE = 5000
 DEFAULT_PAGE_SIZE = 1000
+PII_CLIENT_ROLES = {'platform_admin', 'owner', 'branch_admin', 'manager'}
 
 OPEN_PATHS = {"/health"}
 if not IS_PRODUCTION:
@@ -168,6 +169,18 @@ def apply_company_scope(stmt, column, company_id: Optional[int], ctx: AccessCont
             raise HTTPException(status_code=403, detail='Branch not allowed')
         return stmt.where(column == company_id)
     return stmt.where(column.in_(allowed))
+
+
+def require_client_pii_access(request: Request) -> tuple[AccessContext, int]:
+    ctx = request_access(request)
+    if ctx is None or ctx.user_id is None:
+        raise HTTPException(status_code=401, detail='Authentication required')
+    if ctx.role not in PII_CLIENT_ROLES:
+        raise HTTPException(status_code=403, detail='Insufficient permissions')
+    portal_account_id = require_tenant_context(ctx)
+    if not ctx.company_ids:
+        raise HTTPException(status_code=403, detail='No branch access assigned')
+    return ctx, int(portal_account_id)
 
 
 def build_page_response(total: int, limit: int, offset: int, data: list[dict[str, Any]]) -> dict[str, Any]:
@@ -384,12 +397,29 @@ async def api_clients(
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
+    ctx, portal_account_id = require_client_pii_access(request)
     stmt = select(Client)
-    stmt = apply_company_scope(stmt, Client.company_id, company_id, request_access(request))
+    stmt = apply_company_scope(stmt, Client.company_id, company_id, ctx)
     if min_visits is not None:
         stmt = stmt.where(Client.visits_count >= min_visits)
     stmt = stmt.order_by(Client.id.asc())
     total, items = await fetch_page(db, stmt, limit, offset)
+    await log_portal_audit(
+        db,
+        actor_user_id=ctx.user_id,
+        portal_account_id=portal_account_id,
+        action='client_pii.read',
+        target_type='clients',
+        metadata={
+            'company_id': company_id,
+            'min_visits': min_visits,
+            'limit': limit,
+            'offset': offset,
+            'row_count': len(items),
+            'total': int(total),
+        },
+    )
+    await db.commit()
     data = serialize_rows(items, lambda item: {
         "id": item.id,
         "name": item.name,
@@ -928,9 +958,21 @@ async def export_csv(table_name: str, request: Request, db: AsyncSession = Depen
             status_code=404,
             detail=f"Table '{table_name}' not found. Available: {list(TABLE_MAP.keys())}",
         )
+    ctx = request_access(request)
+    if model is Client:
+        ctx, portal_account_id = require_client_pii_access(request)
+        await log_portal_audit(
+            db,
+            actor_user_id=ctx.user_id,
+            portal_account_id=portal_account_id,
+            action='client_pii.export',
+            target_type='clients',
+            metadata={'table': table_name, 'format': 'csv'},
+        )
+        await db.commit()
 
     return StreamingResponse(
-        async_stream_csv_rows(db, model, request_access(request)),
+        async_stream_csv_rows(db, model, ctx),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename={table_name}.csv"},
     )
