@@ -31,11 +31,14 @@ async function loginWithRetry(email, password) {
   throw lastError;
 }
 
+const DEMO_ORIGIN = import.meta.env.VITE_DEMO_ORIGIN;
+const DEMO_AUTOLOGIN = import.meta.env.VITE_DEMO_AUTOLOGIN;
 const demoBtn = document.getElementById('demo-login');
-demoBtn?.addEventListener('click', async () => {
+
+async function runDemoLogin() {
   errorEl.hidden = true;
-  demoBtn.disabled = true;
-  demoBtn.classList.add('is-loading');
+  demoBtn?.classList.add('is-loading');
+  if (demoBtn) demoBtn.disabled = true;
   try {
     await authFetch('/auth/demo-login', { method: 'POST' });
     window.location.href = '/';
@@ -43,10 +46,26 @@ demoBtn?.addEventListener('click', async () => {
     errorEl.textContent = error.message;
     errorEl.hidden = false;
   } finally {
-    demoBtn.disabled = false;
-    demoBtn.classList.remove('is-loading');
+    demoBtn?.classList.remove('is-loading');
+    if (demoBtn) demoBtn.disabled = false;
   }
+}
+
+// On the production site VITE_DEMO_ORIGIN points at the dedicated demo instance,
+// so the button sends the visitor there (that build auto-logs in via
+// VITE_DEMO_AUTOLOGIN). On the demo instance itself VITE_DEMO_ORIGIN is unset, so
+// the button performs the passwordless login same-origin.
+demoBtn?.addEventListener('click', () => {
+  if (DEMO_ORIGIN) {
+    window.location.href = DEMO_ORIGIN;
+    return;
+  }
+  runDemoLogin();
 });
+
+if (DEMO_AUTOLOGIN && !DEMO_ORIGIN) {
+  runDemoLogin();
+}
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
