@@ -15,6 +15,7 @@
     { "source": "/auth/:path*", "destination": "/api/auth-proxy?path=:path*" },
     { "source": "/api/auth/:path*", "destination": "/api/auth-proxy?path=:path*" },
     { "source": "/dashboard/:path*", "destination": "/api/dashboard/:path*" },
+    { "source": "/onboarding/:path*", "destination": "/api/onboarding/:path*" },
     { "source": "/settings", "destination": "/settings.html" },
     { "source": "/reports", "destination": "/index.html" },
     { "source": "/reports/:path*", "destination": "/index.html" }
