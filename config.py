@@ -4,6 +4,8 @@
 """
 import os
 from datetime import date
+from urllib.parse import urlsplit
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -74,6 +76,30 @@ def _is_placeholder(value: str | None) -> bool:
         or any(normalized.startswith(prefix) for prefix in PLACEHOLDER_SECRET_PREFIXES)
     )
 
+
+def _cors_origins_list(value: str | None) -> list[str]:
+    return [origin.strip() for origin in (value or '').split(',') if origin.strip()]
+
+
+def _is_exact_cors_origin(value: str) -> bool:
+    if value in {'*', 'null'} or '*' in value:
+        return False
+    parsed = urlsplit(value)
+    try:
+        parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {'http', 'https'}
+        and bool(parsed.netloc)
+        and bool(parsed.hostname)
+        and parsed.path == ''
+        and parsed.query == ''
+        and parsed.fragment == ''
+        and parsed.username is None
+        and parsed.password is None
+    )
+
 # ============================================================================
 # Настройки YClients API
 # ============================================================================
@@ -126,6 +152,13 @@ API_KEY = os.getenv('API_KEY', '')
 # Comma-separated origins for dashboard SPA (e.g. Vercel preview). Empty = no CORS middleware.
 DASHBOARD_CORS_ORIGINS = os.getenv('DASHBOARD_CORS_ORIGINS', '')
 DASHBOARD_CORS_ORIGIN_REGEX = os.getenv('DASHBOARD_CORS_ORIGIN_REGEX', '')
+DASHBOARD_CORS_ALLOW_METHODS = ('GET', 'POST', 'PATCH', 'DELETE')
+DASHBOARD_CORS_ALLOW_HEADERS = (
+    'Content-Type',
+    'X-CSRF-Token',
+    'X-Portal-Account-Id',
+    'X-API-Key',
+)
 
 # Published Google Sheets CSV URL with branch plan values for /dashboard/widget/plan_fact.
 PLAN_SHEET_CSV_URL = os.getenv('PLAN_SHEET_CSV_URL', '')
@@ -210,6 +243,8 @@ def collect_production_config_errors(
     smtp_user: str | None = SMTP_USER,
     smtp_password: str | None = SMTP_PASSWORD,
     smtp_from: str | None = SMTP_FROM,
+    dashboard_cors_origins: str | None = DASHBOARD_CORS_ORIGINS,
+    dashboard_cors_origin_regex: str | None = DASHBOARD_CORS_ORIGIN_REGEX,
 ) -> list[str]:
     """Return production-only startup configuration errors.
 
@@ -242,6 +277,13 @@ def collect_production_config_errors(
         errors.append('AUTH_CONSOLE_EMAIL must be false')
     if any(_is_placeholder(value) for value in (smtp_host, smtp_user, smtp_password, smtp_from)):
         errors.append('SMTP_HOST, SMTP_USER, SMTP_PASSWORD and SMTP_FROM must be configured')
+    if not _is_blank(dashboard_cors_origin_regex):
+        errors.append('DASHBOARD_CORS_ORIGIN_REGEX must be empty in production')
+    if any(not _is_exact_cors_origin(origin) for origin in _cors_origins_list(dashboard_cors_origins)):
+        errors.append(
+            'DASHBOARD_CORS_ORIGINS must contain exact http(s) origins without wildcards, '
+            'paths, query strings or fragments'
+        )
     return errors
 
 

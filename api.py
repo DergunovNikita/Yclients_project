@@ -12,6 +12,7 @@ from typing import Any, Callable, Literal, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -20,6 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import (
     API_HOST,
     API_PORT,
+    DASHBOARD_CORS_ALLOW_HEADERS,
+    DASHBOARD_CORS_ALLOW_METHODS,
     DASHBOARD_CORS_ORIGIN_REGEX,
     DASHBOARD_CORS_ORIGINS,
     DB_HOST,
@@ -123,10 +126,45 @@ if _cors_origins:
         allow_origins=_cors_origins,
         allow_origin_regex=DASHBOARD_CORS_ORIGIN_REGEX or None,
         allow_credentials=True,
-        allow_methods=['*'],
-        allow_headers=['*'],
-        allow_private_network=True,
+        allow_methods=list(DASHBOARD_CORS_ALLOW_METHODS),
+        allow_headers=list(DASHBOARD_CORS_ALLOW_HEADERS),
     )
+
+
+SECURITY_HEADERS = {
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'self'; object-src 'none'",
+}
+
+
+def _request_is_https(request: Request) -> bool:
+    forwarded_proto = request.headers.get('x-forwarded-proto', '').split(',')[0].strip().lower()
+    return request.url.scheme == 'https' or forwarded_proto == 'https'
+
+
+def _apply_security_headers(request: Request, response):
+    for header, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(header, value)
+    if IS_PRODUCTION and _request_is_https(request):
+        response.headers.setdefault('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+    return response
+
+
+@app.middleware('http')
+async def add_security_headers(request: Request, call_next: Callable):
+    response = await call_next(request)
+    return _apply_security_headers(request, response)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    response = JSONResponse(
+        status_code=500,
+        content={'detail': 'Internal server error'},
+    )
+    return _apply_security_headers(request, response)
 
 app.include_router(auth_router, prefix='/auth', tags=['auth'])
 app.include_router(auth_router, prefix='/dashboard/auth', tags=['auth'])
