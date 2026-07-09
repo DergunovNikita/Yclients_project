@@ -1,5 +1,6 @@
 """Portal auth and branch access control tests."""
 
+import json
 from datetime import datetime
 
 import pytest
@@ -13,10 +14,12 @@ from api import app
 from auth_sessions import ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME
 from auth_service import TOKEN_PURPOSE_RESET, create_access_token, create_email_token, hash_password
 from config import AUTH_CSRF_COOKIE_NAME
+from yclients_credentials import new_credential
 from models import (
     Company,
     Group,
     PortalAccount,
+    PortalAuditEvent,
     PortalEmailToken,
     PortalBranch,
     PortalUser,
@@ -343,6 +346,125 @@ async def test_platform_admin_lists_portal_accounts(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_platform_admin_yclients_payload_test_requires_and_audits_selected_tenant(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    partner_secret = 'platform-partner-secret'
+    login_secret = 'platform-login-secret'
+    password_secret = 'platform-password-secret'
+    platform_admin = PortalUser(
+        id=52,
+        portal_account_id=None,
+        email='platform.credentials@example.com',
+        password_hash=hash_password('Platform12345!'),
+        full_name='Platform Credentials',
+        role='platform_admin',
+        is_active=True,
+        email_verified_at=datetime.utcnow(),
+        created_at=datetime.utcnow(),
+    )
+    auth_db.add(platform_admin)
+    await auth_db.commit()
+
+    class FakeYClientsAPI:
+        def __init__(self, partner_token, login, password):
+            self.partner_token = partner_token
+            self.login = login
+            self.password = password
+
+        def authenticate(self):
+            return (
+                self.partner_token == partner_secret
+                and self.login == login_secret
+                and self.password == password_secret
+            )
+
+    monkeypatch.setattr('data_sources.YClientsAPI', FakeYClientsAPI)
+
+    async def override_db():
+        yield auth_db
+
+    token = create_access_token(52, 'platform_admin')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    payload = {
+        'partner_token': partner_secret,
+        'login': login_secret,
+        'password': password_secret,
+    }
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        missing_tenant = await client.post(
+            '/auth/admin/yclients-credentials/test',
+            headers={'Authorization': f'Bearer {token}'},
+            json=payload,
+        )
+        unknown_tenant = await client.post(
+            '/auth/admin/yclients-credentials/test',
+            headers={'Authorization': f'Bearer {token}', 'X-Portal-Account-Id': '999'},
+            json=payload,
+        )
+        unknown_tenant_saved_test = await client.post(
+            '/auth/admin/yclients-credentials/404/test',
+            headers={'Authorization': f'Bearer {token}', 'X-Portal-Account-Id': '999'},
+        )
+        selected_tenant = await client.post(
+            '/auth/admin/yclients-credentials/test',
+            headers={'Authorization': f'Bearer {token}', 'X-Portal-Account-Id': '1'},
+            json=payload,
+        )
+
+    app.dependency_overrides.clear()
+
+    assert missing_tenant.status_code == 400
+    assert unknown_tenant.status_code == 404
+    assert unknown_tenant_saved_test.status_code == 404
+    assert selected_tenant.status_code == 200
+    for secret in (partner_secret, login_secret, password_secret):
+        assert secret not in missing_tenant.text
+        assert secret not in unknown_tenant.text
+        assert secret not in unknown_tenant_saved_test.text
+        assert secret not in selected_tenant.text
+    audits = (
+        await auth_db.execute(
+            select(PortalAuditEvent)
+            .where(PortalAuditEvent.action.in_([
+                'yclients_credentials.payload_tested',
+                'yclients_credentials.tested',
+            ]))
+            .order_by(PortalAuditEvent.id.asc())
+        )
+    ).scalars().all()
+    assert all(audit.portal_account_id != 999 for audit in audits)
+    assert any(
+        audit.action == 'yclients_credentials.payload_tested'
+        and audit.portal_account_id is None
+        and audit.metadata_json == {
+            'success': False,
+            'error_type': 'tenant_selection_failed',
+            'requested_portal_account_id': 999,
+        }
+        for audit in audits
+    )
+    assert any(
+        audit.action == 'yclients_credentials.tested'
+        and audit.portal_account_id is None
+        and audit.metadata_json == {
+            'success': False,
+            'error_type': 'credential_lookup_failed',
+            'requested_portal_account_id': 999,
+        }
+        for audit in audits
+    )
+    audit = audits[-1]
+    assert audit is not None
+    assert audit.actor_user_id == 52
+    assert audit.portal_account_id == 1
+    assert audit.metadata_json == {'source_type': 'yclients', 'success': True}
+    metadata_text = json.dumps(audit.metadata_json, sort_keys=True)
+    for secret in (partner_secret, login_secret, password_secret):
+        assert secret not in metadata_text
+
+
+@pytest.mark.asyncio
 async def test_platform_admin_update_clears_platform_admin_tenant(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     actor = PortalUser(
@@ -455,13 +577,38 @@ async def test_platform_admin_filters_yclients_credentials_by_selected_tenant(au
             '/auth/admin/yclients-credentials',
             headers={**headers, 'X-Portal-Account-Id': '2'},
         )
+        unknown_tenant_credentials = await client.get(
+            '/auth/admin/yclients-credentials',
+            headers={**headers, 'X-Portal-Account-Id': '999'},
+        )
 
     app.dependency_overrides.clear()
 
     assert all_credentials.status_code == 400
     assert all_credentials.json()['detail'] == 'portal_account_id is required'
+    assert unknown_tenant_credentials.status_code == 404
+    assert unknown_tenant_credentials.json()['detail'] == 'Portal account not found'
     assert tenant_b_credentials.status_code == 200
     assert [item['title'] for item in tenant_b_credentials.json()['data']] == ['Tenant B Credentials']
+    audits = (
+        await auth_db.execute(
+            select(PortalAuditEvent)
+            .where(PortalAuditEvent.action == 'yclients_credentials.listed')
+            .order_by(PortalAuditEvent.id.asc())
+        )
+    ).scalars().all()
+    assert all(audit.portal_account_id != 999 for audit in audits)
+    assert any(audit.metadata_json == {'success': False, 'error_type': 'tenant_selection_failed'} for audit in audits)
+    assert any(
+        audit.portal_account_id is None
+        and audit.metadata_json == {
+            'success': False,
+            'error_type': 'tenant_selection_failed',
+            'requested_portal_account_id': 999,
+        }
+        for audit in audits
+    )
+    assert any(audit.portal_account_id == 2 and audit.metadata_json == {'success': True, 'count': 1} for audit in audits)
 
 
 @pytest.mark.asyncio
@@ -514,11 +661,21 @@ async def test_platform_admin_move_yclients_credentials_requires_company_ids(aut
             },
             json={'portal_account_id': 2, 'is_active': True},
         )
+        unknown_tenant = await client.patch(
+            '/auth/admin/yclients-credentials/3',
+            headers={
+                'Authorization': f'Bearer {token}',
+                'X-Portal-Account-Id': '1',
+            },
+            json={'portal_account_id': 999, 'company_ids': [], 'is_active': True},
+        )
 
     app.dependency_overrides.clear()
 
     assert response.status_code == 400
     assert 'company_ids' in response.json()['detail']
+    assert unknown_tenant.status_code == 404
+    assert unknown_tenant.json()['detail'] == 'Portal account not found'
     credential = await auth_db.get(YClientsCredential, 3)
     assert credential.portal_account_id == 1
     links = (await auth_db.execute(select(YClientsCredentialCompany.company_id))).scalars().all()
@@ -583,6 +740,50 @@ async def test_platform_admin_move_yclients_credentials_updates_company_bindings
     assert credential.portal_account_id == 2
     links = (await auth_db.execute(select(YClientsCredentialCompany.company_id))).scalars().all()
     assert links == [3]
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_create_yclients_credentials_rejects_unknown_tenant(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    platform_admin = PortalUser(
+        id=57,
+        portal_account_id=None,
+        email='platform.create.credentials@example.com',
+        password_hash=hash_password('Platform12345!'),
+        full_name='Platform Create Credentials',
+        role='platform_admin',
+        is_active=True,
+        email_verified_at=datetime.utcnow(),
+        created_at=datetime.utcnow(),
+    )
+    auth_db.add(platform_admin)
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    token = create_access_token(57, 'platform_admin')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/auth/admin/yclients-credentials',
+            headers={'Authorization': f'Bearer {token}', 'X-Portal-Account-Id': '999'},
+            json={
+                'title': 'Unknown tenant',
+                'partner_token': 'create-partner-secret',
+                'login': 'create-login-secret',
+                'password': 'create-password-secret',
+                'company_ids': [],
+            },
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert response.json()['detail'] == 'Portal account not found'
+    for secret in ('create-partner-secret', 'create-login-secret', 'create-password-secret'):
+        assert secret not in response.text
 
 
 @pytest.mark.asyncio
@@ -1570,6 +1771,43 @@ async def test_owner_manages_yclients_credentials(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
     token = create_access_token(1, 'owner')
+    partner_secret = 'partner-secret-value'
+    login_secret = 'login-secret-value'
+    password_secret = 'password-secret-value'
+    bad_partner_secret = 'bad-partner-secret-value'
+    bad_login_secret = 'bad-login-secret-value'
+    bad_password_secret = 'bad-password-secret-value'
+    validation_secret = 'validation-secret-value'
+    all_secret_values = (
+        partner_secret,
+        login_secret,
+        password_secret,
+        bad_partner_secret,
+        bad_login_secret,
+        bad_password_secret,
+        validation_secret,
+    )
+
+    def assert_no_raw_secret_fields(value):
+        forbidden_keys = {
+            'partner_token',
+            'login',
+            'password',
+            'partner_token_encrypted',
+            'login_encrypted',
+            'password_encrypted',
+        }
+        if isinstance(value, dict):
+            for key, item in value.items():
+                assert key not in forbidden_keys
+                assert not key.endswith('_encrypted')
+                assert_no_raw_secret_fields(item)
+        elif isinstance(value, list):
+            for item in value:
+                assert_no_raw_secret_fields(item)
+        elif isinstance(value, str):
+            for secret in all_secret_values:
+                assert secret not in value
 
     class FakeYClientsAPI:
         def __init__(self, partner_token, login, password):
@@ -1578,7 +1816,11 @@ async def test_owner_manages_yclients_credentials(auth_db, monkeypatch):
             self.password = password
 
         def authenticate(self):
-            return self.partner_token == 'partner' and self.login == 'login' and self.password == 'password'
+            return (
+                self.partner_token == partner_secret
+                and self.login == login_secret
+                and self.password == password_secret
+            )
 
     monkeypatch.setattr('data_sources.YClientsAPI', FakeYClientsAPI)
 
@@ -1588,14 +1830,80 @@ async def test_owner_manages_yclients_credentials(auth_db, monkeypatch):
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
+        payload_test = await client.post(
+            '/auth/admin/yclients-credentials/test',
+            headers={'Authorization': f'Bearer {token}'},
+            json={
+                'partner_token': partner_secret,
+                'login': login_secret,
+                'password': password_secret,
+            },
+        )
+        assert payload_test.status_code == 200
+        assert payload_test.json()['source_type'] == 'yclients'
+        assert_no_raw_secret_fields(payload_test.json())
+
+        missing_payload_test = await client.post(
+            '/auth/admin/yclients-credentials/test',
+            headers={'Authorization': f'Bearer {token}'},
+            json={},
+        )
+        assert missing_payload_test.status_code == 400
+        assert missing_payload_test.json()['detail'] == 'Invalid credential request'
+        for identifier in ('partner_token', 'login', 'password'):
+            assert identifier not in missing_payload_test.text
+
+        unsupported_source_test = await client.post(
+            '/auth/admin/yclients-credentials/test',
+            headers={'Authorization': f'Bearer {token}'},
+            json={
+                'source_type': 'unsupported',
+                'partner_token': partner_secret,
+                'login': login_secret,
+                'password': password_secret,
+            },
+        )
+        assert unsupported_source_test.status_code == 400
+        assert unsupported_source_test.json()['detail'] == 'Unsupported credential source type'
+        for secret in all_secret_values:
+            assert secret not in unsupported_source_test.text
+
+        bad_payload_test = await client.post(
+            '/auth/admin/yclients-credentials/test',
+            headers={'Authorization': f'Bearer {token}'},
+            json={
+                'partner_token': bad_partner_secret,
+                'login': bad_login_secret,
+                'password': bad_password_secret,
+            },
+        )
+        assert bad_payload_test.status_code == 400
+        assert_no_raw_secret_fields(bad_payload_test.json())
+
+        invalid_create = await client.post(
+            '/auth/admin/yclients-credentials',
+            headers={'Authorization': f'Bearer {token}'},
+            json={
+                'title': 'Invalid credential',
+                'partner_token': validation_secret * 300,
+                'login': validation_secret,
+                'password': validation_secret,
+                'company_ids': [1],
+            },
+        )
+        assert invalid_create.status_code == 422
+        assert invalid_create.json()['detail'] == 'Invalid credential request'
+        for identifier in ('partner_token', 'login', 'password'):
+            assert identifier not in invalid_create.text
+
         created = await client.post(
             '/auth/admin/yclients-credentials',
             headers={'Authorization': f'Bearer {token}'},
             json={
                 'title': 'Main credential',
-                'partner_token': 'partner',
-                'login': 'login',
-                'password': 'password',
+                'partner_token': partner_secret,
+                'login': login_secret,
+                'password': password_secret,
                 'company_ids': [1],
             },
         )
@@ -1607,7 +1915,16 @@ async def test_owner_manages_yclients_credentials(auth_db, monkeypatch):
         assert data['has_login'] is True
         assert data['has_password'] is True
         assert 'partner_token' not in data
+        assert 'login' not in data
         assert 'password' not in data
+        assert_no_raw_secret_fields(created.json())
+        for secret in all_secret_values:
+            assert secret not in created.text
+            assert secret not in payload_test.text
+            assert secret not in bad_payload_test.text
+            assert secret not in missing_payload_test.text
+            assert secret not in unsupported_source_test.text
+            assert secret not in invalid_create.text
 
         checked = await client.post(
             f"/auth/admin/yclients-credentials/{data['id']}/test",
@@ -1634,8 +1951,154 @@ async def test_owner_manages_yclients_credentials(auth_db, monkeypatch):
         listed = await client.get('/auth/admin/yclients-credentials', headers={'Authorization': f'Bearer {token}'})
         assert listed.status_code == 200
         assert listed.json()['data'][0]['company_ids'] == [2]
+        assert_no_raw_secret_fields(checked.json())
+        assert_no_raw_secret_fields(checked_after_update.json())
+        assert_no_raw_secret_fields(listed.json())
+        for secret in all_secret_values:
+            assert secret not in checked.text
+            assert secret not in checked_after_update.text
+            assert secret not in listed.text
 
     app.dependency_overrides.clear()
+
+    audits = (
+        await auth_db.execute(
+            select(PortalAuditEvent)
+            .where(PortalAuditEvent.action.in_([
+                'yclients_credentials.payload_tested',
+                'yclients_credentials.created',
+                'yclients_credentials.tested',
+                'yclients_credentials.updated',
+                'yclients_credentials.listed',
+            ]))
+            .order_by(PortalAuditEvent.id.asc())
+        )
+    ).scalars().all()
+    actions = [audit.action for audit in audits]
+    assert 'yclients_credentials.payload_tested' in actions
+    assert 'yclients_credentials.created' in actions
+    assert actions.count('yclients_credentials.tested') == 2
+    assert 'yclients_credentials.updated' in actions
+    assert 'yclients_credentials.listed' in actions
+    metadata_text = json.dumps([audit.metadata_json for audit in audits], sort_keys=True)
+    for secret in all_secret_values:
+        assert secret not in metadata_text
+    assert any(
+        audit.action == 'yclients_credentials.listed' and audit.metadata_json == {'success': True, 'count': 1}
+        for audit in audits
+    )
+    assert any(
+        audit.action == 'yclients_credentials.payload_tested'
+        and audit.metadata_json == {'source_type': 'yclients', 'success': True}
+        for audit in audits
+    )
+    assert any(
+        audit.action == 'yclients_credentials.payload_tested'
+        and audit.metadata_json == {'source_type': 'yclients', 'success': False, 'error_type': 'HTTPException'}
+        for audit in audits
+    )
+    assert any(
+        audit.action == 'yclients_credentials.payload_tested'
+        and audit.metadata_json == {'source_type': 'yclients', 'success': False, 'reason': 'invalid_payload'}
+        for audit in audits
+    )
+    assert any(
+        audit.action == 'yclients_credentials.payload_tested'
+        and audit.metadata_json == {'source_type': 'invalid', 'success': False, 'error_type': 'unsupported_source_type'}
+        for audit in audits
+    )
+
+
+@pytest.mark.asyncio
+async def test_saved_yclients_credentials_test_failures_are_sanitized(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
+    partner_secret = 'saved-partner-secret'
+    login_secret = 'saved-login-secret'
+    password_secret = 'saved-password-secret'
+    token = create_access_token(1, 'owner')
+    credential = new_credential(
+        portal_account_id=1,
+        title='Saved credential',
+        partner_token=partner_secret,
+        login=login_secret,
+        password=password_secret,
+        is_active=True,
+    )
+    auth_db.add(credential)
+    await auth_db.commit()
+    await auth_db.refresh(credential)
+
+    class FailingYClientsAPI:
+        def __init__(self, partner_token, login, password):
+            self.partner_token = partner_token
+            self.login = login
+            self.password = password
+
+        def authenticate(self):
+            return False
+
+    monkeypatch.setattr('data_sources.YClientsAPI', FailingYClientsAPI)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        failed = await client.post(
+            f'/auth/admin/yclients-credentials/{credential.id}/test',
+            headers={'Authorization': f'Bearer {token}'},
+        )
+        listed_after_failed = await client.get(
+            '/auth/admin/yclients-credentials',
+            headers={'Authorization': f'Bearer {token}'},
+        )
+
+        credential.partner_token_encrypted = 'not-a-valid-fernet-token'
+        await auth_db.commit()
+
+        corrupt = await client.post(
+            f'/auth/admin/yclients-credentials/{credential.id}/test',
+            headers={'Authorization': f'Bearer {token}'},
+        )
+        listed_after_corrupt = await client.get(
+            '/auth/admin/yclients-credentials',
+            headers={'Authorization': f'Bearer {token}'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert failed.status_code == 400
+    assert failed.json()['detail'] == 'Data source authentication failed'
+    assert corrupt.status_code == 500
+    assert corrupt.json()['detail'] == 'Stored credentials could not be decrypted'
+    failed_row = listed_after_failed.json()['data'][0]
+    corrupt_row = listed_after_corrupt.json()['data'][0]
+    assert failed_row['last_error'] == 'Data source authentication failed'
+    assert corrupt_row['last_error'] == 'Stored credentials could not be decrypted'
+    for response in (failed, listed_after_failed, corrupt, listed_after_corrupt):
+        for secret in (partner_secret, login_secret, password_secret):
+            assert secret not in response.text
+    for response in (failed, corrupt):
+        for identifier in ('partner_token', 'login', 'password'):
+            assert identifier not in response.text
+
+    audits = (
+        await auth_db.execute(
+            select(PortalAuditEvent)
+            .where(PortalAuditEvent.action == 'yclients_credentials.tested')
+            .order_by(PortalAuditEvent.id.asc())
+        )
+    ).scalars().all()
+    assert len(audits) == 2
+    assert audits[0].metadata_json == {'source_type': 'yclients', 'success': False, 'error_type': 'HTTPException'}
+    assert audits[1].metadata_json['source_type'] == 'yclients'
+    assert audits[1].metadata_json['success'] is False
+    assert audits[1].metadata_json['error_type']
+    metadata_text = json.dumps([audit.metadata_json for audit in audits], sort_keys=True)
+    for secret in (partner_secret, login_secret, password_secret):
+        assert secret not in metadata_text
 
 
 @pytest.mark.asyncio

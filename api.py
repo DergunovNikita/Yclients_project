@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any, Callable, Literal, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
@@ -164,6 +165,20 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={'detail': 'Internal server error'},
     )
+    return _apply_security_headers(request, response)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    if 'yclients-credentials' in request.url.path:
+        response = JSONResponse(status_code=422, content={'detail': 'Invalid credential request'})
+        return _apply_security_headers(request, response)
+    sanitized = []
+    for error in exc.errors():
+        item = dict(error)
+        item.pop('input', None)
+        sanitized.append(item)
+    response = JSONResponse(status_code=422, content={'detail': sanitized})
     return _apply_security_headers(request, response)
 
 app.include_router(auth_router, prefix='/auth', tags=['auth'])
