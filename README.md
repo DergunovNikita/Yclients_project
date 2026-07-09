@@ -193,6 +193,26 @@ pytest --version
 ./scripts/preflight.sh
 ```
 
+Security checks для CI и ручного triage:
+
+```bash
+./scripts/security-check.sh
+./scripts/security-check.sh --strict
+```
+
+В CI отдельный workflow `.github/workflows/security.yml` запускает:
+
+- `gitleaks` остаётся в deploy workflow как full-history secrets gate;
+- `pip-audit` и `npm audit --audit-level=high` блокируют vulnerable dependencies;
+- `Semgrep` и `Checkov` пока работают как report/SARIF checks для triage, чтобы не блокировать deploy на существующих IaC findings без явного suppressions review.
+
+`pip-audit` блокирует любую известную Python vulnerability: у Python advisory
+severity доступна не всегда, поэтому high/critical threshold применяется явно
+только к `npm audit`.
+
+Локальный `./scripts/security-check.sh --strict` делает Semgrep/Checkov blocking намеренно:
+это режим для ручной подготовки к ужесточению CI после triage.
+
 Краткий разбор последнего sync-лога (top slowest шаги + ошибки):
 
 ```bash
