@@ -336,8 +336,7 @@ async def api_companies(
     limit, offset = pagination
     stmt = select(Company)
     ctx = request_access(request)
-    if ctx is not None and not ctx.full_access:
-        stmt = stmt.where(Company.id.in_(ctx.company_ids or []))
+    stmt = apply_company_scope(stmt, Company.id, None, ctx)
     if group_id is not None:
         stmt = stmt.where(Company.group_id == group_id)
     stmt = stmt.order_by(Company.id.asc())
@@ -998,14 +997,12 @@ async def async_stream_csv_rows(db: AsyncSession, model, ctx: AccessContext | No
 
     stmt = select(model)
     company_column = getattr(model, 'company_id', None)
-    if ctx is not None and not ctx.full_access:
-        allowed = ctx.company_ids or []
-        if company_column is not None:
-            stmt = stmt.where(company_column.in_(allowed))
-        elif model is Company:
-            stmt = stmt.where(Company.id.in_(allowed))
-        else:
-            stmt = stmt.where(False)
+    if company_column is not None:
+        stmt = apply_company_scope(stmt, company_column, None, ctx)
+    elif model is Company:
+        stmt = apply_company_scope(stmt, Company.id, None, ctx)
+    elif ctx is not None and not ctx.full_access:
+        stmt = stmt.where(False)
     stmt = stmt.order_by(*model.__table__.primary_key.columns)
     result = await db.stream(stmt)
     async for row in result.scalars():

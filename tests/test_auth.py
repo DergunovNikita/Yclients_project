@@ -141,6 +141,10 @@ async def test_refresh_keeps_cookie_session_without_returning_access_token(auth_
     assert 'access_token' not in payload['data']
     assert 'token_type' not in payload['data']
     assert payload['data']['user']['email'] == 'admin@example.com'
+    set_cookie_headers = refresh.headers.get_list('set-cookie')
+    assert any(f'{ACCESS_COOKIE_NAME}=' in item and 'HttpOnly' in item for item in set_cookie_headers)
+    assert any(f'{REFRESH_COOKIE_NAME}=' in item and 'HttpOnly' in item for item in set_cookie_headers)
+    assert any(f'{AUTH_CSRF_COOKIE_NAME}=' in item and 'HttpOnly' not in item for item in set_cookie_headers)
 
 
 @pytest.mark.asyncio

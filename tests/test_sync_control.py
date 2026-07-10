@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
+import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -134,6 +135,34 @@ def test_auto_sync_enqueues_due_tenant(monkeypatch):
         assert len(jobs) == 1
         assert jobs[0].portal_account_id == 7
         assert jobs[0].initiator == sync_worker.AUTO_SYNC_INITIATOR
+
+
+@pytest.mark.asyncio
+async def test_async_enqueue_job_persists_normalized_queued_defaults(async_session):
+    job = await SyncJobService().async_enqueue_job(
+        async_session,
+        ' Full ',
+        'dashboard',
+        portal_account_id=7,
+        credential_id=11,
+        company_ids=[2, 2, 3],
+    )
+
+    saved = await async_session.get(SyncJob, job.id)
+
+    assert saved is not None
+    assert saved.id == job.id
+    assert saved.mode == 'full'
+    assert saved.initiator == 'dashboard'
+    assert saved.status == 'queued'
+    assert saved.portal_account_id == 7
+    assert saved.credential_id == 11
+    assert saved.company_ids == [2, 3]
+    assert saved.progress_pct == 0
+    assert saved.current_stage == 'queued'
+    assert saved.step_results == []
+    assert saved.cancel_requested is False
+    assert saved.requested_at is not None
 
 
 def test_auto_sync_retries_tenant_needing_reauth(monkeypatch):

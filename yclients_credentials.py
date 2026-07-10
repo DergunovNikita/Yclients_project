@@ -355,17 +355,43 @@ def update_credential_secrets(
     credential.updated_at = datetime.utcnow()
 
 
+def _mark_credential_success(
+    credential: YClientsCredential,
+    *,
+    last_used_at: datetime,
+    updated_at: datetime,
+) -> None:
+    credential.last_used_at = last_used_at
+    credential.needs_reauth = False
+    credential.last_error = None
+    credential.last_error_at = None
+    credential.updated_at = updated_at
+
+
+def _mark_credential_failure(
+    credential: YClientsCredential,
+    error: str,
+    *,
+    last_error_at: datetime,
+    updated_at: datetime,
+) -> None:
+    credential.needs_reauth = True
+    credential.last_error_at = last_error_at
+    credential.last_error = str(error)[:1000]
+    credential.updated_at = updated_at
+
+
 def mark_credential_success_sync(db: Session, credential_id: int | None) -> None:
     if credential_id is None:
         return
     credential = db.get(YClientsCredential, credential_id)
     if credential is None:
         return
-    credential.last_used_at = datetime.utcnow()
-    credential.needs_reauth = False
-    credential.last_error = None
-    credential.last_error_at = None
-    credential.updated_at = datetime.utcnow()
+    _mark_credential_success(
+        credential,
+        last_used_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
     db.commit()
 
 
@@ -375,10 +401,12 @@ def mark_credential_failure_sync(db: Session, credential_id: int | None, error: 
     credential = db.get(YClientsCredential, credential_id)
     if credential is None:
         return
-    credential.needs_reauth = True
-    credential.last_error_at = datetime.utcnow()
-    credential.last_error = str(error)[:1000]
-    credential.updated_at = datetime.utcnow()
+    _mark_credential_failure(
+        credential,
+        error,
+        last_error_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
     db.commit()
 
 
@@ -388,11 +416,11 @@ async def mark_credential_success_async(db: AsyncSession, credential_id: int | N
     credential = await db.get(YClientsCredential, credential_id)
     if credential is None:
         return
-    credential.last_used_at = datetime.utcnow()
-    credential.needs_reauth = False
-    credential.last_error = None
-    credential.last_error_at = None
-    credential.updated_at = datetime.utcnow()
+    _mark_credential_success(
+        credential,
+        last_used_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
 
 
 async def mark_credential_failure_async(db: AsyncSession, credential_id: int | None, error: str) -> None:
@@ -401,7 +429,9 @@ async def mark_credential_failure_async(db: AsyncSession, credential_id: int | N
     credential = await db.get(YClientsCredential, credential_id)
     if credential is None:
         return
-    credential.needs_reauth = True
-    credential.last_error_at = datetime.utcnow()
-    credential.last_error = str(error)[:1000]
-    credential.updated_at = datetime.utcnow()
+    _mark_credential_failure(
+        credential,
+        error,
+        last_error_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )

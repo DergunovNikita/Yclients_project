@@ -302,6 +302,16 @@ def _session_payload(user: PortalUser, branch_ids: list[int], csrf_token: str) -
     }
 
 
+async def _finalize_session_response(db: AsyncSession, response: Response, user: PortalUser, session) -> dict:
+    await db.commit()
+    set_auth_cookies(response, session)
+    branch_ids = await load_user_access_branch_ids(db, user)
+    return {
+        'success': True,
+        'data': _session_payload(user, branch_ids, session.csrf_token),
+    }
+
+
 @router.post('/login')
 async def login(
     body: LoginRequest,
@@ -319,13 +329,7 @@ async def login(
 
     user.last_login_at = datetime.utcnow()
     session = await issue_session(db, user, request, access_token_fn=_access_token_for)
-    await db.commit()
-    set_auth_cookies(response, session)
-    branch_ids = await load_user_access_branch_ids(db, user)
-    return {
-        'success': True,
-        'data': _session_payload(user, branch_ids, session.csrf_token),
-    }
+    return await _finalize_session_response(db, response, user, session)
 
 
 # Best-effort in-memory rate limit for the unauthenticated demo login (per process,
@@ -432,13 +436,7 @@ async def demo_login(
 
     user.last_login_at = datetime.utcnow()
     session = await issue_session(db, user, request, access_token_fn=_access_token_for)
-    await db.commit()
-    set_auth_cookies(response, session)
-    branch_ids = await load_user_access_branch_ids(db, user)
-    return {
-        'success': True,
-        'data': _session_payload(user, branch_ids, session.csrf_token),
-    }
+    return await _finalize_session_response(db, response, user, session)
 
 
 @router.post('/refresh')
@@ -452,13 +450,7 @@ async def refresh(
     if not raw_refresh:
         raise HTTPException(status_code=401, detail='Missing refresh token')
     user, session = await rotate_session(db, raw_refresh, request, access_token_fn=_access_token_for)
-    await db.commit()
-    set_auth_cookies(response, session)
-    branch_ids = await load_user_access_branch_ids(db, user)
-    return {
-        'success': True,
-        'data': _session_payload(user, branch_ids, session.csrf_token),
-    }
+    return await _finalize_session_response(db, response, user, session)
 
 
 @router.post('/logout')
@@ -1095,7 +1087,7 @@ async def admin_list_yclients_credentials(
 ):
     try:
         portal_account_id = await _validated_credential_account_id(db, actor, x_portal_account_id)
-    except HTTPException as exc:
+    except HTTPException:
         await _audit_credential_action_failure(
             db,
             actor=actor,

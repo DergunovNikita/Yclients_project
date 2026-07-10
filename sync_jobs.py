@@ -27,7 +27,28 @@ class SyncJobService:
         credential_id: int | None = None,
         company_ids: list[int] | None = None,
     ) -> SyncJob:
-        job = SyncJob(
+        job = self._new_queued_job(
+            mode,
+            initiator,
+            portal_account_id=portal_account_id,
+            credential_id=credential_id,
+            company_ids=company_ids,
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        return job
+
+    @staticmethod
+    def _new_queued_job(
+        mode: str,
+        initiator: str,
+        *,
+        portal_account_id: int | None = None,
+        credential_id: int | None = None,
+        company_ids: list[int] | None = None,
+    ) -> SyncJob:
+        return SyncJob(
             mode=(mode or 'incremental').strip().lower(),
             initiator=initiator,
             status='queued',
@@ -40,10 +61,6 @@ class SyncJobService:
             step_results=[],
             cancel_requested=False,
         )
-        db.add(job)
-        db.commit()
-        db.refresh(job)
-        return job
 
     def claim_next_job(self, db) -> Optional[SyncJob]:
         row = db.execute(text("""
@@ -273,18 +290,12 @@ class SyncJobService:
         credential_id: int | None = None,
         company_ids: list[int] | None = None,
     ) -> SyncJob:
-        job = SyncJob(
-            mode=(mode or 'incremental').strip().lower(),
-            initiator=initiator,
-            status='queued',
-            requested_at=datetime.now(),
+        job = self._new_queued_job(
+            mode,
+            initiator,
             portal_account_id=portal_account_id,
             credential_id=credential_id,
-            company_ids=_normalize_company_ids(company_ids),
-            progress_pct=0,
-            current_stage='queued',
-            step_results=[],
-            cancel_requested=False,
+            company_ids=company_ids,
         )
         db.add(job)
         await db.commit()

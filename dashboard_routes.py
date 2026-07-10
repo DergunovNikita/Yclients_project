@@ -24,6 +24,7 @@ from auth_scope import (
     query_scope,
     require_financial_access,
     require_tenant_context,
+    user_branch_ids,
 )
 from config import SYNC_API_TOKEN
 from dashboard_service import (
@@ -250,10 +251,7 @@ async def dashboard_branches(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    if ctx.full_access:
-        branch_ids, force_allowed = None, False
-    else:
-        branch_ids, force_allowed = ctx.company_ids or [], True
+    branch_ids, force_allowed = user_branch_ids(ctx)
     return {
         'success': True,
         'data': await fetch_branches(db, branch_ids, force_allowed=force_allowed),
@@ -287,7 +285,7 @@ async def dashboard_staff_directory_csv(
     if ctx.user_id is not None and ctx.role not in {'platform_admin', 'owner', 'branch_admin'}:
         raise HTTPException(status_code=403, detail='Staff directory export requires admin role')
 
-    branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
+    branch_ids, force_allowed = user_branch_ids(ctx)
     rows = await fetch_staff_directory(
         db,
         include_fired,
@@ -658,7 +656,7 @@ async def dashboard_widget_plan_fact(
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
-    branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
+    branch_ids, force_allowed = user_branch_ids(ctx)
     plan_fact = await fetch_plan_fact(
         db,
         start,
@@ -684,7 +682,7 @@ async def dashboard_plan_settings(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     require_financial_access(ctx)
-    branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
+    branch_ids, force_allowed = user_branch_ids(ctx)
     try:
         data = await fetch_plan_settings(
             db,
@@ -705,7 +703,7 @@ async def dashboard_plan_settings_save(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     require_financial_access(ctx)
-    branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
+    branch_ids, force_allowed = user_branch_ids(ctx)
     try:
         data = await save_plan_settings(
             db,
@@ -732,7 +730,7 @@ async def dashboard_plan_reviews_fact(
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
-    branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
+    branch_ids, force_allowed = user_branch_ids(ctx)
     try:
         data = await fetch_manual_review_facts(
             db,
@@ -757,7 +755,7 @@ async def dashboard_plan_reviews_fact_save(
     start, end = _parse_range(payload.start_date, payload.end_date)
     scope = query_scope(ctx, payload.company_id)
     payload_staff_id = effective_staff_id(ctx, payload.staff_id)
-    branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
+    branch_ids, force_allowed = user_branch_ids(ctx)
     try:
         data = await save_manual_review_facts(
             db,

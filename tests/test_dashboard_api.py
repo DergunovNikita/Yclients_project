@@ -1687,6 +1687,62 @@ async def test_dashboard_branches_respects_portal_allowlist(async_session, monke
 
 
 @pytest.mark.asyncio
+async def test_dashboard_branch_scope_applies_to_plan_settings_write(async_session, monkeypatch):
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    now = datetime(2025, 1, 1, 0, 0, 0)
+    async_session.add(Group(id=1, title='G'))
+    async_session.add_all([
+        Company(id=1, title='Allowed', group_id=1),
+        Company(id=2, title='Forbidden', group_id=1),
+        PortalAccount(id=1, label='Tenant', created_at=now),
+        PortalBranch(portal_account_id=1, company_id=1),
+        PortalUser(
+            id=700,
+            portal_account_id=1,
+            email='owner-scope@example.com',
+            password_hash=hash_password('OwnerScope123!'),
+            role='owner',
+            is_active=True,
+            email_verified_at=now,
+            created_at=now,
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(700, 'owner')
+    headers = {'Authorization': f'Bearer {token}'}
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        branches = await client.get('/dashboard/branches', headers=headers)
+        allowed_save = await client.post(
+            '/dashboard/plan/settings',
+            headers=headers,
+            json={'month': '2025-05', 'branches': [{'company_id': 1, 'wax_pct': 10}], 'staff': []},
+        )
+        forbidden_save = await client.post(
+            '/dashboard/plan/settings',
+            headers=headers,
+            json={'month': '2025-05', 'branches': [{'company_id': 2, 'wax_pct': 10}], 'staff': []},
+        )
+    app.dependency_overrides.clear()
+
+    assert branches.status_code == 200
+    assert [row['id'] for row in branches.json()['data']] == [1]
+    assert allowed_save.status_code == 200
+    assert forbidden_save.status_code == 400
+    assert forbidden_save.json()['detail'] == 'company is not allowed: 2'
+
+    forbidden_setting = await async_session.scalar(
+        select(PlanBranchSetting).where(PlanBranchSetting.company_id == 2)
+    )
+    assert forbidden_setting is None
+
+
+@pytest.mark.asyncio
 async def test_dashboard_staff_directory_csv_exports_working_staff(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon 1', group_id=1))

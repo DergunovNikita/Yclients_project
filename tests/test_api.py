@@ -358,6 +358,41 @@ async def test_clients_csv_export_is_scoped_and_audited(async_session):
 
 
 @pytest.mark.asyncio
+async def test_company_scoped_csv_export_uses_jwt_branch_scope(async_session):
+    await _seed_client_pii_scope(async_session)
+    async_session.add_all([
+        GoodCatalog(
+            company_id=1,
+            good_id=10,
+            title='Tenant A Shampoo',
+            updated_at=datetime.utcnow(),
+        ),
+        GoodCatalog(
+            company_id=2,
+            good_id=20,
+            title='Tenant B Shampoo',
+            updated_at=datetime.utcnow(),
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(201, 'manager')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get('/export/csv/good_catalog', headers={'Authorization': f'Bearer {token}'})
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert 'Tenant A Shampoo' in response.text
+    assert 'Tenant B Shampoo' not in response.text
+
+
+@pytest.mark.asyncio
 async def test_clients_csv_export_rejects_non_user_or_viewer_access(async_session, monkeypatch):
     import auth_deps
 
