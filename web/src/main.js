@@ -1955,8 +1955,13 @@ function renderBundle(bundle) {
     ? t('dash.appointmentsCount', { count: formatNumber(appointmentsBreakdown.total) })
     : t('dash.noExactData');
   els.servicesMeta.textContent = t('dash.servicesCount', { count: services.length });
-  els.extraServicesMeta.textContent = t('dash.doneMeta', { count: formatNumber(summary.revenue.extra_service_count) });
-  els.tableMeta.textContent = t('dash.totalMoneyMeta', { value: formatMoney(summary.revenue.total) });
+  const revenue = summary.revenue || {};
+  els.extraServicesMeta.textContent = summary.financials_hidden
+    ? ''
+    : t('dash.doneMeta', { count: formatNumber(revenue.extra_service_count) });
+  els.tableMeta.textContent = summary.financials_hidden
+    ? ''
+    : t('dash.totalMoneyMeta', { value: formatMoney(revenue.total) });
 }
 
 async function loadBranches() {

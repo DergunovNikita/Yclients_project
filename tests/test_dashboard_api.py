@@ -713,6 +713,11 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             params={'month': '2025-01'},
             headers={'Authorization': f'Bearer {branch_admin_token}'},
         )
+        branch_admin_plan_fact = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+            headers={'Authorization': f'Bearer {branch_admin_token}'},
+        )
 
     app.dependency_overrides.clear()
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
@@ -735,6 +740,65 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     assert branch_admin_finance_report.status_code == 403
     assert branch_admin_operations_report.status_code == 200
     assert branch_admin_plan_settings.status_code == 403
+    assert branch_admin_plan_fact.status_code == 200
+    assert 'avg_check_top' not in branch_admin_plan_fact.json()['data'].get('staff_leaderboards', {})
+
+
+@pytest.mark.asyncio
+async def test_dashboard_summary_matches_financial_transactions_by_external_record_id(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add_all([
+        Company(id=1, title='Salon 1', group_id=1),
+        Company(id=2, title='Salon 2', group_id=1),
+    ])
+    async_session.add(
+        Appointment(
+            id=100,
+            external_id=500,
+            source_type='yclients',
+            company_id=1,
+            date=date(2025, 1, 10),
+            attendance=1,
+        )
+    )
+    async_session.add_all([
+        FinancialTransaction(
+            id=10,
+            external_id=10,
+            source_type='yclients',
+            date=datetime(2025, 1, 10, 12, 0, 0),
+            amount=1000.0,
+            record_id=500,
+            sold_item_type='service',
+            company_id=1,
+        ),
+        FinancialTransaction(
+            id=11,
+            external_id=11,
+            source_type='yclients',
+            date=datetime(2025, 1, 10, 12, 0, 0),
+            amount=9999.0,
+            record_id=500,
+            sold_item_type='service',
+            company_id=2,
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()['data']['revenue']['total'] == 1000.0
 
 
 @pytest.mark.asyncio
@@ -2193,9 +2257,9 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
     transaction_rows = [
         (1, 1, 1, 10, 'воск', 1000.0, 1),
         (2, 2, 1, 11, 'камуфляж', 2000.0, 2),
-        (3, 3, 2, 12, 'Black Mask', 5000.0, 3),
-        (4, 4, 3, 13, 'уход за головой', 1500.0, 4),
-        (5, 5, 3, 14, 'Стрижка', 2500.0, 5),
+        (3, 3, 1, 12, 'Black Mask', 5000.0, 3),
+        (4, 4, 2, 13, 'уход за головой', 1500.0, 4),
+        (5, 5, 2, 14, 'Стрижка', 2500.0, 5),
         (6, 6, 1, 15, 'Стрижка', 4000.0, 1),
     ]
     async_session.add_all([

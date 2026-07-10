@@ -16,6 +16,7 @@ from dashboard_service import (
     COMPLETED_ATTENDANCE,
     _business_staff_id_condition,
     business_appointment_condition,
+    financial_appointment_match_condition,
     fetch_extra_services,
     fetch_appointments_breakdown,
     fetch_plan_fact,
@@ -1111,7 +1112,7 @@ async def _staff_rows(
             Appointment.staff_id.label('staff_id'),
             func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
         )
-        .join(FinancialTransaction, FinancialTransaction.record_id == Appointment.id)
+        .join(FinancialTransaction, financial_appointment_match_condition())
         .where(and_(*_appointment_conditions(
             start, end, company_id, staff_id, attended_only=True, allowed_company_ids=allowed_company_ids
         )))
@@ -1207,7 +1208,7 @@ async def _clients_rows(
             func.max(Appointment.date).label('last_visit'),
             func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
         )
-        .outerjoin(FinancialTransaction, FinancialTransaction.record_id == Appointment.id)
+        .outerjoin(FinancialTransaction, financial_appointment_match_condition())
         .where(and_(*_appointment_conditions(
             start, end, company_id, staff_id, attended_only=True, allowed_company_ids=allowed_company_ids
         )))

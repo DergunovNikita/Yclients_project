@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 import yclients_analytics
-from models import Company, Group, PortalAccount, PortalBranch, YClientsCredentialCompany
+from models import Company, Group, PortalAccount, PortalBranch, Staff, YClientsCredentialCompany
 from yclients_credentials import new_credential
 
 
@@ -43,8 +43,8 @@ class FakeAsyncClient:
         self.get_calls.append((url, params))
         company_id = int(url.split('/company/', 1)[1].split('/', 1)[0])
         stats = {
-            1: (10, 2, 3, 15),
-            2: (20, 4, 1, 25),
+            101: (10, 2, 3, 15),
+            102: (20, 4, 1, 25),
         }[company_id]
         completed, pending, cancelled, total = stats
         return FakeResponse({
@@ -65,8 +65,9 @@ async def _seed_db_credentials(async_session, monkeypatch, company_ids=(1, 2)):
     async_session.add(Group(id=1, title='Group'))
     async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
     for company_id in company_ids:
-        async_session.add(Company(id=company_id, title=f'Company {company_id}', group_id=1))
+        async_session.add(Company(id=company_id, external_id=100 + company_id, title=f'Company {company_id}', group_id=1))
         async_session.add(PortalBranch(portal_account_id=1, company_id=company_id))
+    async_session.add(Staff(id=7, external_id=77, source_type='yclients', name='Master', company_id=1))
     credential = new_credential(1, 'Analytics', 'partner', 'login', 'password')
     async_session.add(credential)
     await async_session.flush()
@@ -91,13 +92,14 @@ async def test_fetch_record_stats_aggregates_companies_and_passes_staff(async_se
         [1, 2, 1],
         date(2026, 6, 1),
         date(2026, 6, 30),
-        staff_id=77,
+        staff_id=7,
         db=async_session,
     )
 
     assert result == {'completed': 30, 'incomplete': 6, 'cancelled': 4, 'total': 40}
     assert len(clients[0].get_calls) == 2
     assert all(call[1]['staff_id'] == 77 for call in clients[0].get_calls)
+    assert {int(call[0].split('/company/', 1)[1].split('/', 1)[0]) for call in clients[0].get_calls} == {101, 102}
     assert all(call[1]['date_from'] == '2026-06-01' for call in clients[0].get_calls)
     assert all(call[1]['date_to'] == '2026-06-30' for call in clients[0].get_calls)
 

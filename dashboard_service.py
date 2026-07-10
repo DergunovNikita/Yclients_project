@@ -376,10 +376,20 @@ def business_appointment_condition():
     return _business_staff_id_condition(Appointment.staff_id)
 
 
+def financial_appointment_match_condition():
+    return and_(
+        FinancialTransaction.company_id == Appointment.company_id,
+        or_(
+            FinancialTransaction.record_id == Appointment.external_id,
+            and_(Appointment.external_id.is_(None), FinancialTransaction.record_id == Appointment.id),
+        ),
+    )
+
+
 def _business_financial_master_condition():
     linked_business_appointment = exists(
         select(1).where(
-            Appointment.id == FinancialTransaction.record_id,
+            financial_appointment_match_condition(),
             business_appointment_condition(),
         )
     )
@@ -558,7 +568,7 @@ def _financial_staff_attribution_condition(staff_id: int):
             FinancialTransaction.master_id.is_(None),
             exists(
                 select(1).where(
-                    Appointment.id == FinancialTransaction.record_id,
+                    financial_appointment_match_condition(),
                     Appointment.staff_id == staff_id,
                 )
             ),
@@ -737,7 +747,7 @@ async def _average_check_block(
         await db.scalar(
             select(func.coalesce(func.sum(FinancialTransaction.amount), 0.0))
             .select_from(FinancialTransaction)
-            .join(Appointment, Appointment.id == FinancialTransaction.record_id)
+            .join(Appointment, financial_appointment_match_condition())
             .outerjoin(
                 AccountCatalog,
                 and_(
@@ -1243,7 +1253,7 @@ async def _revenue_block(
             ).label('extra_service_revenue'),
         )
         .select_from(FinancialTransaction)
-        .join(Appointment, Appointment.id == FinancialTransaction.record_id)
+        .join(Appointment, financial_appointment_match_condition())
         .outerjoin(ServiceLabel, _financial_service_label_join())
         .where(
             _service_paid_filters(
@@ -1561,7 +1571,7 @@ async def fetch_revenue_daily(
             func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
         )
         .select_from(Appointment)
-        .join(FinancialTransaction, FinancialTransaction.record_id == Appointment.id)
+        .join(FinancialTransaction, financial_appointment_match_condition())
         .where(
             _service_paid_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids),
         )
@@ -2084,7 +2094,7 @@ async def fetch_top_services(
             func.count(func.distinct(Appointment.company_id)).label('branch_count'),
         )
         .select_from(FinancialTransaction)
-        .join(Appointment, Appointment.id == FinancialTransaction.record_id)
+        .join(Appointment, financial_appointment_match_condition())
         .outerjoin(
             tx_titles,
             and_(
@@ -2175,7 +2185,7 @@ async def fetch_extra_services(
             func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
         )
         .select_from(FinancialTransaction)
-        .join(Appointment, Appointment.id == FinancialTransaction.record_id)
+        .join(Appointment, financial_appointment_match_condition())
         .outerjoin(
             tx_titles,
             and_(
@@ -2273,7 +2283,7 @@ async def _extra_service_revenue_by_staff(
             func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
         )
         .select_from(FinancialTransaction)
-        .join(Appointment, Appointment.id == FinancialTransaction.record_id)
+        .join(Appointment, financial_appointment_match_condition())
         .outerjoin(
             tx_titles,
             and_(

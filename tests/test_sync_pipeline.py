@@ -179,17 +179,55 @@ def test_sync_clients_scopes_external_id_by_internal_company():
         engine.dispose()
 
 
+def test_sync_staff_scopes_external_id_by_internal_company():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__, Staff.__table__])
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add_all([
+            Company(id=1, title='Salon 1', group_id=1),
+            Company(id=2, title='Salon 2', group_id=1),
+        ])
+        db.commit()
+
+        payload = [{'id': 7, 'name': 'Shared external staff', 'fired': 0}]
+        assert sync_staff(FakeYClientsAPI(payload), db, '1') is True
+        assert sync_staff(FakeYClientsAPI(payload), db, '2') is True
+
+        rows = db.query(Staff).order_by(Staff.company_id).all()
+        assert [(row.company_id, row.source_type, row.external_id) for row in rows] == [
+            (1, 'yclients', 7),
+            (2, 'yclients', 7),
+        ]
+        assert rows[0].id != rows[1].id
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_sync_records_uses_internal_client_and_appointment_keys():
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(
         engine,
-        tables=[Group.__table__, Company.__table__, Client.__table__, Appointment.__table__, Transaction.__table__],
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Client.__table__,
+            Staff.__table__,
+            Appointment.__table__,
+            Transaction.__table__,
+        ],
     )
     Session = sessionmaker(bind=engine)
     db = Session()
     try:
         db.add(Group(id=1, title='G1'))
-        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add_all([
+            Company(id=1, title='Salon', group_id=1),
+            Staff(id=100, external_id=7, source_type='yclients', name='Record staff', company_id=1),
+        ])
         db.commit()
 
         records = [{
@@ -208,8 +246,97 @@ def test_sync_records_uses_internal_client_and_appointment_keys():
         transaction = db.query(Transaction).one()
 
         assert appointment.client_id == client.id
+        assert appointment.staff_id == 100
         assert appointment.id != appointment.external_id
         assert transaction.appointment_id == appointment.id
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_records_does_not_use_cross_tenant_staff_fallback():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Client.__table__,
+            Staff.__table__,
+            Appointment.__table__,
+            Transaction.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add_all([
+            Company(id=1, title='Salon', group_id=1),
+            Company(id=2, title='Other salon', group_id=1),
+            Staff(id=7, external_id=7, source_type='yclients', name='Other staff', company_id=2),
+        ])
+        db.commit()
+
+        records = [{
+            'id': 500,
+            'client': {'id': 42, 'name': 'Record client'},
+            'staff_id': 7,
+            'date': '2025-01-10',
+            'datetime': '2025-01-10T10:00:00+0300',
+            'services': [{'id': 10, 'title': 'Cut', 'cost': 1000.0}],
+        }]
+
+        assert sync_records(FakeRecordsAPI(records), db, '1') is True
+
+        appointment = db.query(Appointment).filter(Appointment.company_id == 1, Appointment.external_id == 500).one()
+        assert appointment.staff_id is None
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_financial_transactions_scopes_external_id_by_internal_company():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Client.__table__,
+            Staff.__table__,
+            FinancialTransaction.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add_all([
+            Company(id=1, title='Salon 1', group_id=1),
+            Company(id=2, title='Salon 2', group_id=1),
+        ])
+        db.commit()
+
+        assert sync_financial_transactions(
+            FakeFinancialTransactionsAPI([{'id': 10, 'date': '2025-01-10 12:00:00', 'amount': 100.0}]),
+            db,
+            '101',
+            db_company_id=1,
+        ) is True
+        assert sync_financial_transactions(
+            FakeFinancialTransactionsAPI([{'id': 10, 'date': '2025-01-11 12:00:00', 'amount': 999.0}]),
+            db,
+            '101',
+            db_company_id=2,
+        ) is True
+
+        rows = db.query(FinancialTransaction).order_by(FinancialTransaction.company_id).all()
+        assert [(row.company_id, row.external_id, row.amount) for row in rows] == [
+            (1, 10, 100.0),
+            (2, 10, 999.0),
+        ]
+        assert rows[0].id != rows[1].id
     finally:
         db.close()
         engine.dispose()
@@ -222,6 +349,8 @@ def test_sync_financial_transactions_persists_expense_article_and_source_coverag
         tables=[
             Group.__table__,
             Company.__table__,
+            Client.__table__,
+            Staff.__table__,
             FinancialTransaction.__table__,
             SyncSourceState.__table__,
         ],
@@ -397,7 +526,7 @@ def test_sync_goods_transactions_preserves_embedded_titles():
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(
         engine,
-        tables=[Group.__table__, Company.__table__, GoodTransaction.__table__],
+        tables=[Group.__table__, Company.__table__, Client.__table__, Staff.__table__, GoodTransaction.__table__],
     )
     Session = sessionmaker(bind=engine)
     db = Session()

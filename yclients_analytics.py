@@ -7,9 +7,11 @@ from datetime import date
 from typing import Any, Iterable
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import YCLIENTS_TIMEOUT
+from models import Company, Staff
 from yclients_credentials import YClientsCredentialValue, load_credentials_for_companies_async
 
 YCLIENTS_BASE_URL = 'https://api.yclients.com/api/v1'
@@ -111,6 +113,19 @@ async def fetch_record_stats(
         raise YClientsAnalyticsError('Database session is required to resolve YClients credentials')
     credential_by_company = await load_credentials_for_companies_async(db, normalized_company_ids)
     credential_groups = _group_company_credentials(credential_by_company, normalized_company_ids)
+    company_rows = (
+        await db.execute(
+            select(Company.id, Company.external_id).where(Company.id.in_(normalized_company_ids))
+        )
+    ).all()
+    external_company_by_internal = {
+        int(row.id): int(row.external_id or row.id)
+        for row in company_rows
+    }
+    api_staff_id = staff_id
+    if staff_id is not None:
+        staff_external_id = await db.scalar(select(Staff.external_id).where(Staff.id == int(staff_id)))
+        api_staff_id = int(staff_external_id or staff_id)
 
     timeout = httpx.Timeout(max(1.0, float(YCLIENTS_TIMEOUT)))
     try:
@@ -126,8 +141,8 @@ async def fetch_record_stats(
                     'date_from': start.isoformat(),
                     'date_to': end.isoformat(),
                 }
-                if staff_id is not None:
-                    params['staff_id'] = int(staff_id)
+                if api_staff_id is not None:
+                    params['staff_id'] = int(api_staff_id)
                 headers = {
                     'Authorization': f'Bearer {credentials.partner_token}, User {user_token}',
                     'Accept': 'application/vnd.yclients.v2+json',
@@ -135,7 +150,7 @@ async def fetch_record_stats(
                 }
                 async with semaphore:
                     response = await client.get(
-                        f'{YCLIENTS_BASE_URL}/company/{company_id}/analytics/overall/',
+                        f'{YCLIENTS_BASE_URL}/company/{external_company_by_internal.get(company_id, company_id)}/analytics/overall/',
                         headers=headers,
                         params=params,
                     )

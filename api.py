@@ -37,7 +37,7 @@ from config import (
 from dashboard_routes import router as dashboard_router
 from auth_deps import forbid_demo
 from auth_routes import router as auth_router
-from auth_scope import AccessContext, require_sync_company_ids, require_tenant_context
+from auth_scope import AccessContext, require_financial_access, require_sync_company_ids, require_tenant_context
 from onboarding_routes import router as onboarding_router
 from database import get_async_db, init_async_database
 from portal_audit import log_portal_audit
@@ -234,6 +234,12 @@ def require_client_pii_access(request: Request) -> tuple[AccessContext, int]:
     if not ctx.company_ids:
         raise HTTPException(status_code=403, detail='No branch access assigned')
     return ctx, int(portal_account_id)
+
+
+def require_request_financial_access(request: Request) -> None:
+    ctx = request_access(request)
+    if ctx is not None:
+        require_financial_access(ctx)
 
 
 def build_page_response(total: int, limit: int, offset: int, data: list[dict[str, Any]]) -> dict[str, Any]:
@@ -629,6 +635,7 @@ async def api_transactions(
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
+    require_request_financial_access(request)
     limit, offset = pagination
     stmt = select(Transaction)
     stmt = apply_company_scope(stmt, Transaction.company_id, company_id, request_access(request))
@@ -658,6 +665,7 @@ async def api_financial_transactions(
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
+    require_request_financial_access(request)
     limit, offset = pagination
     stmt = select(FinancialTransaction)
     stmt = apply_company_scope(stmt, FinancialTransaction.company_id, company_id, request_access(request))
@@ -694,6 +702,7 @@ async def api_goods_transactions(
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
+    require_request_financial_access(request)
     limit, offset = pagination
     stmt = select(GoodTransaction)
     stmt = apply_company_scope(stmt, GoodTransaction.company_id, company_id, request_access(request))
@@ -792,6 +801,7 @@ async def api_staff_schedules(
 
 @app.get("/stats")
 async def api_stats(request: Request, db: AsyncSession = Depends(get_async_db)):
+    require_request_financial_access(request)
     ctx = request_access(request)
     allowed = None if ctx is None or ctx.full_access else (ctx.company_ids or [])
     revenue_result = await db.execute(
@@ -974,6 +984,8 @@ TABLE_MAP = {
     "staff_schedules": StaffSchedule,
 }
 
+FINANCIAL_EXPORT_MODELS = {Transaction, FinancialTransaction, GoodTransaction}
+
 
 async def async_stream_csv_rows(db: AsyncSession, model, ctx: AccessContext | None = None):
     columns = [column.key for column in model.__table__.columns]
@@ -1012,6 +1024,8 @@ async def export_csv(table_name: str, request: Request, db: AsyncSession = Depen
             detail=f"Table '{table_name}' not found. Available: {list(TABLE_MAP.keys())}",
         )
     ctx = request_access(request)
+    if model in FINANCIAL_EXPORT_MODELS:
+        require_request_financial_access(request)
     if model is Client:
         ctx, portal_account_id = require_client_pii_access(request)
         await log_portal_audit(

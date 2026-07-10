@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth_deps import forbid_demo, get_current_user
 from database import get_async_db
 from data_sources import SOURCE_YCLIENTS, adapter_from_credential, adapter_from_payload, normalize_source_type
-from models import PortalAccount, PortalBranch, PortalUser, YClientsCredential, YClientsCredentialCompany
+from models import Company, PortalAccount, PortalBranch, PortalUser, YClientsCredential, YClientsCredentialCompany
 from portal_audit import log_portal_audit
 from portal_tenant_ownership import can_reassign_branch_from_tenant
 from yclients_credentials import CredentialsConfigError, mark_credential_failure_async, mark_credential_success_async, new_credential
@@ -145,22 +145,38 @@ async def onboarding_credentials(
 
     conflicting = []
     for item in available:
-        existing = (
+        companies = (
             await db.execute(
-                select(PortalBranch).where(PortalBranch.company_id == item['company_id'])
+                select(Company).where(
+                    Company.source_type == source_type,
+                    Company.external_id == item['company_id'],
+                )
             )
-        ).scalar_one_or_none()
-        if (
-            existing is not None
-            and existing.portal_account_id != user.portal_account_id
-            and not await can_reassign_branch_from_tenant(
-                db,
-                existing.portal_account_id,
-                user.portal_account_id or -1,
-                item['company_id'],
-            )
-        ):
-            conflicting.append(item['company_id'])
+        ).scalars().all()
+        if not companies:
+            legacy = await db.get(Company, item['company_id'])
+            if legacy is not None and legacy.external_id is None:
+                companies = [legacy]
+        if not companies:
+            continue
+        for company in companies:
+            existing = (
+                await db.execute(
+                    select(PortalBranch).where(PortalBranch.company_id == company.id)
+                )
+            ).scalar_one_or_none()
+            if (
+                existing is not None
+                and existing.portal_account_id != user.portal_account_id
+                and not await can_reassign_branch_from_tenant(
+                    db,
+                    existing.portal_account_id,
+                    user.portal_account_id or -1,
+                    company.id,
+                )
+            ):
+                conflicting.append(item['company_id'])
+                break
     if conflicting:
         raise HTTPException(
             status_code=409,

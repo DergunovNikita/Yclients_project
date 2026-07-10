@@ -144,6 +144,7 @@ FINANCIAL_LEADERBOARD_KEYS = {
     'revenue_admin',
     'cosmo_barber',
     'cosmo_admin',
+    'avg_check_top',
 }
 
 

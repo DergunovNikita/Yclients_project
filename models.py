@@ -196,6 +196,8 @@ class Staff(Base):
     __tablename__ = 'staff'
 
     id = Column(Integer, primary_key=True)
+    external_id = Column(Integer, index=True)
+    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
     name = Column(String, nullable=False)
     email = Column(String)
     specialization = Column(String)
@@ -208,6 +210,10 @@ class Staff(Base):
     user_id = Column(Integer, index=True)
     portal_user_id = Column(Integer, index=True)
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
+
+    __table_args__ = (
+        Index('uq_staff_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
+    )
 
     company = relationship("Company", back_populates="staff")
 
@@ -387,6 +393,8 @@ class FinancialTransaction(Base):
     __tablename__ = 'financial_transactions'
 
     id = Column(Integer, primary_key=True)
+    external_id = Column(Integer, index=True)
+    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
     document_id = Column(Integer)
     expense_id = Column(Integer)
     expense_title = Column(String)
@@ -401,6 +409,10 @@ class FinancialTransaction(Base):
     sold_item_id = Column(Integer)
     sold_item_type = Column(String)
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
+
+    __table_args__ = (
+        Index('uq_financial_transactions_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
+    )
 
 
 class SyncSourceState(Base):
@@ -419,6 +431,8 @@ class GoodTransaction(Base):
     __tablename__ = 'goods_transactions'
 
     id = Column(Integer, primary_key=True)
+    external_id = Column(Integer, index=True)
+    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
     document_id = Column(Integer)
     type_id = Column(Integer)
     good_id = Column(Integer, index=True)
@@ -434,11 +448,17 @@ class GoodTransaction(Base):
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
     date = Column(DateTime, index=True)
 
+    __table_args__ = (
+        Index('uq_goods_transactions_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
+    )
+
 
 class Comment(Base):
     __tablename__ = 'comments'
 
     id = Column(Integer, primary_key=True)
+    external_id = Column(Integer, index=True)
+    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
     type = Column(String)
     master_id = Column(Integer, index=True)
     text = Column(Text)
@@ -448,6 +468,10 @@ class Comment(Base):
     user_name = Column(String)
     record_id = Column(Integer, index=True)
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
+
+    __table_args__ = (
+        Index('uq_comments_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
+    )
 
 
 class StaffSchedule(Base):

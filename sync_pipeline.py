@@ -105,6 +105,34 @@ def load_existing_source_branch_map(db, model, company_id: int, ids, id_column, 
     return existing
 
 
+def load_existing_or_adopt_legacy_source_map(
+    db,
+    model,
+    company_id: int,
+    ids,
+    id_column,
+    source_type: str = SOURCE_YCLIENTS,
+):
+    existing = load_existing_source_branch_map(db, model, company_id, ids, id_column, source_type)
+    unique_ids = [int(item_id) for item_id in dict.fromkeys(ids) if item_id is not None]
+    for external_id in unique_ids:
+        if external_id in existing:
+            continue
+        legacy = db.get(model, external_id)
+        if legacy is None or getattr(legacy, 'company_id', None) != company_id:
+            continue
+        if getattr(legacy, 'external_id', None) is not None:
+            continue
+        legacy.external_id = external_id
+        legacy.source_type = source_type
+        existing[external_id] = legacy
+    return existing
+
+
+def external_pk_kwargs(db, model, external_id: int) -> dict[str, int]:
+    return {'id': external_id} if db.get(model, external_id) is None else {}
+
+
 def bulk_delete_by_ids(db, model, column, ids) -> int:
     deleted = 0
     unique_ids = [item_id for item_id in dict.fromkeys(ids) if item_id is not None]
@@ -344,7 +372,7 @@ def _prepare_client_map(db, company_id: int, client_payloads: Iterable[dict]) ->
         if external_id is not None:
             payload_by_external_id[external_id] = payload
 
-    existing_clients = load_existing_source_branch_map(
+    existing_clients = load_existing_or_adopt_legacy_source_map(
         db,
         Client,
         company_id,
@@ -389,6 +417,38 @@ def _internal_client_id(client_map: dict[int, Client], client_data) -> int | Non
         return None
     client = client_map.get(external_id)
     return int(client.id) if client is not None and client.id is not None else None
+
+
+def _payload_id(payload) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get('id')
+    return int(value) if value is not None else None
+
+
+def _staff_external_id(value) -> int | None:
+    if isinstance(value, dict):
+        value = value.get('id')
+    return int(value) if value is not None else None
+
+
+def _load_staff_map(db, company_id: int, staff_ids: Iterable[int | None]) -> dict[int, Staff]:
+    external_ids = [int(item) for item in dict.fromkeys(staff_ids) if item is not None]
+    return load_existing_or_adopt_legacy_source_map(
+        db,
+        Staff,
+        company_id,
+        external_ids,
+        Staff.external_id,
+    )
+
+
+def _internal_staff_id(staff_map: dict[int, Staff], external_staff_id) -> int | None:
+    external_id = _staff_external_id(external_staff_id)
+    if external_id is None:
+        return None
+    staff = staff_map.get(external_id)
+    return int(staff.id) if staff is not None and staff.id is not None else None
 
 
 # ===================================================================
@@ -786,15 +846,11 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        staff_ids = {staff_member.get('id') for staff_member in staff_list if staff_member.get('id') is not None}
-        existing_staff = load_existing_map(
-            db,
-            Staff,
-            staff_ids,
-            Staff.id,
-        )
+        staff_ids = {int(staff_member.get('id')) for staff_member in staff_list if staff_member.get('id') is not None}
+        existing_staff = _load_staff_map(db, cid, staff_ids)
+        active_staff_ids: set[int] = set()
         for s in staff_list:
-            staff_id = s.get('id')
+            staff_id = _staff_external_id(s)
             if staff_id is None:
                 continue
 
@@ -812,7 +868,10 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
             obj = existing_staff.get(staff_id)
             if not obj:
                 obj = Staff(
-                    id=staff_id, name=s.get('name', ''),
+                    **external_pk_kwargs(db, Staff, staff_id),
+                    external_id=staff_id,
+                    source_type=SOURCE_YCLIENTS,
+                    name=s.get('name', ''),
                     email=email,
                     specialization=s.get('specialization'),
                     position=position_title,
@@ -825,6 +884,8 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
                     company_id=cid,
                 )
                 db.add(obj)
+                db.flush()
+                existing_staff[staff_id] = obj
             else:
                 obj.name = s.get('name', '')
                 obj.email = email
@@ -836,10 +897,16 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
                 obj.bookable = s.get('bookable', True)
                 obj.fired = fired
                 obj.user_id = user_id
+                obj.company_id = cid
+                obj.external_id = staff_id
+                obj.source_type = SOURCE_YCLIENTS
+
+            if obj.id is not None and not fired:
+                active_staff_ids.add(int(obj.id))
 
         stale_query = db.query(Staff).filter(Staff.company_id == cid)
-        if staff_ids:
-            stale_query = stale_query.filter(~Staff.id.in_(staff_ids))
+        if active_staff_ids:
+            stale_query = stale_query.filter(~Staff.id.in_(active_staff_ids))
         stale_query.update({Staff.fired: 1}, synchronize_session=False)
 
         db.commit()
@@ -868,7 +935,7 @@ def sync_clients(api: YClientsAPI, db, company_id: str, db_company_id: int | Non
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        existing_clients = load_existing_source_branch_map(
+        existing_clients = load_existing_or_adopt_legacy_source_map(
             db,
             Client,
             cid,
@@ -1254,7 +1321,7 @@ def sync_records(api: YClientsAPI, db, company_id: str,
         cid = _db_company_id(company_id, db_company_id)
         tx_count = 0
         record_ids = [r.get('id') for r in records if r.get('id') is not None]
-        existing_records = load_existing_source_branch_map(
+        existing_records = load_existing_or_adopt_legacy_source_map(
             db,
             Appointment,
             cid,
@@ -1272,6 +1339,11 @@ def sync_records(api: YClientsAPI, db, company_id: str,
             cid,
             (record.get('client') or {} for record in records),
         )
+        staff_map = _load_staff_map(
+            db,
+            cid,
+            (record.get('staff_id') for record in records),
+        )
 
         for r in records:
             record_id = r.get('id')
@@ -1280,7 +1352,7 @@ def sync_records(api: YClientsAPI, db, company_id: str,
 
             client_data = r.get('client') or {}
             client_id = _internal_client_id(client_map, client_data)
-            staff_id = r.get('staff_id')
+            staff_id = _internal_staff_id(staff_map, r.get('staff_id'))
             created_user_id = r.get('created_user_id')
 
             obj = existing_records.get(record_id)
@@ -1361,19 +1433,29 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        existing_txns = load_existing_map(
+        existing_txns = load_existing_or_adopt_legacy_source_map(
             db,
             FinancialTransaction,
+            cid,
             (txn.get('id') for txn in txns),
-            FinancialTransaction.id,
+            FinancialTransaction.external_id,
         )
         client_map = _prepare_client_map(
             db,
             cid,
             (txn.get('client') or {} for txn in txns),
         )
+        staff_map = _load_staff_map(
+            db,
+            cid,
+            (
+                _staff_external_id(txn.get('master') or {})
+                for txn in txns
+                if isinstance(txn.get('master') or {}, dict)
+            ),
+        )
         for t in txns:
-            tid = t.get('id')
+            tid = _payload_id(t)
             if tid is None:
                 continue
             obj = existing_txns.get(tid)
@@ -1384,10 +1466,13 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
             expense = t.get('expense') or {}
             expense_title = expense.get('title') if isinstance(expense, dict) else None
             internal_client_id = _internal_client_id(client_map, client)
+            internal_master_id = _internal_staff_id(staff_map, master) if isinstance(master, dict) else None
 
             if not obj:
                 obj = FinancialTransaction(
-                    id=tid,
+                    **external_pk_kwargs(db, FinancialTransaction, tid),
+                    external_id=tid,
+                    source_type=SOURCE_YCLIENTS,
                     document_id=t.get('document_id'),
                     expense_id=expense.get('id') if isinstance(expense, dict) else None,
                     expense_title=expense_title,
@@ -1396,7 +1481,7 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                     comment=t.get('comment'),
                     account_id=account.get('id') if isinstance(account, dict) else None,
                     client_id=internal_client_id,
-                    master_id=master.get('id') if isinstance(master, dict) else None,
+                    master_id=internal_master_id,
                     record_id=t.get('record_id'),
                     visit_id=t.get('visit_id'),
                     sold_item_id=t.get('sold_item_id'),
@@ -1406,6 +1491,8 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                 db.add(obj)
                 existing_txns[tid] = obj
             else:
+                obj.external_id = tid
+                obj.source_type = SOURCE_YCLIENTS
                 obj.document_id = t.get('document_id')
                 obj.expense_id = expense.get('id') if isinstance(expense, dict) else None
                 obj.expense_title = expense_title
@@ -1414,11 +1501,12 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                 obj.comment = t.get('comment')
                 obj.account_id = account.get('id') if isinstance(account, dict) else None
                 obj.client_id = internal_client_id
-                obj.master_id = master.get('id') if isinstance(master, dict) else None
+                obj.master_id = internal_master_id
                 obj.record_id = t.get('record_id')
                 obj.visit_id = t.get('visit_id')
                 obj.sold_item_id = t.get('sold_item_id')
                 obj.sold_item_type = t.get('sold_item_type')
+                obj.company_id = cid
 
         if start_date and end_date:
             state = db.get(
@@ -1469,19 +1557,29 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        existing_txns = load_existing_map(
+        existing_txns = load_existing_or_adopt_legacy_source_map(
             db,
             GoodTransaction,
+            cid,
             (txn.get('id') for txn in txns),
-            GoodTransaction.id,
+            GoodTransaction.external_id,
         )
         client_map = _prepare_client_map(
             db,
             cid,
             (txn.get('client') or {} for txn in txns),
         )
+        staff_map = _load_staff_map(
+            db,
+            cid,
+            (
+                _staff_external_id(txn.get('master') or {})
+                for txn in txns
+                if isinstance(txn.get('master') or {}, dict)
+            ),
+        )
         for t in txns:
-            tid = t.get('id')
+            tid = _payload_id(t)
             if tid is None:
                 continue
             obj = existing_txns.get(tid)
@@ -1495,12 +1593,15 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
             storage_id = storage.get('id') if isinstance(storage, dict) else None
             storage_title = storage.get('title') if isinstance(storage, dict) else None
             internal_client_id = _internal_client_id(client_map, client)
+            internal_master_id = _internal_staff_id(staff_map, master) if isinstance(master, dict) else None
 
             tx_date = parse_datetime(t.get('create_date') or t.get('date'))
 
             if not obj:
                 obj = GoodTransaction(
-                    id=tid,
+                    **external_pk_kwargs(db, GoodTransaction, tid),
+                    external_id=tid,
+                    source_type=SOURCE_YCLIENTS,
                     document_id=t.get('document_id'),
                     type_id=t.get('type_id'),
                     good_id=good_id,
@@ -1511,7 +1612,7 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
                     cost_per_unit=t.get('cost_per_unit'),
                     cost=t.get('cost'),
                     discount=t.get('discount'),
-                    master_id=master.get('id') if isinstance(master, dict) else None,
+                    master_id=internal_master_id,
                     client_id=internal_client_id,
                     company_id=cid,
                     date=tx_date,
@@ -1519,6 +1620,8 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
                 db.add(obj)
                 existing_txns[tid] = obj
             else:
+                obj.external_id = tid
+                obj.source_type = SOURCE_YCLIENTS
                 obj.document_id = t.get('document_id')
                 obj.type_id = t.get('type_id')
                 obj.good_id = good_id
@@ -1529,8 +1632,9 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
                 obj.cost_per_unit = t.get('cost_per_unit')
                 obj.cost = t.get('cost')
                 obj.discount = t.get('discount')
-                obj.master_id = master.get('id') if isinstance(master, dict) else None
+                obj.master_id = internal_master_id
                 obj.client_id = internal_client_id
+                obj.company_id = cid
                 obj.date = tx_date
 
         db.commit()
@@ -1563,22 +1667,31 @@ def sync_comments(api: YClientsAPI, db, company_id: str,
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        existing_comments = load_existing_map(
+        existing_comments = load_existing_or_adopt_legacy_source_map(
             db,
             Comment,
+            cid,
             (comment.get('id') for comment in comments),
-            Comment.id,
+            Comment.external_id,
+        )
+        staff_map = _load_staff_map(
+            db,
+            cid,
+            (comment.get('master_id') for comment in comments),
         )
         for c in comments:
-            cmt_id = c.get('id')
+            cmt_id = _payload_id(c)
             if cmt_id is None:
                 continue
             obj = existing_comments.get(cmt_id)
+            master_id = _internal_staff_id(staff_map, c.get('master_id'))
             if not obj:
                 obj = Comment(
-                    id=cmt_id,
+                    **external_pk_kwargs(db, Comment, cmt_id),
+                    external_id=cmt_id,
+                    source_type=SOURCE_YCLIENTS,
                     type=c.get('type'),
-                    master_id=c.get('master_id'),
+                    master_id=master_id,
                     text=c.get('text'),
                     date=parse_datetime(c.get('date')),
                     rating=c.get('rating'),
@@ -1589,10 +1702,17 @@ def sync_comments(api: YClientsAPI, db, company_id: str,
                 )
                 db.add(obj)
             else:
+                obj.external_id = cmt_id
+                obj.source_type = SOURCE_YCLIENTS
                 obj.type = c.get('type')
+                obj.master_id = master_id
                 obj.text = c.get('text')
                 obj.date = parse_datetime(c.get('date'))
                 obj.rating = c.get('rating')
+                obj.user_id = c.get('user_id')
+                obj.user_name = c.get('user_name')
+                obj.record_id = c.get('record_id')
+                obj.company_id = cid
 
         db.commit()
         print(f"  ✓ Комментарии сохранены ({len(comments)} шт.)")
