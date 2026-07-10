@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from sqlalchemy import create_engine, text
@@ -10,7 +11,8 @@ from sync_control import SyncControlService
 from sync_jobs import SyncJobService
 
 
-def test_set_state_serializes_datetime_to_isoformat():
+@contextmanager
+def _sqlite_session(tables):
     engine = create_engine(
         'sqlite+pysqlite:///:memory:',
         future=True,
@@ -19,63 +21,43 @@ def test_set_state_serializes_datetime_to_isoformat():
     )
     with engine.begin() as conn:
         conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(engine, tables=[SyncState.__table__])
+    Base.metadata.create_all(engine, tables=tables)
     session_local = sessionmaker(bind=engine)
     session = session_local()
-    service = SyncControlService()
-    value = datetime(2026, 3, 29, 10, 30, 45, 123456)
-
     try:
+        yield session
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_set_state_serializes_datetime_to_isoformat():
+    with _sqlite_session([SyncState.__table__]) as session:
+        service = SyncControlService()
+        value = datetime(2026, 3, 29, 10, 30, 45, 123456)
+
         service.set_state(session, 'last_run_started_at', value)
 
         saved = session.get(SyncState, 'last_run_started_at')
         assert saved is not None
         assert saved.value == '2026-03-29T10:30:45.123456'
-    finally:
-        session.close()
-        engine.dispose()
 
 
 def test_status_payload_includes_last_successful_sync_at():
-    engine = create_engine(
-        'sqlite+pysqlite:///:memory:',
-        future=True,
-        connect_args={'check_same_thread': False},
-        poolclass=StaticPool,
-    )
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(engine, tables=[SyncState.__table__, SyncRun.__table__])
-    session_local = sessionmaker(bind=engine)
-    session = session_local()
-    service = SyncControlService()
+    with _sqlite_session([SyncState.__table__, SyncRun.__table__]) as session:
+        service = SyncControlService()
 
-    try:
         service.set_state(session, 'last_successful_sync_at', datetime(2026, 5, 29, 10, 3, 59))
         payload = service.get_status_payload(session)
 
         assert payload['last_successful_sync_at'] == '2026-05-29T10:03:59'
-    finally:
-        session.close()
-        engine.dispose()
 
 
 def _sync_state_session():
-    engine = create_engine(
-        'sqlite+pysqlite:///:memory:',
-        future=True,
-        connect_args={'check_same_thread': False},
-        poolclass=StaticPool,
-    )
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(engine, tables=[SyncState.__table__])
-    session_local = sessionmaker(bind=engine)
-    return engine, session_local()
+    return _sqlite_session([SyncState.__table__])
 
 
 def test_services_label_weekly_sync_skips_when_not_due(monkeypatch):
-    engine, session = _sync_state_session()
     calls = {'count': 0}
 
     async def fake_import():
@@ -85,28 +67,23 @@ def test_services_label_weekly_sync_skips_when_not_due(monkeypatch):
     monkeypatch.setattr(sync_worker, '_import_services_labels_async', fake_import)
     monkeypatch.setattr(sync_worker, 'SERVICES_LABEL_SYNC_INTERVAL_DAYS', 7)
 
-    try:
+    with _sync_state_session() as session:
         first = sync_worker.run_services_label_sync_if_due(session, datetime(2026, 5, 1, 10, 0, 0))
         second = sync_worker.run_services_label_sync_if_due(session, datetime(2026, 5, 3, 10, 0, 0))
 
         assert first['status'] == 'success'
         assert second == {'status': 'skipped', 'reason': 'not_due'}
         assert calls['count'] == 1
-    finally:
-        session.close()
-        engine.dispose()
 
 
 def test_services_label_weekly_sync_records_result_state(monkeypatch):
-    engine, session = _sync_state_session()
-
     async def fake_import():
         return {'imported': 27, 'processed': 144, 'skipped': [], 'warnings': []}
 
     monkeypatch.setattr(sync_worker, '_import_services_labels_async', fake_import)
     monkeypatch.setattr(sync_worker, 'SERVICES_LABEL_SYNC_INTERVAL_DAYS', 7)
 
-    try:
+    with _sync_state_session() as session:
         result = sync_worker.run_services_label_sync_if_due(session, datetime(2026, 5, 1, 10, 0, 0))
 
         assert result['status'] == 'success'
@@ -115,28 +92,15 @@ def test_services_label_weekly_sync_records_result_state(monkeypatch):
         assert session.get(SyncState, sync_worker.SERVICES_LABEL_SYNC_PROCESSED_KEY).value == '144'
         assert session.get(SyncState, sync_worker.SERVICES_LABEL_SYNC_SKIPPED_KEY).value == '0'
         assert session.get(SyncState, sync_worker.SERVICES_LABEL_SYNC_SUCCESS_KEY).value == '2026-05-01T10:00:00'
-    finally:
-        session.close()
-        engine.dispose()
 
 
 def _auto_sync_session():
-    engine = create_engine(
-        'sqlite+pysqlite:///:memory:',
-        future=True,
-        connect_args={'check_same_thread': False},
-        poolclass=StaticPool,
-    )
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(engine, tables=[
+    return _sqlite_session([
         YClientsCredential.__table__,
         SyncJob.__table__,
         SyncRun.__table__,
         SyncState.__table__,
     ])
-    session_local = sessionmaker(bind=engine)
-    return engine, session_local()
 
 
 def _credential(portal_account_id: int) -> YClientsCredential:
@@ -155,12 +119,11 @@ def _credential(portal_account_id: int) -> YClientsCredential:
 
 
 def test_auto_sync_enqueues_due_tenant(monkeypatch):
-    engine, session = _auto_sync_session()
     now = datetime(2026, 5, 1, 12, 0, 0)
     monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_ENABLED', True)
     monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
 
-    try:
+    with _auto_sync_session() as session:
         session.add(_credential(7))
         session.commit()
 
@@ -171,18 +134,14 @@ def test_auto_sync_enqueues_due_tenant(monkeypatch):
         assert len(jobs) == 1
         assert jobs[0].portal_account_id == 7
         assert jobs[0].initiator == sync_worker.AUTO_SYNC_INITIATOR
-    finally:
-        session.close()
-        engine.dispose()
 
 
 def test_auto_sync_retries_tenant_needing_reauth(monkeypatch):
-    engine, session = _auto_sync_session()
     now = datetime(2026, 5, 1, 12, 0, 0)
     monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_ENABLED', True)
     monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
 
-    try:
+    with _auto_sync_session() as session:
         credential = _credential(7)
         credential.needs_reauth = True
         session.add(credential)
@@ -194,16 +153,12 @@ def test_auto_sync_retries_tenant_needing_reauth(monkeypatch):
         assert result['enqueued'] == 1
         assert len(jobs) == 1
         assert jobs[0].portal_account_id == 7
-    finally:
-        session.close()
-        engine.dispose()
 
 
 def test_reap_stale_jobs_fails_orphaned_running_and_keeps_fresh():
-    engine, session = _auto_sync_session()
     now = datetime(2026, 5, 1, 12, 0, 0)
 
-    try:
+    with _auto_sync_session() as session:
         stale = SyncJob(
             mode='incremental', initiator='auto-worker', status='running',
             portal_account_id=7, company_ids=[], progress_pct=50,
@@ -228,18 +183,14 @@ def test_reap_stale_jobs_fails_orphaned_running_and_keeps_fresh():
         assert stale.finished_at is not None
         assert 'stale' in (stale.error_message or '').lower()
         assert fresh.status == 'running'
-    finally:
-        session.close()
-        engine.dispose()
 
 
 def test_auto_sync_skips_recent_or_active_jobs(monkeypatch):
-    engine, session = _auto_sync_session()
     now = datetime(2026, 5, 1, 12, 0, 0)
     monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_ENABLED', True)
     monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
 
-    try:
+    with _auto_sync_session() as session:
         session.add_all([_credential(7), _credential(8)])
         session.add(SyncJob(
             mode='incremental',
@@ -273,18 +224,14 @@ def test_auto_sync_skips_recent_or_active_jobs(monkeypatch):
         assert result['enqueued'] == 0
         assert result['skipped'] == 2
         assert session.query(SyncJob).count() == 2
-    finally:
-        session.close()
-        engine.dispose()
 
 
 def test_auto_sync_skips_after_recent_global_sync(monkeypatch):
-    engine, session = _auto_sync_session()
     now = datetime(2026, 5, 1, 12, 0, 0)
     monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_ENABLED', True)
     monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
 
-    try:
+    with _auto_sync_session() as session:
         session.add(_credential(7))
         SyncControlService().set_state(session, 'last_successful_sync_at', now - timedelta(minutes=30))
 
@@ -297,6 +244,3 @@ def test_auto_sync_skips_after_recent_global_sync(monkeypatch):
             'reason': 'recent_global_sync',
         }
         assert session.query(SyncJob).count() == 0
-    finally:
-        session.close()
-        engine.dispose()
