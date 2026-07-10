@@ -140,6 +140,8 @@ SYNC_API_TOKEN = os.getenv('SYNC_API_TOKEN', '')
 SYNC_WORKER_POLL_INTERVAL = _get_float('SYNC_WORKER_POLL_INTERVAL', 5.0)
 SYNC_AUTO_ENQUEUE_ENABLED = _get_bool('SYNC_AUTO_ENQUEUE_ENABLED', True)
 SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES = _get_int('SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
+# A 'running' job older than this is treated as orphaned (worker died mid-sync) and reaped.
+SYNC_STALE_JOB_MINUTES = _get_int('SYNC_STALE_JOB_MINUTES', 120)
 SERVICES_LABEL_SYNC_INTERVAL_DAYS = _get_int('SERVICES_LABEL_SYNC_INTERVAL_DAYS', 7)
 
 # ============================================================================

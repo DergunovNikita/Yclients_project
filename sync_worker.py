@@ -12,6 +12,7 @@ from config import (
     SYNC_AUTO_ENQUEUE_ENABLED,
     SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES,
     SERVICES_LABEL_SYNC_INTERVAL_DAYS,
+    SYNC_STALE_JOB_MINUTES,
     SYNC_WORKER_POLL_INTERVAL,
 )
 from database import build_async_database_url, init_database
@@ -135,14 +136,15 @@ def enqueue_auto_sync_jobs_if_due(db, now: datetime | None = None) -> dict:
         return {'status': 'ok', 'enqueued': 0, 'skipped': 1, 'reason': 'recent_global_sync'}
 
     jobs = SyncJobService()
+    # needs_reauth is intentionally not filtered here: a credential that failed auth once
+    # (expired token, transient YClients outage) must still be retried, otherwise the tenant
+    # silently drops out of auto-sync forever. The per-tenant cooldown below throttles retries
+    # to one per interval, and a successful run clears needs_reauth.
     portal_account_ids = [
         int(portal_account_id)
         for (portal_account_id,) in (
             db.query(YClientsCredential.portal_account_id)
-            .filter(
-                YClientsCredential.is_active.is_(True),
-                YClientsCredential.needs_reauth.is_(False),
-            )
+            .filter(YClientsCredential.is_active.is_(True))
             .distinct()
             .all()
         )
@@ -216,6 +218,9 @@ def main():
             database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
             db = database.get_db()
             try:
+                reaped = SyncJobService().reap_stale_jobs(db, max_running_minutes=SYNC_STALE_JOB_MINUTES)
+                if reaped:
+                    print(f'✓ Reaped {reaped} stale running job(s)')
                 auto_result = enqueue_auto_sync_jobs_if_due(db)
                 processed = auto_result.get('enqueued', 0) > 0
             finally:

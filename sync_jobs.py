@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from sqlalchemy import func, select, text
@@ -94,6 +94,34 @@ class SyncJobService:
         db.commit()
         db.refresh(job)
         return job
+
+    def reap_stale_jobs(self, db, *, max_running_minutes: int, now: datetime | None = None) -> int:
+        """Fail 'running' jobs left orphaned by a worker that died mid-sync.
+
+        Such a job stays 'running' forever: it blocks auto-enqueue for its tenant and shows a
+        phantom run in the dashboard. Only jobs whose start is older than max_running_minutes are
+        reaped, so a job actively processed by a live worker is never touched.
+        """
+        if max_running_minutes <= 0:
+            return 0
+        now = now or datetime.now()
+        cutoff = now - timedelta(minutes=max_running_minutes)
+        stale = (
+            db.query(SyncJob)
+            .filter(
+                SyncJob.status == 'running',
+                func.coalesce(SyncJob.started_at, SyncJob.requested_at) < cutoff,
+            )
+            .all()
+        )
+        for job in stale:
+            job.status = 'failed'
+            job.finished_at = now
+            job.current_stage = 'failed'
+            job.error_message = 'Reaped stale running job (worker likely died mid-sync)'
+        if stale:
+            db.commit()
+        return len(stale)
 
     def _scoped_query(self, query, portal_account_id: int | None = None):
         if portal_account_id is not None:

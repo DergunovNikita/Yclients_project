@@ -7,6 +7,7 @@ from sqlalchemy.pool import StaticPool
 import sync_worker
 from models import Base, SyncJob, SyncRun, SyncState, YClientsCredential
 from sync_control import SyncControlService
+from sync_jobs import SyncJobService
 
 
 def test_set_state_serializes_datetime_to_isoformat():
@@ -170,6 +171,63 @@ def test_auto_sync_enqueues_due_tenant(monkeypatch):
         assert len(jobs) == 1
         assert jobs[0].portal_account_id == 7
         assert jobs[0].initiator == sync_worker.AUTO_SYNC_INITIATOR
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_auto_sync_retries_tenant_needing_reauth(monkeypatch):
+    engine, session = _auto_sync_session()
+    now = datetime(2026, 5, 1, 12, 0, 0)
+    monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_ENABLED', True)
+    monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
+
+    try:
+        credential = _credential(7)
+        credential.needs_reauth = True
+        session.add(credential)
+        session.commit()
+
+        result = sync_worker.enqueue_auto_sync_jobs_if_due(session, now)
+        jobs = session.query(SyncJob).all()
+
+        assert result['enqueued'] == 1
+        assert len(jobs) == 1
+        assert jobs[0].portal_account_id == 7
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_reap_stale_jobs_fails_orphaned_running_and_keeps_fresh():
+    engine, session = _auto_sync_session()
+    now = datetime(2026, 5, 1, 12, 0, 0)
+
+    try:
+        stale = SyncJob(
+            mode='incremental', initiator='auto-worker', status='running',
+            portal_account_id=7, company_ids=[], progress_pct=50,
+            current_stage='Сотрудники', step_results=[], cancel_requested=False,
+            requested_at=now - timedelta(hours=30), started_at=now - timedelta(hours=30),
+        )
+        fresh = SyncJob(
+            mode='incremental', initiator='auto-worker', status='running',
+            portal_account_id=8, company_ids=[], progress_pct=10,
+            current_stage='Клиенты', step_results=[], cancel_requested=False,
+            requested_at=now - timedelta(minutes=3), started_at=now - timedelta(minutes=3),
+        )
+        session.add_all([stale, fresh])
+        session.commit()
+
+        reaped = SyncJobService().reap_stale_jobs(session, max_running_minutes=120, now=now)
+
+        session.refresh(stale)
+        session.refresh(fresh)
+        assert reaped == 1
+        assert stale.status == 'failed'
+        assert stale.finished_at is not None
+        assert 'stale' in (stale.error_message or '').lower()
+        assert fresh.status == 'running'
     finally:
         session.close()
         engine.dispose()
