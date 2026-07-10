@@ -1,4 +1,5 @@
 requests>=2.31.0
+urllib3>=2.0.0  # Retry(retry_after_max=...) caps honored 429 Retry-After; param added in urllib3 2.x
 sqlalchemy>=2.0.0
 alembic>=1.14.0
 psycopg2-binary>=2.9.0

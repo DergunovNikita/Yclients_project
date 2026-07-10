@@ -110,6 +110,9 @@ YCLIENTS_REQUEST_DELAY = _get_float('YCLIENTS_REQUEST_DELAY', 0.25)
 YCLIENTS_TIMEOUT = _get_float('YCLIENTS_TIMEOUT', 30.0)
 YCLIENTS_RETRY_TOTAL = _get_int('YCLIENTS_RETRY_TOTAL', 3)
 YCLIENTS_RETRY_BACKOFF = _get_float('YCLIENTS_RETRY_BACKOFF', 1.0)
+# Cap (seconds) on a 429 Retry-After the client will honor, so a hostile/large header cannot
+# stall a sync step for minutes. Each request still gives up after retry_total attempts.
+YCLIENTS_RETRY_AFTER_MAX = _get_float('YCLIENTS_RETRY_AFTER_MAX', 60.0)
 
 # ============================================================================
 # Настройки PostgreSQL

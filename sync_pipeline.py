@@ -10,6 +10,7 @@ from config import (
     SYNC_HISTORY_START_DATE, SYNC_INCREMENTAL, SYNC_LOOKBACK_DAYS,
     YCLIENTS_REQUEST_DELAY, YCLIENTS_TIMEOUT,
     YCLIENTS_RETRY_TOTAL, YCLIENTS_RETRY_BACKOFF,
+    YCLIENTS_RETRY_AFTER_MAX,
 )
 from data_sources import SOURCE_YCLIENTS, adapter_from_payload
 from yclients_api import YClientsAPI
@@ -290,6 +291,7 @@ def _build_api_for_credential(credential: YClientsCredentialValue) -> YClientsAP
         timeout=YCLIENTS_TIMEOUT,
         retry_total=YCLIENTS_RETRY_TOTAL,
         retry_backoff=YCLIENTS_RETRY_BACKOFF,
+        retry_after_max=YCLIENTS_RETRY_AFTER_MAX,
     )
     if not adapter.authenticate():
         return None

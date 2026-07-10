@@ -22,6 +22,7 @@ class YClientsAPI:
         timeout: float = 30.0,
         retry_total: int = 3,
         retry_backoff: float = 1.0,
+        retry_after_max: float = 60.0,
     ):
         self.partner_token = partner_token
         self.login = login
@@ -30,7 +31,10 @@ class YClientsAPI:
         self.base_url = 'https://api.yclients.com/api/v1'
         self.request_delay = max(0.0, request_delay)
         self.timeout = max(1.0, timeout)
+        self.retry_after_max = max(0, int(retry_after_max))
         self.session = requests.Session()
+        # retry_after_max caps a 429 Retry-After we will honor. urllib3's default is 21600s (6h),
+        # so a large/hostile header could otherwise stall a sync step for hours.
         retry = Retry(
             total=max(0, retry_total),
             connect=max(0, retry_total),
@@ -40,6 +44,7 @@ class YClientsAPI:
             status_forcelist=(429, 500, 502, 503, 504),
             allowed_methods=frozenset({"GET", "POST"}),
             respect_retry_after_header=True,
+            retry_after_max=self.retry_after_max,
         )
         adapter = HTTPAdapter(max_retries=retry)
         self.session.mount('https://', adapter)
