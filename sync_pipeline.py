@@ -88,6 +88,23 @@ def load_existing_branch_map(db, model, company_id: int, ids, id_column):
     return existing
 
 
+def load_existing_source_branch_map(db, model, company_id: int, ids, id_column, source_type: str = SOURCE_YCLIENTS):
+    existing = {}
+    unique_ids = [item_id for item_id in dict.fromkeys(ids) if item_id is not None]
+    for batch in chunked(unique_ids, DB_BATCH_SIZE):
+        for obj in (
+            db.query(model)
+            .filter(
+                model.company_id == company_id,
+                model.source_type == source_type,
+                id_column.in_(batch),
+            )
+            .all()
+        ):
+            existing[getattr(obj, id_column.key)] = obj
+    return existing
+
+
 def bulk_delete_by_ids(db, model, column, ids) -> int:
     deleted = 0
     unique_ids = [item_id for item_id in dict.fromkeys(ids) if item_id is not None]
@@ -300,14 +317,85 @@ def _build_api_for_credential(credential: YClientsCredentialValue) -> YClientsAP
 
 def format_company_label(company: Company) -> str:
     title = (company.title or '').strip() or f'Company {company.id}'
-    return f"{title} ({company.id})"
+    external_id = getattr(company, 'external_id', None)
+    suffix = company.id if external_id in (None, company.id) else f'{company.id}/yc:{external_id}'
+    return f"{title} ({suffix})"
+
+
+def _db_company_id(company_id: str, db_company_id: int | None = None) -> int:
+    return int(db_company_id if db_company_id is not None else company_id)
+
+
+def _company_external_id(company: Company) -> int:
+    return int(getattr(company, 'external_id', None) or company.id)
+
+
+def _client_external_id(client_data) -> int | None:
+    if not isinstance(client_data, dict):
+        return None
+    value = client_data.get('id')
+    return int(value) if value is not None else None
+
+
+def _prepare_client_map(db, company_id: int, client_payloads: Iterable[dict]) -> dict[int, Client]:
+    payload_by_external_id: dict[int, dict] = {}
+    for payload in client_payloads:
+        external_id = _client_external_id(payload)
+        if external_id is not None:
+            payload_by_external_id[external_id] = payload
+
+    existing_clients = load_existing_source_branch_map(
+        db,
+        Client,
+        company_id,
+        payload_by_external_id.keys(),
+        Client.external_id,
+    )
+    changed = False
+    for external_id, payload in payload_by_external_id.items():
+        obj = existing_clients.get(external_id)
+        if obj is None:
+            obj = Client(
+                external_id=external_id,
+                source_type=SOURCE_YCLIENTS,
+                name=payload.get('name', '') or '',
+                phone=payload.get('phone'),
+                email=payload.get('email'),
+                birth_date=parse_date(payload.get('birth_date')),
+                visits_count=payload.get('visits_count', 0),
+                last_visit_date=parse_date(payload.get('last_visit_date')),
+                discount=payload.get('discount', 0),
+                company_id=company_id,
+            )
+            db.add(obj)
+            existing_clients[external_id] = obj
+            changed = True
+        else:
+            if payload.get('name') is not None:
+                obj.name = payload.get('name') or ''
+            if payload.get('phone') is not None:
+                obj.phone = payload.get('phone')
+            if payload.get('email') is not None:
+                obj.email = payload.get('email')
+
+    if changed:
+        db.flush()
+    return existing_clients
+
+
+def _internal_client_id(client_map: dict[int, Client], client_data) -> int | None:
+    external_id = _client_external_id(client_data)
+    if external_id is None:
+        return None
+    client = client_map.get(external_id)
+    return int(client.id) if client is not None and client.id is not None else None
 
 
 # ===================================================================
 # 1. Сети и компании
 # ===================================================================
 
-def sync_groups_and_companies(api: YClientsAPI, db):
+def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int | None = None):
     print("\n── Сети и компании ──")
 
     groups = api.get_groups()
@@ -324,8 +412,33 @@ def sync_groups_and_companies(api: YClientsAPI, db):
             for company_data in (group_data.get('companies') or [])
             if company_data.get('id') is not None
         ]
-        existing_groups = load_existing_map(db, Group, group_ids, Group.id)
-        existing_companies = load_existing_map(db, Company, company_ids, Company.id)
+        if portal_account_id is None:
+            existing_groups = load_existing_map(db, Group, group_ids, Group.id)
+            existing_companies = load_existing_map(db, Company, company_ids, Company.id)
+        else:
+            existing_groups = {
+                group.external_id: group
+                for group in (
+                    db.query(Group)
+                    .filter(
+                        Group.portal_account_id == portal_account_id,
+                        Group.external_id.in_(group_ids),
+                    )
+                    .all()
+                )
+            }
+            existing_companies = {
+                company.external_id: company
+                for company in (
+                    db.query(Company)
+                    .filter(
+                        Company.portal_account_id == portal_account_id,
+                        Company.source_type == 'yclients',
+                        Company.external_id.in_(company_ids),
+                    )
+                    .all()
+                )
+            }
 
         for group_data in groups:
             group_id = group_data.get('id')
@@ -334,15 +447,32 @@ def sync_groups_and_companies(api: YClientsAPI, db):
 
             group = existing_groups.get(group_id)
             if not group:
-                group = Group(
-                    id=group_id,
-                    title=group_data.get('title', ''),
-                    access=group_data.get('access')
-                )
-                db.add(group)
+                legacy_group = db.get(Group, group_id) if portal_account_id is not None else None
+                if legacy_group is not None and legacy_group.external_id is None and (
+                    legacy_group.portal_account_id is None or legacy_group.portal_account_id == portal_account_id
+                ):
+                    group = legacy_group
+                    group.title = group_data.get('title', '') or group.title
+                    group.access = group_data.get('access')
+                    group.portal_account_id = portal_account_id
+                    group.external_id = group_id
+                else:
+                    group_kwargs = {
+                        'title': group_data.get('title', ''),
+                        'access': group_data.get('access'),
+                        'portal_account_id': portal_account_id,
+                        'external_id': group_id,
+                    }
+                    if portal_account_id is None:
+                        group_kwargs['id'] = group_id
+                    group = Group(**group_kwargs)
+                    db.add(group)
+                    db.flush()
             else:
                 group.title = group_data.get('title', '')
                 group.access = group_data.get('access')
+                group.portal_account_id = group.portal_account_id or portal_account_id
+                group.external_id = group.external_id or group_id
 
             if 'companies' in group_data and group_data['companies']:
                 for company_data in group_data['companies']:
@@ -352,15 +482,33 @@ def sync_groups_and_companies(api: YClientsAPI, db):
 
                     company = existing_companies.get(company_id)
                     if not company:
-                        company = Company(
-                            id=company_id,
-                            title=company_data.get('title', ''),
-                            group_id=group_id
-                        )
-                        db.add(company)
+                        legacy_company = db.get(Company, company_id) if portal_account_id is not None else None
+                        if legacy_company is not None and legacy_company.external_id is None and (
+                            legacy_company.portal_account_id is None or legacy_company.portal_account_id == portal_account_id
+                        ):
+                            company = legacy_company
+                            company.title = company_data.get('title', '') or company.title
+                            company.group_id = group.id
+                            company.portal_account_id = portal_account_id
+                            company.external_id = company_id
+                            company.source_type = SOURCE_YCLIENTS
+                        else:
+                            company_kwargs = {
+                                'title': company_data.get('title', ''),
+                                'group_id': group.id,
+                                'portal_account_id': portal_account_id,
+                                'external_id': company_id,
+                                'source_type': SOURCE_YCLIENTS,
+                            }
+                            if portal_account_id is None:
+                                company_kwargs['id'] = company_id
+                            company = Company(**company_kwargs)
+                            db.add(company)
                     else:
                         company.title = company_data.get('title', '')
-                        company.group_id = group_id
+                        company.group_id = group.id
+                        company.portal_account_id = company.portal_account_id or portal_account_id
+                        company.external_id = company.external_id or company_id
 
         db.commit()
         print("  ✓ Сети и компании сохранены")
@@ -376,7 +524,7 @@ def sync_groups_and_companies(api: YClientsAPI, db):
 # 2. Категории услуг
 # ===================================================================
 
-def sync_service_categories(api: YClientsAPI, db, company_id: str):
+def sync_service_categories(api: YClientsAPI, db, company_id: str, db_company_id: int | None = None):
     print("\n── Категории услуг ──")
 
     categories = api.get_service_categories(company_id)
@@ -387,7 +535,7 @@ def sync_service_categories(api: YClientsAPI, db, company_id: str):
     print(f"  Найдено: {len(categories)}")
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         now = datetime.now()
         existing_categories = load_existing_map(
             db,
@@ -453,7 +601,7 @@ def sync_service_categories(api: YClientsAPI, db, company_id: str):
 # 3. Услуги
 # ===================================================================
 
-def sync_services(api: YClientsAPI, db, company_id: str):
+def sync_services(api: YClientsAPI, db, company_id: str, db_company_id: int | None = None):
     print("\n── Услуги ──")
 
     services = api.get_services(company_id)
@@ -464,7 +612,7 @@ def sync_services(api: YClientsAPI, db, company_id: str):
     print(f"  Найдено: {len(services)}")
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         now = datetime.now()
         category_by_service_id = {}
         if not any(service.get('category') for service in services):
@@ -561,7 +709,7 @@ def sync_services(api: YClientsAPI, db, company_id: str):
 # 4. Должности
 # ===================================================================
 
-def sync_positions(api: YClientsAPI, db, company_id: str):
+def sync_positions(api: YClientsAPI, db, company_id: str, db_company_id: int | None = None):
     print("\n── Должности ──")
 
     positions = api.get_positions(company_id)
@@ -572,7 +720,7 @@ def sync_positions(api: YClientsAPI, db, company_id: str):
     print(f"  Найдено: {len(positions)}")
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         now = datetime.now()
         existing_positions = load_existing_map(
             db,
@@ -626,7 +774,7 @@ def sync_positions(api: YClientsAPI, db, company_id: str):
 # 5. Сотрудники
 # ===================================================================
 
-def sync_staff(api: YClientsAPI, db, company_id: str):
+def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None = None):
     print("\n── Сотрудники ──")
 
     staff_list = api.get_staff(company_id)
@@ -637,7 +785,7 @@ def sync_staff(api: YClientsAPI, db, company_id: str):
     print(f"  Найдено: {len(staff_list)}")
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         staff_ids = {staff_member.get('id') for staff_member in staff_list if staff_member.get('id') is not None}
         existing_staff = load_existing_map(
             db,
@@ -708,7 +856,7 @@ def sync_staff(api: YClientsAPI, db, company_id: str):
 # 6. Клиенты
 # ===================================================================
 
-def sync_clients(api: YClientsAPI, db, company_id: str):
+def sync_clients(api: YClientsAPI, db, company_id: str, db_company_id: int | None = None):
     print("\n── Клиенты ──")
 
     clients = api.get_clients(company_id)
@@ -719,22 +867,25 @@ def sync_clients(api: YClientsAPI, db, company_id: str):
     print(f"  Найдено: {len(clients)}")
 
     try:
-        cid = int(company_id)
-        existing_clients = load_existing_map(
+        cid = _db_company_id(company_id, db_company_id)
+        existing_clients = load_existing_source_branch_map(
             db,
             Client,
-            (client.get('id') for client in clients),
-            Client.id,
+            cid,
+            (_client_external_id(client) for client in clients),
+            Client.external_id,
         )
         for c in clients:
-            client_id = c.get('id')
+            client_id = _client_external_id(c)
             if client_id is None:
                 continue
 
             obj = existing_clients.get(client_id)
             if not obj:
                 obj = Client(
-                    id=client_id, name=c.get('name', ''),
+                    external_id=client_id,
+                    source_type=SOURCE_YCLIENTS,
+                    name=c.get('name', ''),
                     phone=c.get('phone'), email=c.get('email'),
                     birth_date=parse_date(c.get('birth_date')),
                     visits_count=c.get('visits_count', 0),
@@ -751,6 +902,7 @@ def sync_clients(api: YClientsAPI, db, company_id: str):
                 obj.visits_count = c.get('visits_count', 0)
                 obj.last_visit_date = parse_date(c.get('last_visit_date'))
                 obj.discount = c.get('discount', 0)
+                obj.company_id = cid
 
         db.commit()
         print(f"  ✓ Клиенты сохранены ({len(clients)} шт.)")
@@ -766,7 +918,7 @@ def sync_clients(api: YClientsAPI, db, company_id: str):
 # 7. Кассы
 # ===================================================================
 
-def sync_accounts(api: YClientsAPI, db, company_id: str):
+def sync_accounts(api: YClientsAPI, db, company_id: str, db_company_id: int | None = None):
     print("\n── Кассы ──")
 
     accounts = api.get_accounts(company_id)
@@ -777,7 +929,7 @@ def sync_accounts(api: YClientsAPI, db, company_id: str):
     print(f"  Найдено: {len(accounts)}")
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         now = datetime.now()
         existing_accounts = load_existing_map(
             db,
@@ -841,7 +993,7 @@ def sync_accounts(api: YClientsAPI, db, company_id: str):
 # 8. Склады
 # ===================================================================
 
-def sync_storages(api: YClientsAPI, db, company_id: str):
+def sync_storages(api: YClientsAPI, db, company_id: str, db_company_id: int | None = None):
     print("\n── Склады ──")
 
     storages = api.get_storages(company_id)
@@ -852,7 +1004,7 @@ def sync_storages(api: YClientsAPI, db, company_id: str):
     print(f"  Найдено: {len(storages)}")
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         now = datetime.now()
         existing_storages = load_existing_map(
             db,
@@ -921,7 +1073,7 @@ def sync_storages(api: YClientsAPI, db, company_id: str):
 # 9. Категории товаров
 # ===================================================================
 
-def sync_good_categories(api: YClientsAPI, db, company_id: str):
+def sync_good_categories(api: YClientsAPI, db, company_id: str, db_company_id: int | None = None):
     print("\n── Категории товаров ──")
 
     categories = api.get_good_categories(company_id)
@@ -932,7 +1084,7 @@ def sync_good_categories(api: YClientsAPI, db, company_id: str):
     print(f"  Найдено: {len(categories)}")
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         now = datetime.now()
         existing_categories = load_existing_map(
             db,
@@ -993,7 +1145,7 @@ def sync_good_categories(api: YClientsAPI, db, company_id: str):
 # 10. Товары
 # ===================================================================
 
-def sync_goods(api: YClientsAPI, db, company_id: str):
+def sync_goods(api: YClientsAPI, db, company_id: str, db_company_id: int | None = None):
     print("\n── Товары ──")
 
     goods = api.get_goods(company_id)
@@ -1004,7 +1156,7 @@ def sync_goods(api: YClientsAPI, db, company_id: str):
     print(f"  Найдено: {len(goods)}")
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         now = datetime.now()
         good_ids = [
             g.get('good_id') or g.get('id')
@@ -1087,7 +1239,8 @@ def sync_goods(api: YClientsAPI, db, company_id: str):
 # ===================================================================
 
 def sync_records(api: YClientsAPI, db, company_id: str,
-                 start_date: str = None, end_date: str = None):
+                 start_date: str = None, end_date: str = None,
+                 db_company_id: int | None = None):
     print("\n── Записи (визиты) ──")
 
     records = api.get_records(company_id, start_date=start_date, end_date=end_date)
@@ -1098,11 +1251,27 @@ def sync_records(api: YClientsAPI, db, company_id: str,
     print(f"  Найдено: {len(records)}")
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         tx_count = 0
         record_ids = [r.get('id') for r in records if r.get('id') is not None]
-        existing_records = load_existing_map(db, Appointment, record_ids, Appointment.id)
-        deleted_tx = bulk_delete_by_ids(db, Transaction, Transaction.appointment_id, record_ids)
+        existing_records = load_existing_source_branch_map(
+            db,
+            Appointment,
+            cid,
+            record_ids,
+            Appointment.external_id,
+        )
+        deleted_tx = bulk_delete_by_ids(
+            db,
+            Transaction,
+            Transaction.appointment_id,
+            (record.id for record in existing_records.values()),
+        )
+        client_map = _prepare_client_map(
+            db,
+            cid,
+            (record.get('client') or {} for record in records),
+        )
 
         for r in records:
             record_id = r.get('id')
@@ -1110,14 +1279,16 @@ def sync_records(api: YClientsAPI, db, company_id: str,
                 continue
 
             client_data = r.get('client') or {}
-            client_id = client_data.get('id')
+            client_id = _internal_client_id(client_map, client_data)
             staff_id = r.get('staff_id')
             created_user_id = r.get('created_user_id')
 
             obj = existing_records.get(record_id)
             if not obj:
                 obj = Appointment(
-                    id=record_id, company_id=cid,
+                    external_id=record_id,
+                    source_type=SOURCE_YCLIENTS,
+                    company_id=cid,
                     staff_id=staff_id, client_id=client_id,
                     created_user_id=created_user_id,
                     date=parse_date(r.get('date')),
@@ -1139,9 +1310,12 @@ def sync_records(api: YClientsAPI, db, company_id: str,
                 obj.attendance = r.get('attendance', 0)
                 obj.comment = r.get('comment')
 
+            if obj.id is None:
+                db.flush()
+
             for svc in (r.get('services') or []):
                 tx = Transaction(
-                    appointment_id=record_id,
+                    appointment_id=obj.id,
                     service_id=svc.get('id'),
                     service_title=svc.get('title', ''),
                     cost=svc.get('cost'),
@@ -1170,7 +1344,8 @@ def sync_records(api: YClientsAPI, db, company_id: str,
 # ===================================================================
 
 def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
-                                start_date: str = None, end_date: str = None):
+                                start_date: str = None, end_date: str = None,
+                                db_company_id: int | None = None):
     print("\n── Финансовые транзакции ──")
 
     txns = api.get_financial_transactions(company_id,
@@ -1185,12 +1360,17 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
     print(f"  Найдено: {len(txns)}")
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         existing_txns = load_existing_map(
             db,
             FinancialTransaction,
             (txn.get('id') for txn in txns),
             FinancialTransaction.id,
+        )
+        client_map = _prepare_client_map(
+            db,
+            cid,
+            (txn.get('client') or {} for txn in txns),
         )
         for t in txns:
             tid = t.get('id')
@@ -1203,6 +1383,7 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
             master = t.get('master') or {}
             expense = t.get('expense') or {}
             expense_title = expense.get('title') if isinstance(expense, dict) else None
+            internal_client_id = _internal_client_id(client_map, client)
 
             if not obj:
                 obj = FinancialTransaction(
@@ -1214,7 +1395,7 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                     amount=t.get('amount'),
                     comment=t.get('comment'),
                     account_id=account.get('id') if isinstance(account, dict) else None,
-                    client_id=client.get('id') if isinstance(client, dict) else None,
+                    client_id=internal_client_id,
                     master_id=master.get('id') if isinstance(master, dict) else None,
                     record_id=t.get('record_id'),
                     visit_id=t.get('visit_id'),
@@ -1232,7 +1413,7 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                 obj.amount = t.get('amount')
                 obj.comment = t.get('comment')
                 obj.account_id = account.get('id') if isinstance(account, dict) else None
-                obj.client_id = client.get('id') if isinstance(client, dict) else None
+                obj.client_id = internal_client_id
                 obj.master_id = master.get('id') if isinstance(master, dict) else None
                 obj.record_id = t.get('record_id')
                 obj.visit_id = t.get('visit_id')
@@ -1273,7 +1454,8 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
 # ===================================================================
 
 def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
-                            start_date: str = None, end_date: str = None):
+                            start_date: str = None, end_date: str = None,
+                            db_company_id: int | None = None):
     print("\n── Товарные транзакции ──")
 
     txns = api.get_goods_transactions(company_id,
@@ -1286,12 +1468,17 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
     print(f"  Найдено: {len(txns)}")
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         existing_txns = load_existing_map(
             db,
             GoodTransaction,
             (txn.get('id') for txn in txns),
             GoodTransaction.id,
+        )
+        client_map = _prepare_client_map(
+            db,
+            cid,
+            (txn.get('client') or {} for txn in txns),
         )
         for t in txns:
             tid = t.get('id')
@@ -1307,6 +1494,7 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
             good_title = good.get('title') if isinstance(good, dict) else None
             storage_id = storage.get('id') if isinstance(storage, dict) else None
             storage_title = storage.get('title') if isinstance(storage, dict) else None
+            internal_client_id = _internal_client_id(client_map, client)
 
             tx_date = parse_datetime(t.get('create_date') or t.get('date'))
 
@@ -1324,7 +1512,7 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
                     cost=t.get('cost'),
                     discount=t.get('discount'),
                     master_id=master.get('id') if isinstance(master, dict) else None,
-                    client_id=client.get('id') if isinstance(client, dict) else None,
+                    client_id=internal_client_id,
                     company_id=cid,
                     date=tx_date,
                 )
@@ -1342,7 +1530,7 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
                 obj.cost = t.get('cost')
                 obj.discount = t.get('discount')
                 obj.master_id = master.get('id') if isinstance(master, dict) else None
-                obj.client_id = client.get('id') if isinstance(client, dict) else None
+                obj.client_id = internal_client_id
                 obj.date = tx_date
 
         db.commit()
@@ -1360,7 +1548,8 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
 # ===================================================================
 
 def sync_comments(api: YClientsAPI, db, company_id: str,
-                  start_date: str = None, end_date: str = None):
+                  start_date: str = None, end_date: str = None,
+                  db_company_id: int | None = None):
     print("\n── Комментарии / отзывы ──")
 
     comments = api.get_comments(company_id,
@@ -1373,7 +1562,7 @@ def sync_comments(api: YClientsAPI, db, company_id: str,
     print(f"  Найдено: {len(comments)}")
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         existing_comments = load_existing_map(
             db,
             Comment,
@@ -1420,7 +1609,8 @@ def sync_comments(api: YClientsAPI, db, company_id: str,
 # ===================================================================
 
 def sync_staff_schedules(api: YClientsAPI, db, company_id: str,
-                         start_date: str = None, end_date: str = None):
+                         start_date: str = None, end_date: str = None,
+                         db_company_id: int | None = None):
     print("\n── Графики работы сотрудников ──")
 
     schedules = api.get_staff_schedule(company_id,
@@ -1433,7 +1623,7 @@ def sync_staff_schedules(api: YClientsAPI, db, company_id: str,
     print(f"  Найдено записей расписания: {len(schedules)}")
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         delete_query = db.query(StaffSchedule).filter(StaffSchedule.company_id == cid)
         if start_date:
             delete_query = delete_query.filter(StaffSchedule.date >= parse_date(start_date))
@@ -1472,7 +1662,8 @@ def sync_staff_schedules(api: YClientsAPI, db, company_id: str,
 # ===================================================================
 
 def sync_analytics_overall(api: YClientsAPI, db, company_id: str,
-                           date_from: str, date_to: str):
+                           date_from: str, date_to: str,
+                           db_company_id: int | None = None):
     print("\n── Аналитика: основные показатели ──")
 
     data = api.get_analytics_overall(company_id, date_from, date_to)
@@ -1481,7 +1672,7 @@ def sync_analytics_overall(api: YClientsAPI, db, company_id: str,
         return False
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         db.query(AnalyticsOverall).filter(AnalyticsOverall.company_id == cid).delete()
 
         def _parse_stat(stat_key):
@@ -1555,7 +1746,8 @@ def sync_analytics_overall(api: YClientsAPI, db, company_id: str,
 # ===================================================================
 
 def sync_analytics_daily_charts(api: YClientsAPI, db, company_id: str,
-                                date_from: str, date_to: str):
+                                date_from: str, date_to: str,
+                                db_company_id: int | None = None):
     print("\n── Аналитика: дневные графики ──")
 
     charts = {
@@ -1564,7 +1756,7 @@ def sync_analytics_daily_charts(api: YClientsAPI, db, company_id: str,
         'fullness': api.get_analytics_fullness_daily,
     }
 
-    cid = int(company_id)
+    cid = _db_company_id(company_id, db_company_id)
     total = 0
 
     try:
@@ -1612,10 +1804,11 @@ def sync_analytics_daily_charts(api: YClientsAPI, db, company_id: str,
 # ===================================================================
 
 def sync_analytics_sources_and_statuses(api: YClientsAPI, db, company_id: str,
-                                        date_from: str, date_to: str):
+                                        date_from: str, date_to: str,
+                                        db_company_id: int | None = None):
     print("\n── Аналитика: источники и статусы ──")
 
-    cid = int(company_id)
+    cid = _db_company_id(company_id, db_company_id)
 
     try:
         db.query(AnalyticsSourceMetric).filter(
@@ -1667,7 +1860,13 @@ def sync_analytics_sources_and_statuses(api: YClientsAPI, db, company_id: str,
 # 26. Z-Отчёт
 # ===================================================================
 
-def sync_z_report(api: YClientsAPI, db, company_id: str, report_date: str):
+def sync_z_report(
+    api: YClientsAPI,
+    db,
+    company_id: str,
+    report_date: str,
+    db_company_id: int | None = None,
+):
     print(f"\n── Z-Отчёт ({report_date}) ──")
 
     data = api.get_z_report(company_id, report_date)
@@ -1676,7 +1875,7 @@ def sync_z_report(api: YClientsAPI, db, company_id: str, report_date: str):
         return False
 
     try:
-        cid = int(company_id)
+        cid = _db_company_id(company_id, db_company_id)
         report_bound = parse_date(report_date)
         db.query(ZReport).filter(
             ZReport.company_id == cid, ZReport.report_date == report_bound
@@ -1951,6 +2150,7 @@ def execute_sync(
                     'credential_id': credential.id,
                 },
                 progress_pct=15,
+                portal_account_id=credential.portal_account_id,
             )
 
             credential_company_ids = list(credential.company_ids)
@@ -1995,7 +2195,7 @@ def execute_sync(
             )
 
             for company in target_companies:
-                company_id = str(company.id)
+                company_id = str(_company_external_id(company))
                 company_label = format_company_label(company)
                 print(f"\n{'─' * 60}")
                 print(f"Филиал: {company_label}")
@@ -2018,6 +2218,7 @@ def execute_sync(
                         company_api,
                         db,
                         company_id,
+                        db_company_id=company.id,
                         step_key=name,
                         progress_callback=progress_callback,
                         progress_context={
@@ -2038,6 +2239,7 @@ def execute_sync(
                         company_api,
                         db,
                         company_id,
+                        db_company_id=company.id,
                         step_key=name,
                         progress_callback=progress_callback,
                         progress_context={

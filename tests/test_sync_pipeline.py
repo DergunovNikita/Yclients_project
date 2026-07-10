@@ -5,6 +5,8 @@ from sqlalchemy.orm import sessionmaker
 
 from models import (
     Base,
+    Appointment,
+    Client,
     Company,
     FinancialTransaction,
     GoodTransaction,
@@ -14,13 +16,16 @@ from models import (
     ServiceCategoryCatalog,
     Staff,
     SyncSourceState,
+    Transaction,
 )
 import sync_pipeline
 from sync_pipeline import (
     execute_sync,
     full_sync_start_date,
+    sync_clients,
     sync_financial_transactions,
     sync_goods_transactions,
+    sync_records,
     sync_services,
     sync_staff,
 )
@@ -60,6 +65,22 @@ class FakeFinancialTransactionsAPI:
 
     def get_financial_transactions(self, company_id, start_date=None, end_date=None):
         return self._txns
+
+
+class FakeClientsAPI:
+    def __init__(self, clients):
+        self._clients = clients
+
+    def get_clients(self, company_id):
+        return self._clients
+
+
+class FakeRecordsAPI:
+    def __init__(self, records):
+        self._records = records
+
+    def get_records(self, company_id, start_date=None, end_date=None):
+        return self._records
 
 
 class FakeSyncDatabase:
@@ -114,7 +135,81 @@ def test_execute_sync_skips_credentials_without_assigned_companies(monkeypatch):
 
         assert result['success'] is False
         assert result['companies_count'] == 0
-        assert db.query(Company).filter(Company.id == 10).one_or_none() is not None
+        company = db.query(Company).filter(
+            Company.portal_account_id == 1,
+            Company.source_type == 'yclients',
+            Company.external_id == 10,
+        ).one_or_none()
+        assert company is not None
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_clients_scopes_external_id_by_internal_company():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__, Client.__table__])
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add_all([
+            Company(id=1, title='Salon 1', group_id=1),
+            Company(id=2, title='Salon 2', group_id=1),
+        ])
+        db.commit()
+
+        payload = [{
+            'id': 42,
+            'name': 'Shared external client',
+            'phone': '+100',
+            'visits_count': 1,
+        }]
+        assert sync_clients(FakeClientsAPI(payload), db, '1') is True
+        assert sync_clients(FakeClientsAPI(payload), db, '2') is True
+
+        rows = db.query(Client).order_by(Client.company_id).all()
+        assert [(row.company_id, row.source_type, row.external_id) for row in rows] == [
+            (1, 'yclients', 42),
+            (2, 'yclients', 42),
+        ]
+        assert rows[0].id != rows[1].id
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_records_uses_internal_client_and_appointment_keys():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[Group.__table__, Company.__table__, Client.__table__, Appointment.__table__, Transaction.__table__],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.commit()
+
+        records = [{
+            'id': 500,
+            'client': {'id': 42, 'name': 'Record client'},
+            'staff_id': 7,
+            'date': '2025-01-10',
+            'datetime': '2025-01-10T10:00:00+0300',
+            'services': [{'id': 10, 'title': 'Cut', 'cost': 1000.0}],
+        }]
+
+        assert sync_records(FakeRecordsAPI(records), db, '1') is True
+
+        client = db.query(Client).filter(Client.company_id == 1, Client.external_id == 42).one()
+        appointment = db.query(Appointment).filter(Appointment.company_id == 1, Appointment.external_id == 500).one()
+        transaction = db.query(Transaction).one()
+
+        assert appointment.client_id == client.id
+        assert appointment.id != appointment.external_id
+        assert transaction.appointment_id == appointment.id
     finally:
         db.close()
         engine.dispose()

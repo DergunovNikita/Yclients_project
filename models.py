@@ -23,8 +23,14 @@ class Group(Base):
     __tablename__ = 'groups'
 
     id = Column(Integer, primary_key=True)
+    portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), index=True)
+    external_id = Column(Integer, index=True)
     title = Column(String, nullable=False)
     access = Column(JSON)
+
+    __table_args__ = (
+        Index('uq_groups_account_external', 'portal_account_id', 'external_id', unique=True),
+    )
 
     companies = relationship("Company", back_populates="group")
 
@@ -33,6 +39,8 @@ class Company(Base):
     __tablename__ = 'companies'
 
     id = Column(Integer, primary_key=True)
+    portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), index=True)
+    external_id = Column(Integer, index=True)
     title = Column(String, nullable=False)
     group_id = Column(Integer, ForeignKey('groups.id'), index=True)
     source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
@@ -40,6 +48,16 @@ class Company(Base):
     locale = Column(String)
     currency = Column(String)
     timezone = Column(String)
+
+    __table_args__ = (
+        Index(
+            'uq_companies_account_source_external',
+            'portal_account_id',
+            'source_type',
+            'external_id',
+            unique=True,
+        ),
+    )
 
     group = relationship("Group", back_populates="companies")
     services = relationship("Service", back_populates="company")
@@ -198,6 +216,8 @@ class Client(Base):
     __tablename__ = 'clients'
 
     id = Column(Integer, primary_key=True)
+    external_id = Column(Integer, index=True)
+    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
     name = Column(String, nullable=False)
     phone = Column(String, index=True)
     email = Column(String)
@@ -206,6 +226,10 @@ class Client(Base):
     last_visit_date = Column(Date, index=True)
     discount = Column(Float, default=0)
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
+
+    __table_args__ = (
+        Index('uq_clients_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
+    )
 
     company = relationship("Company", back_populates="clients")
 
@@ -323,6 +347,8 @@ class Appointment(Base):
     __tablename__ = 'appointments'
 
     id = Column(Integer, primary_key=True)
+    external_id = Column(Integer, index=True)
+    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
     staff_id = Column(Integer, index=True)
     client_id = Column(Integer, index=True)
@@ -333,6 +359,10 @@ class Appointment(Base):
     seance_length = Column(Integer)
     attendance = Column(Integer, default=0, index=True)
     comment = Column(Text)
+
+    __table_args__ = (
+        Index('uq_appointments_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
+    )
 
     company = relationship("Company", back_populates="appointments")
     transactions = relationship("Transaction", back_populates="appointment")

@@ -138,31 +138,82 @@ class YClientsDataSourceAdapter(DataSourceAdapter):
         if unknown:
             raise HTTPException(status_code=400, detail=f'Companies not available for credential: {unknown}')
 
+        materialized_company_ids: list[int] = []
         for cid in company_ids:
             meta = available[cid]
-            group = await db.get(Group, meta.group_id)
+            group = (
+                await db.execute(
+                    select(Group).where(
+                        Group.portal_account_id == portal_account_id,
+                        Group.external_id == meta.group_id,
+                    )
+                )
+            ).scalar_one_or_none()
             if group is None:
-                db.add(Group(id=meta.group_id, title=meta.group_title))
+                legacy_group = await db.get(Group, meta.group_id)
+                if legacy_group is not None and legacy_group.external_id is None and (
+                    legacy_group.portal_account_id is None or legacy_group.portal_account_id == portal_account_id
+                ):
+                    group = legacy_group
+                    group.portal_account_id = portal_account_id
+                    group.external_id = meta.group_id
+                    group.title = meta.group_title or group.title
+                else:
+                    group = Group(
+                        portal_account_id=portal_account_id,
+                        external_id=meta.group_id,
+                        title=meta.group_title,
+                    )
+                    db.add(group)
+                    await db.flush()
             else:
                 group.title = meta.group_title or group.title
 
-            company = await db.get(Company, cid)
+            company = (
+                await db.execute(
+                    select(Company).where(
+                        Company.portal_account_id == portal_account_id,
+                        Company.source_type == self.source_type,
+                        Company.external_id == cid,
+                    )
+                )
+            ).scalar_one_or_none()
             if company is None:
-                db.add(Company(id=cid, title=meta.title, group_id=meta.group_id))
+                legacy_company = await db.get(Company, cid)
+                if legacy_company is not None and legacy_company.external_id is None and (
+                    legacy_company.portal_account_id is None or legacy_company.portal_account_id == portal_account_id
+                ):
+                    company = legacy_company
+                    company.portal_account_id = portal_account_id
+                    company.external_id = cid
+                    company.source_type = self.source_type
+                    company.title = meta.title or company.title
+                    company.group_id = group.id
+                else:
+                    company = Company(
+                        portal_account_id=portal_account_id,
+                        external_id=cid,
+                        source_type=self.source_type,
+                        title=meta.title,
+                        group_id=group.id,
+                    )
+                    db.add(company)
+                    await db.flush()
             else:
                 company.title = meta.title or company.title
-                company.group_id = meta.group_id
+                company.group_id = group.id
 
             existing_branch = (
-                await db.execute(select(PortalBranch).where(PortalBranch.company_id == cid))
+                await db.execute(select(PortalBranch).where(PortalBranch.company_id == company.id))
             ).scalar_one_or_none()
             if existing_branch is None:
-                db.add(PortalBranch(portal_account_id=portal_account_id, company_id=cid))
+                db.add(PortalBranch(portal_account_id=portal_account_id, company_id=company.id))
             elif not await reassign_branch_from_admin_only_tenant(db, existing_branch, portal_account_id):
                 raise HTTPException(status_code=409, detail=f'Company {cid} already linked to another tenant')
+            materialized_company_ids.append(int(company.id))
 
         await db.flush()
-        return company_ids
+        return materialized_company_ids
 
 
 class FileImportDataSourceAdapter(DataSourceAdapter):

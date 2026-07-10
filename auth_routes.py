@@ -819,8 +819,8 @@ async def _sync_credential_companies_from_yclients(
     if not adapter.authenticate():
         raise HTTPException(status_code=400, detail='Data source authentication failed')
     company_ids = sorted(item.company_id for item in adapter.list_branches())
-    await adapter.materialize_branches(db, portal_account_id, company_ids)
-    return sorted(set(company_ids))
+    materialized_company_ids = await adapter.materialize_branches(db, portal_account_id, company_ids)
+    return sorted(set(materialized_company_ids))
 
 
 @router.get('/admin/meta')

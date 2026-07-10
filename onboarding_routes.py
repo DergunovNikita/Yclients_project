@@ -234,9 +234,9 @@ async def onboarding_branches(
         raise HTTPException(status_code=400, detail='Data source re-authentication failed')
     await mark_credential_success_async(db, credential.id)
 
-    await adapter.materialize_branches(db, user.portal_account_id, company_ids)
+    materialized_company_ids = await adapter.materialize_branches(db, user.portal_account_id, company_ids)
 
-    for cid in company_ids:
+    for cid in materialized_company_ids:
         link = (
             await db.execute(
                 select(YClientsCredentialCompany).where(
@@ -257,7 +257,12 @@ async def onboarding_branches(
         action='onboarding.completed',
         target_type='portal_account',
         target_id=user.portal_account_id,
-        metadata={'source_type': source_type, 'credential_id': credential.id, 'company_ids': company_ids},
+        metadata={
+            'source_type': source_type,
+            'credential_id': credential.id,
+            'company_ids': materialized_company_ids,
+            'external_company_ids': company_ids,
+        },
     )
     sync_job = await SyncJobService().async_enqueue_job(
         db,
@@ -265,14 +270,14 @@ async def onboarding_branches(
         'onboarding',
         portal_account_id=user.portal_account_id,
         credential_id=credential.id,
-        company_ids=company_ids,
+        company_ids=materialized_company_ids,
     )
     await db.commit()
     return {
         'success': True,
         'data': {
             'source_type': source_type,
-            'company_ids': company_ids,
+            'company_ids': materialized_company_ids,
             'sync_job_id': sync_job.id,
             'sync_status': sync_job.status,
             'completed_at': user.onboarding_completed_at.isoformat(),
