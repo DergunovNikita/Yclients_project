@@ -34,6 +34,26 @@ class StepTiming:
     seconds: float
 
 
+@dataclass
+class LogSummary:
+    steps: list[tuple[int, StepTiming]]
+    branches: set[str]
+    errors: list[tuple[int, list[str]]]
+    ok: int
+    warn: int
+    fail: int
+    total_seconds: float
+    finished: bool
+
+    @property
+    def verdict(self) -> str:
+        return 'ok' if self.finished and self.fail == 0 else 'issues'
+
+    @property
+    def exit_code(self) -> int:
+        return 0 if self.verdict == 'ok' else 1
+
+
 def _parse_seconds(raw: str) -> float:
     raw = raw.strip().lower().replace(',', '.')
     total = 0.0
@@ -88,31 +108,41 @@ def _collect_errors(lines: list[str]):
     return errors
 
 
+def _summarize_lines(lines: list[str]) -> LogSummary:
+    steps = list(_iter_steps(lines))
+    status_counts = Counter(step.status for _, step in steps)
+    fail = sum(status_counts.get(k, 0) for k in ('ERR', 'ERROR', 'FAIL'))
+    return LogSummary(
+        steps=steps,
+        branches={line.strip() for line in lines if BRANCH_RE.match(line.strip())},
+        errors=_collect_errors(lines),
+        ok=status_counts.get('OK', 0),
+        warn=status_counts.get('WARN', 0),
+        fail=fail,
+        total_seconds=sum(step.seconds for _, step in steps),
+        finished=any(marker in line for line in lines for marker in DONE_MARKERS),
+    )
+
+
 def summarize(path: Path, *, errors_only: bool = False) -> int:
     lines = path.read_text(errors='replace').splitlines()
     if not lines:
         print(f'[empty] {path}')
         return 1
 
-    steps = list(_iter_steps(lines))
-    branches = {line.strip() for line in lines if BRANCH_RE.match(line.strip())}
-    errors = _collect_errors(lines)
+    summary = _summarize_lines(lines)
 
     if errors_only:
-        if not errors:
+        if not summary.errors:
             print(f'{path.name}: no error markers found')
             return 0
-        print(f'{path.name}: {len(errors)} error line(s)')
-        for _, chunk in errors:
+        print(f'{path.name}: {len(summary.errors)} error line(s)')
+        for _, chunk in summary.errors:
             print('  ' + '\n  '.join(chunk))
             print('  ---')
         return 0
 
-    status_counts = Counter(step.status for _, step in steps)
-    ok = status_counts.get('OK', 0)
-    warn = status_counts.get('WARN', 0)
-    fail = sum(status_counts.get(k, 0) for k in ('ERR', 'ERROR', 'FAIL'))
-    top = sorted(steps, key=lambda item: item[1].seconds, reverse=True)[:10]
+    top = sorted(summary.steps, key=lambda item: item[1].seconds, reverse=True)[:10]
 
     header = lines[0] if lines else ''
     tail = next((line for line in reversed(lines) if line.strip()), '')
@@ -120,30 +150,27 @@ def summarize(path: Path, *, errors_only: bool = False) -> int:
     print(f'== {path.name} ==')
     print(f'header: {header.strip()}')
     print(f'tail:   {tail.strip()}')
-    print(f'branches seen: {len(branches)}')
-    print(f'steps: OK={ok}  WARN={warn}  FAIL={fail}  total={len(steps)}')
-    total_seconds = sum(step.seconds for _, step in steps)
-    print(f'total step-time: {_fmt_seconds(total_seconds)}')
+    print(f'branches seen: {len(summary.branches)}')
+    print(f'steps: OK={summary.ok}  WARN={summary.warn}  FAIL={summary.fail}  total={len(summary.steps)}')
+    print(f'total step-time: {_fmt_seconds(summary.total_seconds)}')
     print()
     print('top 10 slowest steps:')
     for _, step in top:
         print(f'  {_fmt_seconds(step.seconds):>10}  [{step.status}] {step.label}')
 
-    if errors:
+    if summary.errors:
         print()
-        print(f'errors ({len(errors)}):')
-        for _, chunk in errors[:5]:
+        print(f'errors ({len(summary.errors)}):')
+        for _, chunk in summary.errors[:5]:
             for line in chunk:
                 print(f'  {line}')
             print('  ---')
-        if len(errors) > 5:
-            print(f'  ... {len(errors) - 5} more (use --errors-only)')
+        if len(summary.errors) > 5:
+            print(f'  ... {len(summary.errors) - 5} more (use --errors-only)')
 
-    finished = any(marker in line for line in lines for marker in DONE_MARKERS)
-    exit_code = 0 if finished and fail == 0 else 1
     print()
-    print(f'exit: {"ok" if exit_code == 0 else "issues"}')
-    return exit_code
+    print(f'exit: {summary.verdict}')
+    return summary.exit_code
 
 
 def brief(path: Path) -> str:
@@ -151,14 +178,12 @@ def brief(path: Path) -> str:
         lines = path.read_text(errors='replace').splitlines()
     except OSError:
         return f'{path.name}: unreadable'
-    steps = list(_iter_steps(lines))
-    fail = sum(1 for _, step in steps if step.status in ('ERR', 'ERROR', 'FAIL'))
-    warn = sum(1 for _, step in steps if step.status == 'WARN')
-    ok = sum(1 for _, step in steps if step.status == 'OK')
-    finished = any(marker in line for line in lines for marker in DONE_MARKERS)
-    total = _fmt_seconds(sum(step.seconds for _, step in steps))
-    verdict = 'ok' if finished and fail == 0 else 'issues'
-    return f'{path.name}  ok={ok:>3} warn={warn:>2} fail={fail:>2}  total={total:>8}  {verdict}'
+    summary = _summarize_lines(lines)
+    total = _fmt_seconds(summary.total_seconds)
+    return (
+        f'{path.name}  ok={summary.ok:>3} warn={summary.warn:>2} fail={summary.fail:>2}  '
+        f'total={total:>8}  {summary.verdict}'
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
