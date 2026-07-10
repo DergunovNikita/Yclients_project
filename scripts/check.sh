@@ -20,16 +20,20 @@ export PATH="$LOCAL_BIN:$PATH"
 
 cd "$ROOT_DIR"
 
-"$PYTHON_BIN" -m compileall \
-  api.py \
-  dashboard_reports.py \
-  dashboard_routes.py \
-  dashboard_service.py \
-  models.py \
-  plan_config.py \
-  plan_import.py \
-  tests/conftest.py \
-  tests/test_dashboard_api.py
+py_files=()
+if ! command -v git >/dev/null 2>&1; then
+  echo "git is required to discover tracked Python files" >&2
+  exit 1
+fi
+while IFS= read -r file; do
+  [[ -n "$file" ]] && py_files+=("$file")
+done < <(git ls-files '*.py')
+if [[ ${#py_files[@]} -eq 0 ]]; then
+  echo "No tracked Python files found to compile" >&2
+  exit 1
+fi
+
+"$PYTHON_BIN" -m compileall "${py_files[@]}"
 
 "$PYTHON_BIN" -m pytest -p no:capture "$@"
 
