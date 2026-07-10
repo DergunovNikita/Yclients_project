@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import csv
 import io
+from copy import deepcopy
 from datetime import date, datetime
 from typing import Any
 
@@ -16,7 +17,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_deps import forbid_demo, get_dashboard_access
-from auth_scope import AccessContext, effective_staff_id, query_scope, require_tenant_context
+from auth_scope import (
+    AccessContext,
+    can_view_financials,
+    effective_staff_id,
+    query_scope,
+    require_financial_access,
+    require_tenant_context,
+)
 from config import SYNC_API_TOKEN
 from dashboard_service import (
     fetch_branches,
@@ -43,6 +51,7 @@ from dashboard_reports import (
     REPORT_GRANULARITIES,
     fetch_report_data,
     fetch_report_registry,
+    report_requires_financials,
 )
 from database import get_async_db
 from models import Company, PortalAccount, Staff
@@ -125,6 +134,62 @@ def _require_sync_token(x_sync_token: str | None) -> None:
 def _require_sync_access(ctx: AccessContext) -> None:
     if ctx.user_id is not None and ctx.role != 'platform_admin':
         raise HTTPException(status_code=403, detail='Sync operations require platform_admin role')
+
+
+FINANCIAL_SUMMARY_KEYS = {'revenue', 'average_check', 'average_check_source_status'}
+FINANCIAL_PLAN_CODES = {'revenue', 'avg_check_total', 'cosmo_sum', 'cosmo_price'}
+FINANCIAL_LEADERBOARD_KEYS = {
+    'revenue_top',
+    'revenue_barber',
+    'revenue_admin',
+    'cosmo_barber',
+    'cosmo_admin',
+}
+
+
+def _hide_summary_financials(summary: dict[str, Any]) -> dict[str, Any]:
+    payload = deepcopy(summary)
+    for key in FINANCIAL_SUMMARY_KEYS:
+        payload.pop(key, None)
+    payload['financials_hidden'] = True
+    return payload
+
+
+def _strip_plan_fact_financials(value: Any) -> Any:
+    if isinstance(value, list):
+        items = []
+        for item in value:
+            stripped = _strip_plan_fact_financials(item)
+            if stripped is not None:
+                items.append(stripped)
+        return items
+    if isinstance(value, dict):
+        code = value.get('code')
+        if code in FINANCIAL_PLAN_CODES or value.get('format') == 'money':
+            return None
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in FINANCIAL_LEADERBOARD_KEYS:
+                continue
+            if key == 'staff_leaderboards' and isinstance(item, dict):
+                filtered = {
+                    board_key: _strip_plan_fact_financials(board_value)
+                    for board_key, board_value in item.items()
+                    if board_key not in FINANCIAL_LEADERBOARD_KEYS
+                }
+                result[key] = {k: v for k, v in filtered.items() if v is not None}
+                continue
+            stripped = _strip_plan_fact_financials(item)
+            if stripped is not None:
+                result[key] = stripped
+        return result
+    return value
+
+
+def _hide_plan_fact_financials(plan_fact: dict[str, Any]) -> dict[str, Any]:
+    payload = _strip_plan_fact_financials(plan_fact) or {}
+    payload['financials_hidden'] = True
+    return payload
 
 
 async def _validate_dashboard_scope(
@@ -422,6 +487,8 @@ async def dashboard_report_data(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
+    if report_requires_financials(report_id):
+        require_financial_access(ctx)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
     compare_staff_id = effective_staff_id(ctx, compare_staff_id)
@@ -480,16 +547,19 @@ async def dashboard_widget_summary(
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
+    summary = await fetch_summary(
+        db,
+        start,
+        end,
+        scope['company_id'],
+        staff_id,
+        allowed_company_ids=scope['allowed_company_ids'],
+    )
+    if not can_view_financials(ctx):
+        summary = _hide_summary_financials(summary)
     return {
         'success': True,
-        'data': await fetch_summary(
-            db,
-            start,
-            end,
-            scope['company_id'],
-            staff_id,
-            allowed_company_ids=scope['allowed_company_ids'],
-        ),
+        'data': summary,
     }
 
 
@@ -502,6 +572,7 @@ async def dashboard_widget_revenue_daily(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    require_financial_access(ctx)
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
@@ -528,6 +599,7 @@ async def dashboard_widget_top_services(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    require_financial_access(ctx)
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
@@ -555,6 +627,7 @@ async def dashboard_widget_extra_services(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    require_financial_access(ctx)
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
@@ -585,17 +658,20 @@ async def dashboard_widget_plan_fact(
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
     branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
+    plan_fact = await fetch_plan_fact(
+        db,
+        start,
+        end,
+        scope['company_id'],
+        staff_id,
+        allowed_company_ids=branch_ids,
+        force_allowed=force_allowed,
+    )
+    if not can_view_financials(ctx):
+        plan_fact = _hide_plan_fact_financials(plan_fact)
     return {
         'success': True,
-        'data': await fetch_plan_fact(
-            db,
-            start,
-            end,
-            scope['company_id'],
-            staff_id,
-            allowed_company_ids=branch_ids,
-            force_allowed=force_allowed,
-        ),
+        'data': plan_fact,
     }
 
 
@@ -606,6 +682,7 @@ async def dashboard_plan_settings(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    require_financial_access(ctx)
     branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
     try:
         data = await fetch_plan_settings(
@@ -626,6 +703,7 @@ async def dashboard_plan_settings_save(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    require_financial_access(ctx)
     branch_ids, force_allowed = (None, False) if ctx.full_access else (ctx.company_ids or [], True)
     try:
         data = await save_plan_settings(
@@ -726,6 +804,17 @@ async def dashboard_bundle(
         staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
     )
+    if not can_view_financials(ctx):
+        return {
+            'success': True,
+            'data': {
+                'summary': _hide_summary_financials(summary),
+                'revenue_daily': [],
+                'top_services': [],
+                'extra_services': [],
+                'financials_hidden': True,
+            },
+        }
     daily = await fetch_revenue_daily(
         db,
         start,

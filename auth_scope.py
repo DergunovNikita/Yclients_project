@@ -7,6 +7,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
+FINANCIAL_ACCESS_ROLES = {'owner', 'platform_admin'}
+
 
 @dataclass(frozen=True)
 class AccessContext:
@@ -106,6 +108,16 @@ def effective_staff_id(ctx: AccessContext, requested_staff_id: int | None) -> in
     if requested_staff_id is not None and int(requested_staff_id) != int(ctx.staff_id):
         raise HTTPException(status_code=403, detail='Staff member not allowed')
     return int(ctx.staff_id)
+
+
+def can_view_financials(ctx: AccessContext) -> bool:
+    """Return whether the current principal may see revenue and money metrics."""
+    return ctx.full_access or ctx.role in FINANCIAL_ACCESS_ROLES
+
+
+def require_financial_access(ctx: AccessContext) -> None:
+    if not can_view_financials(ctx):
+        raise HTTPException(status_code=403, detail='Financial metrics are not allowed for this role')
 
 
 def require_tenant_context(ctx: AccessContext, *, allow_full_access: bool = False) -> int | None:

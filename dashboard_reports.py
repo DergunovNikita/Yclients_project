@@ -180,6 +180,7 @@ CLIENT_REPORTS = {
 }
 CHURN_REPORTS = {'losses_by_staff', 'lost_clients_list', 'return_priorities', 'revenue_at_risk'}
 GOODS_REPORTS = {'goods_by_staff', 'goods_conversion', 'goods_dynamics', 'top_goods_revenue'}
+MONEY_REPORTS = FINANCE_REPORTS | GOODS_REPORTS | SERVICE_REPORTS | CLIENT_REPORTS | CHURN_REPORTS | STAFF_REPORTS
 TITLE_OVERRIDES = {
     'avg_check_by_service': 'Средний чек по услугам',
     'avg_check_dynamics': 'Динамика среднего чека',
@@ -293,6 +294,18 @@ def _group_for(report_id: str) -> str:
     if report_id in {'data_audit'}:
         return 'diagnostics'
     return 'advanced'
+
+
+def report_requires_financials(report_id: str) -> bool:
+    normalized = (report_id or '').strip()
+    return (
+        normalized in MONEY_REPORTS
+        or 'revenue' in normalized
+        or 'avg_check' in normalized
+        or 'ltv' in normalized
+        or 'price' in normalized
+        or 'profit' in normalized
+    )
 
 
 def _type_for(group: str) -> str:

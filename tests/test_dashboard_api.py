@@ -604,8 +604,29 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             email_verified_at=datetime.utcnow(),
             created_at=datetime.utcnow(),
         ),
+        PortalUser(
+            id=102,
+            portal_account_id=1,
+            email='owner@example.com',
+            password_hash=hash_password('Owner12345!'),
+            role='owner',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+        PortalUser(
+            id=103,
+            portal_account_id=1,
+            email='branch-admin@example.com',
+            password_hash=hash_password('BranchAdmin12345!'),
+            role='branch_admin',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
         PortalUserBranch(user_id=100, company_id=1),
         PortalUserBranch(user_id=101, company_id=1),
+        PortalUserBranch(user_id=103, company_id=1),
         Staff(id=1, name='Linked Staff', company_id=1, portal_user_id=100),
         Staff(id=2, name='Other Staff', company_id=1),
     ])
@@ -642,6 +663,8 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
 
     viewer_token = create_access_token(100, 'viewer')
     manager_token = create_access_token(101, 'manager')
+    owner_token = create_access_token(102, 'owner')
+    branch_admin_token = create_access_token(103, 'branch_admin')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -660,15 +683,58 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'staff_id': 2},
             headers={'Authorization': f'Bearer {manager_token}'},
         )
+        manager_revenue_daily = await client.get(
+            '/dashboard/widget/revenue_daily',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+            headers={'Authorization': f'Bearer {manager_token}'},
+        )
+        owner_revenue_daily = await client.get(
+            '/dashboard/widget/revenue_daily',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+            headers={'Authorization': f'Bearer {owner_token}'},
+        )
+        branch_admin_bundle = await client.get(
+            '/dashboard/bundle',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+            headers={'Authorization': f'Bearer {branch_admin_token}'},
+        )
+        branch_admin_finance_report = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'revenue_dynamics', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+            headers={'Authorization': f'Bearer {branch_admin_token}'},
+        )
+        branch_admin_operations_report = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'bookings_dynamics', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+            headers={'Authorization': f'Bearer {branch_admin_token}'},
+        )
+        branch_admin_plan_settings = await client.get(
+            '/dashboard/plan/settings',
+            params={'month': '2025-01'},
+            headers={'Authorization': f'Bearer {branch_admin_token}'},
+        )
 
     app.dependency_overrides.clear()
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
 
     assert viewer_summary.status_code == 200
-    assert viewer_summary.json()['data']['revenue']['total'] == 1000.0
+    assert viewer_summary.json()['data']['financials_hidden'] is True
+    assert 'revenue' not in viewer_summary.json()['data']
+    assert 'average_check' not in viewer_summary.json()['data']
     assert forbidden_other_staff.status_code == 403
     assert manager_other_staff.status_code == 200
-    assert manager_other_staff.json()['data']['revenue']['total'] == 2000.0
+    assert manager_other_staff.json()['data']['financials_hidden'] is True
+    assert 'revenue' not in manager_other_staff.json()['data']
+    assert manager_revenue_daily.status_code == 403
+    assert owner_revenue_daily.status_code == 200
+    assert sum(row['revenue'] for row in owner_revenue_daily.json()['data']) == 3000.0
+    assert branch_admin_bundle.status_code == 200
+    assert branch_admin_bundle.json()['data']['financials_hidden'] is True
+    assert branch_admin_bundle.json()['data']['revenue_daily'] == []
+    assert 'revenue' not in branch_admin_bundle.json()['data']['summary']
+    assert branch_admin_finance_report.status_code == 403
+    assert branch_admin_operations_report.status_code == 200
+    assert branch_admin_plan_settings.status_code == 403
 
 
 @pytest.mark.asyncio
