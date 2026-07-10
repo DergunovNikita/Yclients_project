@@ -513,9 +513,12 @@ async def test_csv_export_streams_rows(async_session):
 
     assert response.status_code == 200
     content = response.text
-    assert 'id,document_id,type_id,good_id,good_title,storage_id,storage_title,amount,cost_per_unit,cost,discount,master_id,client_id,company_id' in content
-    assert '1,,1,,,,,2.0,,10.0,,,,7' in content
-    assert '2,,3,,,,,1.0,,5.0,,,,7' in content
+    assert (
+        'id,external_id,source_type,document_id,type_id,good_id,good_title,storage_id,storage_title,'
+        'amount,cost_per_unit,cost,discount,master_id,client_id,company_id,date'
+    ) in content
+    assert '1,,yclients,,1,,,,,2.0,,10.0,,,,7,' in content
+    assert '2,,yclients,,3,,,,,1.0,,5.0,,,,7,' in content
 
 
 @pytest.mark.asyncio
