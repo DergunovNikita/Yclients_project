@@ -210,6 +210,13 @@ Security checks для CI и ручного triage:
 severity доступна не всегда, поэтому high/critical threshold применяется явно
 только к `npm audit`.
 
+Frontend audit проходит через `web/scripts/audit-gate.mjs`: новые high/critical
+findings блокируют CI, а временные suppressions должны быть явно описаны в
+`web/audit-allowlist.json` с package, advisory id, expiry и reason. Сейчас там
+есть suppression для `xlsx`, потому что пакет используется только для
+authenticated export generation, а npm не предлагает fixed version; suppression
+нужно пересмотреть до указанной даты.
+
 Локальный `./scripts/security-check.sh --strict` делает Semgrep/Checkov blocking намеренно:
 это режим для ручной подготовки к ужесточению CI после triage.
 

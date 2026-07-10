@@ -57,11 +57,27 @@ if command -v npm >/dev/null 2>&1; then
   else
     fail "npm ci failed"
   fi
+
+  audit_report="$(mktemp)"
   info "npm audit --audit-level=high"
-  if (cd web && npm audit --audit-level=high); then
+  (
+    cd web
+    set +e
+    npm audit --audit-level=high --json > "$audit_report"
+    audit_status=$?
+    set -e
+    cat "$audit_report"
+    if [[ "$audit_status" -gt 1 ]]; then
+      exit "$audit_status"
+    fi
+    node scripts/audit-gate.mjs "$audit_report" audit-allowlist.json
+  )
+  audit_gate_status=$?
+  rm -f "$audit_report"
+  if [[ "$audit_gate_status" -eq 0 ]]; then
     ok "npm audit"
   else
-    fail "npm audit found high or critical frontend dependency issues"
+    fail "npm audit found unapproved high or critical frontend dependency issues"
   fi
 else
   if [[ "$STRICT" -eq 1 ]]; then
