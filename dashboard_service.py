@@ -2918,6 +2918,10 @@ def _staff_leaderboards_payload(
         row['sum'] = _round_metric_value(value, 'money')
         row['share_pct'] = share(value, total)
 
+    def revenue_builder(group, value, total, row):
+        row['value'] = _round_metric_value(value, 'money')
+        row['cosmo_revenue_share_pct'] = share(_metric_fact_value(group, 'cosmo_sum'), value)
+
     def opz_builder(group, value, total, row):
         row['qty'] = _round_metric_value(value, 'number')
         row['pct'] = _round_metric_value(_metric_fact_value(group, 'opz_pct'), 'percent')
@@ -2930,6 +2934,7 @@ def _staff_leaderboards_payload(
     def fact(code):
         return lambda group: _metric_fact_value(group, code)
 
+    revenue_barber = leaderboard(barbers, fact('revenue'), revenue_builder)
     return {
         'extra_services': leaderboard(barbers, _extra_service_qty, extra_builder),
         'cosmo_barber': leaderboard(barbers, fact('cosmo_sum'), cosmo_builder),
@@ -2937,8 +2942,10 @@ def _staff_leaderboards_payload(
         'opz_barber': leaderboard(barbers, fact('opz_qty'), opz_builder),
         'opz_admin': leaderboard(admins, fact('opz_qty'), opz_builder),
         'reviews_admin': leaderboard(admins, fact('reviews_qty'), value_builder('number')),
-        'revenue_top': leaderboard(staff, fact('revenue'), value_builder('money')),
-        'avg_check_top': leaderboard(staff, fact('avg_check_total'), value_builder('money')),
+        'revenue_barber': revenue_barber,
+        'revenue_admin': leaderboard(admins, fact('revenue'), revenue_builder),
+        'revenue_top': revenue_barber,
+        'avg_check_top': leaderboard(barbers, fact('avg_check_total'), value_builder('money')),
     }
 
 

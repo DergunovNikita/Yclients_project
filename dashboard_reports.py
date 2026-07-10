@@ -1898,23 +1898,38 @@ async def _leaderboard_payload_impl(
     staff_col = ('staff', 'Сотрудник', 'text')
     qty_col = ('qty', 'Кол-во, шт', NUMBER_FORMAT)
     share_col = ('share_pct', 'Доля в топе, %', PERCENT_FORMAT)
+    cosmo_revenue_share_col = ('cosmo_revenue_share_pct', 'Доля косметики, %', PERCENT_FORMAT)
 
-    revenue_top = boards.get('revenue_top', [])
+    revenue_barber = boards.get('revenue_barber', boards.get('revenue_top', []))
+    revenue_admin = boards.get('revenue_admin', [])
     base['cards'] = [
-        _card('Топ выручка', revenue_top[0]['value'] if revenue_top else 0, MONEY_FORMAT),
-        _card('Мастеров в рейтинге', len(boards.get('revenue_top', [])), NUMBER_FORMAT),
-        _card('Админов в рейтинге', len(boards.get('reviews_admin', [])), NUMBER_FORMAT),
+        _card('Топ выручка мастера', revenue_barber[0]['value'] if revenue_barber else 0, MONEY_FORMAT),
+        _card('Мастеров в рейтинге', len(revenue_barber), NUMBER_FORMAT),
+        _card('Админов в рейтинге', len(revenue_admin), NUMBER_FORMAT),
     ]
-    if revenue_top:
-        base['charts'] = [
+    charts = []
+    if revenue_barber:
+        charts.append(
             _chart(
-                'leaderboard_revenue',
-                'Топ по выручке',
+                'leaderboard_revenue_barber',
+                'Топ по выручке — мастера',
                 'bar',
-                [row['staff'] for row in revenue_top],
-                [{'label': 'Выручка', 'data': [row['value'] for row in revenue_top], 'format': MONEY_FORMAT}],
+                [row['staff'] for row in revenue_barber],
+                [{'label': 'Выручка', 'data': [row['value'] for row in revenue_barber], 'format': MONEY_FORMAT}],
             )
-        ]
+        )
+    if revenue_admin:
+        charts.append(
+            _chart(
+                'leaderboard_revenue_admin',
+                'Топ по выручке — админы',
+                'bar',
+                [row['staff'] for row in revenue_admin],
+                [{'label': 'Выручка', 'data': [row['value'] for row in revenue_admin], 'format': MONEY_FORMAT}],
+            )
+        )
+    if charts:
+        base['charts'] = charts
     base['tables'] = [
         _table(
             'extra_services',
@@ -1953,10 +1968,16 @@ async def _leaderboard_payload_impl(
             boards.get('reviews_admin', []),
         ),
         _table(
-            'revenue_top',
-            'Топ по выручке',
-            [staff_col, ('value', 'Выручка', MONEY_FORMAT)],
-            revenue_top,
+            'revenue_barber',
+            'Топ по выручке — мастера',
+            [staff_col, ('value', 'Выручка', MONEY_FORMAT), cosmo_revenue_share_col],
+            revenue_barber,
+        ),
+        _table(
+            'revenue_admin',
+            'Топ по выручке — админы',
+            [staff_col, ('value', 'Выручка', MONEY_FORMAT), cosmo_revenue_share_col],
+            revenue_admin,
         ),
         _table(
             'avg_check_top',

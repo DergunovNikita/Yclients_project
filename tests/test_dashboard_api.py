@@ -449,7 +449,11 @@ async def test_dashboard_staff_leaderboard_report_returns_top_tables(async_sessi
     data = r.json()['data']
     assert data['source_status'] == 'ready'
     table_ids = {table['id'] for table in data['tables']}
-    assert {'extra_services', 'cosmo_barber', 'opz_admin', 'reviews_admin', 'revenue_top'} <= table_ids
+    assert {'extra_services', 'cosmo_barber', 'opz_admin', 'reviews_admin', 'revenue_barber', 'revenue_admin'} <= table_ids
+    revenue_barber = next(table for table in data['tables'] if table['id'] == 'revenue_barber')
+    revenue_admin = next(table for table in data['tables'] if table['id'] == 'revenue_admin')
+    assert {'key': 'cosmo_revenue_share_pct', 'label': 'Доля косметики, %', 'format': 'percent'} in revenue_barber['columns']
+    assert {'key': 'cosmo_revenue_share_pct', 'label': 'Доля косметики, %', 'format': 'percent'} in revenue_admin['columns']
 
 
 @pytest.mark.asyncio
@@ -2083,6 +2087,7 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
         Staff(id=1, name='Alpha', position='Барбер', company_id=1, fired=0),
         Staff(id=2, name='Bravo', position='Барбер', company_id=1, fired=0),
         Staff(id=3, name='Charlie', position='Барбер', company_id=2, fired=0),
+        Staff(id=4, name='Delta Admin', position='Администратор', company_id=1, fired=0, user_id=900),
     ])
     async_session.add_all([
         Client(id=1, name='Client 1', company_id=1),
@@ -2090,15 +2095,17 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
         Client(id=3, name='Client 3', company_id=1),
         Client(id=4, name='Client 4', company_id=2),
         Client(id=5, name='Client 5', company_id=2),
+        Client(id=6, name='Client 6', company_id=1),
     ])
     await async_session.flush()
 
     appointments = [
-        (1, 1, 1, 1, date(2025, 1, 10)),
-        (2, 1, 1, 2, date(2025, 1, 11)),
-        (3, 1, 2, 3, date(2025, 1, 12)),
-        (4, 2, 3, 4, date(2025, 1, 13)),
-        (5, 2, 3, 5, date(2025, 1, 14)),
+        (1, 1, 1, 1, date(2025, 1, 10), None),
+        (2, 1, 1, 2, date(2025, 1, 11), None),
+        (3, 1, 2, 3, date(2025, 1, 12), None),
+        (4, 2, 3, 4, date(2025, 1, 13), None),
+        (5, 2, 3, 5, date(2025, 1, 14), None),
+        (6, 1, 4, 6, date(2025, 1, 15), 900),
     ]
     async_session.add_all([
         Appointment(
@@ -2106,13 +2113,14 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
             company_id=company_id,
             staff_id=staff_id,
             client_id=client_id,
+            created_user_id=created_user_id,
             date=appointment_date,
             datetime=datetime(2025, 1, appointment_date.day, 12, 0, 0),
             create_date=datetime(2025, 1, appointment_date.day - 1, 12, 0, 0),
             seance_length=3600,
             attendance=1,
         )
-        for appointment_id, company_id, staff_id, client_id, appointment_date in appointments
+        for appointment_id, company_id, staff_id, client_id, appointment_date, created_user_id in appointments
     ])
     await async_session.flush()
 
@@ -2122,6 +2130,7 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
         (3, 3, 2, 12, 'Black Mask', 5000.0, 3),
         (4, 4, 3, 13, 'уход за головой', 1500.0, 4),
         (5, 5, 3, 14, 'Стрижка', 2500.0, 5),
+        (6, 6, 1, 15, 'Стрижка', 4000.0, 1),
     ]
     async_session.add_all([
         Transaction(
@@ -2150,6 +2159,18 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
         )
         for txn_id, appointment_id, company_id, service_id, _title, amount, _qty in transaction_rows
     ])
+    async_session.add(
+        GoodTransaction(
+            id=1,
+            document_id=1,
+            type_id=1,
+            amount=-1.0,
+            cost=1000.0,
+            master_id=4,
+            company_id=1,
+            date=datetime(2025, 1, 16, 12, 0, 0),
+        )
+    )
 
     now = datetime(2025, 1, 1, 0, 0, 0)
     staff_plans = {
@@ -2222,18 +2243,23 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
 
     assert network_response.status_code == 200
     network_data = network_response.json()['data']
-    assert [row['staff'] for row in network_data['staff_leaderboards']['revenue_top']] == [
+    network_boards = network_data['staff_leaderboards']
+    assert network_boards['revenue_top'] == network_boards['revenue_barber']
+    assert [row['staff'] for row in network_boards['revenue_barber']] == [
         'Bravo',
         'Charlie',
         'Alpha',
     ]
-    assert [row['staff'] for row in network_data['staff_leaderboards']['avg_check_top']] == [
+    assert [row['staff'] for row in network_boards['revenue_admin']] == ['Delta Admin']
+    assert network_boards['revenue_admin'][0]['value'] == 4000.0
+    assert network_boards['revenue_admin'][0]['cosmo_revenue_share_pct'] == 25.0
+    assert [row['staff'] for row in network_boards['avg_check_top']] == [
         'Bravo',
         'Charlie',
         'Alpha',
     ]
     # The plan/fact widget skips the extra-service revenue query (report-only): qty is present, sum is 0.
-    extra_top = network_data['staff_leaderboards']['extra_services']
+    extra_top = network_boards['extra_services']
     assert [(row['staff'], row['qty']) for row in extra_top] == [
         ('Charlie', 4.0),
         ('Alpha', 3.0),
@@ -2241,8 +2267,15 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
     ]
     # The ratings report enables the revenue query, so the money column is populated.
     assert report_response.status_code == 200
+    report_data = report_response.json()['data']
+    report_revenue_barber = next(table for table in report_data['tables'] if table['id'] == 'revenue_barber')
+    report_revenue_admin = next(table for table in report_data['tables'] if table['id'] == 'revenue_admin')
+    assert [row['staff'] for row in report_revenue_barber['rows']] == ['Bravo', 'Charlie', 'Alpha']
+    assert [(row['staff'], row['value'], row['cosmo_revenue_share_pct']) for row in report_revenue_admin['rows']] == [
+        ('Delta Admin', 4000.0, 25.0),
+    ]
     report_extra = next(
-        table for table in report_response.json()['data']['tables'] if table['id'] == 'extra_services'
+        table for table in report_data['tables'] if table['id'] == 'extra_services'
     )
     assert [(row['staff'], row['qty'], row['sum']) for row in report_extra['rows']] == [
         ('Charlie', 4.0, 1500.0),
@@ -2261,7 +2294,10 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
 
     assert branch_response.status_code == 200
     branch_data = branch_response.json()['data']
-    assert [row['staff'] for row in branch_data['staff_leaderboards']['revenue_top']] == ['Bravo', 'Alpha']
+    branch_boards = branch_data['staff_leaderboards']
+    assert branch_boards['revenue_top'] == branch_boards['revenue_barber']
+    assert [row['staff'] for row in branch_boards['revenue_barber']] == ['Bravo', 'Alpha']
+    assert [row['staff'] for row in branch_boards['revenue_admin']] == ['Delta Admin']
     branch_goods = {row['code']: row for row in branch_data['goods_kpi_execution']}
     assert branch_goods['wax_qty']['plan'] == 2.0
     assert branch_goods['wax_qty']['fact'] == 1.0
