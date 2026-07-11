@@ -227,6 +227,7 @@ if _console_email_env is None:
     AUTH_CONSOLE_EMAIL = not smtp_is_configured()
 else:
     AUTH_CONSOLE_EMAIL = _get_bool('AUTH_CONSOLE_EMAIL', True)
+AUTH_ALLOW_CONSOLE_EMAIL_IN_PRODUCTION = _get_bool('AUTH_ALLOW_CONSOLE_EMAIL_IN_PRODUCTION', False)
 
 PORTAL_CREDENTIALS_ENCRYPTION_KEY = os.getenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', '').strip()
 PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD = os.getenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD', '').strip()
@@ -244,6 +245,7 @@ def collect_production_config_errors(
     auth_cookie_secure: bool = AUTH_COOKIE_SECURE,
     auth_cookie_samesite: str | None = AUTH_COOKIE_SAMESITE,
     auth_console_email: bool = AUTH_CONSOLE_EMAIL,
+    auth_allow_console_email_in_production: bool = AUTH_ALLOW_CONSOLE_EMAIL_IN_PRODUCTION,
     smtp_host: str | None = SMTP_HOST,
     smtp_user: str | None = SMTP_USER,
     smtp_password: str | None = SMTP_PASSWORD,
@@ -278,9 +280,9 @@ def collect_production_config_errors(
         errors.append('AUTH_COOKIE_SECURE must be true')
     if (auth_cookie_samesite or '').strip().lower() not in {'lax', 'strict', 'none'}:
         errors.append('AUTH_COOKIE_SAMESITE must be one of: lax, strict, none')
-    if auth_console_email:
+    if auth_console_email and not auth_allow_console_email_in_production:
         errors.append('AUTH_CONSOLE_EMAIL must be false')
-    if any(_is_placeholder(value) for value in (smtp_host, smtp_user, smtp_password, smtp_from)):
+    if not auth_console_email and any(_is_placeholder(value) for value in (smtp_host, smtp_user, smtp_password, smtp_from)):
         errors.append('SMTP_HOST, SMTP_USER, SMTP_PASSWORD and SMTP_FROM must be configured')
     if not _is_blank(dashboard_cors_origin_regex):
         errors.append('DASHBOARD_CORS_ORIGIN_REGEX must be empty in production')

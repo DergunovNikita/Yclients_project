@@ -36,7 +36,6 @@ def test_production_config_policy_rejects_unsafe_defaults():
     assert 'AUTH_COOKIE_SECURE must be true' in errors
     assert 'AUTH_COOKIE_SAMESITE must be one of: lax, strict, none' in errors
     assert 'AUTH_CONSOLE_EMAIL must be false' in errors
-    assert 'SMTP_HOST, SMTP_USER, SMTP_PASSWORD and SMTP_FROM must be configured' in errors
     assert 'DASHBOARD_CORS_ORIGIN_REGEX must be empty in production' in errors
     assert (
         'DASHBOARD_CORS_ORIGINS must contain exact http(s) origins without wildcards, '
@@ -61,6 +60,51 @@ def test_production_config_policy_accepts_safe_values():
         smtp_password='smtp-password-32-plus-non-default',
         smtp_from='noreply@example.com',
         dashboard_cors_origins='https://dashboard.example.com,https://admin.example.com',
+        dashboard_cors_origin_regex='',
+    ) == []
+
+
+def test_production_config_policy_requires_smtp_without_console_fallback():
+    errors = collect_production_config_errors(
+        api_key='',
+        auth_require_login=True,
+        auth_public_registration_enabled=False,
+        auth_jwt_secret='a-long-production-jwt-secret-32-plus',
+        sync_api_token='sync-token',
+        db_password='db-password-32-plus-non-default',
+        portal_credentials_encryption_key='credential-key-32-plus-non-default',
+        auth_cookie_secure=True,
+        auth_cookie_samesite='lax',
+        auth_console_email=False,
+        smtp_host='',
+        smtp_user='',
+        smtp_password='',
+        smtp_from='',
+        dashboard_cors_origins='https://dashboard.example.com',
+        dashboard_cors_origin_regex='',
+    )
+
+    assert errors == ['SMTP_HOST, SMTP_USER, SMTP_PASSWORD and SMTP_FROM must be configured']
+
+
+def test_production_config_policy_accepts_explicit_console_email_fallback():
+    assert collect_production_config_errors(
+        api_key='',
+        auth_require_login=True,
+        auth_public_registration_enabled=False,
+        auth_jwt_secret='a-long-production-jwt-secret-32-plus',
+        sync_api_token='sync-token',
+        db_password='db-password-32-plus-non-default',
+        portal_credentials_encryption_key='credential-key-32-plus-non-default',
+        auth_cookie_secure=True,
+        auth_cookie_samesite='lax',
+        auth_console_email=True,
+        auth_allow_console_email_in_production=True,
+        smtp_host='',
+        smtp_user='',
+        smtp_password='',
+        smtp_from='',
+        dashboard_cors_origins='https://dashboard.example.com',
         dashboard_cors_origin_regex='',
     ) == []
 
