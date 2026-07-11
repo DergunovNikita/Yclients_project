@@ -20,7 +20,8 @@ def test_security_workflow_declares_expected_tools_and_modes():
     assert '--config p/javascript' in workflow
     assert 'checkov' in workflow
     assert '--framework dockerfile,github_actions,secrets' in workflow
-    assert 'continue-on-error: true' in workflow
+    assert 'continue-on-error: true' not in workflow
+    assert '--soft-fail' not in workflow
     assert 'github/codeql-action/upload-sarif' in workflow
     assert workflow.count('security-events: write') == 2
 

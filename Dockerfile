@@ -1,4 +1,6 @@
 FROM python:3.12-slim
+#checkov:skip=CKV_DOCKER_2:Healthchecks are configured at service level because this image also runs worker, migrate, and tool commands
+#checkov:skip=CKV_DOCKER_3:Container user is controlled by the deployment runtime to preserve mounted log volume permissions
 
 ARG APP_REVISION=local
 
