@@ -46,6 +46,11 @@ export function env(name) {
   return value && value.trim() ? value.trim() : '';
 }
 
+function trustedPeerIp(req) {
+  const value = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 export function forwardedHeaders(req) {
   const headers = {};
   for (const [name, value] of Object.entries(req.headers)) {
@@ -53,6 +58,12 @@ export function forwardedHeaders(req) {
     if (REQUEST_HEADER_ALLOWLIST.has(lowerName)) {
       headers[lowerName] = value;
     }
+  }
+
+  const peerIp = trustedPeerIp(req);
+  if (peerIp) {
+    headers['x-forwarded-for'] = peerIp;
+    headers['x-real-ip'] = peerIp;
   }
 
   return headers;

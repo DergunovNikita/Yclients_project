@@ -8,6 +8,7 @@ x-app-base: &app-base
   env_file:
     - .env
   environment:
+    APP_ENV: ${APP_ENV:-production}
     DB_HOST: postgres
     DB_PORT: 5432
   volumes:
@@ -84,7 +85,7 @@ services:
       - "127.0.0.1:3000:3000"
     environment:
       MB_DB_TYPE: postgres
-      MB_DB_DBNAME: ${MB_DB_NAME:-metabase_app}
+      MB_DB_DBNAME: metabase_app
       MB_DB_PORT: 5432
       MB_DB_USER: ${DB_USER:-postgres}
       MB_DB_PASS: ${DB_PASSWORD:?Set DB_PASSWORD in .env}

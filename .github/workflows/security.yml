@@ -79,7 +79,6 @@ jobs:
   static-analysis:
     name: Static security analysis
     runs-on: ubuntu-latest
-    continue-on-error: true
     permissions:
       contents: read
       security-events: write
@@ -118,7 +117,6 @@ jobs:
   iac-security:
     name: IaC and workflow security
     runs-on: ubuntu-latest
-    continue-on-error: true
     permissions:
       contents: read
       security-events: write
@@ -137,7 +135,6 @@ jobs:
           checkov \
             -d . \
             --framework dockerfile,github_actions,secrets \
-            --soft-fail \
             --output cli \
             --output sarif \
             --output-file-path console,checkov.sarif

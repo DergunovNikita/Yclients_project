@@ -2,6 +2,8 @@
 
 from urllib3.util.retry import Retry
 
+import pytest
+
 from yclients_api import YClientsAPI
 
 
@@ -29,3 +31,21 @@ def test_cap_survives_retry_new_chain():
     api = YClientsAPI('token', 'login', 'password', retry_after_max=45)
     retry = api.session.get_adapter('https://api.yclients.com').max_retries
     assert retry.new().retry_after_max == 45
+
+
+def test_paginated_fetch_raises_on_page_failure():
+    api = YClientsAPI('token', 'login', 'password')
+    calls = []
+
+    def fake_get(_url, params):
+        calls.append(params['page'])
+        if params['page'] == 1:
+            return {'data': [{'id': 1}] * api.MAX_PER_PAGE, 'meta': {'total_count': api.MAX_PER_PAGE + 1}}
+        return None
+
+    api._get = fake_get
+
+    with pytest.raises(RuntimeError, match='page 2'):
+        api._get_all_pages('https://api.example.test/items')
+
+    assert calls == [1, 2]

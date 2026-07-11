@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 import json
 
 import pytest
@@ -10,6 +10,8 @@ from api import app
 from auth_service import create_access_token, hash_password
 from models import (
     Client,
+    Appointment,
+    Comment,
     Company,
     GoodCatalog,
     GoodTransaction,
@@ -20,6 +22,8 @@ from models import (
     PortalUser,
     PortalUserBranch,
     ServiceCatalog,
+    Staff,
+    StaffSchedule,
 )
 
 
@@ -146,6 +150,179 @@ async def test_legacy_api_filters_jwt_users_by_tenant_scope(async_session, monke
     assert forbidden.status_code == 403
     assert own_financial.status_code == 403
     assert exported.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_groups_endpoint_scopes_jwt_users_to_accessible_branches(async_session, monkeypatch):
+    import auth_deps
+
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    async_session.add_all([
+        Group(id=1, title='Tenant A Group'),
+        Group(id=2, title='Tenant B Group'),
+        Company(id=1, title='Tenant A Branch', group_id=1),
+        Company(id=2, title='Tenant B Branch', group_id=2),
+        PortalAccount(id=1, label='Tenant A', created_at=datetime.utcnow()),
+        PortalBranch(portal_account_id=1, company_id=1),
+        PortalUser(
+            id=110,
+            portal_account_id=1,
+            email='manager-groups@example.com',
+            password_hash=hash_password('Manager123!'),
+            full_name='Manager',
+            role='manager',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+        PortalUserBranch(user_id=110, company_id=1),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(110, 'manager')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get('/groups', headers={'Authorization': f'Bearer {token}'})
+
+    app.dependency_overrides.clear()
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
+
+    assert response.status_code == 200
+    assert response.json()['data'] == [{'id': 1, 'title': 'Tenant A Group', 'companies_count': 1}]
+
+
+@pytest.mark.asyncio
+async def test_raw_api_staff_scopes_linked_viewer_and_exports(async_session, monkeypatch):
+    import auth_deps
+
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    async_session.add(Group(id=1, title='Group'))
+    async_session.add(Company(id=1, title='Branch', group_id=1))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    async_session.add(PortalBranch(portal_account_id=1, company_id=1))
+    async_session.add(
+        PortalUser(
+            id=120,
+            portal_account_id=1,
+            email='linked-viewer@example.com',
+            password_hash=hash_password('Viewer123!'),
+            full_name='Linked Viewer',
+            role='viewer',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    async_session.add(PortalUserBranch(user_id=120, company_id=1))
+    async_session.add_all([
+        Staff(id=10, name='Linked Staff', company_id=1, portal_user_id=120),
+        Staff(id=11, name='Other Staff', company_id=1),
+        Appointment(id=10, company_id=1, staff_id=10, client_id=1, date=date(2025, 1, 10)),
+        Appointment(id=11, company_id=1, staff_id=11, client_id=2, date=date(2025, 1, 10)),
+        Comment(id=10, company_id=1, master_id=10, text='Own review', date=datetime(2025, 1, 10)),
+        Comment(id=11, company_id=1, master_id=11, text='Other review', date=datetime(2025, 1, 10)),
+        StaffSchedule(id=10, company_id=1, staff_id=10, date=date(2025, 1, 10)),
+        StaffSchedule(id=11, company_id=1, staff_id=11, date=date(2025, 1, 10)),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(120, 'viewer')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        appointments = await client.get('/appointments', headers={'Authorization': f'Bearer {token}'})
+        forbidden = await client.get(
+            '/appointments',
+            params={'staff_id': 11},
+            headers={'Authorization': f'Bearer {token}'},
+        )
+        comments = await client.get('/comments', headers={'Authorization': f'Bearer {token}'})
+        schedules_csv = await client.get('/export/csv/staff_schedules', headers={'Authorization': f'Bearer {token}'})
+
+    app.dependency_overrides.clear()
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
+
+    assert appointments.status_code == 200
+    assert [row['staff_id'] for row in appointments.json()['data']] == [10]
+    assert forbidden.status_code == 403
+    assert comments.status_code == 200
+    assert [row['master_id'] for row in comments.json()['data']] == [10]
+    assert schedules_csv.status_code == 200
+    assert ',10,' in schedules_csv.text
+    assert ',11,' not in schedules_csv.text
+
+
+@pytest.mark.asyncio
+async def test_catalog_money_fields_are_hidden_from_non_financial_roles(async_session, monkeypatch):
+    import auth_deps
+
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    async_session.add(Group(id=1, title='Group'))
+    async_session.add(Company(id=1, title='Branch', group_id=1))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    async_session.add(PortalBranch(portal_account_id=1, company_id=1))
+    async_session.add(
+        PortalUser(
+            id=130,
+            portal_account_id=1,
+            email='manager-catalog@example.com',
+            password_hash=hash_password('Manager123!'),
+            full_name='Manager',
+            role='manager',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    async_session.add(PortalUserBranch(user_id=130, company_id=1))
+    async_session.add(
+        ServiceCatalog(
+            company_id=1,
+            service_id=10,
+            title='Cut',
+            price_min=1500,
+            updated_at=datetime.utcnow(),
+        )
+    )
+    async_session.add(
+        GoodCatalog(
+            company_id=1,
+            good_id=20,
+            title='Wax',
+            cost=100,
+            actual_cost=80,
+            updated_at=datetime.utcnow(),
+        )
+    )
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(130, 'manager')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        services = await client.get('/services', headers={'Authorization': f'Bearer {token}'})
+        goods = await client.get('/goods', headers={'Authorization': f'Bearer {token}'})
+        filtered = await client.get('/services', params={'min_price': 1000}, headers={'Authorization': f'Bearer {token}'})
+
+    app.dependency_overrides.clear()
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
+
+    assert services.status_code == 200
+    assert services.json()['data'][0]['price_min'] is None
+    assert goods.status_code == 200
+    assert goods.json()['data'][0]['cost'] is None
+    assert goods.json()['data'][0]['actual_cost'] is None
+    assert filtered.status_code == 403
 
 
 async def _seed_client_pii_scope(async_session):

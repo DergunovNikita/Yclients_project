@@ -546,6 +546,7 @@ async def dashboard_widget_summary(
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
+    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
     summary = await fetch_summary(
         db,
         start,
@@ -575,6 +576,7 @@ async def dashboard_widget_revenue_daily(
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
+    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
     return {
         'success': True,
         'data': await fetch_revenue_daily(
@@ -602,6 +604,7 @@ async def dashboard_widget_top_services(
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
+    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
     return {
         'success': True,
         'data': await fetch_top_services(
@@ -630,6 +633,7 @@ async def dashboard_widget_extra_services(
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
+    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
     return {
         'success': True,
         'data': await fetch_extra_services(
@@ -656,6 +660,7 @@ async def dashboard_widget_plan_fact(
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
+    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
     branch_ids, force_allowed = user_branch_ids(ctx)
     plan_fact = await fetch_plan_fact(
         db,
@@ -730,6 +735,7 @@ async def dashboard_plan_reviews_fact(
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
+    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
     branch_ids, force_allowed = user_branch_ids(ctx)
     try:
         data = await fetch_manual_review_facts(
@@ -795,6 +801,7 @@ async def dashboard_bundle(
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
+    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
     summary = await fetch_summary(
         db,
         start,

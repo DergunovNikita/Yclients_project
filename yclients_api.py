@@ -145,7 +145,7 @@ class YClientsAPI:
 
             result = self._get(url, params)
             if result is None:
-                break
+                raise RuntimeError(f"Failed to fetch paginated YClients endpoint {url} page {page}")
 
             data = result.get('data', [])
             if not data:

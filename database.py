@@ -10,19 +10,29 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 
+def _build_url(drivername: str, host: str, port: int, name: str, user: str, password: str = '') -> str:
+    return URL.create(
+        drivername,
+        username=user,
+        password=password or None,
+        host=host,
+        port=int(port),
+        database=name,
+    ).render_as_string(hide_password=False)
+
+
 def build_database_url(host: str, port: int, name: str, user: str, password: str = '') -> str:
-    creds = f'{user}:{password}' if password else user
-    return f'postgresql+psycopg2://{creds}@{host}:{port}/{name}'
+    return _build_url('postgresql+psycopg2', host, port, name, user, password)
 
 
 def build_async_database_url(host: str, port: int, name: str, user: str, password: str = '') -> str:
-    creds = f'{user}:{password}' if password else user
-    return f'postgresql+asyncpg://{creds}@{host}:{port}/{name}'
+    return _build_url('postgresql+asyncpg', host, port, name, user, password)
 
 
 class Database:

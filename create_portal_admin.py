@@ -14,8 +14,8 @@ from models import PortalUser, PortalUserBranch
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Create local platform_admin portal user')
-    parser.add_argument('--email', default='admin@local.dev')
-    parser.add_argument('--password', default='Admin12345!')
+    parser.add_argument('--email', required=True)
+    parser.add_argument('--password', required=True)
     parser.add_argument('--full-name', default='Local Super Admin')
     parser.add_argument('--assign-all-branches', action='store_true', help='Assign all companies as branches')
     return parser.parse_args()

@@ -28,11 +28,7 @@ from models import SYSTEM_SCHEMA, Base  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def main() -> int:
-    database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
-    if not database.test_connection():
-        return 1
-
+def bootstrap_database(database) -> None:
     with database.engine.begin() as conn:
         conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS {SYSTEM_SCHEMA}'))
     Base.metadata.create_all(database.engine)
@@ -42,6 +38,13 @@ def main() -> int:
     cfg.set_main_option('sqlalchemy.url', build_database_url(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD))
     command.stamp(cfg, 'head')
 
+
+def main() -> int:
+    database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
+    if not database.test_connection():
+        return 1
+
+    bootstrap_database(database)
     print(f'Schema created and stamped at Alembic head for database "{DB_NAME}"')
     return 0
 

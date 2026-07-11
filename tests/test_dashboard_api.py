@@ -577,6 +577,57 @@ async def test_platform_admin_dashboard_bundle_requires_selected_tenant(async_se
 
 
 @pytest.mark.asyncio
+async def test_dashboard_summary_and_bundle_reject_foreign_staff_scope(async_session, monkeypatch):
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    async_session.add(Group(id=1, title='Group'))
+    async_session.add_all([
+        Company(id=1, title='Allowed Branch', group_id=1),
+        Company(id=2, title='Foreign Branch', group_id=1),
+        Staff(id=10, name='Allowed Staff', company_id=1),
+        Staff(id=20, name='Foreign Staff', company_id=2),
+        PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()),
+        PortalBranch(portal_account_id=1, company_id=1),
+        PortalUser(
+            id=910,
+            portal_account_id=1,
+            email='manager-dashboard-scope@example.com',
+            password_hash=hash_password('Manager12345!'),
+            role='manager',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+        PortalUserBranch(user_id=910, company_id=1),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(910, 'manager')
+    headers = {'Authorization': f'Bearer {token}'}
+    params = {
+        'start_date': '2025-01-01',
+        'end_date': '2025-01-31',
+        'company_id': 1,
+        'staff_id': 20,
+    }
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        summary = await client.get('/dashboard/widget/summary', params=params, headers=headers)
+        bundle = await client.get('/dashboard/bundle', params=params, headers=headers)
+
+    app.dependency_overrides.clear()
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
+
+    assert summary.status_code == 400
+    assert summary.json()['detail'] == 'unknown staff_id'
+    assert bundle.status_code == 400
+    assert bundle.json()['detail'] == 'unknown staff_id'
+
+
+@pytest.mark.asyncio
 async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, monkeypatch):
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
     async_session.add(Group(id=1, title='Group'))

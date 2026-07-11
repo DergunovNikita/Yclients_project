@@ -37,7 +37,14 @@ from config import (
 from dashboard_routes import router as dashboard_router
 from auth_deps import forbid_demo
 from auth_routes import router as auth_router
-from auth_scope import AccessContext, require_financial_access, require_sync_company_ids, require_tenant_context
+from auth_scope import (
+    AccessContext,
+    can_view_financials,
+    effective_staff_id,
+    require_financial_access,
+    require_sync_company_ids,
+    require_tenant_context,
+)
 from onboarding_routes import router as onboarding_router
 from database import get_async_db, init_async_database
 from portal_audit import log_portal_audit
@@ -224,6 +231,11 @@ def apply_company_scope(stmt, column, company_id: Optional[int], ctx: AccessCont
     return stmt.where(column.in_(allowed))
 
 
+def apply_staff_scope(stmt, column, staff_id: Optional[int], ctx: AccessContext | None):
+    scoped_staff_id = effective_staff_id(ctx, staff_id) if ctx is not None else staff_id
+    return stmt.where(column == scoped_staff_id) if scoped_staff_id is not None else stmt
+
+
 def require_client_pii_access(request: Request) -> tuple[AccessContext, int]:
     ctx = request_access(request)
     if ctx is None or ctx.user_id is None:
@@ -240,6 +252,11 @@ def require_request_financial_access(request: Request) -> None:
     ctx = request_access(request)
     if ctx is not None:
         require_financial_access(ctx)
+
+
+def can_request_view_financials(request: Request) -> bool:
+    ctx = request_access(request)
+    return ctx is None or can_view_financials(ctx)
 
 
 def build_page_response(total: int, limit: int, offset: int, data: list[dict[str, Any]]) -> dict[str, Any]:
@@ -307,16 +324,24 @@ async def health():
 
 @app.get("/groups")
 async def api_groups(
+    request: Request,
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
-    stmt = select(Group).order_by(Group.id.asc())
+    ctx = request_access(request)
+    stmt = select(Group)
+    count_company_filter = []
+    if ctx is not None and not ctx.full_access:
+        allowed = ctx.company_ids or []
+        stmt = stmt.join(Company, Company.group_id == Group.id).where(Company.id.in_(allowed)).distinct()
+        count_company_filter.append(Company.id.in_(allowed))
+    stmt = stmt.order_by(Group.id.asc())
     total, groups = await fetch_page(db, stmt, limit, offset)
     data = []
     for group in groups:
         count_result = await db.execute(
-            select(func.count()).where(Company.group_id == group.id)
+            select(func.count()).where(Company.group_id == group.id, *count_company_filter)
         )
         data.append({
             "id": group.id,
@@ -378,6 +403,9 @@ async def api_services(
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
+    show_financials = can_request_view_financials(request)
+    if (min_price is not None or max_price is not None) and not show_financials:
+        raise HTTPException(status_code=403, detail='Financial metrics are not allowed for this role')
     stmt = select(ServiceCatalog)
     stmt = apply_company_scope(stmt, ServiceCatalog.company_id, company_id, request_access(request))
     if category:
@@ -391,7 +419,7 @@ async def api_services(
     data = serialize_rows(services, lambda item: {
         "id": item.service_id,
         "title": item.title,
-        "price_min": item.price_min,
+        "price_min": item.price_min if show_financials else None,
         "duration_sec": item.duration,
         "duration_min": round(item.duration / 60, 1) if item.duration else None,
         "category": item.category_title,
@@ -567,6 +595,7 @@ async def api_goods(
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
+    show_financials = can_request_view_financials(request)
     stmt = select(GoodCatalog)
     stmt = apply_company_scope(stmt, GoodCatalog.company_id, company_id, request_access(request))
     if category_id is not None:
@@ -576,8 +605,8 @@ async def api_goods(
     data = serialize_rows(items, lambda item: {
         "good_id": item.good_id,
         "title": item.title,
-        "cost": item.cost,
-        "actual_cost": item.actual_cost,
+        "cost": item.cost if show_financials else None,
+        "actual_cost": item.actual_cost if show_financials else None,
         "barcode": item.barcode,
         "unit": item.unit_short_title,
         "category_id": item.category_id,
@@ -599,10 +628,10 @@ async def api_appointments(
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
+    ctx = request_access(request)
     stmt = select(Appointment)
-    stmt = apply_company_scope(stmt, Appointment.company_id, company_id, request_access(request))
-    if staff_id is not None:
-        stmt = stmt.where(Appointment.staff_id == staff_id)
+    stmt = apply_company_scope(stmt, Appointment.company_id, company_id, ctx)
+    stmt = apply_staff_scope(stmt, Appointment.staff_id, staff_id, ctx)
     if client_id is not None:
         stmt = stmt.where(Appointment.client_id == client_id)
     if date_from:
@@ -739,10 +768,10 @@ async def api_comments(
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
+    ctx = request_access(request)
     stmt = select(Comment)
-    stmt = apply_company_scope(stmt, Comment.company_id, company_id, request_access(request))
-    if staff_id is not None:
-        stmt = stmt.where(Comment.master_id == staff_id)
+    stmt = apply_company_scope(stmt, Comment.company_id, company_id, ctx)
+    stmt = apply_staff_scope(stmt, Comment.master_id, staff_id, ctx)
     if min_rating is not None:
         stmt = stmt.where(Comment.rating >= min_rating)
     if date_from:
@@ -777,10 +806,10 @@ async def api_staff_schedules(
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
+    ctx = request_access(request)
     stmt = select(StaffSchedule)
-    stmt = apply_company_scope(stmt, StaffSchedule.company_id, company_id, request_access(request))
-    if staff_id is not None:
-        stmt = stmt.where(StaffSchedule.staff_id == staff_id)
+    stmt = apply_company_scope(stmt, StaffSchedule.company_id, company_id, ctx)
+    stmt = apply_staff_scope(stmt, StaffSchedule.staff_id, staff_id, ctx)
     if date_from:
         stmt = stmt.where(StaffSchedule.date >= parse_date(date_from))
     if date_to:
@@ -984,6 +1013,11 @@ TABLE_MAP = {
 }
 
 FINANCIAL_EXPORT_MODELS = {Transaction, FinancialTransaction, GoodTransaction}
+STAFF_SCOPED_EXPORT_COLUMNS = {
+    Appointment: Appointment.staff_id,
+    Comment: Comment.master_id,
+    StaffSchedule: StaffSchedule.staff_id,
+}
 
 
 async def async_stream_csv_rows(db: AsyncSession, model, ctx: AccessContext | None = None):
@@ -1003,6 +1037,9 @@ async def async_stream_csv_rows(db: AsyncSession, model, ctx: AccessContext | No
         stmt = apply_company_scope(stmt, Company.id, None, ctx)
     elif ctx is not None and not ctx.full_access:
         stmt = stmt.where(False)
+    staff_column = STAFF_SCOPED_EXPORT_COLUMNS.get(model)
+    if staff_column is not None:
+        stmt = apply_staff_scope(stmt, staff_column, None, ctx)
     stmt = stmt.order_by(*model.__table__.primary_key.columns)
     result = await db.stream(stmt)
     async for row in result.scalars():

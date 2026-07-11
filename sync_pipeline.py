@@ -273,7 +273,11 @@ def purge_full_refresh_window(db, company_id: int, start_date: str, end_date: st
         )
         deleted_goods = (
             db.query(GoodTransaction)
-            .filter(GoodTransaction.company_id == company_id)
+            .filter(
+                GoodTransaction.company_id == company_id,
+                GoodTransaction.date >= parse_datetime_start(start_date),
+                GoodTransaction.date <= parse_datetime_end(end_date),
+            )
             .delete(synchronize_session=False)
         )
         deleted_comments = (
@@ -1744,6 +1748,11 @@ def sync_staff_schedules(api: YClientsAPI, db, company_id: str,
 
     try:
         cid = _db_company_id(company_id, db_company_id)
+        staff_map = _load_staff_map(
+            db,
+            cid,
+            (entry.get('staff_id') for entry in schedules),
+        )
         delete_query = db.query(StaffSchedule).filter(StaffSchedule.company_id == cid)
         if start_date:
             delete_query = delete_query.filter(StaffSchedule.date >= parse_date(start_date))
@@ -1753,7 +1762,7 @@ def sync_staff_schedules(api: YClientsAPI, db, company_id: str,
 
         slot_count = 0
         for entry in schedules:
-            staff_id = entry.get('staff_id')
+            staff_id = _internal_staff_id(staff_map, entry.get('staff_id'))
             schedule_date = entry.get('date')
             slots = entry.get('slots') or []
             for slot in slots:

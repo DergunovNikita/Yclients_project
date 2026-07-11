@@ -65,9 +65,11 @@ jobs:
       VM_SSH_PORT: ${{ secrets.VM_SSH_PORT || '22' }}
       VM_PROJECT_DIR: ${{ secrets.VM_PROJECT_DIR || '/opt/yclients_bi_system' }}
     steps:
-      - name: Skip deploy when VM secrets are missing
+      - name: Require VM deploy secrets
         if: env.VM_HOST == '' || env.VM_USER == '' || env.VM_SSH_KEY == ''
-        run: echo "VM deploy secrets are not configured; skipping deploy."
+        run: |
+          echo "VM deploy secrets are not configured; refusing to report a successful production deploy." >&2
+          exit 1
 
       - name: Configure SSH
         if: env.VM_HOST != '' && env.VM_USER != '' && env.VM_SSH_KEY != ''

@@ -7,6 +7,7 @@ from models import (
     Base,
     Appointment,
     Client,
+    Comment,
     Company,
     FinancialTransaction,
     GoodTransaction,
@@ -15,6 +16,7 @@ from models import (
     ServiceCatalog,
     ServiceCategoryCatalog,
     Staff,
+    StaffSchedule,
     SyncSourceState,
     Transaction,
 )
@@ -22,6 +24,7 @@ import sync_pipeline
 from sync_pipeline import (
     execute_sync,
     full_sync_start_date,
+    purge_full_refresh_window,
     sync_clients,
     sync_financial_transactions,
     sync_goods_transactions,
@@ -81,6 +84,14 @@ class FakeRecordsAPI:
 
     def get_records(self, company_id, start_date=None, end_date=None):
         return self._records
+
+
+class FakeSchedulesAPI:
+    def __init__(self, schedules):
+        self._schedules = schedules
+
+    def get_staff_schedule(self, company_id, start_date=None, end_date=None):
+        return self._schedules
 
 
 class FakeSyncDatabase:
@@ -382,6 +393,68 @@ def test_sync_financial_transactions_persists_expense_article_and_source_coverag
         )
         assert state.period_start == date(2025, 1, 1)
         assert state.period_end == date(2025, 1, 31)
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_full_refresh_purge_keeps_goods_transactions_outside_requested_window():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Appointment.__table__,
+            Transaction.__table__,
+            FinancialTransaction.__table__,
+            GoodTransaction.__table__,
+            Comment.__table__,
+            StaffSchedule.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add_all([
+            GoodTransaction(id=1, company_id=1, date=datetime(2025, 1, 1, 12, 0, 0), cost=10),
+            GoodTransaction(id=2, company_id=1, date=datetime(2025, 1, 10, 12, 0, 0), cost=20),
+        ])
+        db.commit()
+
+        assert purge_full_refresh_window(db, 1, '2025-01-10', '2025-01-10', '2025-01-10') is True
+
+        remaining = db.query(GoodTransaction).order_by(GoodTransaction.id).all()
+        assert [(row.id, row.cost) for row in remaining] == [(1, 10)]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_staff_schedules_uses_internal_staff_id_for_tenant_scoped_staff():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[Group.__table__, Company.__table__, Staff.__table__, StaffSchedule.__table__],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add(Staff(id=100, external_id=7, source_type='yclients', name='Master', company_id=1))
+        db.commit()
+
+        api = FakeSchedulesAPI([
+            {'staff_id': 7, 'date': '2025-01-10', 'slots': [{'from': '09:00', 'to': '10:00'}]},
+        ])
+
+        assert sync_pipeline.sync_staff_schedules(api, db, '1') is True
+
+        schedule = db.query(StaffSchedule).one()
+        assert schedule.staff_id == 100
     finally:
         db.close()
         engine.dispose()

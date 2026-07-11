@@ -56,6 +56,7 @@ cp .env.example .env
 
 Заполните минимум:
 
+- `APP_ENV=local` для локального запуска
 - `PARTNER_TOKEN`
 - `YCLIENTS_LOGIN`
 - `YCLIENTS_PASSWORD`

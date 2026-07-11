@@ -202,6 +202,18 @@ def _run_import_config(env_overrides: dict[str, str]) -> subprocess.CompletedPro
     )
 
 
+def _read_env_file(path: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    with open(path) as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            name, value = line.split('=', 1)
+            values[name] = value
+    return values
+
+
 def _safe_production_config_env() -> dict[str, str]:
     return {
         'APP_ENV': 'production',
@@ -237,6 +249,12 @@ def _run_production_code(code: str, env_overrides: dict[str, str] | None = None)
         capture_output=True,
         check=False,
     )
+
+
+def test_env_example_is_importable_as_local_config():
+    result = _run_import_config(_read_env_file('.env.example'))
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_production_import_fails_with_unsafe_defaults():
