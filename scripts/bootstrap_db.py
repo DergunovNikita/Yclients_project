@@ -22,7 +22,7 @@ from alembic.config import Config  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER  # noqa: E402
-from database import build_database_url, init_database  # noqa: E402
+from database import alembic_config_value, build_database_url, init_database  # noqa: E402
 from models import SYSTEM_SCHEMA, Base  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -35,7 +35,10 @@ def bootstrap_database(database) -> None:
 
     cfg = Config(str(REPO_ROOT / 'alembic.ini'))
     cfg.set_main_option('script_location', str(REPO_ROOT / 'alembic'))
-    cfg.set_main_option('sqlalchemy.url', build_database_url(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD))
+    cfg.set_main_option(
+        'sqlalchemy.url',
+        alembic_config_value(build_database_url(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)),
+    )
     command.stamp(cfg, 'head')
 
 

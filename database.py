@@ -35,6 +35,11 @@ def build_async_database_url(host: str, port: int, name: str, user: str, passwor
     return _build_url('postgresql+asyncpg', host, port, name, user, password)
 
 
+def alembic_config_value(value: str) -> str:
+    """Escape percent signs for Alembic's ConfigParser-backed settings."""
+    return value.replace('%', '%%')
+
+
 class Database:
     """Sync connection wrapper — used by ETL pipeline and worker."""
 
@@ -109,5 +114,5 @@ async def get_async_db() -> AsyncGenerator[AsyncSession, None]:
 def run_migrations(database_url: str, revision: str = 'head') -> None:
     config = Config(str(Path(__file__).resolve().parent / 'alembic.ini'))
     config.set_main_option('script_location', str(Path(__file__).resolve().parent / 'alembic'))
-    config.set_main_option('sqlalchemy.url', database_url)
+    config.set_main_option('sqlalchemy.url', alembic_config_value(database_url))
     command.upgrade(config, revision)

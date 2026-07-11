@@ -1,6 +1,7 @@
 from sqlalchemy.engine import make_url
 from sqlalchemy import create_engine, text
 
+import database
 from database import build_async_database_url, build_database_url
 import migrate
 
@@ -24,6 +25,22 @@ def test_database_urls_keep_password_optional():
     assert url.host == 'localhost'
     assert url.username == 'postgres'
     assert url.password is None
+
+
+def test_run_migrations_accepts_percent_encoded_database_url(monkeypatch):
+    captured = {}
+    url = build_database_url('postgres', 5432, 'yclients_db', 'postgres', 'secret!')
+
+    def fake_upgrade(config, revision):
+        captured['url'] = config.get_main_option('sqlalchemy.url')
+        captured['revision'] = revision
+
+    monkeypatch.setattr(database.command, 'upgrade', fake_upgrade)
+
+    database.run_migrations(url, revision='head')
+
+    assert '%21' in captured['url']
+    assert captured['revision'] == 'head'
 
 
 class FakeDatabase:
