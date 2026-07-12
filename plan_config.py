@@ -24,6 +24,58 @@ PLAN_FACT_METRICS: tuple[dict[str, str], ...] = (
     {'code': REVIEWS_QTY_CODE, 'label': 'Отзывы', 'format': 'number'},
 )
 
+MONEY_METRICS: tuple[dict[str, Any], ...] = (
+    {
+        'code': 'revenue',
+        'label': 'Выручка',
+        'summary': ('revenue',),
+        'plan': ('revenue',),
+        'leaderboard': ('revenue_top', 'revenue_barber', 'revenue_admin'),
+    },
+    {
+        'code': 'avg_check',
+        'label': 'Средний чек',
+        'summary': ('average_check', 'average_check_source_status'),
+        'plan': ('avg_check_total',),
+        'leaderboard': ('avg_check_top',),
+    },
+    {
+        'code': 'cosmo_sum',
+        'label': 'Космо, сумма',
+        'summary': (),
+        'plan': ('cosmo_sum', 'cosmo_price'),
+        'leaderboard': ('cosmo_barber', 'cosmo_admin'),
+    },
+)
+
+ALL_MONEY_CODES: frozenset[str] = frozenset(metric['code'] for metric in MONEY_METRICS)
+
+# Roles allowed to configure subordinate visibility always see every money metric.
+DEFAULT_ROLE_MONEY_CODES: dict[str, frozenset[str]] = {
+    'platform_admin': ALL_MONEY_CODES,
+    'owner': ALL_MONEY_CODES,
+    'branch_admin': ALL_MONEY_CODES,
+    'manager': frozenset(),
+    'viewer': frozenset(),
+}
+
+# Roles whose money visibility is configurable per tenant (rest are fixed at ALL).
+CONFIGURABLE_MONEY_ROLES: tuple[str, ...] = ('branch_admin', 'manager', 'viewer')
+
+
+def default_money_codes_for_role(role: str | None) -> frozenset[str]:
+    return DEFAULT_ROLE_MONEY_CODES.get(role or '', frozenset())
+
+
+def money_payload_keys(hidden_codes: frozenset[str], group: str) -> set[str]:
+    """Payload keys (summary/plan/leaderboard) governed by the given hidden money codes."""
+    keys: set[str] = set()
+    for metric in MONEY_METRICS:
+        if metric['code'] in hidden_codes:
+            keys.update(metric.get(group, ()))
+    return keys
+
+
 RAW_PLAN_FACT_CODES = {
     'revenue',
     'clients',

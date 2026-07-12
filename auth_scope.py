@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-FINANCIAL_ACCESS_ROLES = {'owner', 'platform_admin'}
+from plan_config import ALL_MONEY_CODES, default_money_codes_for_role
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,7 @@ class AccessContext:
     is_platform_admin: bool
     full_access: bool
     company_ids: list[int] | None  # None = all branches; [] = none
+    money_metrics: frozenset[str] = ALL_MONEY_CODES  # visible money metric codes
 
     @classmethod
     def api_key(cls) -> AccessContext:
@@ -32,6 +33,7 @@ class AccessContext:
             is_platform_admin=False,
             full_access=True,
             company_ids=None,
+            money_metrics=ALL_MONEY_CODES,
         )
 
     @classmethod
@@ -42,8 +44,11 @@ class AccessContext:
         portal_account_id: int | None,
         company_ids: list[int] | None,
         staff_id: int | None = None,
+        money_metrics: frozenset[str] | None = None,
     ) -> AccessContext:
         is_platform_admin = role == 'platform_admin'
+        if money_metrics is None:
+            money_metrics = default_money_codes_for_role(role)
         return cls(
             user_id=user_id,
             role=role,
@@ -52,6 +57,7 @@ class AccessContext:
             is_platform_admin=is_platform_admin,
             full_access=False,
             company_ids=company_ids or [],
+            money_metrics=frozenset(money_metrics),
         )
 
 
@@ -110,9 +116,21 @@ def effective_staff_id(ctx: AccessContext, requested_staff_id: int | None) -> in
     return int(ctx.staff_id)
 
 
+def can_view_money_metric(ctx: AccessContext, code: str) -> bool:
+    """Return whether the current principal may see a specific money metric."""
+    return ctx.full_access or code in ctx.money_metrics
+
+
+def hidden_money_codes(ctx: AccessContext) -> frozenset[str]:
+    """Money metric codes the current principal must not see."""
+    if ctx.full_access:
+        return frozenset()
+    return ALL_MONEY_CODES - ctx.money_metrics
+
+
 def can_view_financials(ctx: AccessContext) -> bool:
-    """Return whether the current principal may see revenue and money metrics."""
-    return ctx.full_access or ctx.role in FINANCIAL_ACCESS_ROLES
+    """Coarse revenue gate: whether the principal may see revenue-level money data."""
+    return can_view_money_metric(ctx, 'revenue')
 
 
 def require_financial_access(ctx: AccessContext) -> None:

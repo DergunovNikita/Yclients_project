@@ -784,15 +784,131 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     assert manager_revenue_daily.status_code == 403
     assert owner_revenue_daily.status_code == 200
     assert sum(row['revenue'] for row in owner_revenue_daily.json()['data']) == 3000.0
+    # branch_admin sees revenue by default (only manager/viewer are hidden out of the box).
     assert branch_admin_bundle.status_code == 200
-    assert branch_admin_bundle.json()['data']['financials_hidden'] is True
-    assert branch_admin_bundle.json()['data']['revenue_daily'] == []
-    assert 'revenue' not in branch_admin_bundle.json()['data']['summary']
-    assert branch_admin_finance_report.status_code == 403
+    assert branch_admin_bundle.json()['data'].get('financials_hidden') is not True
+    assert branch_admin_bundle.json()['data']['revenue_daily'] != []
+    assert 'revenue' in branch_admin_bundle.json()['data']['summary']
+    assert branch_admin_finance_report.status_code == 200
     assert branch_admin_operations_report.status_code == 200
-    assert branch_admin_plan_settings.status_code == 403
+    assert branch_admin_plan_settings.status_code == 200
     assert branch_admin_plan_fact.status_code == 200
-    assert 'avg_check_top' not in branch_admin_plan_fact.json()['data'].get('staff_leaderboards', {})
+    assert 'avg_check_top' in branch_admin_plan_fact.json()['data'].get('staff_leaderboards', {})
+
+
+@pytest.mark.asyncio
+async def test_metric_visibility_config_controls_money_metrics(async_session, monkeypatch):
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    async_session.add(Group(id=1, title='Group'))
+    async_session.add(Company(id=1, title='Branch', group_id=1))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    async_session.add(PortalBranch(portal_account_id=1, company_id=1))
+    async_session.add_all([
+        PortalUser(
+            id=200,
+            portal_account_id=1,
+            email='owner-mv@example.com',
+            password_hash=hash_password('Owner12345!'),
+            role='owner',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+        PortalUser(
+            id=201,
+            portal_account_id=1,
+            email='manager-mv@example.com',
+            password_hash=hash_password('Manager12345!'),
+            role='manager',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+        PortalUserBranch(user_id=201, company_id=1),
+        Staff(id=1, name='Staff', company_id=1),
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 10), attendance=1),
+        Transaction(id=1, appointment_id=1, service_id=10, service_title='Cut', amount=1, company_id=1),
+        FinancialTransaction(
+            id=1,
+            date=datetime(2025, 1, 10, 12, 0, 0),
+            amount=1000.0,
+            record_id=1,
+            sold_item_id=10,
+            sold_item_type='service',
+            master_id=1,
+            company_id=1,
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    owner_headers = {'Authorization': f'Bearer {create_access_token(200, "owner")}'}
+    manager_headers = {'Authorization': f'Bearer {create_access_token(201, "manager")}'}
+    summary_params = {'start_date': '2025-01-01', 'end_date': '2025-01-31'}
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        manager_default = await client.get('/dashboard/widget/summary', params=summary_params, headers=manager_headers)
+        manager_revenue_default = await client.get(
+            '/dashboard/widget/revenue_daily', params=summary_params, headers=manager_headers
+        )
+        config = await client.get('/dashboard/metric-visibility', headers=owner_headers)
+        manager_put_forbidden = await client.put(
+            '/dashboard/metric-visibility',
+            json={'role': 'manager', 'visible_codes': ['revenue']},
+            headers=manager_headers,
+        )
+        bad_code = await client.put(
+            '/dashboard/metric-visibility',
+            json={'role': 'manager', 'visible_codes': ['nonsense']},
+            headers=owner_headers,
+        )
+        bad_role = await client.put(
+            '/dashboard/metric-visibility',
+            json={'role': 'owner', 'visible_codes': ['revenue']},
+            headers=owner_headers,
+        )
+        granted = await client.put(
+            '/dashboard/metric-visibility',
+            json={'role': 'manager', 'visible_codes': ['avg_check']},
+            headers=owner_headers,
+        )
+        manager_after = await client.get('/dashboard/widget/summary', params=summary_params, headers=manager_headers)
+        manager_revenue_after = await client.get(
+            '/dashboard/widget/revenue_daily', params=summary_params, headers=manager_headers
+        )
+
+    app.dependency_overrides.clear()
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
+
+    # Default: manager sees no money metrics.
+    assert manager_default.status_code == 200
+    assert manager_default.json()['data']['financials_hidden'] is True
+    assert 'revenue' not in manager_default.json()['data']
+    assert 'average_check' not in manager_default.json()['data']
+    assert manager_revenue_default.status_code == 403
+
+    # Config surface reports money metrics, per-role state and defaults.
+    assert config.status_code == 200
+    config_data = config.json()['data']
+    assert {m['code'] for m in config_data['money_metrics']} == {'revenue', 'avg_check', 'cosmo_sum'}
+    assert config_data['roles']['manager'] == []
+    assert set(config_data['defaults']['branch_admin']) == {'revenue', 'avg_check', 'cosmo_sum'}
+
+    # Only owner/platform_admin can configure; codes and roles are validated.
+    assert manager_put_forbidden.status_code == 403
+    assert bad_code.status_code == 400
+    assert bad_role.status_code == 400
+    assert granted.status_code == 200
+
+    # After granting avg_check: manager sees the average check but still not revenue.
+    assert manager_after.status_code == 200
+    assert manager_after.json()['data']['financials_hidden'] is True
+    assert 'average_check' in manager_after.json()['data']
+    assert 'revenue' not in manager_after.json()['data']
+    assert manager_revenue_after.status_code == 403
 
 
 @pytest.mark.asyncio

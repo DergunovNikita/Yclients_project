@@ -21,6 +21,7 @@ from auth_scope import (
     AccessContext,
     can_view_financials,
     effective_staff_id,
+    hidden_money_codes,
     query_scope,
     require_financial_access,
     require_tenant_context,
@@ -55,12 +56,25 @@ from dashboard_reports import (
     report_requires_financials,
 )
 from database import get_async_db
-from models import Company, PortalAccount, Staff
+from models import Company, PortalAccount, PortalMetricVisibility, Staff
+from plan_config import (
+    ALL_MONEY_CODES,
+    CONFIGURABLE_MONEY_ROLES,
+    MONEY_METRICS,
+    default_money_codes_for_role,
+    money_payload_keys,
+)
+from portal_audit import log_portal_audit
 from plan_import import import_plan_sheet_from_config
 from sync_jobs import SyncJobService
 from sync_orchestrator import get_sync_status
 
 router = APIRouter()
+
+
+class MetricVisibilityPayload(BaseModel):
+    role: str
+    visible_codes: list[str]
 
 
 class ManualReviewFactItem(BaseModel):
@@ -137,59 +151,59 @@ def _require_sync_access(ctx: AccessContext) -> None:
         raise HTTPException(status_code=403, detail='Sync operations require platform_admin role')
 
 
-FINANCIAL_SUMMARY_KEYS = {'revenue', 'average_check', 'average_check_source_status'}
-FINANCIAL_PLAN_CODES = {'revenue', 'avg_check_total', 'cosmo_sum', 'cosmo_price'}
-FINANCIAL_LEADERBOARD_KEYS = {
-    'revenue_top',
-    'revenue_barber',
-    'revenue_admin',
-    'cosmo_barber',
-    'cosmo_admin',
-    'avg_check_top',
-}
-
-
-def _hide_summary_financials(summary: dict[str, Any]) -> dict[str, Any]:
+def _hide_summary_financials(summary: dict[str, Any], hidden_codes: frozenset[str]) -> dict[str, Any]:
     payload = deepcopy(summary)
-    for key in FINANCIAL_SUMMARY_KEYS:
+    for key in money_payload_keys(hidden_codes, 'summary'):
         payload.pop(key, None)
     payload['financials_hidden'] = True
     return payload
 
 
-def _strip_plan_fact_financials(value: Any) -> Any:
+def _strip_plan_fact_financials(
+    value: Any,
+    hidden_plan_codes: set[str],
+    hidden_leaderboard_keys: set[str],
+    drop_all_money: bool,
+) -> Any:
     if isinstance(value, list):
         items = []
         for item in value:
-            stripped = _strip_plan_fact_financials(item)
+            stripped = _strip_plan_fact_financials(item, hidden_plan_codes, hidden_leaderboard_keys, drop_all_money)
             if stripped is not None:
                 items.append(stripped)
         return items
     if isinstance(value, dict):
         code = value.get('code')
-        if code in FINANCIAL_PLAN_CODES or value.get('format') == 'money':
+        if code in hidden_plan_codes or (drop_all_money and value.get('format') == 'money'):
             return None
         result: dict[str, Any] = {}
         for key, item in value.items():
-            if key in FINANCIAL_LEADERBOARD_KEYS:
+            if key in hidden_leaderboard_keys:
                 continue
             if key == 'staff_leaderboards' and isinstance(item, dict):
                 filtered = {
-                    board_key: _strip_plan_fact_financials(board_value)
+                    board_key: _strip_plan_fact_financials(
+                        board_value, hidden_plan_codes, hidden_leaderboard_keys, drop_all_money
+                    )
                     for board_key, board_value in item.items()
-                    if board_key not in FINANCIAL_LEADERBOARD_KEYS
+                    if board_key not in hidden_leaderboard_keys
                 }
                 result[key] = {k: v for k, v in filtered.items() if v is not None}
                 continue
-            stripped = _strip_plan_fact_financials(item)
+            stripped = _strip_plan_fact_financials(item, hidden_plan_codes, hidden_leaderboard_keys, drop_all_money)
             if stripped is not None:
                 result[key] = stripped
         return result
     return value
 
 
-def _hide_plan_fact_financials(plan_fact: dict[str, Any]) -> dict[str, Any]:
-    payload = _strip_plan_fact_financials(plan_fact) or {}
+def _hide_plan_fact_financials(plan_fact: dict[str, Any], hidden_codes: frozenset[str]) -> dict[str, Any]:
+    hidden_plan_codes = money_payload_keys(hidden_codes, 'plan')
+    hidden_leaderboard_keys = money_payload_keys(hidden_codes, 'leaderboard')
+    drop_all_money = ALL_MONEY_CODES <= hidden_codes
+    payload = _strip_plan_fact_financials(
+        plan_fact, hidden_plan_codes, hidden_leaderboard_keys, drop_all_money
+    ) or {}
     payload['financials_hidden'] = True
     return payload
 
@@ -555,8 +569,9 @@ async def dashboard_widget_summary(
         staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
     )
-    if not can_view_financials(ctx):
-        summary = _hide_summary_financials(summary)
+    hidden = hidden_money_codes(ctx)
+    if hidden:
+        summary = _hide_summary_financials(summary, hidden)
     return {
         'success': True,
         'data': summary,
@@ -671,8 +686,9 @@ async def dashboard_widget_plan_fact(
         allowed_company_ids=branch_ids,
         force_allowed=force_allowed,
     )
-    if not can_view_financials(ctx):
-        plan_fact = _hide_plan_fact_financials(plan_fact)
+    hidden = hidden_money_codes(ctx)
+    if hidden:
+        plan_fact = _hide_plan_fact_financials(plan_fact, hidden)
     return {
         'success': True,
         'data': plan_fact,
@@ -778,6 +794,89 @@ async def dashboard_plan_reviews_fact_save(
     return {'success': True, 'data': data}
 
 
+def _require_visibility_admin(ctx: AccessContext) -> None:
+    if not (ctx.full_access or ctx.role in ('owner', 'platform_admin')):
+        raise HTTPException(status_code=403, detail='Not allowed to configure metric visibility')
+
+
+@router.get('/metric-visibility')
+async def dashboard_metric_visibility(
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    _require_visibility_admin(ctx)
+    portal_account_id = await _require_kpi_portal_account_id(db, ctx)
+    stored = {
+        row.role: [code for code in (row.visible_codes or []) if code in ALL_MONEY_CODES]
+        for row in (
+            await db.execute(
+                select(PortalMetricVisibility).where(
+                    PortalMetricVisibility.portal_account_id == portal_account_id
+                )
+            )
+        ).scalars()
+    }
+    roles = {
+        role: stored.get(role, sorted(default_money_codes_for_role(role)))
+        for role in CONFIGURABLE_MONEY_ROLES
+    }
+    return {
+        'success': True,
+        'data': {
+            'money_metrics': [{'code': m['code'], 'label': m['label']} for m in MONEY_METRICS],
+            'roles': roles,
+            'defaults': {role: sorted(default_money_codes_for_role(role)) for role in CONFIGURABLE_MONEY_ROLES},
+        },
+    }
+
+
+@router.put('/metric-visibility', dependencies=[Depends(forbid_demo)])
+async def dashboard_metric_visibility_save(
+    payload: MetricVisibilityPayload,
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    _require_visibility_admin(ctx)
+    portal_account_id = await _require_kpi_portal_account_id(db, ctx)
+    if payload.role not in CONFIGURABLE_MONEY_ROLES:
+        raise HTTPException(status_code=400, detail='Role visibility is not configurable')
+    unknown = sorted(set(payload.visible_codes) - ALL_MONEY_CODES)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f'Unknown money metric codes: {unknown}')
+    visible_codes = sorted({code for code in payload.visible_codes if code in ALL_MONEY_CODES})
+
+    row = (
+        await db.execute(
+            select(PortalMetricVisibility).where(
+                PortalMetricVisibility.portal_account_id == portal_account_id,
+                PortalMetricVisibility.role == payload.role,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        row = PortalMetricVisibility(
+            portal_account_id=portal_account_id,
+            role=payload.role,
+            visible_codes=visible_codes,
+            updated_at=datetime.utcnow(),
+        )
+        db.add(row)
+    else:
+        row.visible_codes = visible_codes
+        row.updated_at = datetime.utcnow()
+    await log_portal_audit(
+        db,
+        actor_user_id=ctx.user_id,
+        portal_account_id=portal_account_id,
+        action='metric_visibility.updated',
+        target_type='role',
+        target_id=payload.role,
+        metadata={'visible_codes': visible_codes},
+    )
+    await db.commit()
+    return {'success': True, 'data': {'role': payload.role, 'visible_codes': visible_codes}}
+
+
 @router.post('/plan/sync', dependencies=[Depends(forbid_demo)])
 async def dashboard_plan_sync(
     x_sync_token: str | None = Header(default=None),
@@ -810,17 +909,20 @@ async def dashboard_bundle(
         staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
     )
+    hidden = hidden_money_codes(ctx)
     if not can_view_financials(ctx):
         return {
             'success': True,
             'data': {
-                'summary': _hide_summary_financials(summary),
+                'summary': _hide_summary_financials(summary, hidden),
                 'revenue_daily': [],
                 'top_services': [],
                 'extra_services': [],
                 'financials_hidden': True,
             },
         }
+    if hidden:
+        summary = _hide_summary_financials(summary, hidden)
     daily = await fetch_revenue_daily(
         db,
         start,

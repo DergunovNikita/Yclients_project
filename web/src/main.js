@@ -488,21 +488,29 @@ function renderCards(target, cards) {
     .join('');
 }
 
+function presentCards(cards) {
+  return cards.filter((card) => card.present !== false);
+}
+
 function renderKpi(summary) {
-  const revenue = summary.revenue || {};
-  const averageCheck = summary.average_check || {};
+  const revenueBlock = summary.revenue;
+  const averageCheckBlock = summary.average_check;
+  const revenue = revenueBlock || {};
+  const averageCheck = averageCheckBlock || {};
   const cards = [
     {
       label: t('dash.cardTotalRevenue'),
       value: formatMoney(revenue.total),
       delta: formatPct(revenue.change_pct),
       deltaValue: revenue.change_pct,
+      present: Boolean(revenueBlock),
     },
     {
       label: t('dash.cardVisitedAppointments'),
       value: formatNumber(revenue.appointments),
       delta: formatPct(revenue.appointments_change_pct),
       deltaValue: revenue.appointments_change_pct,
+      present: Boolean(revenueBlock),
     },
     {
       label: averageCheck.source_status === 'partial'
@@ -511,10 +519,11 @@ function renderKpi(summary) {
       value: formatMoney(averageCheck.total),
       delta: formatPct(averageCheck.total_change_pct),
       deltaValue: averageCheck.total_change_pct,
+      present: Boolean(averageCheckBlock),
     },
   ];
 
-  renderCards(els.kpi, cards);
+  renderCards(els.kpi, presentCards(cards));
 }
 
 function goodsRevenueShare(revenue) {
@@ -524,7 +533,11 @@ function goodsRevenueShare(revenue) {
 }
 
 function renderRevenueMetrics(summary) {
-  const revenue = summary.revenue || {};
+  if (!summary.revenue) {
+    renderCards(els.revenueMetrics, []);
+    return;
+  }
+  const revenue = summary.revenue;
   const cards = [
     {
       label: t('dash.cardServiceRevenue'),
@@ -556,48 +569,58 @@ function renderRevenueMetrics(summary) {
 }
 
 function renderServicesMetrics(summary) {
-  const revenue = summary.revenue || {};
-  const averageCheck = summary.average_check || {};
+  const revenueBlock = summary.revenue;
+  const averageCheckBlock = summary.average_check;
+  const revenue = revenueBlock || {};
+  const averageCheck = averageCheckBlock || {};
+  const revenuePresent = Boolean(revenueBlock);
+  const averageCheckPresent = Boolean(averageCheckBlock);
   const cards = [
     {
       label: t('dash.cardServiceCount'),
       value: formatNumber(revenue.service_count),
       delta: formatPct(revenue.service_count_change_pct),
       deltaValue: revenue.service_count_change_pct,
+      present: revenuePresent,
     },
     {
       label: t('dash.cardServiceAverageCheck'),
       value: formatMoney(averageCheck.services),
       delta: formatPct(averageCheck.services_change_pct),
       deltaValue: averageCheck.services_change_pct,
+      present: averageCheckPresent,
     },
     {
       label: t('dash.cardGoodsCount'),
       value: formatNumber(revenue.goods_count),
       delta: formatPct(revenue.goods_count_change_pct),
       deltaValue: revenue.goods_count_change_pct,
+      present: revenuePresent,
     },
     {
       label: t('dash.cardGoodsAverageCheck'),
       value: formatMoney(averageCheck.goods),
       delta: formatPct(averageCheck.goods_change_pct),
       deltaValue: averageCheck.goods_change_pct,
+      present: averageCheckPresent,
     },
     {
       label: t('dash.cardExtraServiceCount'),
       value: formatNumber(revenue.extra_service_count),
       delta: formatPct(revenue.extra_service_count_change_pct),
       deltaValue: revenue.extra_service_count_change_pct,
+      present: revenuePresent,
     },
     {
       label: t('dash.cardExtraServiceAverageCheck'),
       value: formatMoney(averageCheck.extra_services),
       delta: formatPct(averageCheck.extra_services_change_pct),
       deltaValue: averageCheck.extra_services_change_pct,
+      present: averageCheckPresent,
     },
   ];
 
-  renderCards(els.servicesMetrics, cards);
+  renderCards(els.servicesMetrics, presentCards(cards));
 }
 
 function renderVisitMetrics(summary) {

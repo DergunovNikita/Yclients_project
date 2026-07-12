@@ -41,6 +41,11 @@ const initialPasswordsSection = document.getElementById('initial-passwords-secti
 const initialPasswordsBody = document.getElementById('initial-passwords-body');
 const initialPasswordsSearch = document.getElementById('initial-passwords-search');
 const yclientsCredentialsSection = document.getElementById('yclients-credentials-section');
+const metricVisibilitySection = document.getElementById('metric-visibility-section');
+const metricVisibilityHead = document.getElementById('metric-visibility-head');
+const metricVisibilityBody = document.getElementById('metric-visibility-body');
+const metricVisibilityError = document.getElementById('metric-visibility-error');
+const metricVisibilitySuccess = document.getElementById('metric-visibility-success');
 const yclientsCredentialsBody = document.getElementById('yclients-credentials-body');
 const yclientsCredentialsError = document.getElementById('yclients-credentials-error');
 const yclientsCredentialsForm = document.getElementById('yclients-credentials-form');
@@ -218,6 +223,21 @@ function canManageYclientsCredentials() {
   return (currentUserRole || adminMeta?.role) === 'platform_admin';
 }
 
+const MONEY_METRIC_LABELS = {
+  revenue: () => t('admin.moneyRevenue'),
+  avg_check: () => t('admin.moneyAvgCheck'),
+  cosmo_sum: () => t('admin.moneyCosmoSum'),
+};
+
+function canManageMetricVisibility() {
+  return ['owner', 'platform_admin'].includes(currentUserRole || adminMeta?.role);
+}
+
+function moneyMetricLabel(metric) {
+  const localized = MONEY_METRIC_LABELS[metric.code];
+  return localized ? localized() : metric.label || metric.code;
+}
+
 function isPlatformAdmin() {
   return (currentUserRole || adminMeta?.role) === 'platform_admin';
 }
@@ -291,6 +311,9 @@ function applyAdminMeta() {
   if (yclientsCredentialsSection) {
     yclientsCredentialsSection.hidden = !canManageYclientsCredentials();
   }
+  if (metricVisibilitySection) {
+    metricVisibilitySection.hidden = !canManageMetricVisibility();
+  }
   renderBranchOptions(yclientsCredentialBranchSelect, yclientsCredentialBranchDropdown);
   if (users.length) {
     renderUsers();
@@ -311,7 +334,7 @@ async function loadPortalAccounts() {
 async function reloadTenantScopedAdminData() {
   resetYclientsCredentialForm();
   await loadBranches();
-  await Promise.all([loadUsers(), loadInitialPasswords(), loadYclientsCredentials()]);
+  await Promise.all([loadUsers(), loadInitialPasswords(), loadYclientsCredentials(), loadMetricVisibility()]);
 }
 
 function openCreateModal() {
@@ -782,6 +805,81 @@ async function loadYclientsCredentials() {
   yclientsCredentials = payload.data || [];
   renderYclientsCredentialsTable();
 }
+
+let metricVisibilityData = null;
+
+async function loadMetricVisibility() {
+  if (!metricVisibilitySection) return;
+  if (!canManageMetricVisibility()) {
+    metricVisibilitySection.hidden = true;
+    return;
+  }
+  metricVisibilitySection.hidden = false;
+  const payload = await authFetch('/dashboard/metric-visibility');
+  metricVisibilityData = payload.data || null;
+  renderMetricVisibility();
+}
+
+function renderMetricVisibility() {
+  if (!metricVisibilityData || !metricVisibilityHead || !metricVisibilityBody) return;
+  const metrics = metricVisibilityData.money_metrics || [];
+  const roles = metricVisibilityData.roles || {};
+
+  metricVisibilityHead.innerHTML =
+    `<th>${escapeHtml(t('admin.colRole'))}</th>` +
+    metrics.map((metric) => `<th>${escapeHtml(moneyMetricLabel(metric))}</th>`).join('') +
+    `<th>${escapeHtml(t('admin.colActions'))}</th>`;
+
+  metricVisibilityBody.innerHTML = Object.keys(roles)
+    .map((role) => {
+      const visible = new Set(roles[role] || []);
+      const cells = metrics
+        .map(
+          (metric) =>
+            `<td><label class="admin-checkbox"><input type="checkbox" data-mv-role="${escapeHtml(role)}" ` +
+            `data-mv-code="${escapeHtml(metric.code)}"${visible.has(metric.code) ? ' checked' : ''} /></label></td>`
+        )
+        .join('');
+      return (
+        '<tr>' +
+        `<td>${escapeHtml(ROLE_LABELS[role] || role)}</td>` +
+        cells +
+        `<td><button type="button" class="btn btn--primary" data-mv-save="${escapeHtml(role)}">${escapeHtml(t('admin.save'))}</button></td>` +
+        '</tr>'
+      );
+    })
+    .join('');
+}
+
+async function saveMetricVisibility(role) {
+  if (metricVisibilityError) metricVisibilityError.hidden = true;
+  if (metricVisibilitySuccess) metricVisibilitySuccess.hidden = true;
+  const codes = Array.from(
+    metricVisibilityBody.querySelectorAll(`input[data-mv-role="${role}"]:checked`)
+  ).map((input) => input.dataset.mvCode);
+  try {
+    await authFetch('/dashboard/metric-visibility', {
+      method: 'PUT',
+      body: JSON.stringify({ role, visible_codes: codes }),
+    });
+    if (metricVisibilitySuccess) {
+      metricVisibilitySuccess.textContent = t('admin.metricVisibilitySaved');
+      metricVisibilitySuccess.hidden = false;
+    }
+    await loadMetricVisibility();
+  } catch (error) {
+    if (metricVisibilityError) {
+      metricVisibilityError.textContent = error.message;
+      metricVisibilityError.hidden = false;
+    }
+  }
+}
+
+metricVisibilityBody?.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-mv-save]');
+  if (!button) return;
+  saveMetricVisibility(button.dataset.mvSave);
+});
 
 function resetYclientsCredentialForm() {
   editingYclientsCredentialId = null;
@@ -1266,7 +1364,7 @@ async function init() {
       return;
     }
     await loadBranches();
-    await Promise.all([loadUsers(), loadInitialPasswords(), loadYclientsCredentials()]);
+    await Promise.all([loadUsers(), loadInitialPasswords(), loadYclientsCredentials(), loadMetricVisibility()]);
   } catch (error) {
     if (!hasSessionHint()) {
       logout();

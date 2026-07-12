@@ -2692,3 +2692,32 @@ async def test_forbid_demo_does_not_block_non_demo_owner(auth_db):
         assert logout_all.status_code == 200
 
     app.dependency_overrides.clear()
+
+
+def test_access_context_money_metric_helpers():
+    from auth_scope import (
+        AccessContext,
+        can_view_financials,
+        can_view_money_metric,
+        hidden_money_codes,
+    )
+    from plan_config import ALL_MONEY_CODES
+
+    api_ctx = AccessContext.api_key()
+    assert can_view_financials(api_ctx) is True
+    assert hidden_money_codes(api_ctx) == frozenset()
+
+    manager = AccessContext.from_user(1, 'manager', 1, [1])
+    assert manager.money_metrics == frozenset()
+    assert can_view_financials(manager) is False
+    assert hidden_money_codes(manager) == ALL_MONEY_CODES
+
+    branch_admin = AccessContext.from_user(2, 'branch_admin', 1, [1])
+    assert branch_admin.money_metrics == ALL_MONEY_CODES
+    assert can_view_financials(branch_admin) is True
+
+    partial = AccessContext.from_user(3, 'manager', 1, [1], money_metrics=frozenset({'avg_check'}))
+    assert can_view_money_metric(partial, 'avg_check') is True
+    assert can_view_money_metric(partial, 'revenue') is False
+    assert can_view_financials(partial) is False
+    assert hidden_money_codes(partial) == ALL_MONEY_CODES - {'avg_check'}

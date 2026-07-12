@@ -759,6 +759,26 @@ class PortalBranch(Base):
 PORTAL_ROLES = ('platform_admin', 'owner', 'branch_admin', 'manager', 'viewer')
 
 
+class PortalMetricVisibility(Base):
+    """Per-tenant override of which money metrics a subordinate role may see."""
+
+    __tablename__ = 'portal_metric_visibility'
+    __table_args__ = (
+        Index('uq_portal_metric_visibility_account_role', 'portal_account_id', 'role', unique=True),
+        {'schema': SYSTEM_SCHEMA},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    portal_account_id = Column(
+        Integer,
+        ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    role = Column(String(32), nullable=False)
+    visible_codes = Column(JSON, nullable=False, default=list)
+    updated_at = Column(DateTime, nullable=False)
+
+
 class PortalUser(Base):
     """Product portal user account (login + role-based access)."""
 

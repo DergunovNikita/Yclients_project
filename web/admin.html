@@ -136,6 +136,25 @@
         </table>
       </div>
     </section>
+
+    <section class="admin-card" id="metric-visibility-section" hidden>
+      <div class="admin-card__header admin-card__header--stacked">
+        <div>
+          <h2 data-i18n="admin.metricVisibilityTitle">Видимость показателей</h2>
+          <p class="admin-card__hint" data-i18n="admin.metricVisibilityHint">Выберите, какие денежные показатели видят нижестоящие роли.</p>
+        </div>
+      </div>
+      <div class="alert error" id="metric-visibility-error" hidden></div>
+      <div class="alert success" id="metric-visibility-success" hidden></div>
+      <div class="admin-table-wrap">
+        <table class="admin-table" id="metric-visibility-table">
+          <thead>
+            <tr id="metric-visibility-head"></tr>
+          </thead>
+          <tbody id="metric-visibility-body"></tbody>
+        </table>
+      </div>
+    </section>
   </main>
 
   <div class="admin-modal" id="credentials-modal" hidden>

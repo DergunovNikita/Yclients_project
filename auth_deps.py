@@ -12,7 +12,8 @@ from auth_service import decode_access_token, load_portal_account_branch_ids, lo
 from auth_sessions import ACCESS_COOKIE_NAME, enforce_csrf
 from config import API_KEY, AUTH_REQUIRE_LOGIN, IS_PRODUCTION
 from database import get_async_db
-from models import PortalUser, Staff
+from models import PortalMetricVisibility, PortalUser, Staff
+from plan_config import ALL_MONEY_CODES, CONFIGURABLE_MONEY_ROLES, default_money_codes_for_role
 
 OPEN_PATH_PREFIXES = (
     '/health',
@@ -80,7 +81,34 @@ async def _user_from_token(
             .order_by(Staff.id.asc())
             .limit(1)
         )
-    return AccessContext.from_user(user.id, user.role, user.portal_account_id, branch_ids, staff_id=staff_id)
+    money_metrics = await _resolve_money_metrics(db, user.portal_account_id, user.role)
+    return AccessContext.from_user(
+        user.id,
+        user.role,
+        user.portal_account_id,
+        branch_ids,
+        staff_id=staff_id,
+        money_metrics=money_metrics,
+    )
+
+
+async def _resolve_money_metrics(
+    db: AsyncSession,
+    portal_account_id: int | None,
+    role: str,
+) -> frozenset[str]:
+    """Resolve visible money metrics: tenant config override, else role default."""
+    if role not in CONFIGURABLE_MONEY_ROLES or portal_account_id is None:
+        return default_money_codes_for_role(role)
+    stored = await db.scalar(
+        select(PortalMetricVisibility.visible_codes).where(
+            PortalMetricVisibility.portal_account_id == portal_account_id,
+            PortalMetricVisibility.role == role,
+        )
+    )
+    if stored is None:
+        return default_money_codes_for_role(role)
+    return frozenset(code for code in stored if code in ALL_MONEY_CODES)
 
 
 def _extract_access_token(request: Request, authorization: str | None) -> str | None:
