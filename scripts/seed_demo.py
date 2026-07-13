@@ -19,7 +19,7 @@ from pathlib import Path
 # Allow ``python scripts/seed_demo.py`` in addition to ``python -m scripts.seed_demo``.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sqlalchemy import func, select  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 
 from auth_service import generate_initial_password, hash_password, normalize_email  # noqa: E402
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER  # noqa: E402
@@ -54,12 +54,19 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def _demo_company_ids(db) -> list[int]:
-    rows = db.execute(select(Company.id).where(Company.source_type == DEMO_SOURCE_TYPE)).all()
+def _demo_company_ids(db, account_id: int) -> list[int]:
+    rows = db.execute(
+        select(Company.id)
+        .where(
+            Company.source_type == DEMO_SOURCE_TYPE,
+            (Company.portal_account_id == account_id) | (Company.portal_account_id.is_(None)),
+        )
+        .order_by(Company.id.asc())
+    ).all()
     return [row[0] for row in rows]
 
 
-def generate_demo_data(db, args: argparse.Namespace) -> list[int]:
+def generate_demo_data(db, args: argparse.Namespace, account_id: int) -> list[int]:
     """Create synthetic companies + activity, marking them as demo. Returns their ids.
 
     Companies are inserted with ``source_type='demo'`` in ``seed_companies``' own
@@ -76,6 +83,8 @@ def generate_demo_data(db, args: argparse.Namespace) -> list[int]:
         staff_per_company=args.staff_per_company,
         goods_per_company=args.goods_per_company,
         source_type=DEMO_SOURCE_TYPE,
+        portal_account_id=account_id,
+        negative_ids=True,
     )
     company_ids = [ref.company.id for ref in refs]
 
@@ -86,30 +95,52 @@ def generate_demo_data(db, args: argparse.Namespace) -> list[int]:
         days=args.days,
         appt_min=args.appointments_per_day_min,
         appt_max=args.appointments_per_day_max,
+        negative_ids=True,
     )
     return company_ids
 
 
 def get_or_create_demo_account(db) -> PortalAccount:
-    account = db.execute(select(PortalAccount).where(PortalAccount.is_demo.is_(True))).scalar_one_or_none()
+    account = (
+        db.execute(
+            select(PortalAccount)
+            .where(PortalAccount.is_demo.is_(True))
+            .order_by(PortalAccount.id.asc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
     if account is None:
         account = PortalAccount(label=DEMO_ACCOUNT_LABEL, is_demo=True, created_at=datetime.utcnow())
         db.add(account)
         db.flush()
+    else:
+        account.label = account.label or DEMO_ACCOUNT_LABEL
+        account.is_demo = True
     return account
 
 
 def ensure_branches(db, account_id: int, company_ids: list[int]) -> None:
     """Link each demo company to the demo account (UNIQUE on company_id)."""
-    linked = {
-        row[0]
-        for row in db.execute(
-            select(PortalBranch.company_id).where(PortalBranch.company_id.in_(company_ids))
-        ).all()
+    companies = db.execute(select(Company).where(Company.id.in_(company_ids))).scalars().all()
+    for company in companies:
+        if company.source_type != DEMO_SOURCE_TYPE:
+            raise RuntimeError(f'Company {company.id} is not a demo company')
+        if company.portal_account_id not in (None, account_id):
+            raise RuntimeError(f'Demo company {company.id} is linked to another tenant')
+        company.portal_account_id = account_id
+
+    branches = {
+        row.company_id: row
+        for row in db.execute(select(PortalBranch).where(PortalBranch.company_id.in_(company_ids))).scalars().all()
     }
     for company_id in company_ids:
-        if company_id not in linked:
+        branch = branches.get(company_id)
+        if branch is None:
             db.add(PortalBranch(portal_account_id=account_id, company_id=company_id))
+        elif branch.portal_account_id != account_id:
+            raise RuntimeError(f'Demo company {company_id} already belongs to another tenant')
 
 
 def ensure_demo_user(db, account_id: int) -> PortalUser:
@@ -131,6 +162,8 @@ def ensure_demo_user(db, account_id: int) -> PortalUser:
         )
         db.add(user)
     else:
+        if not user.is_demo:
+            raise RuntimeError(f'Cannot reuse non-demo portal user as demo owner: {email}')
         user.portal_account_id = account_id
         user.role = 'owner'
         user.is_active = True
@@ -149,24 +182,16 @@ def main() -> int:
 
     db = database.get_db()
     try:
-        real_companies = db.execute(
-            select(func.count(Company.id)).where(Company.source_type != DEMO_SOURCE_TYPE)
-        ).scalar()
-        if real_companies:
-            print(
-                f'Refusing: database has {real_companies} non-demo companies. '
-                'seed_demo is only safe on a demo-dedicated database.'
-            )
-            return 1
+        account = get_or_create_demo_account(db)
+        db.flush()
 
-        company_ids = _demo_company_ids(db)
+        company_ids = _demo_company_ids(db, account.id)
         if company_ids:
             print(f'Demo data already present ({len(company_ids)} branches) — reusing.')
         else:
             print(f'Generating demo data: companies={args.companies}, days={args.days}')
-            company_ids = generate_demo_data(db, args)
+            company_ids = generate_demo_data(db, args, account.id)
 
-        account = get_or_create_demo_account(db)
         ensure_branches(db, account.id, company_ids)
         user = ensure_demo_user(db, account.id)
         db.commit()

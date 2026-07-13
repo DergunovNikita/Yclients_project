@@ -120,29 +120,22 @@ curl http://127.0.0.1:8000/health
 демо-баннером; любой запрос на запись под демо-сессией возвращает `403`. Если стенд
 не провижинен, `/auth/demo-login` отвечает `503` — кнопка показывает ошибку.
 
-Демо живёт в **отдельной, выделенной под демо базе**: `seed_demo` намеренно отказывается
-работать, если в базе есть хоть одна не-демо компания (иначе id-схема генератора
-переполняет int32 на реальных id, а демо-данные попадают в боевую аналитику). Поэтому
-рядом с продом демо разворачивают **отдельным стеком**, а не в боевой БД.
+Демо живёт в **основной базе как отдельный portal tenant**:
+`PortalAccount(is_demo=True)` с синтетическими филиалами `source_type='demo'`.
+Это не отдельный сайт и не отдельная БД. Кнопка «View demo» на основной странице
+входа делает same-origin `POST /auth/demo-login`; если демо-тенант ещё не создан,
+endpoint отвечает `503`.
 
-### Отдельный демо-инстанс
+### Запуск в основной БД
 
-Изолированный стек (свой Postgres + API) из `docker-compose.demo.yml`:
+Создать или переиспользовать встроенный read-only демо-тенант:
 
 ```bash
-cp .env.demo.example .env.demo   # затем задать секреты внутри (.env.demo в .gitignore)
-docker compose -f docker-compose.demo.yml --env-file .env.demo run --rm bootstrap-db
-docker compose -f docker-compose.demo.yml --env-file .env.demo run --rm seed-demo
-docker compose -f docker-compose.demo.yml --env-file .env.demo up -d api
+python -m scripts.seed_demo
 ```
 
-Демо-API поднимется на `127.0.0.1:${DEMO_API_PORT:-8001}`. Направьте демо-SPA
-(`VITE_API_BASE`) или кнопку «View demo» на этот origin.
-
-- `bootstrap-db` создаёт текущую схему на пустой БД и делает Alembic `stamp head`
-  (обычный `alembic upgrade head` с нуля здесь не проходит: baseline `0001` строит
-  таблицы по текущим моделям, и поздние `add_column`-миграции конфликтуют).
-- `seed-demo` создаёт демо-тенант и обновляет аналитические views.
+Скрипт можно запускать рядом с реальными tenant'ами: он создаёт только demo account,
+demo owner и demo companies. Реальные компании не удаляются и не перезаписываются.
 
 ### Что создаётся
 
@@ -155,26 +148,11 @@ docker compose -f docker-compose.demo.yml --env-file .env.demo up -d api
 `--appointments-per-day-min/--appointments-per-day-max`, `--skip-refresh-views`.
 Скрипт идемпотентен: повторный запуск переиспользует стенд и **не** перегенерирует данные.
 
-### Локально (одна dev-БД)
-
-На пустой локальной БД без Docker:
-
-```bash
-python -m scripts.bootstrap_db          # схема + stamp head (для свежей БД)
-python -m scripts.seed_demo             # демо-тенант + views
-```
-
 ### Свежие даты (пересев)
 
 `seed_demo` при наличии демо-данных пропускает генерацию, поэтому повторный запуск
-**не** сдвигает даты. Чтобы обновить — пересоздайте демо-БД и пересейте:
-
-```bash
-docker compose -f docker-compose.demo.yml --env-file .env.demo down -v
-docker compose -f docker-compose.demo.yml --env-file .env.demo run --rm bootstrap-db
-docker compose -f docker-compose.demo.yml --env-file .env.demo run --rm seed-demo
-docker compose -f docker-compose.demo.yml --env-file .env.demo up -d api
-```
+**не** сдвигает даты. Чтобы обновить, удалите старые demo data в отдельной
+maintenance-задаче и затем снова выполните `python -m scripts.seed_demo`.
 
 ## Тесты
 

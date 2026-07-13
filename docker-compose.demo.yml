@@ -1,8 +1,15 @@
-# Isolated demo stack: a dedicated Postgres + API seeded with synthetic data.
+# Legacy isolated demo stack.
 #
-# Runs the SAME app image against a demo-only database, so seed_demo works
-# cleanly (no real companies -> no preflight refusal, no int32 id overflow) and
-# the production database/analytics stay untouched.
+# The default demo mode is now an embedded PortalAccount(is_demo=True) in the
+# main database, provisioned with:
+#
+#   python -m scripts.seed_demo
+#
+# Keep this compose file only for occasional local experiments that require a
+# disposable database/API. It is not needed for the production "View demo" flow.
+#
+# Runs the SAME app image against a demo-only database when a disposable
+# standalone sandbox is useful.
 #
 #   cp .env.demo.example .env.demo            # then set the secrets inside
 #   docker compose -f docker-compose.demo.yml --env-file .env.demo run --rm bootstrap-db

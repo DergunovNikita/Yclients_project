@@ -130,6 +130,18 @@ def next_pk(db, model, column_name: str = "id", start_from: int = 1) -> int:
     return int(max_value) + 1
 
 
+def next_negative_pk(db, model, column_name: str = "id") -> int:
+    column = getattr(model, column_name)
+    min_value = db.query(func.min(column)).scalar()
+    if min_value is None or int(min_value) >= 0:
+        return -1
+    return int(min_value) - 1
+
+
+def advance_pk(value: int, *, negative: bool = False) -> int:
+    return value - 1 if negative else value + 1
+
+
 def seed_companies(
     db,
     rng: random.Random,
@@ -138,45 +150,79 @@ def seed_companies(
     staff_per_company: int,
     goods_per_company: int,
     source_type: str = "yclients",
+    portal_account_id: int | None = None,
+    negative_ids: bool = False,
+    negative_catalog_ids: bool = False,
 ) -> list[CompanyRefs]:
-    group_id = next_pk(db, Group, "id", 1)
-    group = Group(id=group_id, title=f"Synthetic Group {group_id}", access={"mode": "fake"})
+    negative_catalog_ids = negative_catalog_ids or negative_ids
+    group_id = next_negative_pk(db, Group, "id") if negative_ids else next_pk(db, Group, "id", 1)
+    group = Group(
+        id=group_id,
+        portal_account_id=portal_account_id,
+        external_id=1,
+        title=f"Synthetic Group {group_id}",
+        access={"mode": "fake"},
+    )
     db.add(group)
     db.flush()
 
     refs: list[CompanyRefs] = []
-    company_base_id = max(1000, next_pk(db, Company, "id", 1000))
+    company_id = next_negative_pk(db, Company, "id") if negative_ids else max(1000, next_pk(db, Company, "id", 1000))
+    if negative_catalog_ids:
+        service_cat_id = next_negative_pk(db, ServiceCategory, "id")
+        service_id = next_negative_pk(db, Service, "id")
+        position_id = next_negative_pk(db, StaffPosition, "id")
+        account_id = next_negative_pk(db, Account, "id")
+        good_category_id = next_negative_pk(db, GoodCategory, "id")
+        storage_id = next_negative_pk(db, Storage, "id")
+        good_id = next_negative_pk(db, Good, "good_id")
+    else:
+        service_cat_id = next_pk(db, ServiceCategory, "id", 1)
+        service_id = next_pk(db, Service, "id", 1)
+        position_id = next_pk(db, StaffPosition, "id", 1)
+        account_id = next_pk(db, Account, "id", 1)
+        good_category_id = next_pk(db, GoodCategory, "id", 1)
+        storage_id = next_pk(db, Storage, "id", 1)
+        good_id = next_pk(db, Good, "good_id", 1)
+    staff_id = next_negative_pk(db, Staff, "id") if negative_ids else next_pk(db, Staff, "id", 1)
+    client_id = next_negative_pk(db, Client, "id") if negative_ids else next_pk(db, Client, "id", 1)
     shared_service_categories = ["Hair", "Nails", "Cosmetology", "Body"]
     shared_positions = ["Master", "Senior Master", "Top Master", "Administrator"]
 
     for idx in range(companies_count):
-        company_id = company_base_id + idx
-        company = Company(id=company_id, title=f"Demo Branch {idx + 1}", group_id=group.id, source_type=source_type)
+        current_company_id = company_id
+        company_id = advance_pk(company_id, negative=negative_ids)
+        external_company_id = idx + 1
+        company = Company(
+            id=current_company_id,
+            portal_account_id=portal_account_id,
+            external_id=external_company_id,
+            title=f"Demo Branch {idx + 1}",
+            group_id=group.id,
+            source_type=source_type,
+        )
         db.add(company)
         db.flush()
 
         categories: list[ServiceCategory] = []
-        service_cat_base = max(company_id * 10, next_pk(db, ServiceCategory, "id", company_id * 10))
         for c_idx, category_name in enumerate(shared_service_categories):
-            cat_id = service_cat_base + c_idx
             cat = ServiceCategory(
-                id=cat_id,
+                id=service_cat_id,
                 title=category_name,
                 weight=c_idx + 1,
-                api_id=f"demo-cat-{cat_id}",
+                api_id=f"demo-cat-{company.id}-{c_idx + 1}",
                 company_id=company.id,
             )
             db.add(cat)
             categories.append(cat)
+            service_cat_id = advance_pk(service_cat_id, negative=negative_catalog_ids)
 
         services: list[Service] = []
-        service_base = max(company_id * 100, next_pk(db, Service, "id", company_id * 100))
         for s_idx in range(max(8, len(SERVICE_NAMES))):
-            srv_id = service_base + s_idx
             category = categories[s_idx % len(categories)]
             duration = rng.choice([1800, 2700, 3600, 5400])
             service = Service(
-                id=srv_id,
+                id=service_id,
                 title=f"{SERVICE_NAMES[s_idx % len(SERVICE_NAMES)]} #{s_idx + 1}",
                 price_min=round(rng.uniform(20, 120), 2),
                 duration=duration,
@@ -185,22 +231,24 @@ def seed_companies(
             )
             db.add(service)
             services.append(service)
+            service_id = advance_pk(service_id, negative=negative_catalog_ids)
 
-        position_base = max(company_id * 10, next_pk(db, StaffPosition, "id", company_id * 10))
         for p_idx, title in enumerate(shared_positions):
             db.add(
                 StaffPosition(
-                    id=position_base + p_idx,
+                    id=position_id,
                     title=title,
                     company_id=company.id,
                 )
             )
+            position_id = advance_pk(position_id, negative=negative_catalog_ids)
 
         staff: list[Staff] = []
-        staff_base = max(company_id * 1000, next_pk(db, Staff, "id", company_id * 1000))
         for st_idx in range(staff_per_company):
             staff_member = Staff(
-                id=staff_base + st_idx,
+                id=staff_id,
+                external_id=st_idx + 1,
+                source_type=source_type,
                 name=pick_name(rng),
                 specialization=rng.choice(["Hair", "Nails", "Cosmetology", "Massage"]),
                 position=rng.choice(shared_positions),
@@ -211,17 +259,19 @@ def seed_companies(
             )
             db.add(staff_member)
             staff.append(staff_member)
+            staff_id = advance_pk(staff_id, negative=negative_ids)
 
         clients: list[Client] = []
-        client_base = max(company_id * 100000, next_pk(db, Client, "id", company_id * 100000))
         for cl_idx in range(clients_per_company):
-            client_id = client_base + cl_idx
+            external_client_id = cl_idx + 1
             years = rng.randint(18, 65)
             birthday = date.today() - timedelta(days=years * 365 + rng.randint(0, 364))
             visits = rng.randint(0, 18)
             last_visit = date.today() - timedelta(days=rng.randint(0, 90))
             client = Client(
                 id=client_id,
+                external_id=external_client_id,
+                source_type=source_type,
                 name=pick_name(rng),
                 phone=f"+7900{company_id % 100:02d}{cl_idx:06d}"[:12],
                 email=f"client{company_id}_{cl_idx}@demo.local",
@@ -233,12 +283,12 @@ def seed_companies(
             )
             db.add(client)
             clients.append(client)
+            client_id = advance_pk(client_id, negative=negative_ids)
 
         accounts: list[Account] = []
-        account_base = max(company_id * 10, next_pk(db, Account, "id", company_id * 10))
         for acc_idx, acc_title in enumerate(["Main Cash", "Card", "Online"]):
             account = Account(
-                id=account_base + acc_idx,
+                id=account_id,
                 title=acc_title,
                 type=acc_idx + 1,
                 comment="synthetic",
@@ -246,23 +296,25 @@ def seed_companies(
             )
             db.add(account)
             accounts.append(account)
+            account_id = advance_pk(account_id, negative=negative_catalog_ids)
 
-        good_category_base = max(company_id * 100, next_pk(db, GoodCategory, "id", company_id * 100))
+        company_good_category_ids: list[int] = []
         for s_idx, storage_title in enumerate(["Retail", "Care"]):
+            company_good_category_ids.append(good_category_id)
             db.add(
                 GoodCategory(
-                    id=good_category_base + s_idx,
+                    id=good_category_id,
                     title=storage_title,
                     parent_category_id=None,
                     company_id=company.id,
                 )
             )
+            good_category_id = advance_pk(good_category_id, negative=negative_catalog_ids)
 
         storages: list[Storage] = []
-        storage_base = max(company_id * 10, next_pk(db, Storage, "id", company_id * 10))
         for s_idx, storage_title in enumerate(["Main Storage", "Retail Shelf"]):
             storage = Storage(
-                id=storage_base + s_idx,
+                id=storage_id,
                 title=storage_title,
                 for_services=True,
                 for_sale=True,
@@ -271,23 +323,24 @@ def seed_companies(
             )
             db.add(storage)
             storages.append(storage)
+            storage_id = advance_pk(storage_id, negative=negative_catalog_ids)
 
         goods: list[Good] = []
-        good_base = max(company_id * 10000, next_pk(db, Good, "good_id", company_id * 10000))
         for g_idx in range(goods_per_company):
             good = Good(
-                good_id=good_base + g_idx,
+                good_id=good_id,
                 title=f"{GOOD_NAMES[g_idx % len(GOOD_NAMES)]} #{g_idx + 1}",
                 cost=round(rng.uniform(5, 60), 2),
                 actual_cost=round(rng.uniform(4, 50), 2),
                 barcode=f"{company_id}{g_idx:08d}"[:13],
                 unit_short_title=rng.choice(["pcs", "ml", "g"]),
-                category_id=good_category_base + (g_idx % 2),
+                category_id=company_good_category_ids[g_idx % len(company_good_category_ids)],
                 last_change_date=datetime.now() - timedelta(days=rng.randint(0, 45)),
                 company_id=company.id,
             )
             db.add(good)
             goods.append(good)
+            good_id = advance_pk(good_id, negative=negative_catalog_ids)
 
         refs.append(
             CompanyRefs(
@@ -312,13 +365,26 @@ def seed_activity(
     days: int,
     appt_min: int,
     appt_max: int,
+    negative_ids: bool = False,
 ) -> None:
     start = date.today() - timedelta(days=days)
     end = date.today()
-    appointment_id = next_pk(db, Appointment, "id", 1)
-    financial_id = next_pk(db, FinancialTransaction, "id", 1)
-    goods_tx_id = next_pk(db, GoodTransaction, "id", 1)
-    comment_id = next_pk(db, Comment, "id", 1)
+    appointment_id = next_negative_pk(db, Appointment, "id") if negative_ids else next_pk(db, Appointment, "id", 1)
+    transaction_id = next_negative_pk(db, Transaction, "id") if negative_ids else next_pk(db, Transaction, "id", 1)
+    financial_id = (
+        next_negative_pk(db, FinancialTransaction, "id")
+        if negative_ids
+        else next_pk(db, FinancialTransaction, "id", 1)
+    )
+    goods_tx_id = (
+        next_negative_pk(db, GoodTransaction, "id")
+        if negative_ids
+        else next_pk(db, GoodTransaction, "id", 1)
+    )
+    comment_id = next_negative_pk(db, Comment, "id") if negative_ids else next_pk(db, Comment, "id", 1)
+    staff_schedule_id = (
+        next_negative_pk(db, StaffSchedule, "id") if negative_ids else next_pk(db, StaffSchedule, "id", 1)
+    )
 
     for company_ref in refs:
         company = company_ref.company
@@ -328,6 +394,11 @@ def seed_activity(
         goods = company_ref.goods
         account_ids = [item.id for item in company_ref.accounts]
         storage_ids = [item.id for item in company_ref.storages]
+        source_type = company.source_type or "yclients"
+        appointment_external_id = 1
+        financial_external_id = 1
+        goods_tx_external_id = 1
+        comment_external_id = 1
 
         day = start
         while day <= end:
@@ -343,6 +414,8 @@ def seed_activity(
 
                 appointment = Appointment(
                     id=appointment_id,
+                    external_id=appointment_external_id,
+                    source_type=source_type,
                     company_id=company.id,
                     staff_id=master.id,
                     client_id=client.id,
@@ -354,6 +427,7 @@ def seed_activity(
                     comment=None if rng.random() < 0.7 else "synthetic appointment",
                 )
                 db.add(appointment)
+                current_appointment_id = appointment.id
 
                 visit_total = 0.0
                 for _tx in range(rng.randint(1, 3)):
@@ -362,7 +436,8 @@ def seed_activity(
                     first_cost = round(cost * rng.uniform(1.05, 1.2), 2)
                     db.add(
                         Transaction(
-                            appointment_id=appointment.id,
+                            id=transaction_id,
+                            appointment_id=current_appointment_id,
                             service_id=srv.id,
                             service_title=srv.title,
                             cost=cost,
@@ -371,12 +446,15 @@ def seed_activity(
                             company_id=company.id,
                         )
                     )
+                    transaction_id = advance_pk(transaction_id, negative=negative_ids)
                     visit_total += cost
 
                 db.add(
                     FinancialTransaction(
                         id=financial_id,
-                        document_id=appointment.id,
+                        external_id=financial_external_id,
+                        source_type=source_type,
+                        document_id=current_appointment_id,
                         expense_id=None,
                         date=dt + timedelta(minutes=duration // 60),
                         amount=round(visit_total, 2) if attendance > 0 else 0.0,
@@ -384,14 +462,15 @@ def seed_activity(
                         account_id=rng.choice(account_ids),
                         client_id=client.id,
                         master_id=master.id,
-                        record_id=appointment.id,
-                        visit_id=appointment.id,
-                        sold_item_id=appointment.id,
+                        record_id=current_appointment_id,
+                        visit_id=current_appointment_id,
+                        sold_item_id=current_appointment_id,
                         sold_item_type="service",
                         company_id=company.id,
                     )
                 )
-                financial_id += 1
+                financial_id = advance_pk(financial_id, negative=negative_ids)
+                financial_external_id += 1
 
                 if rng.random() < 0.35:
                     good = rng.choice(goods)
@@ -400,6 +479,8 @@ def seed_activity(
                     db.add(
                         GoodTransaction(
                             id=goods_tx_id,
+                            external_id=goods_tx_external_id,
+                            source_type=source_type,
                             document_id=appointment.id,
                             type_id=1,
                             good_id=good.good_id,
@@ -413,12 +494,15 @@ def seed_activity(
                             company_id=company.id,
                         )
                     )
-                    goods_tx_id += 1
+                    goods_tx_id = advance_pk(goods_tx_id, negative=negative_ids)
+                    goods_tx_external_id += 1
 
                 if attendance > 0 and rng.random() < 0.25:
                     db.add(
                         Comment(
                             id=comment_id,
+                            external_id=comment_external_id,
+                            source_type=source_type,
                             type="review",
                             master_id=master.id,
                             text="Synthetic feedback",
@@ -430,9 +514,11 @@ def seed_activity(
                             company_id=company.id,
                         )
                     )
-                    comment_id += 1
+                    comment_id = advance_pk(comment_id, negative=negative_ids)
+                    comment_external_id += 1
 
-                appointment_id += 1
+                appointment_id = advance_pk(appointment_id, negative=negative_ids)
+                appointment_external_id += 1
 
             for staff_member in staff:
                 slot_start = datetime.combine(day, time(9, 0))
@@ -440,6 +526,7 @@ def seed_activity(
                     slot_end = slot_start + timedelta(minutes=30)
                     db.add(
                         StaffSchedule(
+                            id=staff_schedule_id,
                             staff_id=staff_member.id,
                             date=day,
                             slot_from=slot_start.time(),
@@ -447,6 +534,7 @@ def seed_activity(
                             company_id=company.id,
                         )
                     )
+                    staff_schedule_id = advance_pk(staff_schedule_id, negative=negative_ids)
                     slot_start = slot_end
 
             day += timedelta(days=1)
