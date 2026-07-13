@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dashboard_service import (
     COMPLETED_ATTENDANCE,
+    SERVICE_SOLD_ITEM_TYPE,
     _business_staff_id_condition,
     business_appointment_condition,
     financial_appointment_match_condition,
@@ -632,6 +633,17 @@ def _appointment_conditions(
     return conditions
 
 
+def _paid_service_transaction_condition(start: date, end: date):
+    start_at = datetime.combine(start, datetime.min.time())
+    end_at = datetime.combine(end + timedelta(days=1), datetime.min.time())
+    return and_(
+        FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
+        FinancialTransaction.amount > 0,
+        FinancialTransaction.date >= start_at,
+        FinancialTransaction.date < end_at,
+    )
+
+
 def _period_key(value: date | datetime | None, granularity: str) -> str:
     if value is None:
         return ''
@@ -1116,6 +1128,7 @@ async def _staff_rows(
         .where(and_(*_appointment_conditions(
             start, end, company_id, staff_id, attended_only=True, allowed_company_ids=allowed_company_ids
         )))
+        .where(_paid_service_transaction_condition(start, end))
         .group_by(Appointment.staff_id)
     )
     appt_rows = (await db.execute(appt_stmt)).all()
@@ -1206,7 +1219,15 @@ async def _clients_rows(
             Appointment.client_id.label('client_id'),
             func.count(func.distinct(Appointment.id)).label('visits'),
             func.max(Appointment.date).label('last_visit'),
-            func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (_paid_service_transaction_condition(start, end), FinancialTransaction.amount),
+                        else_=0.0,
+                    )
+                ),
+                0.0,
+            ).label('revenue'),
         )
         .outerjoin(FinancialTransaction, financial_appointment_match_condition())
         .where(and_(*_appointment_conditions(

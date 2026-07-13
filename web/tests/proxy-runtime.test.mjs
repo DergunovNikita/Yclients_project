@@ -191,6 +191,26 @@ test('forwardedHeaders strips sensitive and hop-by-hop browser headers', () => {
   });
 });
 
+test('forwardedHeaders rewrites trusted client IP headers from the proxy socket peer', () => {
+  const req = {
+    headers: {
+      accept: 'application/json',
+      'x-forwarded-for': '203.0.113.10',
+      'x-real-ip': '203.0.113.11',
+    },
+    socket: { remoteAddress: '198.51.100.42' },
+  };
+
+  for (const proxy of [webProxy, rootProxy]) {
+    const headers = proxy.forwardedHeaders(req);
+    assert.equal(headers.accept, 'application/json');
+    assert.equal(headers['x-forwarded-for'], '198.51.100.42');
+    assert.equal(headers['x-real-ip'], '198.51.100.42');
+    assert.notEqual(headers['x-forwarded-for'], '203.0.113.10');
+    assert.notEqual(headers['x-real-ip'], '203.0.113.11');
+  }
+});
+
 test('proxyToVm forwards only allowlisted request headers', async () => {
   const originalFetch = globalThis.fetch;
   let forwarded;
@@ -269,6 +289,10 @@ test('catch-all proxy enforces dashboard and auth route allowlists', () => {
     const dashboard = buildWebProxyTarget(requestStub('GET', {}, '/api/dashboard/branches?company_id=1'));
     assert.equal(dashboard.ok, true);
     assert.equal(dashboard.target.href, 'https://vm.example.test/dashboard/branches?company_id=1');
+
+    const metricVisibility = buildWebProxyTarget(requestStub('PUT', {}, '/api/dashboard/metric-visibility'));
+    assert.equal(metricVisibility.ok, true);
+    assert.equal(metricVisibility.target.href, 'https://vm.example.test/dashboard/metric-visibility');
 
     const auth = buildRootProxyTarget(requestStub('POST', {}, '/api/auth/admin/users'));
     assert.equal(auth.ok, true);

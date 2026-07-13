@@ -1,7 +1,10 @@
 from datetime import date, datetime
+from contextlib import contextmanager
 
-from sqlalchemy import create_engine
+import pytest
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from models import (
     Base,
@@ -17,6 +20,7 @@ from models import (
     ServiceCategoryCatalog,
     Staff,
     StaffSchedule,
+    SyncState,
     SyncSourceState,
     Transaction,
 )
@@ -25,12 +29,14 @@ from sync_pipeline import (
     execute_sync,
     full_sync_start_date,
     purge_full_refresh_window,
-    sync_clients,
     sync_financial_transactions,
+    sync_comments,
+    sync_clients,
     sync_goods_transactions,
     sync_records,
     sync_services,
     sync_staff,
+    transactional_state_key,
 )
 from yclients_credentials import YClientsCredentialValue
 
@@ -86,6 +92,14 @@ class FakeRecordsAPI:
         return self._records
 
 
+class FakeCommentsAPI:
+    def __init__(self, comments):
+        self._comments = comments
+
+    def get_comments(self, company_id, start_date=None, end_date=None):
+        return self._comments
+
+
 class FakeSchedulesAPI:
     def __init__(self, schedules):
         self._schedules = schedules
@@ -110,10 +124,272 @@ class FakeSyncAPI:
         return [{'id': 1, 'title': 'G1', 'companies': [{'id': 10, 'title': 'Salon'}]}]
 
 
+SYNC_STEP_FUNCTIONS = (
+    'sync_groups_and_companies',
+    'sync_service_categories',
+    'sync_services',
+    'sync_positions',
+    'sync_staff',
+    'sync_clients',
+    'sync_accounts',
+    'sync_storages',
+    'sync_good_categories',
+    'sync_goods',
+    'sync_records',
+    'sync_financial_transactions',
+    'sync_goods_transactions',
+    'sync_comments',
+    'sync_staff_schedules',
+    'sync_analytics_overall',
+    'sync_analytics_daily_charts',
+    'sync_analytics_sources_and_statuses',
+    'sync_z_report',
+)
+
+
+def patch_execute_sync_dependencies(monkeypatch, db, credential, *, purge_result=True):
+    monkeypatch.setattr(sync_pipeline, 'init_database', lambda *_args, **_kwargs: FakeSyncDatabase(db))
+    monkeypatch.setattr(sync_pipeline, 'load_active_credentials_sync', lambda *_args, **_kwargs: [credential])
+    monkeypatch.setattr(sync_pipeline, '_build_api_for_credential', lambda _credential: FakeSyncAPI())
+    monkeypatch.setattr(sync_pipeline, 'mark_credential_success_sync', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sync_pipeline, 'mark_credential_failure_sync', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sync_pipeline, 'purge_full_refresh_window', lambda *_args, **_kwargs: purge_result)
+    for name in SYNC_STEP_FUNCTIONS:
+        monkeypatch.setattr(sync_pipeline, name, lambda *_args, **_kwargs: True)
+
+
+@contextmanager
+def sqlite_session_with_system(tables):
+    engine = create_engine(
+        'sqlite+pysqlite:///:memory:',
+        future=True,
+        connect_args={'check_same_thread': False},
+        poolclass=StaticPool,
+    )
+    with engine.begin() as conn:
+        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
+    Base.metadata.create_all(engine, tables=tables)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        yield db
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_full_sync_start_date_uses_history_start_when_sync_days_is_unlimited(monkeypatch):
     monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
     monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
     assert full_sync_start_date(date(2026, 6, 28)) == date(2000, 1, 1)
+
+
+TRANSACTIONAL_WINDOW_TABLES = [
+    Group.__table__,
+    Company.__table__,
+    Appointment.__table__,
+    FinancialTransaction.__table__,
+    GoodTransaction.__table__,
+    Comment.__table__,
+    SyncState.__table__,
+]
+
+
+def test_company_window_uses_scoped_checkpoint_first(monkeypatch):
+    monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2026, 1, 1))
+    monkeypatch.setattr(sync_pipeline, 'SYNC_INCREMENTAL', True)
+    monkeypatch.setattr(sync_pipeline, 'SYNC_LOOKBACK_DAYS', 2)
+
+    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.add(Appointment(id=1, company_id=1, date=date(2026, 6, 20)))
+        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-30'))
+        db.add(SyncState(key=transactional_state_key(1), value='2026-06-20'))
+        db.commit()
+
+        assert sync_pipeline.resolve_company_sync_window(db, date(2026, 7, 1), 'incremental', 1) == (
+            date(2026, 6, 18),
+            'incremental',
+        )
+
+
+def test_company_window_falls_back_to_global_for_existing_transactional_company(monkeypatch):
+    monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2026, 1, 1))
+    monkeypatch.setattr(sync_pipeline, 'SYNC_INCREMENTAL', True)
+    monkeypatch.setattr(sync_pipeline, 'SYNC_LOOKBACK_DAYS', 2)
+
+    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.add(Appointment(id=1, company_id=1, date=date(2026, 6, 20)))
+        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-30'))
+        db.commit()
+
+        assert sync_pipeline.resolve_company_sync_window(db, date(2026, 7, 1), 'incremental', 1) == (
+            date(2026, 6, 28),
+            'incremental',
+        )
+
+
+def test_company_window_ignores_global_for_new_company_without_transactional_rows(monkeypatch):
+    monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2026, 1, 1))
+    monkeypatch.setattr(sync_pipeline, 'SYNC_INCREMENTAL', True)
+    monkeypatch.setattr(sync_pipeline, 'SYNC_LOOKBACK_DAYS', 2)
+
+    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-30'))
+        db.commit()
+
+        assert sync_pipeline.resolve_company_sync_window(db, date(2026, 7, 1), 'incremental', 1) == (
+            date(2026, 1, 1),
+            'full',
+        )
+
+
+@pytest.mark.parametrize(
+    'row',
+    [
+        Appointment(id=1, company_id=1, date=date(2026, 6, 20)),
+        FinancialTransaction(id=1, company_id=1, date=datetime(2026, 6, 20, 12, 0)),
+        GoodTransaction(id=1, company_id=1, date=datetime(2026, 6, 20, 12, 0)),
+        Comment(id=1, company_id=1, date=datetime(2026, 6, 20, 12, 0)),
+    ],
+)
+def test_company_has_transactional_rows_detects_existing_sources(row):
+    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.add(row)
+        db.commit()
+
+        assert sync_pipeline.company_has_transactional_rows(db, 1) is True
+
+
+def test_execute_sync_updates_company_scoped_checkpoint(monkeypatch):
+    with sqlite_session_with_system([Group.__table__, Company.__table__, SyncState.__table__]) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.commit()
+
+        credential = YClientsCredentialValue(
+            id=11,
+            title='Tenant credential',
+            partner_token='partner',
+            login='login',
+            password='password',
+            company_ids=(1,),
+            portal_account_id=7,
+        )
+        patch_execute_sync_dependencies(monkeypatch, db, credential)
+
+        result = execute_sync(mode='incremental', end_date=date(2026, 6, 30), portal_account_id=7)
+
+        assert result['success'] is True
+        assert result['mode'] == 'full'
+        assert result['window_start'] == sync_pipeline.full_sync_start_date(date(2026, 6, 30)).isoformat()
+        assert db.get(SyncState, sync_pipeline.TRANSACTIONAL_STATE_KEY) is None
+        assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
+
+
+def test_execute_sync_uses_global_checkpoint_for_existing_company_without_purge(monkeypatch):
+    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.add(Appointment(id=1, company_id=1, date=date(2026, 6, 20)))
+        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-28'))
+        db.commit()
+
+        credential = YClientsCredentialValue(
+            id=11,
+            title='Tenant credential',
+            partner_token='partner',
+            login='login',
+            password='password',
+            company_ids=(1,),
+            portal_account_id=7,
+        )
+        purge_calls = []
+        patch_execute_sync_dependencies(monkeypatch, db, credential)
+        monkeypatch.setattr(
+            sync_pipeline,
+            'purge_full_refresh_window',
+            lambda *_args, **_kwargs: purge_calls.append(_args) or True,
+        )
+
+        result = execute_sync(mode='incremental', end_date=date(2026, 6, 30), portal_account_id=7)
+
+        assert result['success'] is True
+        assert result['mode'] == 'incremental'
+        assert result['window_start'] == '2026-06-26'
+        assert purge_calls == []
+        assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
+
+
+def test_execute_sync_does_not_checkpoint_when_full_cleanup_fails(monkeypatch):
+    with sqlite_session_with_system([Group.__table__, Company.__table__, SyncState.__table__]) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.commit()
+
+        credential = YClientsCredentialValue(
+            id=11,
+            title='Tenant credential',
+            partner_token='partner',
+            login='login',
+            password='password',
+            company_ids=(1,),
+            portal_account_id=7,
+        )
+        patch_execute_sync_dependencies(monkeypatch, db, credential, purge_result=False)
+        skipped_calls = []
+        monkeypatch.setattr(sync_pipeline, 'sync_service_categories', lambda *_args, **_kwargs: skipped_calls.append('company') or True)
+        monkeypatch.setattr(sync_pipeline, 'sync_analytics_overall', lambda *_args, **_kwargs: skipped_calls.append('analytics') or True)
+
+        result = execute_sync(mode='full', end_date=date(2026, 6, 30), portal_account_id=7)
+
+        assert result['success'] is False
+        assert db.get(SyncState, transactional_state_key(1)) is None
+        assert skipped_calls == []
+        cleanup = next(item for item in result['step_results'] if item['key'] == sync_pipeline.FULL_REFRESH_CLEANUP_STEP)
+        assert cleanup['success'] is False
+
+
+def test_execute_sync_full_refreshes_new_company_even_with_global_checkpoint(monkeypatch):
+    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-28'))
+        db.commit()
+
+        credential = YClientsCredentialValue(
+            id=11,
+            title='Tenant credential',
+            partner_token='partner',
+            login='login',
+            password='password',
+            company_ids=(1,),
+            portal_account_id=7,
+        )
+        purge_calls = []
+        patch_execute_sync_dependencies(monkeypatch, db, credential)
+        monkeypatch.setattr(
+            sync_pipeline,
+            'purge_full_refresh_window',
+            lambda *_args, **_kwargs: purge_calls.append(_args) or True,
+        )
+
+        result = execute_sync(mode='incremental', end_date=date(2026, 6, 30), portal_account_id=7)
+
+        assert result['success'] is True
+        assert result['mode'] == 'full'
+        assert purge_calls
+        assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
 
 
 def test_execute_sync_skips_credentials_without_assigned_companies(monkeypatch):
@@ -155,6 +431,20 @@ def test_execute_sync_skips_credentials_without_assigned_companies(monkeypatch):
     finally:
         db.close()
         engine.dispose()
+
+
+def test_checkpoint_steps_treat_empty_results_as_success():
+    assert sync_records(FakeRecordsAPI([]), None, '1') is True
+    assert sync_financial_transactions(FakeFinancialTransactionsAPI([]), None, '1') is True
+    assert sync_goods_transactions(FakeGoodsTransactionsAPI([]), None, '1') is True
+    assert sync_comments(FakeCommentsAPI([]), None, '1') is True
+
+
+def test_checkpoint_steps_fail_when_source_is_unavailable():
+    assert sync_records(FakeRecordsAPI(None), None, '1') is False
+    assert sync_financial_transactions(FakeFinancialTransactionsAPI(None), None, '1') is False
+    assert sync_goods_transactions(FakeGoodsTransactionsAPI(None), None, '1') is False
+    assert sync_comments(FakeCommentsAPI(None), None, '1') is False
 
 
 def test_sync_clients_scopes_external_id_by_internal_company():
@@ -393,6 +683,44 @@ def test_sync_financial_transactions_persists_expense_article_and_source_coverag
         )
         assert state.period_start == date(2025, 1, 1)
         assert state.period_end == date(2025, 1, 31)
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_financial_transactions_empty_window_persists_source_coverage():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            FinancialTransaction.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.commit()
+
+        assert sync_financial_transactions(
+            FakeFinancialTransactionsAPI([]),
+            db,
+            '1',
+            start_date='2025-02-01',
+            end_date='2025-02-28',
+        ) is True
+
+        state = db.get(
+            SyncSourceState,
+            {'company_id': 1, 'source': 'financial_transactions_detail'},
+        )
+        assert state.period_start == date(2025, 2, 1)
+        assert state.period_end == date(2025, 2, 28)
+        assert db.query(FinancialTransaction).count() == 0
     finally:
         db.close()
         engine.dispose()

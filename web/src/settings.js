@@ -1,6 +1,6 @@
 import './auth.css';
 import './settings.css';
-import { authFetch, hasSessionHint, loadCurrentUser, setToken } from './auth.js';
+import { authFetch, hasSessionHint, loadCurrentUser, logout, setToken } from './auth.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 if (!hasSessionHint()) {
@@ -77,15 +77,7 @@ els.tabs.forEach((tab) => {
   });
 });
 
-els.logout.addEventListener('click', async () => {
-  try {
-    await authFetch('/auth/logout', { method: 'POST' });
-  } catch {
-    /* even if backend fails, still drop token */
-  }
-  setToken('');
-  window.location.href = '/login.html';
-});
+els.logout.addEventListener('click', () => logout());
 
 async function loadProfile() {
   try {

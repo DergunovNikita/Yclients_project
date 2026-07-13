@@ -48,6 +48,56 @@ from models import (
 )
 
 
+def _paid_service_revenue_filter_rows() -> list[FinancialTransaction]:
+    return [
+        FinancialTransaction(
+            id=1,
+            date=datetime(2025, 1, 10, 12, 0, 0),
+            amount=1000.0,
+            record_id=1,
+            sold_item_type='service',
+            master_id=1,
+            company_id=1,
+        ),
+        FinancialTransaction(
+            id=2,
+            date=datetime(2025, 1, 11, 12, 0, 0),
+            amount=500.0,
+            record_id=2,
+            sold_item_type='service',
+            master_id=1,
+            company_id=1,
+        ),
+        FinancialTransaction(
+            id=3,
+            date=datetime(2025, 1, 10, 12, 0, 0),
+            amount=600.0,
+            record_id=1,
+            sold_item_type='goods_transaction',
+            master_id=1,
+            company_id=1,
+        ),
+        FinancialTransaction(
+            id=4,
+            date=datetime(2025, 1, 10, 12, 0, 0),
+            amount=-200.0,
+            record_id=1,
+            sold_item_type='service',
+            master_id=1,
+            company_id=1,
+        ),
+        FinancialTransaction(
+            id=5,
+            date=datetime(2025, 2, 1, 12, 0, 0),
+            amount=300.0,
+            record_id=1,
+            sold_item_type='service',
+            master_id=1,
+            company_id=1,
+        ),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_dashboard_reports_registry_contract(async_session):
     async def override_db():
@@ -230,6 +280,47 @@ async def test_dashboard_client_reports_are_aggregated_without_client_pii(async_
     assert '+100000001' not in combined_payload
     assert '+100000002' not in combined_payload
     assert '+100000003' not in combined_payload
+
+
+@pytest.mark.asyncio
+async def test_dashboard_client_reports_revenue_uses_paid_service_rows(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add_all([
+        Client(id=1, name='Paying Client', company_id=1),
+        Client(id=2, name='No Payment Client', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 10), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 11), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=2, date=date(2025, 1, 12), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all(_paid_service_revenue_filter_rows())
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        r = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'top_clients_pareto', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+    app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    data = r.json()['data']
+    assert [card['value'] for card in data['cards']] == [2, 3, 1500.0, 750.0]
+    frequency_by_bucket = {row['bucket']: row for row in data['raw']['visit_frequency']}
+    assert frequency_by_bucket['1 визит']['clients'] == 1
+    assert frequency_by_bucket['1 визит']['revenue'] == 0.0
+    assert frequency_by_bucket['2-3 визита']['clients'] == 1
+    assert frequency_by_bucket['2-3 визита']['revenue'] == 1500.0
 
 
 @pytest.mark.asyncio
@@ -454,6 +545,50 @@ async def test_dashboard_staff_leaderboard_report_returns_top_tables(async_sessi
     revenue_admin = next(table for table in data['tables'] if table['id'] == 'revenue_admin')
     assert {'key': 'cosmo_revenue_share_pct', 'label': 'Доля косметики, %', 'format': 'percent'} in revenue_barber['columns']
     assert {'key': 'cosmo_revenue_share_pct', 'label': 'Доля косметики, %', 'format': 'percent'} in revenue_admin['columns']
+
+
+@pytest.mark.asyncio
+async def test_dashboard_staff_efficiency_revenue_uses_paid_service_rows(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add(Client(id=1, name='Client', company_id=1))
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 10), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 11), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all(_paid_service_revenue_filter_rows())
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        r = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'staff_efficiency', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+    app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    rows = r.json()['data']['raw']['staff']
+    assert rows == [
+        {
+            'staff_id': 1,
+            'staff_name': 'Master',
+            'company_title': 'Salon',
+            'appointments': 2,
+            'completed': 2,
+            'not_completed': 0,
+            'clients': 1,
+            'revenue': 1500.0,
+            'avg_check': 750.0,
+        }
+    ]
 
 
 @pytest.mark.asyncio

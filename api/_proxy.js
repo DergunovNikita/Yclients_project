@@ -31,6 +31,7 @@ const AUTH_ROUTE_RULES = [
 
 const DASHBOARD_ROUTE_RULES = [
   { methods: ['GET'], pattern: /^(branches|staff|staff_directory\.csv|services|services\/kpi_groups|reports|reports\/data|widget\/sync_status|widget\/summary|widget\/revenue_daily|widget\/top_services|widget\/extra_services|widget\/plan_fact|plan\/settings|plan\/reviews_fact|bundle)$/ },
+  { methods: ['GET', 'PUT'], pattern: /^metric-visibility$/ },
   { methods: ['POST'], pattern: /^(services\/kpi_groups|plan\/settings|plan\/reviews_fact|plan\/sync)$/ },
   { methods: ['PATCH'], pattern: /^services\/[^/]+\/[^/]+\/(labels|kpi_group)$/ },
   { methods: ['PATCH', 'DELETE'], pattern: /^services\/kpi_groups\/[^/]+$/ },
@@ -62,6 +63,8 @@ export function forwardedHeaders(req) {
 
   const peerIp = trustedPeerIp(req);
   if (peerIp) {
+    // The VM trusts these headers for session metadata and rate limits. Browser-supplied
+    // forwarding headers are intentionally ignored; only this proxy's socket peer is forwarded.
     headers['x-forwarded-for'] = peerIp;
     headers['x-real-ip'] = peerIp;
   }

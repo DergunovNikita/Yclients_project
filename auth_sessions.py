@@ -83,6 +83,8 @@ def parse_device_label(user_agent: str | None) -> str:
 
 
 def extract_client_ip(request: Request) -> str | None:
+    # Public browser traffic reaches the VM through the frontend proxy, which strips
+    # client-supplied forwarding headers and rewrites x-forwarded-for to its socket peer.
     forwarded = request.headers.get('x-forwarded-for')
     if forwarded:
         return forwarded.split(',', 1)[0].strip() or None

@@ -147,7 +147,13 @@ class YClientsAPI:
             if result is None:
                 raise RuntimeError(f"Failed to fetch paginated YClients endpoint {url} page {page}")
 
-            data = result.get('data', [])
+            if result.get('success') is False:
+                raise RuntimeError(f"YClients endpoint {url} page {page} returned success=false")
+            if 'data' not in result:
+                raise RuntimeError(f"YClients endpoint {url} page {page} returned no data field")
+            data = result.get('data') or []
+            if not isinstance(data, list):
+                raise RuntimeError(f"YClients endpoint {url} page {page} returned non-list data")
             if not data:
                 break
 
@@ -280,9 +286,9 @@ class YClientsAPI:
 
     def get_records(self, company_id: str,
                     start_date: Optional[str] = None,
-                    end_date: Optional[str] = None) -> List[Dict]:
+                    end_date: Optional[str] = None) -> Optional[List[Dict]]:
         if not self._ensure_auth():
-            return []
+            return None
 
         url = f'{self.base_url}/records/{company_id}'
         params = {}
@@ -299,9 +305,9 @@ class YClientsAPI:
 
     def get_financial_transactions(self, company_id: str,
                                    start_date: Optional[str] = None,
-                                   end_date: Optional[str] = None) -> List[Dict]:
+                                   end_date: Optional[str] = None) -> Optional[List[Dict]]:
         if not self._ensure_auth():
-            return []
+            return None
 
         url = f'{self.base_url}/transactions/{company_id}'
         params = {}
@@ -318,9 +324,9 @@ class YClientsAPI:
 
     def get_goods_transactions(self, company_id: str,
                                start_date: Optional[str] = None,
-                               end_date: Optional[str] = None) -> List[Dict]:
+                               end_date: Optional[str] = None) -> Optional[List[Dict]]:
         if not self._ensure_auth():
-            return []
+            return None
 
         url = f'{self.base_url}/storages/transactions/{company_id}'
         params = {}
@@ -337,9 +343,9 @@ class YClientsAPI:
 
     def get_comments(self, company_id: str,
                      start_date: Optional[str] = None,
-                     end_date: Optional[str] = None) -> List[Dict]:
+                     end_date: Optional[str] = None) -> Optional[List[Dict]]:
         if not self._ensure_auth():
-            return []
+            return None
 
         url = f'{self.base_url}/comments/{company_id}/'
         params = {}

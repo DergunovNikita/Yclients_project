@@ -35,6 +35,7 @@ from models import (
 from sync_parsing import parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_time
 
 TRANSACTIONAL_STATE_KEY = 'transactions_last_success_date'
+FULL_REFRESH_CLEANUP_STEP = 'Full refresh cleanup'
 PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
 
 
@@ -201,18 +202,22 @@ def set_sync_state_value(db, key: str, value: str):
     db.commit()
 
 
+def transactional_state_key(company_id: int) -> str:
+    return f'{TRANSACTIONAL_STATE_KEY}:company:{int(company_id)}'
+
+
 def full_sync_start_date(end_date: date) -> date:
     if SYNC_DAYS and SYNC_DAYS > 0:
         return end_date - timedelta(days=SYNC_DAYS)
     return min(SYNC_HISTORY_START_DATE, end_date)
 
 
-def resolve_transaction_window(db, end_date: date):
+def resolve_transaction_window(db, end_date: date, state_key: str = TRANSACTIONAL_STATE_KEY):
     full_start = full_sync_start_date(end_date)
     if not SYNC_INCREMENTAL:
         return full_start, 'full'
 
-    raw_value = get_sync_state_value(db, TRANSACTIONAL_STATE_KEY)
+    raw_value = get_sync_state_value(db, state_key)
     if not raw_value:
         return full_start, 'full'
 
@@ -225,11 +230,33 @@ def resolve_transaction_window(db, end_date: date):
     return max(full_start, incremental_start), 'incremental'
 
 
-def resolve_sync_window(db, end_date: date, requested_mode: str):
+def resolve_sync_window(db, end_date: date, requested_mode: str, state_key: str = TRANSACTIONAL_STATE_KEY):
     normalized_mode = (requested_mode or 'incremental').strip().lower()
     if normalized_mode == 'full':
         return full_sync_start_date(end_date), 'full'
-    return resolve_transaction_window(db, end_date)
+    return resolve_transaction_window(db, end_date, state_key)
+
+
+def company_has_transactional_rows(db, company_id: int) -> bool:
+    for model in (Appointment, FinancialTransaction, GoodTransaction, Comment):
+        if db.query(model.id).filter(model.company_id == int(company_id)).first() is not None:
+            return True
+    return False
+
+
+def resolve_company_sync_window(db, end_date: date, requested_mode: str, company_id: int):
+    normalized_mode = (requested_mode or 'incremental').strip().lower()
+    if normalized_mode == 'full':
+        return full_sync_start_date(end_date), 'full'
+
+    scoped_key = transactional_state_key(company_id)
+    if get_sync_state_value(db, scoped_key):
+        return resolve_transaction_window(db, end_date, scoped_key)
+
+    if get_sync_state_value(db, TRANSACTIONAL_STATE_KEY) and company_has_transactional_rows(db, company_id):
+        return resolve_transaction_window(db, end_date, TRANSACTIONAL_STATE_KEY)
+
+    return full_sync_start_date(end_date), 'full'
 
 
 def purge_full_refresh_window(db, company_id: int, start_date: str, end_date: str, schedule_end_date: str):
@@ -1315,9 +1342,12 @@ def sync_records(api: YClientsAPI, db, company_id: str,
     print("\n── Записи (визиты) ──")
 
     records = api.get_records(company_id, start_date=start_date, end_date=end_date)
+    if records is None:
+        print("  Источник недоступен")
+        return False
     if not records:
         print("  Нет записей за указанный период")
-        return False
+        return True
 
     print(f"  Найдено: {len(records)}")
 
@@ -1419,6 +1449,30 @@ def sync_records(api: YClientsAPI, db, company_id: str,
 # 13. Финансовые транзакции
 # ===================================================================
 
+def mark_personal_account_source_coverage(db, company_id: int, start_date: str | None, end_date: str | None):
+    if not start_date or not end_date:
+        return
+    state = db.get(
+        SyncSourceState,
+        {'company_id': company_id, 'source': PERSONAL_ACCOUNT_SOURCE},
+    )
+    period_start = parse_date(start_date)
+    period_end = parse_date(end_date)
+    if state is None:
+        state = SyncSourceState(
+            company_id=company_id,
+            source=PERSONAL_ACCOUNT_SOURCE,
+            period_start=period_start,
+            period_end=period_end,
+            synced_at=datetime.now(),
+        )
+        db.add(state)
+    else:
+        state.period_start = min(state.period_start, period_start)
+        state.period_end = max(state.period_end, period_end)
+        state.synced_at = datetime.now()
+
+
 def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                                 start_date: str = None, end_date: str = None,
                                 db_company_id: int | None = None):
@@ -1432,11 +1486,21 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
         return False
     if not txns:
         print("  Нет данных")
-
-    print(f"  Найдено: {len(txns)}")
+        try:
+            cid = _db_company_id(company_id, db_company_id)
+            if db is not None:
+                mark_personal_account_source_coverage(db, cid, start_date, end_date)
+                db.commit()
+            return True
+        except Exception as e:
+            if db is not None:
+                db.rollback()
+            print(f"  ✗ Ошибка: {e}")
+            return False
 
     try:
         cid = _db_company_id(company_id, db_company_id)
+        print(f"  Найдено: {len(txns)}")
         existing_txns = load_existing_or_adopt_legacy_source_map(
             db,
             FinancialTransaction,
@@ -1512,24 +1576,7 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                 obj.sold_item_type = t.get('sold_item_type')
                 obj.company_id = cid
 
-        if start_date and end_date:
-            state = db.get(
-                SyncSourceState,
-                {'company_id': cid, 'source': PERSONAL_ACCOUNT_SOURCE},
-            )
-            if state is None:
-                state = SyncSourceState(
-                    company_id=cid,
-                    source=PERSONAL_ACCOUNT_SOURCE,
-                    period_start=parse_date(start_date),
-                    period_end=parse_date(end_date),
-                    synced_at=datetime.now(),
-                )
-                db.add(state)
-            else:
-                state.period_start = min(state.period_start, parse_date(start_date))
-                state.period_end = max(state.period_end, parse_date(end_date))
-                state.synced_at = datetime.now()
+        mark_personal_account_source_coverage(db, cid, start_date, end_date)
 
         db.commit()
         print(f"  ✓ Финансовые транзакции сохранены ({len(txns)} шт.)")
@@ -1553,9 +1600,12 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
     txns = api.get_goods_transactions(company_id,
                                       start_date=start_date,
                                       end_date=end_date)
+    if txns is None:
+        print("  Источник недоступен")
+        return False
     if not txns:
         print("  Нет данных")
-        return False
+        return True
 
     print(f"  Найдено: {len(txns)}")
 
@@ -1663,9 +1713,12 @@ def sync_comments(api: YClientsAPI, db, company_id: str,
     comments = api.get_comments(company_id,
                                 start_date=start_date,
                                 end_date=end_date)
+    if comments is None:
+        print("  Источник недоступен")
+        return False
     if not comments:
         print("  Нет данных")
-        return False
+        return True
 
     print(f"  Найдено: {len(comments)}")
 
@@ -2107,13 +2160,16 @@ def execute_sync(
     companies_count = 0
 
     end = end_date or date.today()
-    start, sync_mode = resolve_sync_window(db, end, mode)
-    sd = start.isoformat()
+    default_start, default_sync_mode = resolve_sync_window(db, end, mode)
+    default_sd = default_start.isoformat()
     ed = end.isoformat()
     schedule_end = end + timedelta(days=SCHEDULE_DAYS)
     analytics_start = end - timedelta(days=ANALYTICS_DAYS)
     analytics_sd = analytics_start.isoformat()
+    result_window_start: date | None = None
+    result_modes: set[str] = set()
     checkpoint_step_names = {
+        FULL_REFRESH_CLEANUP_STEP,
         'Записи',
         'Финансовые транзакции',
         'Товарные транзакции',
@@ -2156,8 +2212,8 @@ def execute_sync(
             return {
                 **empty_result,
                 'completed': True,
-                'mode': sync_mode,
-                'window_start': sd,
+                'mode': default_sync_mode,
+                'window_start': default_sd,
                 'window_end': ed,
             }
 
@@ -2170,8 +2226,8 @@ def execute_sync(
             f"TIMEOUT={YCLIENTS_TIMEOUT}"
         )
         print(
-            f"Режим синхронизации транзакций: {sync_mode} "
-            f"({sd} .. {ed}, lookback={SYNC_LOOKBACK_DAYS} дн.)"
+            f"Режим синхронизации транзакций: {mode or 'incremental'} "
+            f"(окно определяется по филиалам, lookback={SYNC_LOOKBACK_DAYS} дн.)"
         )
         print(f"Активных учётных данных: {len(credentials)}")
         emit_progress(
@@ -2182,34 +2238,6 @@ def execute_sync(
             payload={'credentials_count': len(credentials)},
         )
 
-        company_steps = [
-            ("Категории услуг", sync_service_categories, {}),
-            ("Услуги", sync_services, {}),
-            ("Должности", sync_positions, {}),
-            ("Сотрудники", sync_staff, {}),
-            ("Клиенты", sync_clients, {}),
-            ("Кассы", sync_accounts, {}),
-            ("Склады", sync_storages, {}),
-            ("Категории товаров", sync_good_categories, {}),
-            ("Товары", sync_goods, {}),
-            ("Записи", sync_records, {'start_date': sd, 'end_date': schedule_end.isoformat()}),
-            (
-                "Финансовые транзакции",
-                sync_financial_transactions,
-                {'start_date': sd, 'end_date': ed},
-            ),
-            (
-                "Товарные транзакции",
-                sync_goods_transactions,
-                {'start_date': sd, 'end_date': ed},
-            ),
-            ("Комментарии", sync_comments, {'start_date': sd, 'end_date': ed}),
-            (
-                "Графики сотрудников",
-                sync_staff_schedules,
-                {'start_date': ed, 'end_date': schedule_end.isoformat()},
-            ),
-        ]
         analytics_steps = [
             ("Аналитика overall", sync_analytics_overall, {'date_from': analytics_sd, 'date_to': ed}),
             ("Аналитика daily", sync_analytics_daily_charts, {'date_from': analytics_sd, 'date_to': ed}),
@@ -2324,21 +2352,82 @@ def execute_sync(
             )
 
             for company in target_companies:
+                company_start, company_sync_mode = resolve_company_sync_window(
+                    db,
+                    end,
+                    mode,
+                    company.id,
+                )
+                company_sd = company_start.isoformat()
+                result_window_start = (
+                    company_start
+                    if result_window_start is None
+                    else min(result_window_start, company_start)
+                )
+                result_modes.add(company_sync_mode)
                 company_id = str(_company_external_id(company))
                 company_label = format_company_label(company)
                 print(f"\n{'─' * 60}")
                 print(f"Филиал: {company_label}")
+                print(
+                    f"Окно транзакций: {company_sync_mode} "
+                    f"({company_sd} .. {ed}, lookback={SYNC_LOOKBACK_DAYS} дн.)"
+                )
                 print(f"{'─' * 60}")
 
-                if sync_mode == 'full':
-                    purge_full_refresh_window(
+                company_step_start = len(step_results)
+                if company_sync_mode == 'full':
+                    cleanup_success = run_sync_step(
+                        step_results,
+                        f"{FULL_REFRESH_CLEANUP_STEP} [{company_label}]",
+                        purge_full_refresh_window,
                         db,
                         company.id,
-                        sd,
+                        company_sd,
                         ed,
                         schedule_end.isoformat(),
+                        step_key=FULL_REFRESH_CLEANUP_STEP,
+                        progress_callback=progress_callback,
+                        progress_context={
+                            'portal_account_id': credential.portal_account_id,
+                            'credential_id': credential.id,
+                            'company_id': company.id,
+                        },
+                        progress_pct=35,
                     )
+                    if not cleanup_success:
+                        print(f"! Full refresh cleanup failed; филиал пропущен [{company_label}]")
+                        print(f"! Состояние инкрементальной синхронизации не обновлено [{company_label}]")
+                        continue
 
+                company_steps = [
+                    ("Категории услуг", sync_service_categories, {}),
+                    ("Услуги", sync_services, {}),
+                    ("Должности", sync_positions, {}),
+                    ("Сотрудники", sync_staff, {}),
+                    ("Клиенты", sync_clients, {}),
+                    ("Кассы", sync_accounts, {}),
+                    ("Склады", sync_storages, {}),
+                    ("Категории товаров", sync_good_categories, {}),
+                    ("Товары", sync_goods, {}),
+                    ("Записи", sync_records, {'start_date': company_sd, 'end_date': schedule_end.isoformat()}),
+                    (
+                        "Финансовые транзакции",
+                        sync_financial_transactions,
+                        {'start_date': company_sd, 'end_date': ed},
+                    ),
+                    (
+                        "Товарные транзакции",
+                        sync_goods_transactions,
+                        {'start_date': company_sd, 'end_date': ed},
+                    ),
+                    ("Комментарии", sync_comments, {'start_date': company_sd, 'end_date': ed}),
+                    (
+                        "Графики сотрудников",
+                        sync_staff_schedules,
+                        {'start_date': ed, 'end_date': schedule_end.isoformat()},
+                    ),
+                ]
                 for name, fn, kwargs in company_steps:
                     run_sync_step(
                         step_results,
@@ -2380,11 +2469,12 @@ def execute_sync(
                         **kwargs,
                     )
 
-        if steps_successful(step_results, checkpoint_step_names):
-            set_sync_state_value(db, TRANSACTIONAL_STATE_KEY, ed)
-            print(f"✓ Обновлено состояние инкрементальной синхронизации: {ed}")
-        else:
-            print("! Состояние инкрементальной синхронизации не обновлено")
+                company_step_results = step_results[company_step_start:]
+                if steps_successful(company_step_results, checkpoint_step_names):
+                    set_sync_state_value(db, transactional_state_key(company.id), ed)
+                    print(f"✓ Обновлено состояние инкрементальной синхронизации [{company_label}]: {ed}")
+                else:
+                    print(f"! Состояние инкрементальной синхронизации не обновлено [{company_label}]")
 
         overall_success = companies_count > 0 and steps_successful(step_results, checkpoint_step_names)
 
@@ -2400,8 +2490,8 @@ def execute_sync(
         'completed': True,
         'success': overall_success,
         'step_results': step_results,
-        'mode': sync_mode,
-        'window_start': sd,
+        'mode': next(iter(result_modes)) if len(result_modes) == 1 else ('mixed' if result_modes else default_sync_mode),
+        'window_start': (result_window_start or default_start).isoformat(),
         'window_end': ed,
         'companies_count': companies_count,
     }

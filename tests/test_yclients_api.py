@@ -49,3 +49,35 @@ def test_paginated_fetch_raises_on_page_failure():
         api._get_all_pages('https://api.example.test/items')
 
     assert calls == [1, 2]
+
+
+@pytest.mark.parametrize(
+    ('payload', 'message'),
+    [
+        ({'success': False, 'data': []}, 'success=false'),
+        ({'success': True}, 'no data field'),
+        ({'success': True, 'data': {'id': 1}}, 'non-list data'),
+    ],
+)
+def test_paginated_fetch_rejects_malformed_success_payload(payload, message):
+    api = YClientsAPI('token', 'login', 'password')
+    api._get = lambda _url, _params: payload
+
+    with pytest.raises(RuntimeError, match=message):
+        api._get_all_pages('https://api.example.test/items')
+
+
+@pytest.mark.parametrize(
+    'method_name',
+    [
+        'get_records',
+        'get_financial_transactions',
+        'get_goods_transactions',
+        'get_comments',
+    ],
+)
+def test_transactional_paginated_endpoints_return_none_on_auth_failure(method_name):
+    api = YClientsAPI('token', 'login', 'password')
+    api.authenticate = lambda: False
+
+    assert getattr(api, method_name)('1') is None

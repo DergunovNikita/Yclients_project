@@ -9,6 +9,7 @@ import {
   hasSessionHint,
   loadCurrentUser,
   logout,
+  requestWithReauth,
   setSelectedPortalAccountId,
 } from './auth.js';
 
@@ -332,7 +333,14 @@ async function fetchJson(path, params) {
   for (const url of apiUrlCandidates(path, params)) {
     let response;
     try {
-      response = await fetch(url, { credentials: 'include', headers: headers() });
+      response = await requestWithReauth(url, {}, (_path, options = {}) => {
+        const { __retried, ...fetchOptions } = options;
+        return fetch(url, {
+          ...fetchOptions,
+          credentials: 'include',
+          headers: headers(),
+        });
+      });
     } catch (error) {
       errors.push(`${url}\n${error.message}`);
       continue;
@@ -361,16 +369,19 @@ async function requestJson(path, { method = 'GET', body = null } = {}) {
   for (const url of apiUrlCandidates(path)) {
     let response;
     try {
-      const requestHeaders = { ...headers(), 'Content-Type': 'application/json' };
-      if (!['GET', 'HEAD', 'OPTIONS'].includes(String(method).toUpperCase())) {
-        const csrf = getCsrfToken();
-        if (csrf) requestHeaders['X-CSRF-Token'] = csrf;
-      }
-      response = await fetch(url, {
-        method,
-        credentials: 'include',
-        headers: requestHeaders,
-        body: body === null ? undefined : JSON.stringify(body),
+      response = await requestWithReauth(url, { method, body }, (_path, options = {}) => {
+        const { __retried, body: requestBody = null, ...fetchOptions } = options;
+        const requestHeaders = { ...headers(), 'Content-Type': 'application/json' };
+        if (!['GET', 'HEAD', 'OPTIONS'].includes(String(fetchOptions.method).toUpperCase())) {
+          const csrf = getCsrfToken();
+          if (csrf) requestHeaders['X-CSRF-Token'] = csrf;
+        }
+        return fetch(url, {
+          ...fetchOptions,
+          credentials: 'include',
+          headers: requestHeaders,
+          body: requestBody === null ? undefined : JSON.stringify(requestBody),
+        });
       });
     } catch (error) {
       errors.push(`${url}\n${error.message}`);
