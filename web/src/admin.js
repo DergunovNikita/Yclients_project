@@ -77,6 +77,7 @@ const editStaffPosition = document.getElementById('edit-staff-position');
 const editStaffBranchSelect = document.getElementById('edit-staff-branch-select');
 const createStaffAccountName = document.getElementById('create-staff-account-name');
 const createStaffAccountEmail = document.getElementById('create-staff-account-email');
+const createStaffAccountBranchSelect = document.getElementById('create-staff-account-branches');
 const saveBtn = document.getElementById('save-user');
 const saveStaffBtn = document.getElementById('save-staff');
 const adminRoleLabel = document.getElementById('admin-role-label');
@@ -90,6 +91,7 @@ const createBranchDropdown = enhanceSelect(createBranchSelect, { placeholder: t(
 const editRoleDropdown = enhanceSelect(editRoleSelect, { placeholder: t('admin.selectRole') });
 const editBranchDropdown = enhanceSelect(editBranchSelect, { placeholder: t('admin.selectBranches') });
 const editStaffBranchDropdown = enhanceSelect(editStaffBranchSelect, { placeholder: t('admin.selectBranch') });
+const createStaffAccountBranchDropdown = enhanceSelect(createStaffAccountBranchSelect, { placeholder: t('admin.selectBranches') });
 const yclientsCredentialBranchDropdown = enhanceSelect(yclientsCredentialBranchSelect, { placeholder: t('admin.selectBranches') });
 
 const ROLE_LABELS = {
@@ -421,6 +423,7 @@ function openCreateStaffAccountModal(staff) {
   createStaffAccountForm.reset();
   createStaffAccountName.value = staff.full_name || '';
   createStaffAccountEmail.value = staff.can_create_account ? staff.email : '';
+  renderBranchOptions(createStaffAccountBranchSelect, createStaffAccountBranchDropdown, staff.company_ids || []);
   createStaffAccountModal.hidden = false;
   document.body.classList.add('admin-modal-open');
   createStaffAccountEmail.focus();
@@ -945,12 +948,14 @@ async function provisionAllAccounts() {
 async function createStaffAccount(staffId, email = null) {
   const selected = users.find((user) => user.staff_id === staffId);
   if (!selected?.manageable) return;
+  const company_ids = Array.from(createStaffAccountBranchSelect.selectedOptions)
+    .map((option) => Number(option.value));
 
   hideAlerts();
   try {
     const payload = await authFetch(`/auth/admin/staff/${staffId}/create-account`, {
       method: 'POST',
-      body: JSON.stringify({ role: 'viewer', email: email || selected.email }),
+      body: JSON.stringify({ role: 'viewer', email: email || selected.email, company_ids }),
     });
     closeCreateStaffAccountModal();
     showCredentialsModal([payload.data]);

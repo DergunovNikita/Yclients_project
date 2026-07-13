@@ -100,7 +100,7 @@ async function loadProfile() {
 
     const ownerOrAdmin = currentUser.role === 'owner' || currentUser.role === 'platform_admin';
     document.querySelector('[data-tab="sources"]').hidden = !ownerOrAdmin;
-    document.querySelector('[data-tab="team"]').hidden = !['platform_admin', 'owner', 'branch_admin', 'manager'].includes(currentUser.role);
+    document.querySelector('[data-tab="team"]').hidden = !['platform_admin', 'owner', 'branch_admin'].includes(currentUser.role);
   } catch (error) {
     showError(els.passwordError, `${t('settings.profileLoadError')}: ${error.message}`);
   }

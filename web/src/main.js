@@ -166,6 +166,54 @@ let reportsController = null;
 let selectedTenant = null;
 
 const ADMIN_HIDDEN_METRIC_CODES = new Set(['revenue', 'avg_check_total']);
+const SETTINGS_ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
+const SETTINGS_VIEWS = new Set(['planSettings', 'serviceManagement', 'reviewFacts']);
+
+function hasSettingsAdminAccess() {
+  if (apiKey && !currentUser) return true;
+  return SETTINGS_ADMIN_ROLES.has(currentUser?.role);
+}
+
+function canAccessView(view) {
+  return !SETTINGS_VIEWS.has(view) || hasSettingsAdminAccess();
+}
+
+function accessibleView(view) {
+  return canAccessView(view) ? view : 'overview';
+}
+
+function setViewLinksHidden(view, hidden) {
+  els.viewLinks
+    .filter((link) => link.dataset.viewLink === view)
+    .forEach((link) => {
+      link.hidden = hidden;
+    });
+}
+
+function applyDashboardPermissions() {
+  const hideSettings = !hasSettingsAdminAccess();
+  SETTINGS_VIEWS.forEach((view) => setViewLinksHidden(view, hideSettings));
+  els.planSettingsView.hidden = hideSettings;
+  els.serviceManagementView.hidden = hideSettings;
+  els.reviewFactsView.hidden = hideSettings;
+}
+
+function setOverviewSectionHidden(section, hidden) {
+  document.querySelectorAll(`[data-overview-section="${section}"]`).forEach((node) => {
+    node.hidden = hidden;
+  });
+  els.overviewJumpButtons
+    .filter((button) => button.dataset.overviewJump === section)
+    .forEach((button) => {
+      button.hidden = hidden;
+    });
+}
+
+function applyFinancialVisibility(summary) {
+  const financialsHidden = Boolean(summary?.financials_hidden);
+  setOverviewSectionHidden('revenue', financialsHidden);
+  setOverviewSectionHidden('services', financialsHidden);
+}
 
 function headers() {
   const extra = {};
@@ -1958,21 +2006,31 @@ function renderBundle(bundle) {
     top_services: services = [],
     extra_services: extraServices = [],
   } = bundle;
+  applyFinancialVisibility(summary);
   renderKpi(summary);
   renderVisitMetrics(summary);
   renderClientsMetrics(summary);
-  renderRevenueMetrics(summary);
-  renderServicesMetrics(summary);
+  if (summary.financials_hidden) {
+    renderRevenueMetrics({});
+    renderServicesMetrics({});
+    destroyChart('revenue');
+    destroyChart('services');
+    renderServicesTable([]);
+    renderExtraServicesTable([]);
+  } else {
+    renderRevenueMetrics(summary);
+    renderServicesMetrics(summary);
+    renderRevenueChart(daily);
+    renderServicesChart(services.slice(0, 8));
+    renderServicesTable(services);
+    renderExtraServicesTable(extraServices);
+  }
   renderAppointmentsMetrics(summary);
-  renderRevenueChart(daily);
   renderAppointmentsChart(daily);
   renderOpzChart(daily);
-  renderServicesChart(services.slice(0, 8));
-  renderServicesTable(services);
-  renderExtraServicesTable(extraServices);
 
   els.periodLabel.textContent = t('dash.subhead');
-  els.revenueMeta.textContent = t('dash.daysCount', { count: daily.length });
+  els.revenueMeta.textContent = summary.financials_hidden ? '' : t('dash.daysCount', { count: daily.length });
   const appointmentsBreakdown = summary.appointments_breakdown || {};
   els.appointmentsMeta.textContent = appointmentsBreakdown.source_status === 'ready' || appointmentsBreakdown.source_status === 'local'
     ? t('dash.appointmentsCount', { count: formatNumber(appointmentsBreakdown.total) })
@@ -2065,15 +2123,17 @@ async function loadSyncStatus() {
 }
 
 function viewFromLocation() {
-  if (window.location.pathname.replace(/\/+$/, '') === '/reports' || window.location.pathname.startsWith('/reports/')) return 'reports';
-  if (window.location.hash === '#plan-fact') return 'plan';
-  if (window.location.hash === '#plan-settings') return 'planSettings';
-  if (window.location.hash === '#services') return 'serviceManagement';
-  if (window.location.hash === '#review-facts') return 'reviewFacts';
-  return 'overview';
+  let view = 'overview';
+  if (window.location.pathname.replace(/\/+$/, '') === '/reports' || window.location.pathname.startsWith('/reports/')) view = 'reports';
+  else if (window.location.hash === '#plan-fact') view = 'plan';
+  else if (window.location.hash === '#plan-settings') view = 'planSettings';
+  else if (window.location.hash === '#services') view = 'serviceManagement';
+  else if (window.location.hash === '#review-facts') view = 'reviewFacts';
+  return accessibleView(view);
 }
 
 function setActiveView(view) {
+  view = accessibleView(view);
   activeView = view;
   els.overviewView.classList.toggle('active', view === 'overview');
   els.planView.classList.toggle('active', view === 'plan');
@@ -2280,6 +2340,7 @@ async function init() {
     if (profileRole) {
       profileRole.textContent = ROLE_LABELS[me.data.role] || me.data.role;
     }
+    applyDashboardPermissions();
 
     try {
       const canLoadTenantData = await setupPlatformTenantSelector();
@@ -2297,6 +2358,7 @@ async function init() {
     return;
   } else {
     setSelectedPortalAccountId('');
+    applyDashboardPermissions();
   }
   await loadBranches();
   await Promise.all(Object.values(filterEls).map((filter) => loadStaff(filter)));
@@ -2409,6 +2471,13 @@ els.viewLinks.forEach((link) => {
   link.addEventListener('click', (event) => {
     const view = link.dataset.viewLink;
     if (!view) return;
+    if (!canAccessView(view)) {
+      event.preventDefault();
+      history.replaceState({ view: 'overview' }, '', '/#overview');
+      setActiveView('overview');
+      loadCurrentView();
+      return;
+    }
     if (!confirmDiscardPlanSettings() || !confirmDiscardServiceManagement()) {
       event.preventDefault();
       return;

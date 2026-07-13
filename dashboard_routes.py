@@ -151,6 +151,11 @@ def _require_sync_access(ctx: AccessContext) -> None:
         raise HTTPException(status_code=403, detail='Sync operations require platform_admin role')
 
 
+def _require_settings_admin(ctx: AccessContext) -> None:
+    if not (ctx.full_access or ctx.role in {'platform_admin', 'owner', 'branch_admin'}):
+        raise HTTPException(status_code=403, detail='Settings require admin role')
+
+
 def _hide_summary_financials(summary: dict[str, Any], hidden_codes: frozenset[str]) -> dict[str, Any]:
     payload = deepcopy(summary)
     for key in money_payload_keys(hidden_codes, 'summary'):
@@ -339,6 +344,7 @@ async def dashboard_services(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     """Current branch service catalog with dashboard-maintained labels."""
+    _require_settings_admin(ctx)
     scope = query_scope(ctx, company_id)
     return {
         'success': True,
@@ -360,6 +366,7 @@ async def dashboard_service_kpi_groups(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    _require_settings_admin(ctx)
     return {
         'success': True,
         'data': await fetch_service_kpi_groups(
@@ -376,6 +383,7 @@ async def dashboard_service_kpi_group_create(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    _require_settings_admin(ctx)
     try:
         data = await create_service_kpi_group(
             db,
@@ -398,6 +406,7 @@ async def dashboard_service_kpi_group_update(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    _require_settings_admin(ctx)
     try:
         data = await update_service_kpi_group(
             db,
@@ -420,6 +429,7 @@ async def dashboard_service_kpi_group_delete(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    _require_settings_admin(ctx)
     try:
         data = await archive_service_kpi_group(
             db,
@@ -439,6 +449,7 @@ async def dashboard_service_label_save(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    _require_settings_admin(ctx)
     scope = query_scope(ctx, company_id)
     try:
         data = await save_service_label(
@@ -462,6 +473,7 @@ async def dashboard_service_kpi_assignment_save(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    _require_settings_admin(ctx)
     scope = query_scope(ctx, company_id)
     try:
         data = await save_service_kpi_assignment(
@@ -702,6 +714,7 @@ async def dashboard_plan_settings(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    _require_settings_admin(ctx)
     require_financial_access(ctx)
     branch_ids, force_allowed = user_branch_ids(ctx)
     try:
@@ -723,6 +736,7 @@ async def dashboard_plan_settings_save(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    _require_settings_admin(ctx)
     require_financial_access(ctx)
     branch_ids, force_allowed = user_branch_ids(ctx)
     try:
@@ -748,6 +762,7 @@ async def dashboard_plan_reviews_fact(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    _require_settings_admin(ctx)
     start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
@@ -774,6 +789,7 @@ async def dashboard_plan_reviews_fact_save(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    _require_settings_admin(ctx)
     start, end = _parse_range(payload.start_date, payload.end_date)
     scope = query_scope(ctx, payload.company_id)
     payload_staff_id = effective_staff_id(ctx, payload.staff_id)

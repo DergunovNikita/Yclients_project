@@ -101,6 +101,7 @@ async def provision_staff_account(
     email: str | None = None,
     role: str = 'viewer',
     password: str | None = None,
+    company_ids: list[int] | None = None,
 ) -> ProvisionedAccount:
     if staff.portal_user_id is not None:
         raise ValueError(f'Staff {staff.id} already has a portal account')
@@ -138,7 +139,7 @@ async def provision_staff_account(
     if user.id != staff.id:
         raise RuntimeError(f'Portal user id mismatch: expected {staff.id}, got {user.id}')
 
-    await set_user_branches(db, user.id, [staff.company_id])
+    await set_user_branches(db, user.id, company_ids or [staff.company_id])
     staff.portal_user_id = user.id
     if staff.fired:
         staff.fired = 0

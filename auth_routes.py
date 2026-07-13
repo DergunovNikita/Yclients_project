@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth_deps import forbid_demo, get_current_user, require_roles
 from auth_hierarchy import (
     USER_ADMIN_ROLES,
-    USER_MANAGER_ROLES,
     assignable_roles,
     assert_can_assign_role,
     assert_can_manage_staff,
@@ -140,6 +139,7 @@ class AdminStaffCreateAccountRequest(BaseModel):
     email: EmailStr | None = None
     role: str = 'viewer'
     password: str | None = Field(default=None, min_length=8, max_length=128)
+    company_ids: list[int] | None = None
 
 
 class DistributeCredentialsRequest(BaseModel):
@@ -817,7 +817,7 @@ async def _sync_credential_companies_from_yclients(
 
 @router.get('/admin/meta')
 async def admin_meta(
-    actor: PortalUser = Depends(require_roles(*USER_MANAGER_ROLES)),
+    actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
     branch_ids = await _actor_branch_ids(db, actor)
@@ -883,7 +883,7 @@ async def _load_staff_ids_by_portal_user(db: AsyncSession, portal_user_ids: list
 @router.get('/admin/users')
 async def admin_list_users(
     x_portal_account_id: int | None = Header(default=None),
-    actor: PortalUser = Depends(require_roles(*USER_MANAGER_ROLES)),
+    actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
     active_portal_account_id = await _active_admin_portal_account_id(db, actor, x_portal_account_id)
@@ -1598,7 +1598,13 @@ async def admin_create_staff_account(
     actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
     staff = await _load_manageable_staff(db, staff_id, actor, actor_branch_ids)
     assert_can_assign_role(actor.role, body.role)
-    validate_company_ids_for_role(actor.role, actor_branch_ids, body.role, [staff.company_id])
+    company_ids = body.company_ids if body.company_ids is not None else [staff.company_id]
+    validate_company_ids_for_role(actor.role, actor_branch_ids, body.role, company_ids)
+    if actor.role == 'platform_admin':
+        invalid = sorted(set(company_ids) - set(actor_branch_ids))
+        if invalid:
+            raise HTTPException(status_code=403, detail=f'Branches not allowed: {invalid}')
+    await _validate_company_ids_in_scope(db, actor, company_ids)
 
     try:
         account = await provision_staff_account(
@@ -1607,6 +1613,7 @@ async def admin_create_staff_account(
             email=body.email,
             role=body.role,
             password=body.password,
+            company_ids=company_ids,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

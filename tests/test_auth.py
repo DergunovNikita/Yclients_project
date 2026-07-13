@@ -1565,6 +1565,55 @@ async def test_owner_creates_manager(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_owner_can_assign_multiple_branches_to_manager_and_viewer(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    token = create_access_token(1, 'owner')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        manager = await client.post(
+            '/auth/admin/users',
+            headers={'Authorization': f'Bearer {token}'},
+            json={
+                'email': 'multibranch.manager@example.com',
+                'password': 'Manager12345!',
+                'full_name': 'Multi Branch Manager',
+                'role': 'manager',
+                'company_ids': [1, 2],
+            },
+        )
+        viewer = await client.post(
+            '/auth/admin/users',
+            headers={'Authorization': f'Bearer {token}'},
+            json={
+                'email': 'multibranch.viewer@example.com',
+                'password': 'Viewer12345!',
+                'full_name': 'Multi Branch Viewer',
+                'role': 'viewer',
+                'company_ids': [1, 2],
+            },
+        )
+        updated = await client.patch(
+            '/auth/admin/users/2',
+            headers={'Authorization': f'Bearer {token}'},
+            json={'company_ids': [1, 2]},
+        )
+
+        assert manager.status_code == 200
+        assert manager.json()['data']['company_ids'] == [1, 2]
+        assert viewer.status_code == 200
+        assert viewer.json()['data']['company_ids'] == [1, 2]
+        assert updated.status_code == 200
+        assert updated.json()['data']['company_ids'] == [1, 2]
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
 async def test_owner_updates_user_email_login(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     token = create_access_token(1, 'owner')
@@ -1752,20 +1801,7 @@ async def test_manager_cannot_create_or_update_users(auth_db, monkeypatch):
         assert updated.status_code == 403
 
         listed = await client.get('/auth/admin/users', headers={'Authorization': f'Bearer {token}'})
-        assert listed.status_code == 200
-        portal_emails = [
-            item.get('email')
-            for item in listed.json()['data']
-            if item.get('is_portal_user')
-        ]
-        assert 'admin@example.com' not in portal_emails
-        assert 'branch@example.com' not in portal_emails
-        self_row = next(
-            (item for item in listed.json()['data'] if item.get('email') == 'manager@example.com'),
-            None,
-        )
-        assert self_row is not None
-        assert self_row['manageable'] is False
+        assert listed.status_code == 403
 
     app.dependency_overrides.clear()
 
@@ -2312,7 +2348,7 @@ async def test_provision_staff_account(auth_db, monkeypatch):
         created = await client.post(
             '/auth/admin/staff/9003/create-account',
             headers={'Authorization': f'Bearer {token}'},
-            json={'role': 'viewer', 'email': 'worker9003@example.com'},
+            json={'role': 'viewer', 'email': 'worker9003@example.com', 'company_ids': [1, 2]},
         )
         assert created.status_code == 200
         data = created.json()['data']
@@ -2320,6 +2356,14 @@ async def test_provision_staff_account(auth_db, monkeypatch):
         assert data['user_id'] == 9003
         assert data['staff_id'] == 9003
         assert len(data['initial_password']) >= 8
+        branch_ids = (
+            await auth_db.execute(
+                select(PortalUserBranch.company_id)
+                .where(PortalUserBranch.user_id == 9003)
+                .order_by(PortalUserBranch.company_id.asc())
+            )
+        ).scalars().all()
+        assert branch_ids == [1, 2]
 
         login = await client.post(
             '/auth/login',

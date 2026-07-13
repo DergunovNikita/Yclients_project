@@ -739,6 +739,26 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
             headers={'Authorization': f'Bearer {manager_token}'},
         )
+        manager_plan_settings = await client.get(
+            '/dashboard/plan/settings',
+            params={'month': '2025-01'},
+            headers={'Authorization': f'Bearer {manager_token}'},
+        )
+        manager_services = await client.get(
+            '/dashboard/services',
+            params={'company_id': 1},
+            headers={'Authorization': f'Bearer {manager_token}'},
+        )
+        manager_service_label = await client.patch(
+            '/dashboard/services/1/10/labels',
+            json={'is_extra': True},
+            headers={'Authorization': f'Bearer {manager_token}'},
+        )
+        manager_review_facts = await client.get(
+            '/dashboard/plan/reviews_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+            headers={'Authorization': f'Bearer {manager_token}'},
+        )
         owner_revenue_daily = await client.get(
             '/dashboard/widget/revenue_daily',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
@@ -782,6 +802,10 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     assert manager_other_staff.json()['data']['financials_hidden'] is True
     assert 'revenue' not in manager_other_staff.json()['data']
     assert manager_revenue_daily.status_code == 403
+    assert manager_plan_settings.status_code == 403
+    assert manager_services.status_code == 403
+    assert manager_service_label.status_code == 403
+    assert manager_review_facts.status_code == 403
     assert owner_revenue_daily.status_code == 200
     assert sum(row['revenue'] for row in owner_revenue_daily.json()['data']) == 3000.0
     # branch_admin sees revenue by default (only manager/viewer are hidden out of the box).
