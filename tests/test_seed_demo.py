@@ -177,6 +177,7 @@ def test_seed_demo_creates_embedded_tenant_without_touching_real_data():
         assert demo_company.portal_account_id == account.id
         assert demo_company.source_type == seed_demo.DEMO_SOURCE_TYPE
         assert demo_company.external_id == 1
+        assert db.scalar(select(func.count(ServiceCatalog.service_id)).where(ServiceCatalog.company_id == demo_company.id)) > 0
 
         branch = db.execute(select(PortalBranch).where(PortalBranch.company_id == demo_company.id)).scalar_one()
         assert branch.portal_account_id == account.id
@@ -202,6 +203,29 @@ def test_seed_demo_creates_embedded_tenant_without_touching_real_data():
             (1, 'yclients'),
             (demo_company.id, seed_demo.DEMO_SOURCE_TYPE),
         }
+
+        paid_service_rows = (
+            db.execute(
+                select(FinancialTransaction, Appointment, ServiceCatalog)
+                .join(
+                    Appointment,
+                    (FinancialTransaction.company_id == Appointment.company_id)
+                    & (FinancialTransaction.record_id == Appointment.external_id),
+                )
+                .join(
+                    ServiceCatalog,
+                    (ServiceCatalog.company_id == FinancialTransaction.company_id)
+                    & (ServiceCatalog.service_id == FinancialTransaction.sold_item_id),
+                )
+                .where(
+                    FinancialTransaction.company_id == demo_company.id,
+                    FinancialTransaction.sold_item_type == 'service',
+                    FinancialTransaction.amount > 0,
+                )
+            )
+            .all()
+        )
+        assert paid_service_rows
 
 
 def test_seed_demo_is_idempotent_for_account_user_branches_and_data():
@@ -259,6 +283,19 @@ def test_seed_demo_child_primary_keys_do_not_scale_from_large_company_ids():
         assert db.scalar(select(func.max(Appointment.id)).where(Appointment.company_id == demo_company_id)) < 0
         assert db.scalar(select(func.max(Transaction.id)).where(Transaction.company_id == demo_company_id)) < 0
         assert db.scalar(select(func.max(StaffSchedule.id)).where(StaffSchedule.company_id == demo_company_id)) < 0
+        assert db.scalar(select(func.max(ServiceCatalog.service_id)).where(ServiceCatalog.company_id == demo_company_id)) < 0
+        assert (
+            db.scalar(
+                select(func.count(FinancialTransaction.id))
+                .join(
+                    Appointment,
+                    (FinancialTransaction.company_id == Appointment.company_id)
+                    & (FinancialTransaction.record_id == Appointment.external_id),
+                )
+                .where(FinancialTransaction.company_id == demo_company_id)
+            )
+            > 0
+        )
 
 
 def test_seed_demo_catalog_ids_do_not_collide_with_later_real_sync_ids():
@@ -299,6 +336,59 @@ def test_seed_demo_catalog_ids_do_not_collide_with_later_real_sync_ids():
             for service in db.execute(select(Service).where(Service.company_id == demo_company_id)).scalars()
         }
         assert demo_services_after == demo_services_before
+
+
+def test_seed_demo_repairs_existing_demo_catalog_and_payment_links():
+    with sqlite_session_with_system() as db:
+        _account, _user, company_ids = provision_demo(db)
+        demo_company_id = company_ids[0]
+
+        db.query(ServiceCatalog).filter(ServiceCatalog.company_id == demo_company_id).delete()
+        db.query(ServiceCategoryCatalog).filter(ServiceCategoryCatalog.company_id == demo_company_id).delete()
+        payment = (
+            db.execute(
+                select(FinancialTransaction)
+                .where(
+                    FinancialTransaction.company_id == demo_company_id,
+                    FinancialTransaction.sold_item_type == 'service',
+                    FinancialTransaction.amount > 0,
+                )
+                .limit(1)
+            )
+            .scalars()
+            .one()
+        )
+        appointment = db.get(Appointment, payment.document_id)
+        assert appointment is not None
+        payment.record_id = appointment.id
+        payment.visit_id = appointment.id
+        payment.sold_item_id = appointment.id
+        db.commit()
+
+        seed_demo.repair_demo_data(db, company_ids)
+        db.commit()
+
+        assert db.scalar(select(func.count(ServiceCatalog.service_id)).where(ServiceCatalog.company_id == demo_company_id)) > 0
+        assert (
+            db.scalar(
+                select(func.count(FinancialTransaction.id))
+                .join(
+                    Appointment,
+                    (FinancialTransaction.company_id == Appointment.company_id)
+                    & (FinancialTransaction.record_id == Appointment.external_id),
+                )
+                .join(
+                    ServiceCatalog,
+                    (ServiceCatalog.company_id == FinancialTransaction.company_id)
+                    & (ServiceCatalog.service_id == FinancialTransaction.sold_item_id),
+                )
+                .where(
+                    FinancialTransaction.id == payment.id,
+                    FinancialTransaction.company_id == demo_company_id,
+                )
+            )
+            == 1
+        )
 
 
 def test_seed_demo_refuses_to_reuse_non_demo_user_email():

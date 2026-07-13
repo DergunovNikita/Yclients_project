@@ -25,6 +25,8 @@ from models import (
     Group,
     Service,
     ServiceCategory,
+    ServiceCategoryCatalog,
+    ServiceCatalog,
     Staff,
     StaffPosition,
     StaffSchedule,
@@ -205,15 +207,27 @@ def seed_companies(
         db.flush()
 
         categories: list[ServiceCategory] = []
+        now = datetime.now()
         for c_idx, category_name in enumerate(shared_service_categories):
+            current_category_id = service_cat_id
             cat = ServiceCategory(
-                id=service_cat_id,
+                id=current_category_id,
                 title=category_name,
                 weight=c_idx + 1,
                 api_id=f"demo-cat-{company.id}-{c_idx + 1}",
                 company_id=company.id,
             )
             db.add(cat)
+            db.add(
+                ServiceCategoryCatalog(
+                    company_id=company.id,
+                    category_id=current_category_id,
+                    title=category_name,
+                    weight=c_idx + 1,
+                    api_id=cat.api_id,
+                    updated_at=now,
+                )
+            )
             categories.append(cat)
             service_cat_id = advance_pk(service_cat_id, negative=negative_catalog_ids)
 
@@ -221,15 +235,30 @@ def seed_companies(
         for s_idx in range(max(8, len(SERVICE_NAMES))):
             category = categories[s_idx % len(categories)]
             duration = rng.choice([1800, 2700, 3600, 5400])
+            current_service_id = service_id
+            title = f"{SERVICE_NAMES[s_idx % len(SERVICE_NAMES)]} #{s_idx + 1}"
+            price_min = round(rng.uniform(20, 120), 2)
             service = Service(
-                id=service_id,
-                title=f"{SERVICE_NAMES[s_idx % len(SERVICE_NAMES)]} #{s_idx + 1}",
-                price_min=round(rng.uniform(20, 120), 2),
+                id=current_service_id,
+                title=title,
+                price_min=price_min,
                 duration=duration,
                 category_title=category.title,
                 company_id=company.id,
             )
             db.add(service)
+            db.add(
+                ServiceCatalog(
+                    company_id=company.id,
+                    service_id=current_service_id,
+                    title=title,
+                    price_min=price_min,
+                    duration=duration,
+                    category_id=category.id,
+                    category_title=category.title,
+                    updated_at=now,
+                )
+            )
             services.append(service)
             service_id = advance_pk(service_id, negative=negative_catalog_ids)
 
@@ -430,8 +459,11 @@ def seed_activity(
                 current_appointment_id = appointment.id
 
                 visit_total = 0.0
+                first_service_id = None
                 for _tx in range(rng.randint(1, 3)):
                     srv = rng.choice(services)
+                    if first_service_id is None:
+                        first_service_id = srv.id
                     cost = round(float(srv.price_min or 0) * rng.uniform(0.9, 1.25), 2)
                     first_cost = round(cost * rng.uniform(1.05, 1.2), 2)
                     db.add(
@@ -462,9 +494,9 @@ def seed_activity(
                         account_id=rng.choice(account_ids),
                         client_id=client.id,
                         master_id=master.id,
-                        record_id=current_appointment_id,
-                        visit_id=current_appointment_id,
-                        sold_item_id=current_appointment_id,
+                        record_id=appointment.external_id,
+                        visit_id=appointment.external_id,
+                        sold_item_id=first_service_id,
                         sold_item_type="service",
                         company_id=company.id,
                     )
