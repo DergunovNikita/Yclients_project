@@ -1564,19 +1564,8 @@ async def fetch_revenue_daily(
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
+    include_financials: bool = True,
 ) -> list[dict[str, Any]]:
-    svc_stmt = (
-        select(
-            Appointment.date.label('d'),
-            func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
-        )
-        .select_from(Appointment)
-        .join(FinancialTransaction, financial_appointment_match_condition())
-        .where(
-            _service_paid_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids),
-        )
-        .group_by(Appointment.date)
-    )
     appt_stmt = (
         select(
             Appointment.date.label('d'),
@@ -1587,20 +1576,36 @@ async def fetch_revenue_daily(
         .group_by(Appointment.date)
     )
 
-    goods_day = func.date(FinancialTransaction.date)
-    goods_stmt = (
-        select(
-            goods_day.label('d'),
-            func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+    if include_financials:
+        svc_stmt = (
+            select(
+                Appointment.date.label('d'),
+                func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+            )
+            .select_from(Appointment)
+            .join(FinancialTransaction, financial_appointment_match_condition())
+            .where(
+                _service_paid_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids),
+            )
+            .group_by(Appointment.date)
         )
-        .where(_goods_paid_filters(start, end, company_id, staff_id, allowed_company_ids))
-        .group_by(goods_day)
-    )
+        goods_day = func.date(FinancialTransaction.date)
+        goods_stmt = (
+            select(
+                goods_day.label('d'),
+                func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+            )
+            .where(_goods_paid_filters(start, end, company_id, staff_id, allowed_company_ids))
+            .group_by(goods_day)
+        )
+        svc_rows = (await db.execute(svc_stmt)).all()
+        goods_rows = (await db.execute(goods_stmt)).all()
+    else:
+        svc_rows = []
+        goods_rows = []
 
-    svc_rows = (await db.execute(svc_stmt)).all()
     appt_rows = (await db.execute(appt_stmt)).all()
-    goods_rows = (await db.execute(goods_stmt)).all()
-    company_ids = await _appointment_company_ids(db, company_id, staff_id)
+    company_ids = await _appointment_company_ids(db, company_id, staff_id, allowed_company_ids)
     opz_by_date: dict[date, int] = {}
     for item_company_id in company_ids:
         events = await _opz_events(db, start, end, item_company_id)
@@ -1627,18 +1632,22 @@ async def fetch_revenue_daily(
         by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
         by_date[day]['opz_qty'] = opz_qty
 
-    return [
-        {
+    rows = []
+    for d, v in sorted(by_date.items(), key=lambda kv: kv[0]):
+        row = {
             'date': d.isoformat(),
-            'revenue': float(v['service_revenue']) + float(v['goods_revenue']),
-            'service_revenue': float(v['service_revenue']),
-            'goods_revenue': float(v['goods_revenue']),
             'appointments': int(v['appointments']),
             'opz_qty': int(v['opz_qty']),
             'opz_pct': 100.0 * _safe_div(float(v['opz_qty']), float(v['appointments'])),
         }
-        for d, v in sorted(by_date.items(), key=lambda kv: kv[0])
-    ]
+        if include_financials:
+            row.update({
+                'revenue': float(v['service_revenue']) + float(v['goods_revenue']),
+                'service_revenue': float(v['service_revenue']),
+                'goods_revenue': float(v['goods_revenue']),
+            })
+        rows.append(row)
+    return rows
 
 
 def _normalize_service_group_code(value: Any) -> str:

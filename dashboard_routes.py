@@ -926,19 +926,7 @@ async def dashboard_bundle(
         allowed_company_ids=scope['allowed_company_ids'],
     )
     hidden = hidden_money_codes(ctx)
-    if not can_view_financials(ctx):
-        return {
-            'success': True,
-            'data': {
-                'summary': _hide_summary_financials(summary, hidden),
-                'revenue_daily': [],
-                'top_services': [],
-                'extra_services': [],
-                'financials_hidden': True,
-            },
-        }
-    if hidden:
-        summary = _hide_summary_financials(summary, hidden)
+    can_see_financials = can_view_financials(ctx)
     daily = await fetch_revenue_daily(
         db,
         start,
@@ -946,7 +934,21 @@ async def dashboard_bundle(
         scope['company_id'],
         staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
+        include_financials=can_see_financials,
     )
+    if not can_see_financials:
+        return {
+            'success': True,
+            'data': {
+                'summary': _hide_summary_financials(summary, hidden),
+                'revenue_daily': daily,
+                'top_services': [],
+                'extra_services': [],
+                'financials_hidden': True,
+            },
+        }
+    if hidden:
+        summary = _hide_summary_financials(summary, hidden)
     services = await fetch_top_services(
         db,
         start,

@@ -632,8 +632,10 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
     async_session.add(Group(id=1, title='Group'))
     async_session.add(Company(id=1, title='Branch', group_id=1))
+    async_session.add(Company(id=2, title='Other Branch', group_id=1))
     async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
     async_session.add(PortalBranch(portal_account_id=1, company_id=1))
+    async_session.add(PortalBranch(portal_account_id=1, company_id=2))
     async_session.add_all([
         PortalUser(
             id=100,
@@ -680,10 +682,29 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
         PortalUserBranch(user_id=103, company_id=1),
         Staff(id=1, name='Linked Staff', company_id=1, portal_user_id=100),
         Staff(id=2, name='Other Staff', company_id=1),
+        Staff(id=3, name='Foreign Staff', company_id=2),
     ])
     async_session.add_all([
         Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 10), attendance=1),
         Appointment(id=2, company_id=1, staff_id=2, client_id=2, date=date(2025, 1, 11), attendance=1),
+        Appointment(
+            id=3,
+            company_id=2,
+            staff_id=3,
+            client_id=3,
+            date=date(2025, 1, 12),
+            attendance=1,
+            create_date=datetime(2025, 1, 1, 12, 0, 0),
+        ),
+        Appointment(
+            id=4,
+            company_id=2,
+            staff_id=3,
+            client_id=3,
+            date=date(2025, 1, 20),
+            attendance=0,
+            create_date=datetime(2025, 1, 12, 12, 0, 0),
+        ),
         Transaction(id=1, appointment_id=1, service_id=10, service_title='Cut', amount=1, company_id=1),
         Transaction(id=2, appointment_id=2, service_id=10, service_title='Cut', amount=1, company_id=1),
         FinancialTransaction(
@@ -736,6 +757,11 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
         )
         manager_revenue_daily = await client.get(
             '/dashboard/widget/revenue_daily',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+            headers={'Authorization': f'Bearer {manager_token}'},
+        )
+        manager_bundle = await client.get(
+            '/dashboard/bundle',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
             headers={'Authorization': f'Bearer {manager_token}'},
         )
@@ -802,6 +828,17 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     assert manager_other_staff.json()['data']['financials_hidden'] is True
     assert 'revenue' not in manager_other_staff.json()['data']
     assert manager_revenue_daily.status_code == 403
+    assert manager_bundle.status_code == 200
+    manager_bundle_data = manager_bundle.json()['data']
+    assert manager_bundle_data['financials_hidden'] is True
+    assert 'revenue' not in manager_bundle_data['summary']
+    assert manager_bundle_data['top_services'] == []
+    assert manager_bundle_data['extra_services'] == []
+    assert manager_bundle_data['revenue_daily'] == [
+        {'date': '2025-01-10', 'appointments': 1, 'opz_qty': 0, 'opz_pct': 0.0},
+        {'date': '2025-01-11', 'appointments': 1, 'opz_qty': 0, 'opz_pct': 0.0},
+    ]
+    assert all('revenue' not in row for row in manager_bundle_data['revenue_daily'])
     assert manager_plan_settings.status_code == 403
     assert manager_services.status_code == 403
     assert manager_service_label.status_code == 403
