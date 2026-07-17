@@ -11,7 +11,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_service import (
-    generate_initial_password,
+    generate_bootstrap_password,
     hash_password,
     is_deliverable_portal_email,
     normalize_email,
@@ -54,7 +54,6 @@ class ProvisionedAccount:
     user_id: int
     email: str
     full_name: str
-    initial_password: str
     company_id: int
     role: str
 
@@ -119,19 +118,18 @@ async def provision_staff_account(
         raise ValueError(f'Staff company {staff.company_id} is not assigned to a tenant')
 
     login_email = await _unique_staff_email(db, staff, email)
-    initial_password = password or generate_initial_password()
+    bootstrap_password = password or generate_bootstrap_password()
     now = datetime.utcnow()
 
     user = PortalUser(
         id=staff.id,
         portal_account_id=int(portal_account_id),
         email=login_email,
-        password_hash=hash_password(initial_password),
+        password_hash=hash_password(bootstrap_password),
         full_name=staff.name,
         role=role,
         is_active=True,
         email_verified_at=now,
-        initial_password=initial_password,
         created_at=now,
     )
     db.add(user)
@@ -150,7 +148,6 @@ async def provision_staff_account(
         user_id=user.id,
         email=login_email,
         full_name=staff.name,
-        initial_password=initial_password,
         company_id=staff.company_id,
         role=role,
     )

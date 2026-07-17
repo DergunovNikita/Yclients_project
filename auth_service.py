@@ -39,8 +39,8 @@ def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
 
-def generate_initial_password(length: int = 12) -> str:
-    """Generate a readable initial password (letters + digits, no ambiguous chars)."""
+def generate_bootstrap_password(length: int = 24) -> str:
+    """Generate a random password used only to seed a password hash."""
     alphabet = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789'
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
@@ -78,7 +78,7 @@ def _token_hash(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
 
 
-async def create_email_token(db: AsyncSession, user_id: int, purpose: str) -> str:
+async def create_email_token(db: AsyncSession, user_id: int, purpose: str, *, commit: bool = True) -> str:
     raw = secrets.token_urlsafe(32)
     ttl = TOKEN_TTL_HOURS[purpose]
     db.add(
@@ -90,7 +90,8 @@ async def create_email_token(db: AsyncSession, user_id: int, purpose: str) -> st
             created_at=datetime.utcnow(),
         )
     )
-    await db.commit()
+    if commit:
+        await db.commit()
     return raw
 
 
@@ -192,56 +193,71 @@ def send_auth_email(to_email: str, subject: str, body: str) -> None:
 
 
 async def send_verification_email(db: AsyncSession, user: PortalUser) -> None:
-    token = await create_email_token(db, user.id, TOKEN_PURPOSE_VERIFY)
+    token = await create_email_token(db, user.id, TOKEN_PURPOSE_VERIFY, commit=False)
     user.email_verification_sent_at = datetime.utcnow()
-    await db.commit()
     link = _email_link('/verify-email.html', token)
     name = (user.full_name or user.email).strip()
-    send_auth_email(
-        user.email,
-        'Подтверждение регистрации — YClients Portal',
-        (
-            f'Здравствуйте, {name}!\n\n'
-            'Для завершения регистрации перейдите по ссылке (действует 48 часов):\n'
-            f'{link}\n\n'
-            'Если вы не регистрировались на портале, просто проигнорируйте это письмо.\n'
-        ),
-    )
+    try:
+        send_auth_email(
+            user.email,
+            'Подтверждение регистрации — YClients Portal',
+            (
+                f'Здравствуйте, {name}!\n\n'
+                'Для завершения регистрации перейдите по ссылке (действует 48 часов):\n'
+                f'{link}\n\n'
+                'Если вы не регистрировались на портале, просто проигнорируйте это письмо.\n'
+            ),
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
 
 async def send_password_reset_email(db: AsyncSession, user: PortalUser) -> None:
-    token = await create_email_token(db, user.id, TOKEN_PURPOSE_RESET)
+    token = await create_email_token(db, user.id, TOKEN_PURPOSE_RESET, commit=False)
     user.password_reset_sent_at = datetime.utcnow()
-    await db.commit()
     link = _email_link('/reset-password.html', token)
     name = (user.full_name or user.email).strip()
-    send_auth_email(
-        user.email,
-        'Сброс пароля — YClients Portal',
-        (
-            f'Здравствуйте, {name}!\n\n'
-            'Чтобы задать новый пароль, перейдите по ссылке (действует 2 часа):\n'
-            f'{link}\n\n'
-            'Если вы не запрашивали сброс, проигнорируйте это письмо.\n'
-        ),
-    )
+    try:
+        send_auth_email(
+            user.email,
+            'Сброс пароля — YClients Portal',
+            (
+                f'Здравствуйте, {name}!\n\n'
+                'Чтобы задать новый пароль, перейдите по ссылке (действует 2 часа):\n'
+                f'{link}\n\n'
+                'Если вы не запрашивали сброс, проигнорируйте это письмо.\n'
+            ),
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
 
-def send_account_credentials_email(user: PortalUser, password: str) -> None:
-    login_url = APP_PUBLIC_URL.rstrip('/') + '/login.html'
+async def send_account_invite_email(db: AsyncSession, user: PortalUser) -> None:
+    token = await create_email_token(db, user.id, TOKEN_PURPOSE_RESET, commit=False)
+    user.password_reset_sent_at = datetime.utcnow()
+    link = _email_link('/reset-password.html', token)
     name = (user.full_name or user.email).strip()
-    send_auth_email(
-        user.email,
-        'Доступ к YClients Portal',
-        (
-            f'Здравствуйте, {name}!\n\n'
-            'Для вас создан аккаунт на портале.\n\n'
-            f'Логин: {user.email}\n'
-            f'Пароль: {password}\n\n'
-            f'Войти: {login_url}\n\n'
-            'Рекомендуем сменить пароль после первого входа в личном кабинете.\n'
-        ),
-    )
+    try:
+        send_auth_email(
+            user.email,
+            'Доступ к YClients Portal',
+            (
+                f'Здравствуйте, {name}!\n\n'
+                'Для вас создан аккаунт на портале.\n\n'
+                f'Логин: {user.email}\n'
+                'Чтобы задать пароль, перейдите по ссылке (действует 2 часа):\n'
+                f'{link}\n\n'
+                'Если вы не ожидали это письмо, просто проигнорируйте его.\n'
+            ),
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
 
 def is_deliverable_portal_email(email: str) -> bool:

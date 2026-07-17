@@ -794,7 +794,6 @@ class PortalUser(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     is_demo = Column(Boolean, nullable=False, default=False)
     email_verified_at = Column(DateTime)
-    initial_password = Column(String(128))
     password_changed_at = Column(DateTime)
     created_at = Column(DateTime, nullable=False)
     last_login_at = Column(DateTime)

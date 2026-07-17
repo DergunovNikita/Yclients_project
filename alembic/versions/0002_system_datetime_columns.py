@@ -1,5 +1,7 @@
 """normalize system datetime columns"""
 
+import re
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -15,6 +17,18 @@ SYSTEM_TIMESTAMP_COLUMNS = {
     'sync_step_runs': ['created_at'],
     'sync_jobs': ['requested_at', 'started_at', 'finished_at'],
 }
+
+_IDENTIFIER_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+
+def _quote_identifier(bind, value: str) -> str:
+    if not _IDENTIFIER_RE.fullmatch(value):
+        raise ValueError(f'Unsafe SQL identifier: {value!r}')
+    return bind.dialect.identifier_preparer.quote(value)
+
+
+def _system_table(bind, table_name: str) -> str:
+    return f'{_quote_identifier(bind, "system")}.{_quote_identifier(bind, table_name)}'
 
 
 def _column_type(bind, table_name: str, column_name: str) -> str | None:
@@ -32,12 +46,14 @@ def upgrade() -> None:
     for table_name, columns in SYSTEM_TIMESTAMP_COLUMNS.items():
         for column_name in columns:
             if _column_type(bind, table_name, column_name) == 'text':
-                op.execute(sa.text(f"""
-                    ALTER TABLE system.{table_name}
-                    ALTER COLUMN {column_name}
+                table_sql = _system_table(bind, table_name)
+                column_sql = _quote_identifier(bind, column_name)
+                bind.exec_driver_sql(f"""
+                    ALTER TABLE {table_sql}
+                    ALTER COLUMN {column_sql}
                     TYPE timestamp without time zone
-                    USING NULLIF({column_name}, '')::timestamp
-                """))
+                    USING NULLIF({column_sql}, '')::timestamp
+                """)
 
 
 def downgrade() -> None:
@@ -45,12 +61,14 @@ def downgrade() -> None:
     for table_name, columns in SYSTEM_TIMESTAMP_COLUMNS.items():
         for column_name in columns:
             if _column_type(bind, table_name, column_name) == 'timestamp without time zone':
-                op.execute(sa.text(f"""
-                    ALTER TABLE system.{table_name}
-                    ALTER COLUMN {column_name}
+                table_sql = _system_table(bind, table_name)
+                column_sql = _quote_identifier(bind, column_name)
+                bind.exec_driver_sql(f"""
+                    ALTER TABLE {table_sql}
+                    ALTER COLUMN {column_sql}
                     TYPE text
                     USING CASE
-                        WHEN {column_name} IS NULL THEN NULL
-                        ELSE to_char({column_name}, 'YYYY-MM-DD\"T\"HH24:MI:SS.US')
+                        WHEN {column_sql} IS NULL THEN NULL
+                        ELSE to_char({column_sql}, 'YYYY-MM-DD\"T\"HH24:MI:SS.US')
                     END
-                """))
+                """)

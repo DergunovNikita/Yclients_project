@@ -1,5 +1,7 @@
 """hardening baseline"""
 
+import re
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -70,12 +72,24 @@ SYSTEM_BASE_TABLES = {
     'sync_step_runs',
 }
 
+_IDENTIFIER_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+
+def _quote_identifier(bind, value: str) -> str:
+    if not _IDENTIFIER_RE.fullmatch(value):
+        raise ValueError(f'Unsafe SQL identifier: {value!r}')
+    return bind.dialect.identifier_preparer.quote(value)
+
+
+def _public_table(bind, table_name: str) -> str:
+    return f'{_quote_identifier(bind, "public")}.{_quote_identifier(bind, table_name)}'
+
 
 def _rebuild_public_schema(bind) -> None:
     for view_name in LEGACY_VIEWS:
-        op.execute(sa.text(f'DROP VIEW IF EXISTS {view_name} CASCADE'))
+        bind.exec_driver_sql(f'DROP VIEW IF EXISTS {_quote_identifier(bind, view_name)} CASCADE')
     for table_name in PUBLIC_TABLES:
-        op.execute(sa.text(f'DROP TABLE IF EXISTS public.{table_name} CASCADE'))
+        bind.exec_driver_sql(f'DROP TABLE IF EXISTS {_public_table(bind, table_name)} CASCADE')
     Base.metadata.create_all(
         bind=bind,
         tables=[
@@ -119,8 +133,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
     for view_name in LEGACY_VIEWS:
-        op.execute(sa.text(f'DROP VIEW IF EXISTS {view_name} CASCADE'))
+        bind.exec_driver_sql(f'DROP VIEW IF EXISTS {_quote_identifier(bind, view_name)} CASCADE')
     for table_name in PUBLIC_TABLES:
-        op.execute(sa.text(f'DROP TABLE IF EXISTS public.{table_name} CASCADE'))
+        bind.exec_driver_sql(f'DROP TABLE IF EXISTS {_public_table(bind, table_name)} CASCADE')
     op.execute(sa.text('DROP TABLE IF EXISTS system.sync_jobs CASCADE'))

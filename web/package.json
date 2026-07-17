@@ -12,8 +12,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "chart.js": "^4.4.0",
-    "xlsx": "^0.18.5"
+    "chart.js": "^4.4.0"
   },
   "devDependencies": {
     "vite": "^8.1.4"

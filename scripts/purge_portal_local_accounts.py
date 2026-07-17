@@ -1,4 +1,4 @@
-"""Delete @portal.local portal accounts, clear initial passwords, reset id sequence."""
+"""Delete @portal.local portal accounts and reset the portal user id sequence."""
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import select, text, update
 
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from database import build_async_database_url
@@ -21,11 +21,6 @@ async def main() -> int:
     Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with Session() as db:
-        pwd_count = (
-            await db.execute(
-                select(func.count()).select_from(PortalUser).where(PortalUser.initial_password.is_not(None))
-            )
-        ).scalar_one()
         users = (
             await db.execute(select(PortalUser).where(PortalUser.email.ilike('%@portal.local')))
         ).scalars().all()
@@ -39,9 +34,6 @@ async def main() -> int:
                 await db.delete(user)
 
         await db.execute(
-            update(PortalUser).where(PortalUser.initial_password.is_not(None)).values(initial_password=None)
-        )
-        await db.execute(
             text(
                 "SELECT setval("
                 "pg_get_serial_sequence('system.portal_users', 'id'), "
@@ -50,7 +42,6 @@ async def main() -> int:
             )
         )
         await db.commit()
-        print(f'Cleared initial_password for {pwd_count} user(s).')
         print(f'Deleted {len(users)} @portal.local account(s).')
 
     await engine.dispose()

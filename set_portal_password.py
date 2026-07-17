@@ -1,9 +1,8 @@
 """Set a permanent reusable password for an existing portal user.
 
 Unlike `create_portal_admin.py`, this script does not create users or modify
-roles — it only replaces the password hash, clears any one-time
-`initial_password`, and stamps `password_changed_at` so the account is treated
-as having a permanent reusable password.
+roles — it only replaces the password hash and stamps `password_changed_at`
+so the account is treated as having a permanent reusable password.
 """
 from __future__ import annotations
 
@@ -46,7 +45,6 @@ def main() -> int:
             return 1
 
         user.password_hash = hash_password(password)
-        user.initial_password = None
         user.password_changed_at = datetime.utcnow()
         db.commit()
         print(f'Password updated for user id={user.id} email={email}')

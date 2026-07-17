@@ -819,7 +819,6 @@ async def test_platform_admin_user_management_is_scoped_to_selected_tenant(auth_
             role='manager',
             is_active=True,
             email_verified_at=datetime.utcnow(),
-            initial_password='TenantB12345!',
             created_at=datetime.utcnow(),
         )
     )
@@ -859,7 +858,13 @@ async def test_platform_admin_user_management_is_scoped_to_selected_tenant(auth_
     assert 'staff-b@example.com' in tenant_b_emails
     assert 'admin@example.com' not in tenant_b_emails
     assert tenant_b_passwords.status_code == 200
-    assert [row['email'] for row in tenant_b_passwords.json()['data']] == ['tenant-b@example.com']
+    pending_invite_emails = {item['email'] for item in tenant_b_passwords.json()['data']}
+    assert 'tenant-b@example.com' in pending_invite_emails
+    assert 'admin@example.com' not in pending_invite_emails
+    for row in tenant_b_passwords.json()['data']:
+        assert row['portal_account_id'] == 2
+        assert 'initial_password' not in row
+    assert tenant_b_passwords.json()['deprecated'] is True
 
 
 @pytest.mark.asyncio
@@ -1248,9 +1253,16 @@ async def test_onboarding_claims_branch_from_admin_only_tenant_with_active_crede
 
 
 @pytest.mark.asyncio
-async def test_register_allows_login_without_email_verification(auth_db, monkeypatch):
+async def test_register_requires_email_verification_before_login(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     monkeypatch.setattr('auth_routes.AUTH_PUBLIC_REGISTRATION_ENABLED', True)
+    monkeypatch.setattr('auth_routes.AUTH_EMAIL_VERIFY_REQUIRED', True)
+    sent = []
+
+    def _capture_email(to_email, subject, body):
+        sent.append((to_email, subject, body))
+
+    monkeypatch.setattr('auth_service.send_auth_email', _capture_email)
 
     async def override_db():
         yield auth_db
@@ -1263,17 +1275,67 @@ async def test_register_allows_login_without_email_verification(auth_db, monkeyp
             json={'email': 'newuser@example.com', 'password': 'NewUser123!', 'full_name': 'New'},
         )
         assert created.status_code == 200
+        assert created.json()['message_key'] == 'register.verifySuccess'
         login = await client.post('/auth/login', json={'email': 'newuser@example.com', 'password': 'NewUser123!'})
-        assert login.status_code == 200
+        assert login.status_code == 403
+        assert login.json()['detail'] == 'Email verification required'
+
+        assert len(sent) == 1
+        raw_token = sent[0][2].split('token=', 1)[1].split()[0]
+        verified = await client.post('/auth/verify-email', json={'token': raw_token})
+        assert verified.status_code == 200
+        login_after_verify = await client.post(
+            '/auth/login',
+            json={'email': 'newuser@example.com', 'password': 'NewUser123!'},
+        )
+        assert login_after_verify.status_code == 200
 
     created_user = (
         await auth_db.execute(select(PortalUser).where(PortalUser.email == 'newuser@example.com'))
     ).scalar_one()
     assert created_user.role == 'owner'
+    await auth_db.refresh(created_user)
     assert created_user.email_verified_at is not None
     assert created_user.portal_account_id is None
 
     app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_register_email_failure_rolls_back_unverified_account(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setattr('auth_routes.AUTH_PUBLIC_REGISTRATION_ENABLED', True)
+    monkeypatch.setattr('auth_routes.AUTH_EMAIL_VERIFY_REQUIRED', True)
+
+    def _fail_email(*_args, **_kwargs):
+        raise RuntimeError('smtp unavailable')
+
+    monkeypatch.setattr('auth_service.send_auth_email', _fail_email)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        failed = await client.post(
+            '/auth/register',
+            json={'email': 'mailfail@example.com', 'password': 'MailFail123!', 'full_name': 'Mail Fail'},
+        )
+        retry = await client.post(
+            '/auth/register',
+            json={'email': 'mailfail@example.com', 'password': 'MailFail123!', 'full_name': 'Mail Fail'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert failed.status_code == 503
+    assert failed.json()['detail'] == 'Email delivery failed'
+    assert retry.status_code == 503
+    assert await auth_db.scalar(
+        select(func.count()).select_from(PortalUser).where(PortalUser.email == 'mailfail@example.com')
+    ) == 0
+    assert await auth_db.scalar(select(func.count()).select_from(PortalEmailToken)) == 0
 
 
 @pytest.mark.asyncio
@@ -2355,7 +2417,7 @@ async def test_provision_staff_account(auth_db, monkeypatch):
         assert data['email'] == 'worker9003@example.com'
         assert data['user_id'] == 9003
         assert data['staff_id'] == 9003
-        assert len(data['initial_password']) >= 8
+        assert 'initial_password' not in data
         branch_ids = (
             await auth_db.execute(
                 select(PortalUserBranch.company_id)
@@ -2365,25 +2427,21 @@ async def test_provision_staff_account(auth_db, monkeypatch):
         ).scalars().all()
         assert branch_ids == [1, 2]
 
-        login = await client.post(
-            '/auth/login',
-            json={'email': data['email'], 'password': data['initial_password']},
-        )
-        assert login.status_code == 200
-
         passwords = await client.get(
             '/auth/admin/initial-passwords',
             headers={'Authorization': f'Bearer {token}'},
         )
         assert passwords.status_code == 200
-        emails = {row['email'] for row in passwords.json()['data']}
-        assert data['email'] in emails
+        pending_invites = passwords.json()['data']
+        assert any(row['email'] == 'worker9003@example.com' for row in pending_invites)
+        for row in pending_invites:
+            assert 'initial_password' not in row
 
     app.dependency_overrides.clear()
 
 
 @pytest.mark.asyncio
-async def test_change_password_clears_initial_password(auth_db, monkeypatch):
+async def test_change_password_updates_hash_and_invalidates_old_password(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     token = create_access_token(2, 'manager')
 
@@ -2394,9 +2452,6 @@ async def test_change_password_clears_initial_password(auth_db, monkeypatch):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         user = (await auth_db.execute(select(PortalUser).where(PortalUser.id == 2))).scalar_one()
-        user.initial_password = 'Manager12345!'
-        await auth_db.commit()
-
         changed = await client.post(
             '/auth/change-password',
             headers={'Authorization': f'Bearer {token}'},
@@ -2405,7 +2460,6 @@ async def test_change_password_clears_initial_password(auth_db, monkeypatch):
         assert changed.status_code == 200
 
         await auth_db.refresh(user)
-        assert user.initial_password is None
         assert user.password_changed_at is not None
 
         login_old = await client.post(
@@ -2424,7 +2478,7 @@ async def test_change_password_clears_initial_password(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_branch_admin_sees_branch_initial_passwords_only(auth_db, monkeypatch):
+async def test_initial_passwords_endpoint_lists_pending_invites_without_passwords(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(
         Staff(
@@ -2463,14 +2517,24 @@ async def test_branch_admin_sees_branch_initial_passwords_only(auth_db, monkeypa
             headers={'Authorization': f'Bearer {super_token}'},
         )
 
-        branch_passwords = await client.get(
+        pending_invites = await client.get(
             '/auth/admin/initial-passwords',
             headers={'Authorization': f'Bearer {branch_token}'},
         )
-        assert branch_passwords.status_code == 200
-        branch_emails = {row['email'] for row in branch_passwords.json()['data']}
-        assert 'branch.worker@example.com' in branch_emails
-        assert 'other.branch.worker@example.com' not in branch_emails
+        assert pending_invites.status_code == 200
+        data = pending_invites.json()['data']
+        assert pending_invites.json()['deprecated'] is True
+        emails = {row['email'] for row in data}
+        assert 'branch.worker@example.com' in emails
+        assert 'other.branch.worker@example.com' not in emails
+        for row in data:
+            assert row['user_id']
+            assert 'initial_password' not in row
+        branch_row = next(row for row in data if row['email'] == 'branch.worker@example.com')
+        assert branch_row['full_name'] == 'Branch Worker'
+        assert branch_row['staff_id'] == 9004
+        assert branch_row['company_ids'] == [1]
+        assert branch_row['password_reset_sent_at'] is None
 
     app.dependency_overrides.clear()
 
@@ -2527,10 +2591,10 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     sent = []
 
-    def _capture_send(user, password):
-        sent.append((user.email, password))
+    async def _capture_send(db, user):
+        sent.append(user.email)
 
-    monkeypatch.setattr('auth_routes.send_account_credentials_email', _capture_send)
+    monkeypatch.setattr('auth_routes.send_account_invite_email', _capture_send)
 
     auth_db.add(
         PortalUser(
@@ -2542,7 +2606,6 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
             role='viewer',
             is_active=True,
             email_verified_at=datetime.utcnow(),
-            initial_password='RealUser123!',
             created_at=datetime.utcnow(),
         )
     )
@@ -2557,7 +2620,6 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
             role='viewer',
             is_active=True,
             email_verified_at=datetime.utcnow(),
-            initial_password='FakeWorker123!',
             created_at=datetime.utcnow(),
         )
     )
@@ -2581,9 +2643,59 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
         data = response.json()['data']
         assert data['sent_count'] == 1
         assert len(data['skipped']) == 1
-        assert sent == [('real.user@example.com', 'RealUser123!')]
+        assert sent == ['real.user@example.com']
 
     app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_distribute_credentials_reports_invite_failures_after_rollback(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+
+    auth_db.add(
+        PortalUser(
+            id=12,
+            portal_account_id=1,
+            email='rollback.invite@example.com',
+            password_hash=hash_password('Rollback123!'),
+            full_name='Rollback Invite',
+            role='viewer',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add(PortalUserBranch(user_id=12, company_id=1))
+    await auth_db.commit()
+
+    async def _fail_after_rollback(db, _user):
+        await db.rollback()
+        raise RuntimeError('smtp unavailable')
+
+    monkeypatch.setattr('auth_routes.send_account_invite_email', _fail_after_rollback)
+    token = create_access_token(1, 'owner')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/auth/admin/distribute-credentials',
+            headers={'Authorization': f'Bearer {token}'},
+            json={'user_ids': [12]},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    data = response.json()['data']
+    assert data['sent_count'] == 0
+    assert data['sent'] == []
+    assert data['errors'] == [
+        {'user_id': 12, 'email': 'rollback.invite@example.com', 'reason': 'smtp unavailable'}
+    ]
 
 
 # --------------------------------------------------------------------------- #

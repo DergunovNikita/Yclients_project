@@ -802,6 +802,12 @@ LEGACY_VIEWS = [
 ]
 
 
+def quote_identifier(conn, value: str) -> str:
+    if not value.replace("_", "").isalnum() or not value[0].isalpha():
+        raise ValueError(f"Unsafe SQL identifier: {value!r}")
+    return conn.dialect.identifier_preparer.quote(value)
+
+
 def refresh_analytics_views(verbose: bool = True):
     if verbose:
         print("Создание аналитических представлений в PostgreSQL...")
@@ -815,7 +821,7 @@ def refresh_analytics_views(verbose: bool = True):
 
     with database.engine.connect() as conn:
         for view_name in LEGACY_VIEWS:
-            conn.execute(text(f"DROP VIEW IF EXISTS {view_name}"))
+            conn.exec_driver_sql(f"DROP VIEW IF EXISTS {quote_identifier(conn, view_name)}")
         conn.commit()
 
         for i, view_sql in enumerate(VIEWS, 1):

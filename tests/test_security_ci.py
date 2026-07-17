@@ -55,7 +55,6 @@ def test_local_security_script_documents_same_gate():
 def test_frontend_audit_allowlist_entries_are_explicit():
     allowlist = json.loads((ROOT / 'web/audit-allowlist.json').read_text())
 
-    assert allowlist['allowed']
     for entry in allowlist['allowed']:
         assert entry['package']
         assert entry['advisoryIds']

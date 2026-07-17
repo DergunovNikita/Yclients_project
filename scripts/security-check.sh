@@ -4,6 +4,24 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCAL_BIN="$ROOT_DIR/.venv/bin"
 export PATH="$LOCAL_BIN:$PATH"
+export npm_config_cache="${npm_config_cache:-/private/tmp/yclients-npm-cache}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/private/tmp/yclients-pip-cache}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/private/tmp/yclients-xdg-cache}"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/private/tmp/yclients-xdg-config}"
+export SEMGREP_LOG_FILE="${SEMGREP_LOG_FILE:-/private/tmp/yclients-semgrep/semgrep.log}"
+export SEMGREP_SETTINGS_FILE="${SEMGREP_SETTINGS_FILE:-/private/tmp/yclients-semgrep/settings.yaml}"
+export SEMGREP_SEND_METRICS="${SEMGREP_SEND_METRICS:-off}"
+export SEMGREP_ENABLE_VERSION_CHECK="${SEMGREP_ENABLE_VERSION_CHECK:-0}"
+if [[ -z "${SSL_CERT_FILE:-}" && -x "$LOCAL_BIN/python" ]]; then
+  certifi_bundle="$("$LOCAL_BIN/python" -c 'import certifi; print(certifi.where())' 2>/dev/null || true)"
+  if [[ -n "$certifi_bundle" && -f "$certifi_bundle" ]]; then
+    export SSL_CERT_FILE="$certifi_bundle"
+  fi
+fi
+if [[ -z "${REQUESTS_CA_BUNDLE:-}" && -n "${SSL_CERT_FILE:-}" ]]; then
+  export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+fi
+mkdir -p "$PIP_CACHE_DIR" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$(dirname "$SEMGREP_LOG_FILE")" "$(dirname "$SEMGREP_SETTINGS_FILE")"
 
 STRICT=0
 if [[ "${1:-}" == "--strict" ]]; then
@@ -38,6 +56,26 @@ if require_or_warn gitleaks "install gitleaks to enable secret scanning"; then
     ok "gitleaks"
   else
     fail "gitleaks flagged potential secrets"
+  fi
+
+  untracked_files=()
+  while IFS= read -r -d '' file_path; do
+    untracked_files+=("$file_path")
+  done < <(git ls-files -z --others --exclude-standard)
+
+  if [[ "${#untracked_files[@]}" -gt 0 ]]; then
+    info "gitleaks untracked worktree scan"
+    untracked_status=0
+    for file_path in "${untracked_files[@]}"; do
+      if ! gitleaks dir "$file_path" --config .gitleaks.toml --redact --no-banner; then
+        untracked_status=1
+      fi
+    done
+    if [[ "$untracked_status" -eq 0 ]]; then
+      ok "gitleaks untracked files"
+    else
+      fail "gitleaks flagged potential secrets in untracked files"
+    fi
   fi
 fi
 
@@ -91,6 +129,20 @@ if require_or_warn semgrep "python -m pip install semgrep"; then
   info "semgrep Python/JavaScript security packs"
   semgrep_args=(
     scan
+    --metrics=off
+    --no-git-ignore
+    --exclude .git
+    --exclude .venv
+    --exclude venv
+    --exclude .tools
+    --exclude web/node_modules
+    --exclude web/dist
+    --exclude __pycache__
+    --exclude .pytest_cache
+    --exclude .mypy_cache
+    --exclude .ruff_cache
+    --exclude htmlcov
+    --exclude logs
     --config p/python
     --config p/javascript
     --config p/security-audit
@@ -115,6 +167,9 @@ if require_or_warn checkov "python -m pip install checkov"; then
     -d .
     --framework dockerfile,github_actions,secrets
     --output cli
+    --skip-download
+    --quiet
+    --compact
   )
   if [[ "$STRICT" -eq 0 ]]; then
     checkov_args+=(--soft-fail)

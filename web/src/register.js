@@ -25,11 +25,11 @@ form.addEventListener('submit', async (event) => {
     const email = document.getElementById('email').value.trim();
     const password = document.getElementById('password').value;
     const full_name = document.getElementById('full_name').value.trim() || null;
-    await authFetch('/auth/register', {
+    const payload = await authFetch('/auth/register', {
       method: 'POST',
       body: JSON.stringify({ email, password, full_name }),
     });
-    successEl.textContent = t('register.success');
+    successEl.textContent = payload.message_key ? t(payload.message_key) : (payload.message || t('register.success'));
     successEl.hidden = false;
     form.reset();
   } catch (error) {

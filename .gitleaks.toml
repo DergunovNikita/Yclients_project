@@ -3,6 +3,17 @@ title = "YClients BI gitleaks config"
 [extend]
 useDefault = true
 
+[[allowlists]]
+description = "Historical documentation examples before the hardening pass"
+commits = [
+  "16a9b42d94c1929bb76618b65a09cc83556a6deb",
+  "8e19f714dfc1f6e5bb8a6da9555cea5ab1a35808",
+  "46ad2c116b01628c6d20af7083e02ca773f22a1f",
+  "b61c92d3601d221c5128508b55e8abeb88b91a33",
+  "d0ddf85a96c464ab2ea30d9e1b5e3e53a1fc307b",
+  "82a742f73d5ed345c0844020f1537ec8d41aede5",
+]
+
 [[rules]]
 id = "yclients-vm-host-ip"
 description = "Detect committed VM host IPs in deployment examples"

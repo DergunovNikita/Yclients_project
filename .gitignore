@@ -4,6 +4,7 @@
 .env.*.local
 # Local Google service account keys
 Silver Stratum Plan Reader.json
+*service*account*.json
 secrets/*.json
 .venv/
 venv/

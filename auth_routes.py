@@ -28,12 +28,13 @@ from auth_service import (
     consume_email_token,
     create_access_token,
     email_cooldown_active,
+    generate_bootstrap_password,
     hash_password,
     load_portal_account_branch_ids,
     load_user_access_branch_ids,
     normalize_email,
     send_password_reset_email,
-    send_account_credentials_email,
+    send_account_invite_email,
     is_deliverable_portal_email,
     send_verification_email,
     set_user_branches,
@@ -75,6 +76,7 @@ from yclients_credentials import (
     update_credential_secrets,
 )
 from config import (
+    AUTH_EMAIL_VERIFY_REQUIRED,
     AUTH_PUBLIC_REGISTRATION_ENABLED,
     AUTH_RATE_LIMIT_IP_MAX_REQUESTS,
     AUTH_RATE_LIMIT_MAX_REQUESTS,
@@ -156,7 +158,7 @@ class AdminUserUpdateRequest(BaseModel):
 
 class AdminUserCreateRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+    password: str | None = Field(default=None, min_length=8, max_length=128)
     full_name: str | None = Field(default=None, max_length=255)
     role: str
     portal_account_id: int | None = None
@@ -196,7 +198,6 @@ def _user_payload(
     branch_ids: list[int],
     manageable: bool | None = None,
     *,
-    show_initial_password: bool = False,
     staff_id: int | None = None,
 ) -> dict:
     payload = {
@@ -214,8 +215,6 @@ def _user_payload(
         'manageable': manageable,
         'password_changed': user.password_changed_at is not None,
     }
-    if show_initial_password and user.initial_password:
-        payload['initial_password'] = user.initial_password
     return payload
 
 
@@ -272,6 +271,7 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     if existing is not None:
         raise HTTPException(status_code=409, detail='Email already registered')
 
+    now = datetime.utcnow()
     user = PortalUser(
         portal_account_id=None,
         email=email,
@@ -279,15 +279,26 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
         full_name=body.full_name,
         role='owner',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=None if AUTH_EMAIL_VERIFY_REQUIRED else now,
+        created_at=now,
     )
     db.add(user)
-    await db.commit()
-    await db.refresh(user)
+    if AUTH_EMAIL_VERIFY_REQUIRED:
+        await db.flush()
+        try:
+            await send_verification_email(db, user)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail='Email delivery failed') from exc
+    else:
+        await db.commit()
     return {
         'success': True,
-        'message': 'Регистрация успешна. Можно войти и подключить источник данных.',
+        'message_key': 'register.verifySuccess' if AUTH_EMAIL_VERIFY_REQUIRED else 'register.success',
+        'message': (
+            'Регистрация успешна. Проверьте почту для подтверждения email.'
+            if AUTH_EMAIL_VERIFY_REQUIRED
+            else 'Регистрация успешна. Можно войти и подключить источник данных.'
+        ),
     }
 
 
@@ -326,6 +337,8 @@ async def login(
         raise HTTPException(status_code=401, detail='Invalid email or password')
     if not user_can_login(user):
         raise HTTPException(status_code=403, detail='Account disabled')
+    if AUTH_EMAIL_VERIFY_REQUIRED and user.email_verified_at is None:
+        raise HTTPException(status_code=403, detail='Email verification required')
 
     user.last_login_at = datetime.utcnow()
     session = await issue_session(db, user, request, access_token_fn=_access_token_for)
@@ -591,7 +604,6 @@ async def reset_password(
     if user is None:
         raise HTTPException(status_code=400, detail='Invalid or expired token')
     user.password_hash = hash_password(body.password)
-    user.initial_password = None
     user.password_changed_at = datetime.utcnow()
     bump_user_token_version(user)
     await revoke_user_sessions(db, user.id)
@@ -611,7 +623,6 @@ async def change_password(
         raise HTTPException(status_code=400, detail='Новый пароль должен отличаться от текущего')
 
     user.password_hash = hash_password(body.new_password)
-    user.initial_password = None
     user.password_changed_at = datetime.utcnow()
     bump_user_token_version(user)
     await revoke_user_sessions(db, user.id)
@@ -893,7 +904,6 @@ async def admin_list_users(
     await db.commit()
 
     payload = []
-    show_passwords = actor.role in USER_ADMIN_ROLES
     staff_ids_by_user = await _load_staff_ids_by_portal_user(db, [user.id for user in users])
     for user in users:
         if actor.role == 'platform_admin' and user.portal_account_id != active_portal_account_id:
@@ -910,9 +920,6 @@ async def admin_list_users(
                     user,
                     branch_ids,
                     manageable=manageable,
-                    show_initial_password=show_passwords and can_list_user(
-                        actor.role, actor_branch_ids, user.role, branch_ids
-                    ),
                     staff_id=staff_ids_by_user.get(user.id),
                 )
             )
@@ -972,15 +979,15 @@ async def admin_create_user(
     if existing is not None:
         raise HTTPException(status_code=409, detail='Email already registered')
 
+    password = body.password or generate_bootstrap_password()
     user = PortalUser(
         portal_account_id=portal_account_id,
         email=email,
-        password_hash=hash_password(body.password),
+        password_hash=hash_password(password),
         full_name=body.full_name,
         role=body.role,
         is_active=True,
         email_verified_at=datetime.utcnow(),
-        initial_password=body.password,
         created_at=datetime.utcnow(),
     )
     db.add(user)
@@ -1003,7 +1010,7 @@ async def admin_create_user(
     branch_ids = await load_user_access_branch_ids(db, user)
     return {
         'success': True,
-        'data': _user_payload(user, branch_ids, manageable=None, show_initial_password=True),
+        'data': _user_payload(user, branch_ids, manageable=None),
     }
 
 
@@ -1561,7 +1568,6 @@ def _provisioned_payload(account) -> dict:
         'user_id': account.user_id,
         'email': account.email,
         'full_name': account.full_name,
-        'initial_password': account.initial_password,
         'company_id': account.company_id,
         'role': account.role,
     }
@@ -1633,32 +1639,37 @@ async def admin_list_initial_passwords(
     users = (
         await db.execute(
             select(PortalUser)
-            .where(PortalUser.initial_password.is_not(None))
+            .where(PortalUser.is_active.is_(True))
+            .where(PortalUser.is_demo.is_(False))
+            .where(PortalUser.last_login_at.is_(None))
             .order_by(PortalUser.id.asc())
         )
     ).scalars().all()
+    staff_ids_by_user = await _load_staff_ids_by_portal_user(db, [user.id for user in users])
 
     payload = []
-    staff_ids_by_user = await _load_staff_ids_by_portal_user(db, [user.id for user in users])
     for user in users:
         if actor.role == 'platform_admin' and user.portal_account_id != active_portal_account_id:
             continue
         if not _same_tenant(actor, user):
             continue
         branch_ids = await load_user_access_branch_ids(db, user)
-        if not can_list_user(actor.role, actor_branch_ids, user.role, branch_ids):
+        if not can_manage_user(actor.role, actor_branch_ids, user.role, branch_ids):
             continue
-        staff_id = staff_ids_by_user.get(user.id, user.id)
         payload.append({
+            **_user_payload(
+                user,
+                branch_ids,
+                manageable=True,
+                staff_id=staff_ids_by_user.get(user.id),
+            ),
             'user_id': user.id,
-            'staff_id': staff_id,
-            'email': user.email,
-            'full_name': user.full_name,
-            'role': user.role,
-            'company_ids': branch_ids,
-            'initial_password': user.initial_password,
+            'password_reset_sent_at': (
+                user.password_reset_sent_at.isoformat() if user.password_reset_sent_at else None
+            ),
         })
-    return {'success': True, 'data': payload}
+
+    return {'success': True, 'data': payload, 'deprecated': True}
 
 
 @router.post('/admin/distribute-credentials', dependencies=[Depends(forbid_demo)])
@@ -1686,34 +1697,36 @@ async def admin_distribute_credentials(
             errors.append({'user_id': user_id, 'reason': 'User not found'})
             continue
 
-        if actor.role == 'platform_admin' and user.portal_account_id != active_portal_account_id:
-            errors.append({'user_id': user_id, 'email': user.email, 'reason': 'Access denied'})
+        user_email = user.email
+        portal_account_id = user.portal_account_id
+        user_role = user.role
+        user_object_id = user.id
+
+        if actor.role == 'platform_admin' and portal_account_id != active_portal_account_id:
+            errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Access denied'})
             continue
         if not _same_tenant(actor, user):
-            errors.append({'user_id': user_id, 'email': user.email, 'reason': 'Access denied'})
+            errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Access denied'})
             continue
         branch_ids = await load_user_access_branch_ids(db, user)
-        if not can_manage_user(actor.role, actor_branch_ids, user.role, branch_ids):
-            errors.append({'user_id': user_id, 'email': user.email, 'reason': 'Access denied'})
+        if not can_manage_user(actor.role, actor_branch_ids, user_role, branch_ids):
+            errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Access denied'})
             continue
-        if not user.initial_password:
-            skipped.append({'user_id': user_id, 'email': user.email, 'reason': 'No initial password stored'})
-            continue
-        if not is_deliverable_portal_email(user.email):
+        if not is_deliverable_portal_email(user_email):
             skipped.append({
                 'user_id': user_id,
-                'email': user.email,
+                'email': user_email,
                 'reason': 'Synthetic login address (@portal.local) — specify a real email',
             })
             continue
 
         try:
-            send_account_credentials_email(user, user.initial_password)
+            await send_account_invite_email(db, user)
         except Exception as exc:
-            errors.append({'user_id': user_id, 'email': user.email, 'reason': str(exc)})
+            errors.append({'user_id': user_id, 'email': user_email, 'reason': str(exc)})
             continue
 
-        sent.append({'user_id': user.id, 'email': user.email})
+        sent.append({'user_id': user_object_id, 'email': user_email})
 
     return {
         'success': True,

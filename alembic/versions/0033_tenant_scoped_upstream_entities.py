@@ -23,6 +23,12 @@ ENTITY_TABLES = (
 )
 
 
+def _quote_identifier(bind, value: str) -> str:
+    if not value.replace('_', '').isalnum() or not value[0].isalpha():
+        raise ValueError(f'Unsafe SQL identifier: {value!r}')
+    return bind.dialect.identifier_preparer.quote(value)
+
+
 def _has_column(inspector, table: str, column: str, schema: str | None = None) -> bool:
     return any(item['name'] == column for item in inspector.get_columns(table, schema=schema))
 
@@ -32,7 +38,8 @@ def _index_names(inspector, table: str, schema: str | None = None) -> set[str]:
 
 
 def upgrade() -> None:
-    inspector = sa.inspect(op.get_bind())
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
 
     for table, unique_index in ENTITY_TABLES:
         if not _has_column(inspector, table, 'external_id'):
@@ -42,7 +49,8 @@ def upgrade() -> None:
                 table,
                 sa.Column('source_type', sa.String(), server_default='yclients', nullable=False),
             )
-        op.execute(sa.text(f'UPDATE {table} SET external_id = id WHERE external_id IS NULL'))
+        table_sql = _quote_identifier(bind, table)
+        bind.exec_driver_sql(f'UPDATE {table_sql} SET external_id = id WHERE external_id IS NULL')
 
         indexes = _index_names(inspector, table)
         external_index = f'ix_{table}_external_id'

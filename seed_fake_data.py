@@ -114,9 +114,16 @@ WIPE_TABLES = [
 ]
 
 
+def quote_identifier(db, value: str) -> str:
+    if not value.replace("_", "").isalnum() or not value[0].isalpha():
+        raise ValueError(f"Unsafe SQL identifier: {value!r}")
+    return db.bind.dialect.identifier_preparer.quote(value)
+
+
 def maybe_wipe_data(db) -> None:
-    wipe_sql = "TRUNCATE TABLE " + ", ".join(WIPE_TABLES) + " RESTART IDENTITY CASCADE;"
-    db.execute(text(wipe_sql))
+    table_names = ", ".join(quote_identifier(db, table_name) for table_name in WIPE_TABLES)
+    wipe_sql = f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE;"
+    db.connection().exec_driver_sql(wipe_sql)
     db.commit()
 
 

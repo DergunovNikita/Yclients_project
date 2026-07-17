@@ -24,7 +24,7 @@ async def main() -> int:
         for item in created:
             print(
                 f'created staff_id={item.staff_id} user_id={item.user_id} '
-                f'email={item.email} password={item.initial_password}'
+                f'email={item.email}'
             )
         for error in errors:
             print(f'error: {error}')

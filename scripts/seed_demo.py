@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import select  # noqa: E402
 
-from auth_service import generate_initial_password, hash_password, normalize_email  # noqa: E402
+from auth_service import generate_bootstrap_password, hash_password, normalize_email  # noqa: E402
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER  # noqa: E402
 from database import init_database  # noqa: E402
 from models import (  # noqa: E402
@@ -274,7 +274,7 @@ def ensure_demo_user(db, account_id: int) -> PortalUser:
     if user is None:
         user = PortalUser(
             email=email,
-            password_hash=hash_password(generate_initial_password()),
+            password_hash=hash_password(generate_bootstrap_password()),
             full_name='Demo',
             role='owner',
             is_active=True,

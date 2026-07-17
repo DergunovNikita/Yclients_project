@@ -77,7 +77,7 @@
       <div class="admin-card__header admin-card__header--stacked">
         <div>
           <h2 data-i18n="admin.initialPasswordsTitle">Password iniziali</h2>
-          <p class="admin-card__hint" data-i18n="admin.initialPasswordsHint">Il login è l'email dell'utente. La password scompare dall'elenco dopo che l'utente la cambia.</p>
+          <p class="admin-card__hint" data-i18n="admin.initialPasswordsHint">Il login è l'email dell'utente. Invia un link sicuro per impostare la password.</p>
         </div>
         <label class="admin-search">
           <span class="admin-search__label" data-i18n="admin.search">Cerca</span>
@@ -93,7 +93,8 @@
               <th data-i18n="admin.colName">Nome</th>
               <th data-i18n="admin.colRole">Ruolo</th>
               <th data-i18n="admin.colBranches">Filiali</th>
-              <th data-i18n="admin.colPassword">Password</th>
+              <th data-i18n="admin.colInviteSentAt">Ultimo invito</th>
+              <th data-i18n="admin.colActions">Azioni</th>
             </tr>
           </thead>
           <tbody id="initial-passwords-body"></tbody>
@@ -168,7 +169,7 @@
       <div class="alert success" id="credentials-success" hidden></div>
       <div class="admin-modal__message" id="credentials-message"></div>
       <div class="admin-modal__actions admin-modal__actions--center">
-        <button type="button" class="btn btn--ghost" id="save-credentials-excel" data-i18n="admin.saveExcel">Salva Excel</button>
+        <button type="button" class="btn btn--ghost" id="save-credentials-excel" data-i18n="admin.saveExcel">Salva CSV</button>
         <button type="button" class="btn btn--ghost" id="distribute-credentials" data-i18n="admin.distribute">Invia</button>
         <button type="button" class="btn btn--primary" id="close-credentials-btn" data-i18n="admin.done">Fatto</button>
       </div>
@@ -185,7 +186,7 @@
       <div class="alert error" id="create-error" hidden></div>
       <form class="admin-toolbar admin-toolbar--create" id="create-user-form">
         <label><span data-i18n="common.email">Email</span><input type="email" id="create-email" required autocomplete="off" placeholder="user@company.com" /></label>
-        <label><span data-i18n="admin.password">Password</span><input type="password" id="create-password" required minlength="8" autocomplete="new-password" placeholder="almeno 8 caratteri" data-i18n-attr="placeholder:admin.passwordPlaceholder" /></label>
+        <label><span data-i18n="admin.password">Password</span><input type="password" id="create-password" minlength="8" autocomplete="new-password" placeholder="opzionale" data-i18n-attr="placeholder:admin.passwordPlaceholder" /></label>
         <label><span data-i18n="admin.name">Nome</span><input type="text" id="create-name" autocomplete="off" placeholder="Mario Rossi" data-i18n-attr="placeholder:admin.namePlaceholder" /></label>
         <label><span data-i18n="admin.role">Ruolo</span><select id="create-role-select"></select></label>
         <label><span data-i18n="admin.branches">Filiali</span><select id="create-branch-select" multiple></select></label>

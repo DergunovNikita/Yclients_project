@@ -17,6 +17,21 @@ function normalizeSearch(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+export function appendOptionContent(item, labelText, multiple) {
+  const ownerDocument = item.ownerDocument || document;
+  if (multiple) {
+    const check = ownerDocument.createElement('span');
+    check.className = 'custom-select__check';
+    check.setAttribute('aria-hidden', 'true');
+    item.appendChild(check);
+  }
+
+  const label = ownerDocument.createElement('span');
+  label.className = 'custom-select__label';
+  label.textContent = labelText;
+  item.appendChild(label);
+}
+
 class CustomSelect {
   constructor(selectEl, { placeholder = t('common.select'), searchable = true, searchPlaceholder = t('common.search') } = {}) {
     this.select = selectEl;
@@ -200,14 +215,7 @@ class CustomSelect {
         item.classList.add('is-disabled');
       }
 
-      if (this.multiple) {
-        item.innerHTML = `
-          <span class="custom-select__check" aria-hidden="true"></span>
-          <span class="custom-select__label">${option.textContent}</span>
-        `;
-      } else {
-        item.innerHTML = `<span class="custom-select__label">${option.textContent}</span>`;
-      }
+      appendOptionContent(item, option.textContent, this.multiple);
 
       item.addEventListener('click', (event) => {
         event.stopPropagation();

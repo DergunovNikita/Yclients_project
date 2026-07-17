@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'vite';
+import { buildCsv, csvCell, escapeHtml } from '../src/adminSecurity.js';
 import { forbiddenBrowserAuthTokens, scanBrowserAuthTokens } from './browser-auth-scan.mjs';
 
 class MemoryStorage {
@@ -59,6 +60,37 @@ async function loadAuthModule() {
   return { auth, server };
 }
 
+async function loadCustomSelectModule() {
+  const server = await createServer({
+    appType: 'custom',
+    logLevel: 'silent',
+    root: new URL('..', import.meta.url).pathname,
+    server: { middlewareMode: true },
+  });
+  const customSelect = await server.ssrLoadModule('/src/customSelect.js');
+  return { customSelect, server };
+}
+
+class FakeElement {
+  constructor(ownerDocument) {
+    this.ownerDocument = ownerDocument;
+    this.children = [];
+    this.attributes = new Map();
+    this.className = '';
+    this.textContent = '';
+    this.innerHTML = '';
+  }
+
+  appendChild(child) {
+    this.children.push(child);
+    return child;
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+}
+
 test('browser source has no bearer-token construction patterns', async () => {
   const webRoot = new URL('..', import.meta.url);
   assert.deepEqual(await scanBrowserAuthTokens(webRoot), []);
@@ -77,6 +109,45 @@ test('browser auth token detector catches split-string construction', () => {
     forbiddenBrowserAuthTokens("localStorage.setItem(['portal', 'access', 'token'].join('_'), value)"),
     ['access_token', 'portal_access_token'],
   );
+});
+
+test('admin escaping neutralizes user and branch HTML payloads', () => {
+  const payload = '<img src=x onerror=alert(1)>';
+  assert.equal(escapeHtml(payload), '&lt;img src=x onerror=alert(1)&gt;');
+  assert.equal(escapeHtml('"quoted" & tagged'), '&quot;quoted&quot; &amp; tagged');
+});
+
+test('custom select renders option labels as text, not HTML', async (t) => {
+  const { customSelect, server } = await loadCustomSelectModule();
+  t.after(() => server.close());
+
+  const ownerDocument = {
+    createElement: () => new FakeElement(ownerDocument),
+  };
+  const item = new FakeElement(ownerDocument);
+  const payload = '<img src=x onerror=alert(1)>';
+
+  customSelect.appendOptionContent(item, payload, false);
+
+  assert.equal(item.innerHTML, '');
+  assert.equal(item.children.length, 1);
+  assert.equal(item.children[0].className, 'custom-select__label');
+  assert.equal(item.children[0].textContent, payload);
+});
+
+test('admin CSV export quotes cells and prefixes spreadsheet formulas', () => {
+  assert.equal(csvCell('=cmd|calc'), `"'=cmd|calc"`);
+  assert.equal(csvCell('+SUM(A1:A2)'), `"'+SUM(A1:A2)"`);
+  assert.equal(csvCell('plain "quoted"'), '"plain ""quoted"""');
+
+  const csv = buildCsv(
+    [{ email: '=evil@example.com', name: '<Admin>' }],
+    [
+      { key: 'email', label: 'Email' },
+      { key: 'name', label: 'Name' },
+    ],
+  );
+  assert.equal(csv, '"Email","Name"\r\n"\'=evil@example.com","<Admin>"');
 });
 
 test('authHeaders never returns browser bearer credentials', async (t) => {

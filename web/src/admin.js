@@ -8,7 +8,7 @@ import {
   requireAuthRedirect,
   setSelectedPortalAccountId,
 } from './auth.js';
-import * as XLSX from 'xlsx';
+import { buildCsv, escapeHtml } from './adminSecurity.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 document.documentElement.lang = getLocale();
@@ -194,7 +194,7 @@ function scopedBranches() {
 
 function renderRoleOptions(selectEl, dropdown, roles) {
   selectEl.innerHTML = roles
-    .map((role) => `<option value="${role}">${ROLE_LABELS[role] || role}</option>`)
+    .map((role) => `<option value="${escapeHtml(role)}">${escapeHtml(ROLE_LABELS[role] || role)}</option>`)
     .join('');
   dropdown.refresh();
 }
@@ -202,7 +202,7 @@ function renderRoleOptions(selectEl, dropdown, roles) {
 function renderBranchOptions(selectEl, dropdown, selectedIds = [], multiple = true) {
   const items = scopedBranches();
   selectEl.innerHTML = items
-    .map((branch) => `<option value="${branch.id}">${branch.title}</option>`)
+    .map((branch) => `<option value="${escapeHtml(branch.id)}">${escapeHtml(branch.title)}</option>`)
     .join('');
   if (multiple) {
     Array.from(selectEl.options).forEach((option) => {
@@ -438,14 +438,6 @@ function closeCreateStaffAccountModal() {
   hideCreateStaffAccountError();
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
 function openDeleteConfirm({ type, id, label, subjectType }) {
   pendingDelete = { type, id };
   const safeLabel = escapeHtml(label);
@@ -481,7 +473,6 @@ function showCredentialsModal(items) {
     user_id: item.user_id ?? item.id ?? null,
     email: item.email,
     full_name: item.full_name || '',
-    initial_password: item.initial_password,
   }));
   hideCredentialsAlerts();
   const rows = currentCredentialsItems
@@ -490,36 +481,38 @@ function showCredentialsModal(items) {
         <div class="credentials-row">
           <strong>${escapeHtml(item.full_name || item.email)}</strong>
           <div>${t('admin.loginLabel')}: <code>${escapeHtml(item.email)}</code></div>
-          <div>${t('common.password')}: <code>${escapeHtml(item.initial_password)}</code></div>
         </div>`
     )
     .join('');
   credentialsMessage.innerHTML = `
-    <p class="admin-modal__confirm-text">${t('admin.saveCredentialsHint')}</p>
+    <p class="admin-modal__confirm-text">${escapeHtml(t('admin.saveCredentialsHint'))}</p>
     <div class="credentials-list">${rows}</div>
   `;
   credentialsModal.hidden = false;
   document.body.classList.add('admin-modal-open');
 }
 
-function saveCredentialsAsExcel() {
+function saveCredentialsAsCsv() {
   if (!currentCredentialsItems.length) return;
 
   const rows = currentCredentialsItems.map((item) => ({
-    ID: item.staff_id ?? item.user_id ?? '',
-    [t('admin.colName')]: item.full_name || '',
-    [t('admin.colLoginEmail')]: item.email,
-    [t('admin.colPassword')]: item.initial_password,
+    id: item.staff_id ?? item.user_id ?? '',
+    name: item.full_name || '',
+    email: item.email,
   }));
-
-  const worksheet = XLSX.utils.json_to_sheet(rows);
-  worksheet['!cols'] = [{ wch: 12 }, { wch: 28 }, { wch: 36 }, { wch: 18 }];
-
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, t('admin.passwordsSheet'));
-
+  const csv = buildCsv(rows, [
+    { key: 'id', label: 'ID' },
+    { key: 'name', label: t('admin.colName') },
+    { key: 'email', label: t('admin.colLoginEmail') },
+  ]);
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-  XLSX.writeFile(workbook, `portal-credentials-${stamp}.xlsx`);
+  link.href = url;
+  link.download = `portal-invites-${stamp}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 async function distributeCredentials() {
@@ -594,7 +587,7 @@ function roleBadge(role) {
     viewer: 'role-badge role-badge--viewer',
   };
   const cls = classes[role] || 'role-badge';
-  return `<span class="${cls}">${role}</span>`;
+  return `<span class="${escapeHtml(cls)}">${escapeHtml(ROLE_LABELS[role] || role)}</span>`;
 }
 
 function branchTitles(companyIds) {
@@ -675,25 +668,25 @@ function renderUsers() {
           if (user.manageable && canManageUsers()) {
             if (user.is_portal_user) {
               actions = renderRowMenu({
-                editAttr: `data-edit-user="${user.id}"`,
-                deleteAttr: `data-delete-user="${user.id}"`,
+                editAttr: `data-edit-user="${escapeHtml(user.id)}"`,
+                deleteAttr: `data-delete-user="${escapeHtml(user.id)}"`,
               });
             } else {
               actions = renderRowMenu({
-                editAttr: `data-edit-staff="${user.staff_id}"`,
-                deleteAttr: `data-delete-staff="${user.staff_id}"`,
-                createAccountAttr: `data-create-account="${user.staff_id}"`,
+                editAttr: `data-edit-staff="${escapeHtml(user.staff_id)}"`,
+                deleteAttr: `data-delete-staff="${escapeHtml(user.staff_id)}"`,
+                createAccountAttr: `data-create-account="${escapeHtml(user.staff_id)}"`,
               });
             }
           }
           return `
       <tr>
-        <td>${user.staff_id ?? user.id ?? '—'}</td>
-        <td>${user.is_portal_user ? user.email : '—'}${user.id === currentUserId ? ` <span class="user-you">${t('admin.you')}</span>` : ''}</td>
-        <td>${user.full_name || '—'}</td>
+        <td>${escapeHtml(user.staff_id ?? user.id ?? '—')}</td>
+        <td>${user.is_portal_user ? escapeHtml(user.email) : '—'}${user.id === currentUserId ? ` <span class="user-you">${escapeHtml(t('admin.you'))}</span>` : ''}</td>
+        <td>${escapeHtml(user.full_name || '—')}</td>
         <td>${roleBadge(user.role)}</td>
-        <td><span class="status-dot ${user.email_verified ? 'ok' : ''}">${user.is_portal_user ? (user.email_verified ? t('admin.confirmed') : t('admin.pending')) : '—'}</span></td>
-        <td>${branchTitles(user.company_ids)}</td>
+        <td><span class="status-dot ${user.email_verified ? 'ok' : ''}">${user.is_portal_user ? escapeHtml(user.email_verified ? t('admin.confirmed') : t('admin.pending')) : '—'}</span></td>
+        <td>${escapeHtml(branchTitles(user.company_ids))}</td>
         <td class="admin-table__cell-actions">${actions}</td>
       </tr>`;
         })
@@ -713,7 +706,7 @@ function filterInitialPasswords(rows, query) {
       row.email,
       row.full_name,
       row.role,
-      row.initial_password,
+      row.password_reset_sent_at,
       branchTitles(row.company_ids),
     ]
       .filter(Boolean)
@@ -736,16 +729,19 @@ function renderInitialPasswordsTable() {
         .map(
           (row) => `
       <tr>
-        <td>${row.staff_id ?? row.user_id ?? '—'}</td>
+        <td>${escapeHtml(row.staff_id ?? row.user_id ?? '—')}</td>
         <td>${escapeHtml(row.email)}</td>
         <td>${escapeHtml(row.full_name || '—')}</td>
         <td>${roleBadge(row.role)}</td>
-        <td>${branchTitles(row.company_ids)}</td>
-        <td><code class="initial-password">${escapeHtml(row.initial_password)}</code></td>
+        <td>${escapeHtml(branchTitles(row.company_ids))}</td>
+        <td>${escapeHtml(formatDate(row.password_reset_sent_at) || '—')}</td>
+        <td class="admin-table__cell-actions">
+          <button type="button" class="btn btn--ghost btn--small" data-resend-invite="${escapeHtml(row.user_id)}">${t('admin.resendInvite')}</button>
+        </td>
       </tr>`
         )
         .join('')
-    : `<tr><td colspan="6" class="admin-table__empty">${
+    : `<tr><td colspan="7" class="admin-table__empty">${
         initialPasswords.length ? t('admin.nothingFound') : t('admin.noInitialPasswords')
       }</td></tr>`;
 }
@@ -755,6 +751,30 @@ async function loadInitialPasswords() {
   const payload = await authFetch('/auth/admin/initial-passwords');
   initialPasswords = payload.data || [];
   renderInitialPasswordsTable();
+}
+
+async function resendInvite(userId, button) {
+  if (!userId) return;
+  button.disabled = true;
+  button.classList.add('is-loading');
+  try {
+    const payload = await authFetch('/auth/admin/distribute-credentials', {
+      method: 'POST',
+      body: JSON.stringify({ user_ids: [userId] }),
+    });
+    const { sent_count: sentCount, errors } = payload.data || {};
+    if (errors?.length) {
+      showError(errors.map((item) => `${item.email || item.user_id}: ${item.reason}`).join('; '));
+    } else {
+      showSuccess(t('admin.sentEmailsCount', { count: sentCount || 0 }));
+    }
+    await loadInitialPasswords();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    button.disabled = false;
+    button.classList.remove('is-loading');
+  }
 }
 
 function hideYclientsCredentialsError() {
@@ -789,7 +809,7 @@ function renderYclientsCredentialsTable() {
         <td>${credential.id}</td>
         <td>${escapeHtml(credential.title)}</td>
         <td><span class="status-dot ${credential.is_active ? 'ok' : ''}">${credential.is_active ? t('admin.activeStatus') : t('admin.disabledStatus')}</span></td>
-        <td>${branchTitles(credential.company_ids)}</td>
+        <td>${escapeHtml(branchTitles(credential.company_ids))}</td>
         <td>${escapeHtml(secretStatus || '—')}</td>
         <td class="admin-table__cell-actions">
           <button type="button" class="btn btn--ghost btn--small" data-edit-yclients-credential="${credential.id}">${t('admin.edit')}</button>
@@ -1286,7 +1306,7 @@ createForm.addEventListener('submit', async (event) => {
       method: 'POST',
       body: JSON.stringify({
         email: createEmail.value.trim(),
-        password: createPassword.value,
+        password: createPassword.value || null,
         full_name: createName.value.trim() || null,
         role: createRoleSelect.value,
         portal_account_id: portal_account_id ? Number(portal_account_id) : null,
@@ -1294,9 +1314,7 @@ createForm.addEventListener('submit', async (event) => {
       }),
     });
     closeCreateModal();
-    if (payload.data?.initial_password) {
-      showCredentialsModal([payload.data]);
-    }
+    showCredentialsModal([payload.data]);
     showSuccess(t('admin.userCreated', { email: payload.data.email }));
     await Promise.all([loadUsers(), loadInitialPasswords()]);
   } catch (error) {
@@ -1308,6 +1326,11 @@ createForm.addEventListener('submit', async (event) => {
 });
 
 initialPasswordsSearch?.addEventListener('input', renderInitialPasswordsTable);
+initialPasswordsBody?.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-resend-invite]');
+  if (!button) return;
+  resendInvite(Number(button.dataset.resendInvite), button);
+});
 usersSearch?.addEventListener('input', renderUsers);
 yclientsCredentialsForm?.addEventListener('submit', saveYclientsCredential);
 testYclientsCredentialDraftBtn?.addEventListener('click', testDraftYclientsCredential);
@@ -1315,7 +1338,7 @@ cancelYclientsCredentialEditBtn?.addEventListener('click', resetYclientsCredenti
 document.getElementById('open-create-user').addEventListener('click', openCreateModal);
 provisionAccountsBtn?.addEventListener('click', provisionAllAccounts);
 document.getElementById('close-create-user').addEventListener('click', closeCreateModal);
-saveCredentialsExcelBtn?.addEventListener('click', saveCredentialsAsExcel);
+saveCredentialsExcelBtn?.addEventListener('click', saveCredentialsAsCsv);
 distributeCredentialsBtn?.addEventListener('click', distributeCredentials);
 document.getElementById('close-credentials').addEventListener('click', closeCredentialsModal);
 document.getElementById('close-credentials-btn').addEventListener('click', closeCredentialsModal);
