@@ -1,5 +1,5 @@
 import './auth.css';
-import { authFetch, isTransientAuthError, wait } from './auth.js';
+import { authFetch, isTransientAuthError, setSelectedPortalAccountId, wait } from './auth.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 document.documentElement.lang = getLocale();
@@ -13,6 +13,26 @@ mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListene
 const form = document.getElementById('auth-form');
 const errorEl = document.getElementById('error');
 const submitBtn = document.getElementById('submit');
+const passwordInput = document.getElementById('password');
+const togglePasswordBtn = document.getElementById('toggle-password');
+
+function safeReturnTo(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(raw)) {
+    return '/';
+  }
+  return raw.startsWith('/') ? raw : '/';
+}
+
+function loginDestination() {
+  return safeReturnTo(new URLSearchParams(window.location.search).get('return_to'));
+}
+
+togglePasswordBtn?.addEventListener('click', () => {
+  const visible = passwordInput.type === 'text';
+  passwordInput.type = visible ? 'password' : 'text';
+  togglePasswordBtn.textContent = visible ? t('common.showPassword') : t('common.hidePassword');
+});
 
 async function loginWithRetry(email, password) {
   let lastError;
@@ -40,8 +60,10 @@ async function runDemoLogin() {
   demoBtn?.classList.add('is-loading');
   if (demoBtn) demoBtn.disabled = true;
   try {
+    setSelectedPortalAccountId('');
     await authFetch('/auth/demo-login', { method: 'POST' });
-    window.location.href = '/';
+    setSelectedPortalAccountId('');
+    window.location.href = loginDestination();
   } catch (error) {
     errorEl.textContent = error.message;
     errorEl.hidden = false;
@@ -88,7 +110,7 @@ form.addEventListener('submit', async (event) => {
         /* fallback to dashboard on error — main.js will gate again */
       }
     }
-    window.location.href = '/';
+    window.location.href = loginDestination();
   } catch (error) {
     errorEl.textContent = error.message;
     errorEl.hidden = false;

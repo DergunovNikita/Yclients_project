@@ -6,16 +6,11 @@ import {
   ensureOnboardingComplete,
   getCsrfToken,
   getSelectedPortalAccountId,
-  hasSessionHint,
-  loadCurrentUser,
-  logout,
+  loadCurrentUserQuietly,
+  redirectToLogin,
   requestWithReauth,
   setSelectedPortalAccountId,
 } from './auth.js';
-
-if (!hasSessionHint() && !import.meta.env.VITE_API_KEY) {
-  window.location.href = '/login.html';
-}
 
 import { initReports } from './reports/index.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t, userDataLoadErrorMessage } from './i18n.js';
@@ -26,6 +21,7 @@ mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListene
 
 const apiBase = import.meta.env.VITE_API_BASE || '';
 const apiKey = import.meta.env.VITE_API_KEY || '';
+const DEMO_AUTOLOGIN = import.meta.env.VITE_DEMO_AUTOLOGIN;
 let currentUser = null;
 
 const els = {
@@ -165,6 +161,11 @@ let serviceManagementSavedSnapshot = '';
 let serviceManagementDirty = false;
 let reportsController = null;
 let selectedTenant = null;
+let retryCurrentView = null;
+const loadedStaffFilters = new WeakSet();
+
+const REQUEST_TIMEOUT_MS = 60000;
+const SLOW_REQUEST_MS = 12000;
 
 const ADMIN_HIDDEN_METRIC_CODES = new Set(['revenue', 'avg_check_total']);
 const SETTINGS_ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
@@ -317,23 +318,94 @@ function setApiState(text, kind = 'warn') {
   els.apiState.className = `pill ${kind}`;
 }
 
-function showError(message) {
+function setApiStatus(status) {
+  const states = {
+    loading: [t('dash.apiLoading'), 'warn'],
+    slow: [t('dash.apiSlow'), 'warn'],
+    auth_required: [t('dash.apiAuthRequired'), 'warn'],
+    timeout: [t('dash.apiTimeout'), 'error'],
+    server_error: [t('dash.apiServerError'), 'error'],
+    sync_problem: [t('dash.apiSyncProblem'), 'warn'],
+    ok: [t('dash.apiConnected'), 'ok'],
+    error: [t('dash.apiError'), 'error'],
+  };
+  const [label, kind] = states[status] || states.error;
+  setApiState(label, kind);
+}
+
+function setErrorMessage(message, retry = null) {
   els.error.textContent = message;
+  retryCurrentView = retry;
+  if (retry) {
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'alert__retry';
+    action.textContent = t('dash.retry');
+    action.addEventListener('click', () => retry());
+    els.error.appendChild(document.createTextNode(' '));
+    els.error.appendChild(action);
+  }
   els.error.classList.add('visible');
-  setApiState(t('dash.apiError'), 'error');
+}
+
+function showError(message, { apiStatus = 'error', retry = null } = {}) {
+  setErrorMessage(message, retry);
+  setApiStatus(apiStatus);
+}
+
+function showSlowNotice(retry = null) {
+  setErrorMessage(t('dash.apiSlowMessage'), retry);
+  setApiStatus('slow');
 }
 
 function clearError() {
   els.error.textContent = '';
   els.error.classList.remove('visible');
+  retryCurrentView = null;
 }
 
-async function fetchJson(path, params) {
+function apiStatusForResponse(response) {
+  if (response.status === 401) return 'auth_required';
+  if (response.status === 408 || response.status === 504) return 'timeout';
+  if (response.status >= 500) return 'server_error';
+  return 'error';
+}
+
+function errorForResponse(response, fallbackMessage = userDataLoadErrorMessage()) {
+  const error = new Error(fallbackMessage);
+  error.status = response.status;
+  error.apiStatus = apiStatusForResponse(response);
+  return error;
+}
+
+function timeoutError() {
+  const error = new Error(t('dash.apiTimeoutMessage'));
+  error.apiStatus = 'timeout';
+  return error;
+}
+
+function timedRequestContext({ slowState = true, retry = null } = {}) {
+  const controller = new AbortController();
+  const slowTimer = slowState
+    ? window.setTimeout(() => showSlowNotice(retry), SLOW_REQUEST_MS)
+    : null;
+  const timeoutTimer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  return {
+    signal: controller.signal,
+    cleanup() {
+      if (slowTimer) window.clearTimeout(slowTimer);
+      window.clearTimeout(timeoutTimer);
+    },
+  };
+}
+
+async function fetchJson(path, params, options = {}) {
   const errors = [];
   for (const url of apiUrlCandidates(path, params)) {
     let response;
+    const timing = timedRequestContext(options);
     try {
-      response = await requestWithReauth(url, {}, (_path, options = {}) => {
+      response = await requestWithReauth(url, { signal: timing.signal }, (_path, options = {}) => {
         const { __retried, ...fetchOptions } = options;
         return fetch(url, {
           ...fetchOptions,
@@ -342,14 +414,18 @@ async function fetchJson(path, params) {
         });
       });
     } catch (error) {
-      errors.push(`${url}\n${error.message}`);
+      const nextError = error?.name === 'AbortError' ? timeoutError() : error;
+      errors.push(`${url}\n${nextError.message}`);
+      if (nextError.apiStatus === 'timeout') throw nextError;
       continue;
+    } finally {
+      timing.cleanup();
     }
 
     if (!response.ok) {
       const body = await response.text();
       console.error('Dashboard API request failed', { status: response.status, url, body: body.slice(0, 1000) });
-      throw new Error(userDataLoadErrorMessage());
+      throw errorForResponse(response);
     }
 
     const payload = await response.json();
@@ -368,8 +444,9 @@ async function requestJson(path, { method = 'GET', body = null } = {}) {
   const errors = [];
   for (const url of apiUrlCandidates(path)) {
     let response;
+    const timing = timedRequestContext({ retry: retryCurrentView });
     try {
-      response = await requestWithReauth(url, { method, body }, (_path, options = {}) => {
+      response = await requestWithReauth(url, { method, body, signal: timing.signal }, (_path, options = {}) => {
         const { __retried, body: requestBody = null, ...fetchOptions } = options;
         const requestHeaders = { ...headers(), 'Content-Type': 'application/json' };
         if (!['GET', 'HEAD', 'OPTIONS'].includes(String(fetchOptions.method).toUpperCase())) {
@@ -384,8 +461,12 @@ async function requestJson(path, { method = 'GET', body = null } = {}) {
         });
       });
     } catch (error) {
-      errors.push(`${url}\n${error.message}`);
+      const nextError = error?.name === 'AbortError' ? timeoutError() : error;
+      errors.push(`${url}\n${nextError.message}`);
+      if (nextError.apiStatus === 'timeout') throw nextError;
       continue;
+    } finally {
+      timing.cleanup();
     }
 
     if (!response.ok) {
@@ -395,9 +476,10 @@ async function requestJson(path, { method = 'GET', body = null } = {}) {
         showError(t('demo.readOnly'));
         const demoError = new Error(t('demo.readOnly'));
         demoError.status = 403;
+        demoError.apiStatus = 'error';
         throw demoError;
       }
-      throw new Error(userDataLoadErrorMessage());
+      throw errorForResponse(response);
     }
 
     const payload = await response.json();
@@ -1571,16 +1653,19 @@ function setPlanSettingsLoading(isLoading) {
 async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom = null, dirty = false } = {}) {
   clearError();
   setPlanSettingsLoading(true);
-  setApiState(t('dash.apiLoading'), 'warn');
+  setApiStatus('loading');
   try {
     const params = { month };
     if (copyFrom) params.copy_from = copyFrom;
-    const payload = await fetchJson('/dashboard/plan/settings', params);
+    const payload = await fetchJson('/dashboard/plan/settings', params, {
+      retry: () => loadPlanSettings({ month, copyFrom, dirty }),
+    });
     renderPlanSettings(payload.data, { updateSnapshot: !copyFrom, dirty });
-    setApiState(t('dash.apiConnected'), 'ok');
+    clearError();
+    setApiStatus('ok');
     await loadSyncStatus();
   } catch (error) {
-    showError(error.message);
+    showError(error.message, { apiStatus: error.apiStatus, retry: () => loadPlanSettings({ month, copyFrom, dirty }) });
   } finally {
     setPlanSettingsLoading(false);
   }
@@ -1671,7 +1756,7 @@ function renderServiceCatalog(rows) {
     return;
   }
   els.serviceCatalogTable.innerHTML = `
-    <div class="table-scroll">
+    <div class="table-scroll service-catalog-scroll">
       <table class="service-table">
         <thead>
           <tr>
@@ -1831,14 +1916,15 @@ function setServiceManagementLoading(isLoading) {
 async function loadServiceManagement() {
   clearError();
   setServiceManagementLoading(true);
-  setApiState(t('dash.apiLoading'), 'warn');
+  setApiStatus('loading');
   try {
-    const payload = await fetchJson('/dashboard/services', serviceManagementParams());
+    const payload = await fetchJson('/dashboard/services', serviceManagementParams(), { retry: () => loadServiceManagement() });
     renderServiceManagement(payload.data);
-    setApiState(t('dash.apiConnected'), 'ok');
+    clearError();
+    setApiStatus('ok');
     await loadSyncStatus();
   } catch (error) {
-    showError(error.message);
+    showError(error.message, { apiStatus: error.apiStatus, retry: () => loadServiceManagement() });
   } finally {
     setServiceManagementLoading(false);
   }
@@ -1957,7 +2043,7 @@ function renderReviewFactEditor(data) {
 
 async function loadReviewFactEditor() {
   const filter = filterEls.reviewFacts;
-  const payload = await fetchJson('/dashboard/plan/reviews_fact', filterParams(filter));
+  const payload = await fetchJson('/dashboard/plan/reviews_fact', filterParams(filter), { retry: () => loadReviewFacts() });
   renderReviewFactEditor(payload.data);
 }
 
@@ -2080,12 +2166,14 @@ function renderBranchOptions(filter) {
   customFilterDropdowns[filter.branch.id]?.refresh();
 }
 
-async function loadStaff(filter) {
+async function loadStaff(filter, { force = false } = {}) {
+  if (force) loadedStaffFilters.delete(filter);
+  if (loadedStaffFilters.has(filter)) return;
   const selected = filter.staff.value;
   try {
     const payload = await fetchJson('/dashboard/staff', {
       company_id: filter.branch.value,
-    });
+    }, { retry: () => loadStaff(filter, { force: true }) });
     const staffOptions = payload.data || [];
     const defaultLabel = filter === filterEls.reviewFacts ? t('dash.allStaff') : t('dash.allWorkers');
     filter.staff.innerHTML = `<option value="">${defaultLabel}</option>`;
@@ -2099,9 +2187,21 @@ async function loadStaff(filter) {
     });
     filter.staff.value = staffOptions.some((staff) => String(staff.id) === selected) ? selected : '';
     customFilterDropdowns[filter.staff.id]?.refresh();
+    loadedStaffFilters.add(filter);
   } catch (error) {
-    showError(error.message);
+    showError(error.message, { apiStatus: error.apiStatus, retry: () => loadStaff(filter, { force: true }) });
   }
+}
+
+function filterForView(view) {
+  if (view === 'plan') return filterEls.plan;
+  if (view === 'reviewFacts') return filterEls.reviewFacts;
+  return filterEls.overview;
+}
+
+async function ensureStaffForView(view) {
+  if (view === 'planSettings' || view === 'serviceManagement' || view === 'reports') return;
+  await loadStaff(filterForView(view));
 }
 
 function filterParams(filter) {
@@ -2120,7 +2220,7 @@ function setFilterLoading(filter, isLoading) {
 
 async function loadSyncStatus() {
   try {
-    const payload = await fetchJson('/dashboard/widget/sync_status');
+    const payload = await fetchJson('/dashboard/widget/sync_status', undefined, { slowState: false });
     const sync = payload.data?.sync || {};
     const lastRun = sync.last_run;
     const lastSuccessfulAt = sync.last_successful_sync_at
@@ -2170,15 +2270,16 @@ async function loadPlanFact() {
   const filter = filterEls.plan;
   clearError();
   setFilterLoading(filter, true);
-  setApiState(t('dash.apiLoading'), 'warn');
+  setApiStatus('loading');
 
   try {
-    const payload = await fetchJson('/dashboard/widget/plan_fact', filterParams(filter));
+    const payload = await fetchJson('/dashboard/widget/plan_fact', filterParams(filter), { retry: () => loadPlanFact() });
     renderPlanFact(payload.data);
-    setApiState(t('dash.apiConnected'), 'ok');
+    clearError();
+    setApiStatus('ok');
     await loadSyncStatus();
   } catch (error) {
-    showError(error.message);
+    showError(error.message, { apiStatus: error.apiStatus, retry: () => loadPlanFact() });
   } finally {
     setFilterLoading(filter, false);
   }
@@ -2188,14 +2289,15 @@ async function loadReviewFacts() {
   const filter = filterEls.reviewFacts;
   clearError();
   setFilterLoading(filter, true);
-  setApiState(t('dash.apiLoading'), 'warn');
+  setApiStatus('loading');
 
   try {
     await loadReviewFactEditor();
-    setApiState(t('dash.apiConnected'), 'ok');
+    clearError();
+    setApiStatus('ok');
     await loadSyncStatus();
   } catch (error) {
-    showError(error.message);
+    showError(error.message, { apiStatus: error.apiStatus, retry: () => loadReviewFacts() });
   } finally {
     setFilterLoading(filter, false);
   }
@@ -2205,15 +2307,16 @@ async function loadDashboard() {
   const filter = filterEls.overview;
   clearError();
   setFilterLoading(filter, true);
-  setApiState(t('dash.apiLoading'), 'warn');
+  setApiStatus('loading');
 
   try {
-    const payload = await fetchJson('/dashboard/bundle', filterParams(filter));
+    const payload = await fetchJson('/dashboard/bundle', filterParams(filter), { retry: () => loadDashboard() });
     renderBundle(payload.data);
-    setApiState(t('dash.apiConnected'), 'ok');
+    clearError();
+    setApiStatus('ok');
     await loadSyncStatus();
   } catch (error) {
-    showError(error.message);
+    showError(error.message, { apiStatus: error.apiStatus, retry: () => loadDashboard() });
   } finally {
     setFilterLoading(filter, false);
   }
@@ -2310,6 +2413,31 @@ async function setupPlatformTenantSelector() {
   return true;
 }
 
+async function startDemoSession() {
+  setSelectedPortalAccountId('');
+  await authFetch('/auth/demo-login', { method: 'POST' });
+  setSelectedPortalAccountId('');
+}
+
+async function loadStartupUser() {
+  let me = null;
+  try {
+    me = await loadCurrentUserQuietly();
+  } catch (error) {
+    if (!DEMO_AUTOLOGIN) {
+      throw error;
+    }
+    await startDemoSession();
+    return loadCurrentUserQuietly();
+  }
+
+  if (DEMO_AUTOLOGIN && me?.data?.is_demo !== true) {
+    await startDemoSession();
+    return loadCurrentUserQuietly();
+  }
+  return me;
+}
+
 async function init() {
   reportsController = initReports({ clearError, showError, setApiState });
   Object.values(filterEls).forEach((filter) => defaultDates(filter));
@@ -2321,12 +2449,12 @@ async function init() {
   renderServicesTable([]);
   renderExtraServicesTable([]);
   renderServiceManagement({ rows: [], groups: [], categories: [] });
-  if (hasSessionHint()) {
+  if (!apiKey) {
     let me;
     try {
-      me = await loadCurrentUser();
+      me = await loadStartupUser();
     } catch {
-      logout();
+      redirectToLogin();
       return;
     }
 
@@ -2364,16 +2492,13 @@ async function init() {
       setApiState(t('dash.apiTenantError'), 'error');
       return;
     }
-  } else if (!apiKey) {
-    window.location.href = '/login.html';
-    return;
   } else {
     setSelectedPortalAccountId('');
     applyDashboardPermissions();
   }
   await loadBranches();
-  await Promise.all(Object.values(filterEls).map((filter) => loadStaff(filter)));
   setActiveView(viewFromLocation());
+  await ensureStaffForView(activeView);
   await loadCurrentView();
 }
 
@@ -2389,7 +2514,7 @@ filterEls.overview.end.addEventListener('change', () => {
   els.overviewPresetButtons.forEach((button) => button.classList.remove('active'));
 });
 filterEls.overview.branch.addEventListener('change', async () => {
-  await loadStaff(filterEls.overview);
+  await loadStaff(filterEls.overview, { force: true });
   await loadDashboard();
 });
 filterEls.overview.staff.addEventListener('change', () => loadDashboard());
@@ -2409,7 +2534,7 @@ els.overviewJumpButtons.forEach((button) => {
 
 filterEls.plan.load.addEventListener('click', () => loadPlanFact());
 filterEls.plan.branch.addEventListener('change', async () => {
-  await loadStaff(filterEls.plan);
+  await loadStaff(filterEls.plan, { force: true });
   await loadPlanFact();
 });
 filterEls.plan.staff.addEventListener('change', () => loadPlanFact());
@@ -2421,7 +2546,7 @@ filterEls.reviewFacts.month.addEventListener('change', async () => {
 filterEls.reviewFacts.start.addEventListener('change', syncReviewFactMonthFromDates);
 filterEls.reviewFacts.end.addEventListener('change', syncReviewFactMonthFromDates);
 filterEls.reviewFacts.branch.addEventListener('change', async () => {
-  await loadStaff(filterEls.reviewFacts);
+  await loadStaff(filterEls.reviewFacts, { force: true });
   await loadReviewFacts();
 });
 filterEls.reviewFacts.staff.addEventListener('change', () => loadReviewFacts());
@@ -2475,17 +2600,19 @@ document.addEventListener('click', async (event) => {
   event.preventDefault();
   history.pushState({ view: 'reports' }, '', href);
   setActiveView('reports');
+  await ensureStaffForView('reports');
   await loadCurrentView();
 });
 
 els.viewLinks.forEach((link) => {
-  link.addEventListener('click', (event) => {
+  link.addEventListener('click', async (event) => {
     const view = link.dataset.viewLink;
     if (!view) return;
     if (!canAccessView(view)) {
       event.preventDefault();
       history.replaceState({ view: 'overview' }, '', '/#overview');
       setActiveView('overview');
+      await ensureStaffForView('overview');
       loadCurrentView();
       return;
     }
@@ -2508,6 +2635,7 @@ els.viewLinks.forEach((link) => {
     };
     history.pushState({ view }, '', paths[view] || '/#overview');
     setActiveView(view);
+    await ensureStaffForView(view);
     loadCurrentView();
   });
 });
@@ -2531,12 +2659,14 @@ window.addEventListener('hashchange', async () => {
   }
   allowDirtyPlanSettingsNavigation = false;
   setActiveView(nextView);
+  await ensureStaffForView(nextView);
   await loadCurrentView();
 });
 window.addEventListener('popstate', async () => {
   const nextView = viewFromLocation();
   if (nextView === activeView && nextView !== 'reports') return;
   setActiveView(nextView);
+  await ensureStaffForView(nextView);
   await loadCurrentView();
 });
 window.addEventListener('beforeunload', (event) => {

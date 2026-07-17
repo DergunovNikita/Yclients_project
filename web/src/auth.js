@@ -8,6 +8,29 @@ const apiBase = import.meta.env.VITE_API_BASE || '';
 let refreshInFlight = null;
 let reauthInFlight = null;
 
+function currentReturnTo() {
+  if (typeof window === 'undefined') return '/';
+  return `${window.location.pathname}${window.location.search}${window.location.hash}` || '/';
+}
+
+function safeReturnTo(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(raw)) {
+    return '/';
+  }
+  return raw.startsWith('/') ? raw : '/';
+}
+
+export function loginPathWithReturnTo(loginPath = '/login.html', returnTo = currentReturnTo()) {
+  const url = new URL(loginPath, window.location.origin);
+  url.searchParams.set('return_to', safeReturnTo(returnTo));
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+export function redirectToLogin(loginPath = '/login.html') {
+  window.location.href = loginPathWithReturnTo(loginPath);
+}
+
 function clearLegacyAccessToken() {
   for (let index = localStorage.length - 1; index >= 0; index -= 1) {
     const key = localStorage.key(index);
@@ -170,9 +193,12 @@ function ensureReauthModal() {
     .reauth-modal__dialog p{margin:0 0 16px;color:#64748b;font-size:14px;line-height:1.45}
     .reauth-modal__dialog label{display:grid;gap:6px;margin-bottom:12px;color:#334155;font-size:13px;font-weight:600}
     .reauth-modal__dialog input{min-height:38px;border:1px solid #cbd5e1;border-radius:6px;padding:8px 10px;font:inherit}
+    .reauth-modal__password{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;border:1px solid #cbd5e1;border-radius:6px;background:#fff}
+    .reauth-modal__password input{border:0;border-radius:6px;min-width:0}
+    .reauth-modal__password button{height:38px;border:0;background:transparent;color:#0f766e;padding:0 10px;font:inherit;font-weight:700;cursor:pointer}
     .reauth-modal__error{margin:0 0 12px;color:#b91c1c;font-size:13px}
     .reauth-modal__actions{display:flex;justify-content:flex-end;gap:10px;margin-top:16px}
-    .reauth-modal__actions button{min-height:38px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;padding:0 14px;font:inherit;cursor:pointer}
+    .reauth-modal__actions button{min-width:92px;min-height:38px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#334155;padding:0 14px;font:inherit;font-weight:600;cursor:pointer}
     .reauth-modal__actions button[type=submit]{border-color:#0f766e;background:#0f766e;color:#fff}
   `;
   document.head.appendChild(style);
@@ -187,7 +213,12 @@ function ensureReauthModal() {
       <p>${t('reauth.text')}</p>
       <div class="reauth-modal__error" id="reauth-error" hidden></div>
       <label>Email<input type="email" id="reauth-email" autocomplete="username" readonly /></label>
-      <label>${t('common.password')}<input type="password" id="reauth-password" autocomplete="current-password" required /></label>
+      <label>${t('common.password')}
+        <span class="reauth-modal__password">
+          <input type="password" id="reauth-password" autocomplete="current-password" required />
+          <button type="button" id="reauth-toggle-password">${t('common.showPassword')}</button>
+        </span>
+      </label>
       <div class="reauth-modal__actions">
         <button type="button" id="reauth-cancel">${t('common.cancel')}</button>
         <button type="submit" id="reauth-submit">${t('login.submit')}</button>
@@ -212,11 +243,16 @@ async function promptReauth() {
     const errorEl = modal.querySelector('#reauth-error');
     const submitBtn = modal.querySelector('#reauth-submit');
     const cancelBtn = modal.querySelector('#reauth-cancel');
+    const togglePasswordBtn = modal.querySelector('#reauth-toggle-password');
     const email = cachedUserEmail();
 
     emailInput.value = email;
     emailInput.readOnly = Boolean(email);
     passwordInput.value = '';
+    passwordInput.type = 'password';
+    togglePasswordBtn.textContent = t('common.showPassword');
+    cancelBtn.textContent = t('common.cancel');
+    submitBtn.textContent = t('login.submit');
     errorEl.hidden = true;
     modal.hidden = false;
     passwordInput.focus();
@@ -224,6 +260,7 @@ async function promptReauth() {
     const cleanup = () => {
       form.removeEventListener('submit', onSubmit);
       cancelBtn.removeEventListener('click', onCancel);
+      togglePasswordBtn.removeEventListener('click', onTogglePassword);
       modal.hidden = true;
       submitBtn.disabled = false;
       reauthInFlight = null;
@@ -232,6 +269,12 @@ async function promptReauth() {
     const onCancel = () => {
       cleanup();
       reject(new Error(t('authErrors.authenticationRequired')));
+    };
+
+    const onTogglePassword = () => {
+      const visible = passwordInput.type === 'text';
+      passwordInput.type = visible ? 'password' : 'text';
+      togglePasswordBtn.textContent = visible ? t('common.showPassword') : t('common.hidePassword');
     };
 
     const onSubmit = async (event) => {
@@ -267,13 +310,14 @@ async function promptReauth() {
 
     form.addEventListener('submit', onSubmit);
     cancelBtn.addEventListener('click', onCancel);
+    togglePasswordBtn.addEventListener('click', onTogglePassword);
   });
 
   return reauthInFlight;
 }
 
 async function doFetch(path, options = {}) {
-  const { __retried, ...fetchOptions } = options;
+  const { __retried, __skipReauth, ...fetchOptions } = options;
   return fetch(resolveApiPath(path), {
     ...fetchOptions,
     credentials: 'include',
@@ -287,6 +331,9 @@ export async function requestWithReauth(path, options = {}, requestFn = doFetch)
     try {
       await refreshSession();
     } catch {
+      if (options.__skipReauth) {
+        return response;
+      }
       await promptReauth();
     }
     response = await requestFn(path, { ...options, __retried: true });
@@ -308,7 +355,7 @@ export async function authFetch(path, options = {}) {
 
 export function requireAuthRedirect(loginPath = '/login.html') {
   if (!hasSessionHint()) {
-    window.location.href = loginPath;
+    redirectToLogin(loginPath);
     return false;
   }
   return true;
@@ -330,6 +377,10 @@ export async function logout(loginPath = '/login.html') {
 
 export async function loadCurrentUser() {
   return authFetch('/auth/me');
+}
+
+export async function loadCurrentUserQuietly() {
+  return authFetch('/auth/me', { __skipReauth: true });
 }
 
 export async function ensureOnboardingComplete(user, onboardingPath = '/onboarding.html') {

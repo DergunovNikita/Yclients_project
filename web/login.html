@@ -45,7 +45,10 @@
           </div>
           <div class="field">
             <label for="password" data-i18n="common.password">Password</label>
-            <input type="password" id="password" required autocomplete="current-password" placeholder="••••••••" data-i18n-attr="placeholder:login.passwordPlaceholder" />
+            <div class="password-field">
+              <input type="password" id="password" required autocomplete="current-password" placeholder="••••••••" data-i18n-attr="placeholder:login.passwordPlaceholder" />
+              <button type="button" class="password-field__toggle" id="toggle-password" data-i18n="common.showPassword">Show</button>
+            </div>
           </div>
           <button type="submit" class="btn btn--primary" id="submit" data-i18n="login.submit">Accedi</button>
         </form>

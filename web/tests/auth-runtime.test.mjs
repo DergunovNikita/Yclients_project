@@ -35,7 +35,15 @@ async function loadAuthModule() {
     configurable: true,
     value: { language: 'en-US', languages: ['en-US'] },
   });
-  globalThis.window = { location: { href: '', pathname: '/' } };
+  globalThis.window = {
+    location: {
+      href: '',
+      origin: 'https://app.example',
+      pathname: '/',
+      search: '',
+      hash: '',
+    },
+  };
   globalThis.document = {
     cookie: 'portal_csrf=csrf-runtime-token',
     documentElement: { lang: 'en' },
@@ -134,6 +142,20 @@ test('logout posts cookie logout, clears local auth state, and redirects after r
   assert.equal(window.location.href, '/login.html?logged_out=1');
 });
 
+test('login redirect preserves only same-origin return_to paths', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  window.location.pathname = '/';
+  window.location.search = '?company_id=7';
+  window.location.hash = '#plan-fact';
+
+  assert.equal(auth.loginPathWithReturnTo(), '/login.html?return_to=%2F%3Fcompany_id%3D7%23plan-fact');
+  assert.equal(auth.loginPathWithReturnTo('/login.html', '/reports?id=1'), '/login.html?return_to=%2Freports%3Fid%3D1');
+  assert.equal(auth.loginPathWithReturnTo('/login.html', 'https://evil.example'), '/login.html?return_to=%2F');
+  assert.equal(auth.loginPathWithReturnTo('/login.html', '//evil.example'), '/login.html?return_to=%2F');
+});
+
 test('requestWithReauth refreshes once and retries the original request', async (t) => {
   const { auth, server } = await loadAuthModule();
   t.after(() => server.close());
@@ -163,4 +185,29 @@ test('requestWithReauth refreshes once and retries the original request', async 
     { path: '/dashboard/bundle', options: { method: 'POST', body: 'payload' } },
     { path: '/dashboard/bundle', options: { method: 'POST', body: 'payload', __retried: true } },
   ]);
+});
+
+test('requestWithReauth can skip password prompt for quiet session checks', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  let refreshCalls = 0;
+  let requestCalls = 0;
+  globalThis.fetch = async () => {
+    refreshCalls += 1;
+    return new Response(JSON.stringify({ detail: 'expired' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  const requestFn = async () => {
+    requestCalls += 1;
+    return new Response('{}', { status: 401 });
+  };
+
+  const response = await auth.requestWithReauth('/auth/me', { __skipReauth: true }, requestFn);
+
+  assert.equal(response.status, 401);
+  assert.equal(refreshCalls, 1);
+  assert.equal(requestCalls, 1);
 });

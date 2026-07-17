@@ -252,6 +252,44 @@ textarea {
   box-shadow: 0 0 0 4px var(--brand-glow);
 }
 
+.password-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-md);
+  background: #fff;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.password-field:focus-within {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 4px var(--brand-glow);
+}
+
+.password-field input {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.password-field input:focus {
+  box-shadow: none;
+}
+
+.password-field__toggle {
+  min-height: 38px;
+  border: 0;
+  background: transparent;
+  color: var(--brand);
+  padding: 0 12px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;

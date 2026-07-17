@@ -6,6 +6,8 @@ from __future__ import annotations
 import csv
 import hmac
 import io
+import logging
+import time as perf_time
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Callable, Literal, Optional
@@ -95,6 +97,15 @@ OPEN_PATHS = {"/health"}
 if not IS_PRODUCTION:
     OPEN_PATHS.update({"/openapi.json", "/docs", "/redoc"})
 
+LOGGER = logging.getLogger('yclients.api')
+TIMED_DASHBOARD_PATHS = {
+    '/dashboard/bundle',
+    '/dashboard/widget/plan_fact',
+    '/dashboard/branches',
+    '/dashboard/staff',
+    '/dashboard/widget/sync_status',
+}
+
 
 async def require_api_key(
     request: Request,
@@ -162,8 +173,38 @@ def _apply_security_headers(request: Request, response):
 
 @app.middleware('http')
 async def add_security_headers(request: Request, call_next: Callable):
-    response = await call_next(request)
-    return _apply_security_headers(request, response)
+    started = perf_time.perf_counter()
+    response = None
+    try:
+        response = await call_next(request)
+        return _apply_security_headers(request, response)
+    except Exception as exc:
+        if request.url.path in TIMED_DASHBOARD_PATHS:
+            duration_ms = round((perf_time.perf_counter() - started) * 1000, 2)
+            access = request_access(request)
+            LOGGER.exception(
+                'dashboard_api_request_failed path=%s duration_ms=%s user_id=%s portal_account_id=%s role=%s exc=%s',
+                request.url.path,
+                duration_ms,
+                getattr(access, 'user_id', None),
+                getattr(access, 'portal_account_id', None),
+                getattr(access, 'role', None),
+                exc.__class__.__name__,
+            )
+        raise
+    finally:
+        if request.url.path in TIMED_DASHBOARD_PATHS and response is not None:
+            duration_ms = round((perf_time.perf_counter() - started) * 1000, 2)
+            access = request_access(request)
+            LOGGER.info(
+                'dashboard_api_request path=%s status=%s duration_ms=%s user_id=%s portal_account_id=%s role=%s',
+                request.url.path,
+                response.status_code,
+                duration_ms,
+                getattr(access, 'user_id', None),
+                getattr(access, 'portal_account_id', None),
+                getattr(access, 'role', None),
+            )
 
 
 @app.exception_handler(Exception)
