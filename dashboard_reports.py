@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import traceback
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from calendar import monthrange
@@ -39,6 +40,14 @@ MONEY_FORMAT = 'money'
 NUMBER_FORMAT = 'number'
 PERCENT_FORMAT = 'percent'
 DECIMAL_FORMAT = 'decimal'
+
+
+class ReportCalculationError(RuntimeError):
+    """Raised when a report cannot produce any usable payload."""
+
+    def __init__(self, message: str, *, stage: str = 'unknown') -> None:
+        super().__init__(message)
+        self.stage = stage
 
 REPORT_ORDER = (
     'avg_check_by_service',
@@ -300,6 +309,10 @@ def _group_for(report_id: str) -> str:
 
 def report_requires_financials(report_id: str) -> bool:
     normalized = (report_id or '').strip()
+    if normalized == 'staff_leaderboard':
+        # This mixed report also contains OPZ, review and percentage rankings.
+        # Its individual money components are filtered by the route.
+        return False
     return (
         normalized in MONEY_REPORTS
         or 'revenue' in normalized
@@ -479,7 +492,11 @@ async def fetch_report_data(
     data = await _fetch_report_payload(
         db, report_id, start, end, company_id, staff_id, granularity, allowed_company_ids, start_year, end_year
     )
-    if data['source_status'] == 'ready' and ((compare_start and compare_end) or compare_staff_id):
+    if (
+        report_id in COMPARE_REPORTS
+        and data['source_status'] == 'ready'
+        and ((compare_start and compare_end) or compare_staff_id)
+    ):
         cmp_start = compare_start or start
         cmp_end = compare_end or end
         cmp_staff_id = compare_staff_id if compare_staff_id is not None else staff_id
@@ -606,6 +623,23 @@ def _table(
         'columns': [{'key': key, 'label': label, 'format': fmt} for key, label, fmt in columns],
         'rows': rows,
     }
+
+
+def _ranking_table(
+    table_id: str,
+    title: str,
+    columns: list[tuple[str, str, str]],
+    rows_by_metric: dict[str, list[dict[str, Any]]],
+    default_metric: str,
+    options: list[tuple[str, str]],
+) -> dict[str, Any]:
+    table = _table(table_id, title, columns, rows_by_metric.get(default_metric, []))
+    table['ranking'] = {
+        'default_metric': default_metric,
+        'options': [{'key': key, 'label': label} for key, label in options],
+        'rows_by_metric': rows_by_metric,
+    }
+    return table
 
 
 def _appointment_conditions(
@@ -1887,26 +1921,33 @@ async def _leaderboard_payload(
     staff_id: int | None,
     allowed_company_ids: list[int] | None,
 ) -> dict[str, Any]:
-    """Never raise: a failure here must not turn the whole report into a 500."""
+    started_at = time.perf_counter()
     try:
         return await _leaderboard_payload_impl(
             db, base, start, end, company_id, staff_id, allowed_company_ids
         )
-    except Exception:  # noqa: BLE001 - report degrades gracefully, traceback goes to the server log
+    except Exception as error:  # noqa: BLE001 - mapped to a retryable report error by the route
         traceback.print_exc()
         try:
             await db.rollback()
         except Exception:  # noqa: BLE001
             pass
-        base['cards'] = []
-        base['charts'] = []
-        base['tables'] = []
-        base['notes'] = [{
-            'kind': 'partial',
-            'title': 'Отчёт временно недоступен',
-            'text': 'Не удалось рассчитать рейтинги за выбранный период. Ошибка записана в журнал сервера.',
-        }]
-        return base
+        stage = getattr(error, 'stage', 'payload')
+        print(
+            'staff_leaderboard '
+            f'status=failed stage={stage} start={start.isoformat()} end={end.isoformat()} '
+            f'company_id={company_id} staff_id={staff_id}'
+        )
+        if isinstance(error, ReportCalculationError):
+            raise
+        raise ReportCalculationError('staff leaderboard calculation failed', stage=stage) from error
+    finally:
+        duration_ms = round((time.perf_counter() - started_at) * 1000)
+        print(
+            'staff_leaderboard '
+            f'status=finished start={start.isoformat()} end={end.isoformat()} '
+            f'company_id={company_id} staff_id={staff_id} duration_ms={duration_ms}'
+        )
 
 
 async def _leaderboard_payload_impl(
@@ -1918,22 +1959,41 @@ async def _leaderboard_payload_impl(
     staff_id: int | None,
     allowed_company_ids: list[int] | None,
 ) -> dict[str, Any]:
-    plan = await fetch_plan_fact(
-        db,
-        start,
-        end,
-        company_id,
-        staff_id,
-        allowed_company_ids=allowed_company_ids,
-        force_allowed=allowed_company_ids is not None,
-        include_extra_service_revenue=True,
+    stage_started = time.perf_counter()
+    try:
+        plan = await fetch_plan_fact(
+            db,
+            start,
+            end,
+            company_id,
+            staff_id,
+            allowed_company_ids=allowed_company_ids,
+            force_allowed=allowed_company_ids is not None,
+            include_extra_service_revenue=True,
+            include_all_staff_in_leaderboards=True,
+        )
+    except Exception as error:  # noqa: BLE001 - stage is added before route mapping
+        raise ReportCalculationError('staff leaderboard plan/fact failed', stage='plan_fact') from error
+    print(
+        'staff_leaderboard '
+        f'status=ready stage=plan_fact start={start.isoformat()} end={end.isoformat()} '
+        f'company_id={company_id} staff_id={staff_id} '
+        f'duration_ms={round((time.perf_counter() - stage_started) * 1000)}'
     )
     boards = plan.get('staff_leaderboards', {})
+    if boards.get('_partial_reasons'):
+        base['source_status'] = 'partial'
+        base['notes'].append({
+            'kind': 'warning',
+            'title': 'Часть рейтинга временно недоступна',
+            'text': 'Не удалось рассчитать суммы допуслуг. Количество и проценты показаны полностью.',
+        })
 
     staff_col = ('staff', 'Сотрудник', 'text')
+    branch_col = ('company_title', 'Барбершоп', 'text')
     qty_col = ('qty', 'Кол-во, шт', NUMBER_FORMAT)
-    share_col = ('share_pct', 'Доля в топе, %', PERCENT_FORMAT)
-    cosmo_revenue_share_col = ('cosmo_revenue_share_pct', 'Доля косметики, %', PERCENT_FORMAT)
+    extra_share_col = ('share_pct', 'Доля всех 4 KPI, %', PERCENT_FORMAT)
+    cosmo_share_col = ('share_pct', 'Доля продаж косметики, %', PERCENT_FORMAT)
 
     revenue_barber = boards.get('revenue_barber', boards.get('revenue_top', []))
     revenue_admin = boards.get('revenue_admin', [])
@@ -1966,62 +2026,78 @@ async def _leaderboard_payload_impl(
     if charts:
         base['charts'] = charts
     base['tables'] = [
-        _table(
+        _ranking_table(
             'extra_services',
-            'Топ по доп. услугам',
-            [staff_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), ('pct', 'Доп. услуги, %', PERCENT_FORMAT), share_col],
-            boards.get('extra_services', []),
+            'Топ по доп. услугам · воск, камуфляж, уход за лицом и головой',
+            [staff_col, branch_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), ('pct', 'Доп. услуги, %', PERCENT_FORMAT), extra_share_col],
+            boards.get('extra_services_rankings', {}),
+            'pct',
+            [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
         ),
-        _table(
+        _ranking_table(
             'cosmo_barber',
             'Топ по косметике — мастера',
-            [staff_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), share_col],
-            boards.get('cosmo_barber', []),
+            [staff_col, branch_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), ('pct', 'Косметика, %', PERCENT_FORMAT), cosmo_share_col],
+            boards.get('cosmo_barber_rankings', {}),
+            'sum',
+            [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
         ),
-        _table(
+        _ranking_table(
             'cosmo_admin',
             'Топ по косметике — админы',
-            [staff_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), share_col],
-            boards.get('cosmo_admin', []),
+            [staff_col, branch_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), ('pct', 'Косметика, %', PERCENT_FORMAT), cosmo_share_col],
+            boards.get('cosmo_admin_rankings', {}),
+            'sum',
+            [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
         ),
-        _table(
+        _ranking_table(
             'opz_barber',
             'Топ по ОПЗ — мастера',
-            [staff_col, qty_col, ('pct', 'ОПЗ, %', PERCENT_FORMAT)],
-            boards.get('opz_barber', []),
+            [staff_col, branch_col, qty_col, ('pct', 'ОПЗ, %', PERCENT_FORMAT)],
+            boards.get('opz_barber_rankings', {}),
+            'pct',
+            [('qty', 'По количеству'), ('pct', 'По проценту')],
         ),
-        _table(
+        _ranking_table(
             'opz_admin',
             'Топ по ОПЗ — админы',
-            [staff_col, qty_col, ('pct', 'ОПЗ, %', PERCENT_FORMAT)],
-            boards.get('opz_admin', []),
+            [staff_col, branch_col, qty_col, ('pct', 'ОПЗ, %', PERCENT_FORMAT)],
+            boards.get('opz_admin_rankings', {}),
+            'pct',
+            [('qty', 'По количеству'), ('pct', 'По проценту')],
         ),
         _table(
             'reviews_admin',
             'Топ по отзывам — админы',
-            [staff_col, ('value', 'Отзывы', NUMBER_FORMAT)],
+            [staff_col, branch_col, ('value', 'Отзывы', NUMBER_FORMAT)],
             boards.get('reviews_admin', []),
         ),
         _table(
             'revenue_barber',
             'Топ по выручке — мастера',
-            [staff_col, ('value', 'Выручка', MONEY_FORMAT), cosmo_revenue_share_col],
+            [staff_col, branch_col, ('value', 'Выручка', MONEY_FORMAT)],
             revenue_barber,
         ),
         _table(
             'revenue_admin',
             'Топ по выручке — админы',
-            [staff_col, ('value', 'Выручка', MONEY_FORMAT), cosmo_revenue_share_col],
+            [staff_col, branch_col, ('value', 'Выручка', MONEY_FORMAT)],
             revenue_admin,
         ),
         _table(
-            'avg_check_top',
-            'Топ по среднему чеку',
-            [staff_col, ('value', 'Средний чек', MONEY_FORMAT)],
-            boards.get('avg_check_top', []),
+            'avg_check_plan_branch',
+            'Топ выполнения плана среднего чека — барбершопы',
+            [('staff', 'Барбершоп', 'text'), ('plan', 'План', MONEY_FORMAT), ('fact', 'Факт', MONEY_FORMAT), ('pct', 'Выполнение, %', PERCENT_FORMAT)],
+            boards.get('avg_check_plan_branch', []),
+        ),
+        _table(
+            'avg_check_plan_staff',
+            'Топ выполнения плана среднего чека — мастера',
+            [staff_col, branch_col, ('plan', 'План', MONEY_FORMAT), ('fact', 'Факт', MONEY_FORMAT), ('pct', 'Выполнение, %', PERCENT_FORMAT)],
+            boards.get('avg_check_plan_staff', []),
         ),
     ]
-    base['raw'] = {'leaderboards': boards}
+    base['raw'] = {}
     return base
 
 

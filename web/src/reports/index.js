@@ -1,4 +1,13 @@
-import { fetchJson } from './api.js';
+import {
+  createLatestRequestScope,
+  fetchJson,
+  isSupersededRequest,
+  reportDataCacheKey,
+  reportDataState,
+  reportRefreshPresentation,
+  reportScopedFilterAllowsLoad,
+  staffRefreshAllowsDataLoad,
+} from './api.js';
 import { ReportChartManager } from './charts.js';
 import { defaultReportDates, escapeHtml, formatDate } from './format.js';
 import { GROUP_LABELS, STATUS_LABELS, sourceLabel } from './registry.js';
@@ -124,11 +133,19 @@ export function initReports({ clearError, showError, setApiState }) {
   if (!els.view) return null;
 
   const charts = new ReportChartManager();
+  const reportRequests = createLatestRequestScope();
+  const staffRequests = createLatestRequestScope();
+  const branchRequests = createLatestRequestScope();
+  const catalogRequests = createLatestRequestScope();
   const state = {
     loaded: false,
+    branchesLoaded: false,
+    staffLoaded: false,
+    staffIds: [],
     reports: [],
     branches: [],
     activeReportId: '',
+    reportData: new Map(),
     filters: {
       search: '',
       group: '',
@@ -138,6 +155,38 @@ export function initReports({ clearError, showError, setApiState }) {
       favoritesOnly: false,
     },
   };
+
+  function reportRetry() {
+    if (state.activeReportId) openReport(state.activeReportId, false);
+  }
+
+  function ensureFilterWarning() {
+    let warning = document.getElementById('reports-filter-warning');
+    if (warning) return warning;
+    warning = document.createElement('div');
+    warning.id = 'reports-filter-warning';
+    warning.className = 'reports-note reports-note--warning reports-filter-warning';
+    warning.hidden = true;
+    els.catalogPanel?.before(warning);
+    return warning;
+  }
+
+  function showFilterWarning(message, retry) {
+    const warning = ensureFilterWarning();
+    warning.hidden = false;
+    warning.innerHTML = `<strong>${escapeHtml(t('reports.filtersUnavailable'))}</strong><span>${escapeHtml(message)}</span>`;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'alert__retry';
+    button.textContent = t('dash.retry');
+    button.addEventListener('click', retry);
+    warning.appendChild(button);
+  }
+
+  function clearFilterWarning() {
+    const warning = document.getElementById('reports-filter-warning');
+    if (warning) warning.hidden = true;
+  }
 
   function setCatalogVisible(visible) {
     if (els.catalogToolbar) els.catalogToolbar.hidden = !visible;
@@ -161,21 +210,50 @@ export function initReports({ clearError, showError, setApiState }) {
 
   async function ensureLoaded() {
     if (state.loaded) return;
+    const catalogRequest = catalogRequests.start();
+    state.branchesLoaded = false;
     setDefaultDates();
-    // The catalog itself is the essential payload; branch/staff filters are best-effort
-    // so a transient failure of a secondary endpoint never blanks the whole catalog.
-    const reportsPayload = await fetchJson('/dashboard/reports');
-    state.reports = reportsPayload.data || [];
-    renderFilterOptions();
     try {
-      const branchesPayload = await fetchJson('/dashboard/branches');
-      state.branches = branchesPayload.data || [];
-      renderBranches();
-      await loadStaff();
+      const reportsPayload = await fetchJson('/dashboard/reports', {}, {
+        signal: catalogRequest.signal,
+      });
+      if (!catalogRequest.isCurrent()) return;
+      state.reports = reportsPayload.data || [];
+      renderFilterOptions();
+      const branchRequest = branchRequests.start();
+      try {
+        const branchesPayload = await fetchJson('/dashboard/branches', {}, {
+          signal: branchRequest.signal,
+          slowState: false,
+        });
+        if (!branchRequest.isCurrent() || !catalogRequest.isCurrent()) return;
+        state.branches = branchesPayload.data || [];
+        renderBranches();
+        state.branchesLoaded = true;
+        clearFilterWarning();
+        await loadStaff();
+      } catch (error) {
+        if (
+          !isSupersededRequest(error)
+          && branchRequest.isCurrent()
+          && catalogRequest.isCurrent()
+        ) {
+          showFilterWarning(error.message, async () => {
+            state.loaded = false;
+            await loadFromLocation();
+          });
+        }
+      } finally {
+        if (branchRequest.isCurrent()) branchRequest.finish();
+      }
+      if (!catalogRequest.isCurrent()) return;
+      state.loaded = true;
     } catch (error) {
-      console.error('Reports filters failed to load', error);
+      if (isSupersededRequest(error) || !catalogRequest.isCurrent()) return;
+      throw error;
+    } finally {
+      if (catalogRequest.isCurrent()) catalogRequest.finish();
     }
-    state.loaded = true;
   }
 
   function renderFilterOptions() {
@@ -206,15 +284,34 @@ export function initReports({ clearError, showError, setApiState }) {
   }
 
   async function loadStaff() {
+    state.staffLoaded = false;
+    state.staffIds = [];
+    const request = staffRequests.start();
     const selected = els.staff.value;
-    const payload = await fetchJson('/dashboard/staff', { company_id: els.branch.value });
-    const staff = payload.data || [];
-    els.staff.innerHTML = optionHtml('', t('dash.allStaff'), selected)
-      + staff.map((person) => optionHtml(
-        person.id,
-        els.branch.value ? person.name : `${person.name} · ${person.company_title || person.company_id}`,
-        selected,
-      )).join('');
+    try {
+      const payload = await fetchJson('/dashboard/staff', { company_id: els.branch.value }, {
+        signal: request.signal,
+        slowState: false,
+      });
+      if (!request.isCurrent()) return 'superseded';
+      const staff = payload.data || [];
+      els.staff.innerHTML = optionHtml('', t('dash.allStaff'), selected)
+        + staff.map((person) => optionHtml(
+          person.id,
+          els.branch.value ? person.name : `${person.name} · ${person.company_title || person.company_id}`,
+          selected,
+        )).join('');
+      state.staffLoaded = true;
+      state.staffIds = staff.map((person) => person.id);
+      clearFilterWarning();
+      return 'ready';
+    } catch (error) {
+      if (isSupersededRequest(error) || !request.isCurrent()) return 'superseded';
+      showFilterWarning(error.message, () => loadStaff());
+      return 'failed';
+    } finally {
+      if (request.isCurrent()) request.finish();
+    }
   }
 
   function collectCatalogFilters() {
@@ -267,6 +364,7 @@ export function initReports({ clearError, showError, setApiState }) {
   }
 
   function showCatalog(push = true) {
+    reportRequests.abort();
     state.activeReportId = '';
     setCatalogVisible(true);
     els.viewer.classList.remove('visible');
@@ -327,27 +425,65 @@ export function initReports({ clearError, showError, setApiState }) {
       showCatalog(push);
       return;
     }
+    const request = reportRequests.start();
     applyReportFilterVisibility(meta);
     if (push) history.pushState({ view: 'reports', report: reportId }, '', reportPath(reportId, reportSearch()));
     setCatalogVisible(false);
     els.viewer.classList.add('visible');
     els.viewerTitle.textContent = meta.title;
-    els.viewerSubtitle.textContent = t('common.loadingShort');
-    els.content.innerHTML = `<div class="empty compact">${t('reports.loadingReport')}</div>`;
+    const requestParams = reportParams();
+    const cacheKey = reportDataCacheKey(requestParams);
+    const previousData = state.reportData.get(cacheKey);
+    const refreshPresentation = reportRefreshPresentation(previousData);
+    if (refreshPresentation.retainedData) {
+      els.viewerSubtitle.textContent = periodSubtitle(refreshPresentation.retainedData);
+      renderReportData(els.content, refreshPresentation.retainedData, charts);
+    } else {
+      els.viewerSubtitle.textContent = t('common.loadingShort');
+      els.content.innerHTML = `<div class="empty compact">${t('reports.loadingReport')}</div>`;
+    }
+    els.refresh.disabled = true;
     clearError();
-    setApiState(t('dash.apiLoading'), 'warn');
+    setApiState(
+      refreshPresentation.state === 'refreshing' ? t('dash.apiRefreshing') : t('dash.apiLoading'),
+      'warn',
+    );
     try {
-      const payload = await fetchJson('/dashboard/reports/data', reportParams());
+      const payload = await fetchJson('/dashboard/reports/data', requestParams, {
+        signal: request.signal,
+        retry: reportRetry,
+        onSlow: () => showError(t('dash.apiSlowMessage'), { apiStatus: 'slow', retry: reportRetry }),
+      });
+      if (!request.isCurrent() || state.activeReportId !== reportId) return;
       const data = payload.data;
+      state.reportData.set(cacheKey, data);
       els.viewerTitle.textContent = data.title || meta.title;
       els.viewerSubtitle.textContent = periodSubtitle(data);
       renderReportData(els.content, data, charts);
-      setApiState(t('dash.apiConnected'), 'ok');
+      clearError();
+      const dataState = reportDataState(data);
+      if (dataState === 'partial') {
+        setApiState(t('dash.apiPartial'), 'warn');
+      } else if (dataState === 'empty') {
+        setApiState(t('dash.apiEmpty'), 'warn');
+      } else {
+        setApiState(t('dash.apiConnected'), 'ok');
+      }
     } catch (error) {
+      if (isSupersededRequest(error) || !request.isCurrent()) return;
       charts.clear();
-      showError(error.message);
-      els.viewerSubtitle.textContent = t('common.errorPrefix');
-      els.content.innerHTML = `<div class="empty compact">${t('reports.loadFailed')}</div>`;
+      showError(error.message, { apiStatus: error.apiStatus, retry: reportRetry });
+      if (!previousData) {
+        els.viewerSubtitle.textContent = t('common.errorPrefix');
+        els.content.innerHTML = `<div class="empty compact">${t('reports.loadFailed')}</div>`;
+      } else {
+        renderReportData(els.content, previousData, charts);
+      }
+    } finally {
+      if (request.isCurrent()) {
+        els.refresh.disabled = false;
+        request.finish();
+      }
     }
   }
 
@@ -360,11 +496,45 @@ export function initReports({ clearError, showError, setApiState }) {
       return;
     }
     applyReportParamsFromLocation(els);
-    try {
-      await loadStaff();
-    } catch (error) {
-      console.error('Reports staff filter failed to load', error);
+    const locationParams = new URLSearchParams(window.location.search);
+    const requestedCompanyId = locationParams.get('company_id') || '';
+    const requestedStaffId = locationParams.get('staff_id') || '';
+    const showBlockedScope = () => {
+      const retry = async () => {
+        state.loaded = false;
+        await loadFromLocation();
+      };
+      showError(t('reports.filtersUnavailable'), { apiStatus: 'error', retry });
+      const reportId = reportIdFromLocation();
+      const meta = state.reports.find((report) => report.id === reportId);
+      if (meta) {
+        state.activeReportId = reportId;
+        setCatalogVisible(false);
+        els.viewer.classList.add('visible');
+        els.viewerTitle.textContent = meta.title;
+        els.viewerSubtitle.textContent = t('common.errorPrefix');
+        els.content.innerHTML = `<div class="empty compact">${t('reports.loadFailed')}</div>`;
+      } else {
+        showCatalog(false);
+      }
+    };
+    if (!reportScopedFilterAllowsLoad(
+      requestedCompanyId,
+      state.branchesLoaded,
+      state.branches.map((branch) => branch.id),
+    )) {
+      showBlockedScope();
+      return;
     }
+    const expectedBranch = els.branch.value;
+    const staffStatus = await loadStaff();
+    if (staffStatus === 'superseded') return;
+    if (!reportScopedFilterAllowsLoad(requestedStaffId, state.staffLoaded, state.staffIds)) {
+      showBlockedScope();
+      return;
+    }
+    if (staffStatus === 'failed') els.staff.value = '';
+    if (!staffRefreshAllowsDataLoad(staffStatus, expectedBranch, els.branch.value)) return;
     const reportId = reportIdFromLocation();
     if (reportId) {
       await openReport(reportId, false);
@@ -407,7 +577,10 @@ export function initReports({ clearError, showError, setApiState }) {
     if (state.activeReportId) openReport(state.activeReportId, false);
   });
   els.branch.addEventListener('change', async () => {
-    await loadStaff();
+    const expectedBranch = els.branch.value;
+    els.staff.value = '';
+    const staffStatus = await loadStaff();
+    if (!staffRefreshAllowsDataLoad(staffStatus, expectedBranch, els.branch.value)) return;
     if (state.activeReportId) openReport(state.activeReportId, false);
   });
   [els.start, els.end, els.staff, els.granularity, els.compareEnabled, els.compareStart, els.compareEnd].forEach((input) => {
@@ -423,6 +596,17 @@ export function initReports({ clearError, showError, setApiState }) {
 
   return {
     loadFromLocation,
-    clear: () => charts.clear(),
+    clear: () => {
+      charts.clear();
+      state.loaded = false;
+      state.branchesLoaded = false;
+      state.staffLoaded = false;
+      state.staffIds = [];
+      state.activeReportId = '';
+      reportRequests.abort();
+      staffRequests.abort();
+      branchRequests.abort();
+      catalogRequests.abort();
+    },
   };
 }

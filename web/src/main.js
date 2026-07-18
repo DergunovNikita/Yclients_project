@@ -2,25 +2,29 @@ import Chart from 'chart.js/auto';
 import { enhanceSelect } from './customSelect.js';
 import {
   authFetch,
-  authHeaders,
   ensureOnboardingComplete,
-  getCsrfToken,
   getSelectedPortalAccountId,
   loadCurrentUserQuietly,
   redirectToLogin,
-  requestWithReauth,
   setSelectedPortalAccountId,
 } from './auth.js';
+import {
+  createLatestRequestScope,
+  fetchJson as sharedFetchJson,
+  isSupersededRequest,
+  patchJson as sharedPatchJson,
+  postJson as sharedPostJson,
+  staffRefreshAllowsDataLoad,
+} from './dashboardApi.js';
 
 import { initReports } from './reports/index.js';
-import { applyTranslations, getLocale, mountLanguageSwitcher, t, userDataLoadErrorMessage } from './i18n.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 document.documentElement.lang = getLocale();
 applyTranslations();
 mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListener('change', () => location.reload());
 
-const apiBase = import.meta.env.VITE_API_BASE || '';
-const apiKey = import.meta.env.VITE_API_KEY || '';
+const apiKey = import.meta.env?.VITE_API_KEY || '';
 const DEMO_AUTOLOGIN = import.meta.env.VITE_DEMO_AUTOLOGIN;
 let currentUser = null;
 
@@ -163,9 +167,16 @@ let reportsController = null;
 let selectedTenant = null;
 let retryCurrentView = null;
 const loadedStaffFilters = new WeakSet();
-
-const REQUEST_TIMEOUT_MS = 60000;
-const SLOW_REQUEST_MS = 12000;
+const staffRequestScopes = new WeakMap();
+const viewRequestScopes = {
+  overview: createLatestRequestScope(),
+  plan: createLatestRequestScope(),
+  planSettings: createLatestRequestScope(),
+  serviceManagement: createLatestRequestScope(),
+  reviewFacts: createLatestRequestScope(),
+  branches: createLatestRequestScope(),
+};
+const viewsWithData = new Set();
 
 const ADMIN_HIDDEN_METRIC_CODES = new Set(['revenue', 'avg_check_total']);
 const SETTINGS_ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
@@ -215,36 +226,6 @@ function applyFinancialVisibility(summary) {
   const financialsHidden = Boolean(summary?.financials_hidden);
   setOverviewSectionHidden('revenue', financialsHidden);
   setOverviewSectionHidden('services', financialsHidden);
-}
-
-function headers() {
-  const extra = {};
-  if (apiKey) extra['X-API-Key'] = apiKey;
-  return authHeaders(extra);
-}
-
-function apiUrl(path, params = {}) {
-  const qs = new URLSearchParams();
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== '') {
-      qs.set(key, value);
-    }
-  });
-  const suffix = qs.toString() ? `?${qs}` : '';
-  const normalizedPath = `${path}${suffix}`;
-  if (!apiBase) return normalizedPath;
-  return `${apiBase.replace(/\/$/, '')}${normalizedPath}`;
-}
-
-function apiUrlCandidates(path, params = {}) {
-  const primary = apiUrl(path, params);
-  const candidates = [primary];
-  if (apiBase.includes('127.0.0.1')) {
-    candidates.push(primary.replace('127.0.0.1', 'localhost'));
-  } else if (apiBase.includes('localhost')) {
-    candidates.push(primary.replace('localhost', '127.0.0.1'));
-  }
-  return [...new Set(candidates)];
 }
 
 function formatMoney(value) {
@@ -321,8 +302,13 @@ function setApiState(text, kind = 'warn') {
 function setApiStatus(status) {
   const states = {
     loading: [t('dash.apiLoading'), 'warn'],
+    refreshing: [t('dash.apiRefreshing'), 'warn'],
     slow: [t('dash.apiSlow'), 'warn'],
+    partial: [t('dash.apiPartial'), 'warn'],
+    empty: [t('dash.apiEmpty'), 'warn'],
+    ready: [t('dash.apiConnected'), 'ok'],
     auth_required: [t('dash.apiAuthRequired'), 'warn'],
+    forbidden: [t('dash.apiForbidden'), 'error'],
     timeout: [t('dash.apiTimeout'), 'error'],
     server_error: [t('dash.apiServerError'), 'error'],
     sync_problem: [t('dash.apiSyncProblem'), 'warn'],
@@ -364,142 +350,68 @@ function clearError() {
   retryCurrentView = null;
 }
 
-function apiStatusForResponse(response) {
-  if (response.status === 401) return 'auth_required';
-  if (response.status === 408 || response.status === 504) return 'timeout';
-  if (response.status >= 500) return 'server_error';
-  return 'error';
+function requestScopeForStaff(filter) {
+  if (!staffRequestScopes.has(filter)) staffRequestScopes.set(filter, createLatestRequestScope());
+  return staffRequestScopes.get(filter);
 }
 
-function errorForResponse(response, fallbackMessage = userDataLoadErrorMessage()) {
-  const error = new Error(fallbackMessage);
-  error.status = response.status;
-  error.apiStatus = apiStatusForResponse(response);
-  return error;
+function beginViewRequest(view) {
+  const request = viewRequestScopes[view].start();
+  setApiStatus(viewsWithData.has(view) ? 'refreshing' : 'loading');
+  return request;
 }
 
-function timeoutError() {
-  const error = new Error(t('dash.apiTimeoutMessage'));
-  error.apiStatus = 'timeout';
-  return error;
+function setLoadedApiState(data, { empty = false } = {}) {
+  const appointmentsStatus = data?.summary?.appointments_breakdown?.source_status;
+  if (data?.source_status === 'partial' || appointmentsStatus === 'unavailable') {
+    setApiStatus('partial');
+  } else {
+    setApiStatus(empty ? 'empty' : 'ready');
+  }
 }
 
-function timedRequestContext({ slowState = true, retry = null } = {}) {
-  const controller = new AbortController();
-  const slowTimer = slowState
-    ? window.setTimeout(() => showSlowNotice(retry), SLOW_REQUEST_MS)
-    : null;
-  const timeoutTimer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+function showFilterWarning(input, message, retry) {
+  const host = input?.closest('label') || input?.parentElement;
+  if (!host) return;
+  let warning = host.querySelector(':scope > .filter-load-warning');
+  if (!warning) {
+    warning = document.createElement('span');
+    warning.className = 'filter-load-warning';
+    host.appendChild(warning);
+  }
+  warning.textContent = message;
+  if (retry) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = t('dash.retry');
+    button.addEventListener('click', retry);
+    warning.appendChild(document.createTextNode(' '));
+    warning.appendChild(button);
+  }
+}
+
+function clearFilterWarning(input) {
+  const host = input?.closest('label') || input?.parentElement;
+  host?.querySelector(':scope > .filter-load-warning')?.remove();
+}
+
+function requestOptions(options = {}) {
   return {
-    signal: controller.signal,
-    cleanup() {
-      if (slowTimer) window.clearTimeout(slowTimer);
-      window.clearTimeout(timeoutTimer);
-    },
+    ...options,
+    onSlow: () => showSlowNotice(options.retry || retryCurrentView),
   };
 }
 
-async function fetchJson(path, params, options = {}) {
-  const errors = [];
-  for (const url of apiUrlCandidates(path, params)) {
-    let response;
-    const timing = timedRequestContext(options);
-    try {
-      response = await requestWithReauth(url, { signal: timing.signal }, (_path, options = {}) => {
-        const { __retried, ...fetchOptions } = options;
-        return fetch(url, {
-          ...fetchOptions,
-          credentials: 'include',
-          headers: headers(),
-        });
-      });
-    } catch (error) {
-      const nextError = error?.name === 'AbortError' ? timeoutError() : error;
-      errors.push(`${url}\n${nextError.message}`);
-      if (nextError.apiStatus === 'timeout') throw nextError;
-      continue;
-    } finally {
-      timing.cleanup();
-    }
-
-    if (!response.ok) {
-      const body = await response.text();
-      console.error('Dashboard API request failed', { status: response.status, url, body: body.slice(0, 1000) });
-      throw errorForResponse(response);
-    }
-
-    const payload = await response.json();
-    if (payload.success === false) {
-      console.error('Dashboard API returned success=false', { url, payload });
-      throw new Error(userDataLoadErrorMessage());
-    }
-    return payload;
-  }
-
-  console.error('Dashboard API connection failed', errors);
-  throw new Error(userDataLoadErrorMessage());
+function fetchJson(path, params, options = {}) {
+  return sharedFetchJson(path, params, requestOptions(options));
 }
 
-async function requestJson(path, { method = 'GET', body = null } = {}) {
-  const errors = [];
-  for (const url of apiUrlCandidates(path)) {
-    let response;
-    const timing = timedRequestContext({ retry: retryCurrentView });
-    try {
-      response = await requestWithReauth(url, { method, body, signal: timing.signal }, (_path, options = {}) => {
-        const { __retried, body: requestBody = null, ...fetchOptions } = options;
-        const requestHeaders = { ...headers(), 'Content-Type': 'application/json' };
-        if (!['GET', 'HEAD', 'OPTIONS'].includes(String(fetchOptions.method).toUpperCase())) {
-          const csrf = getCsrfToken();
-          if (csrf) requestHeaders['X-CSRF-Token'] = csrf;
-        }
-        return fetch(url, {
-          ...fetchOptions,
-          credentials: 'include',
-          headers: requestHeaders,
-          body: requestBody === null ? undefined : JSON.stringify(requestBody),
-        });
-      });
-    } catch (error) {
-      const nextError = error?.name === 'AbortError' ? timeoutError() : error;
-      errors.push(`${url}\n${nextError.message}`);
-      if (nextError.apiStatus === 'timeout') throw nextError;
-      continue;
-    } finally {
-      timing.cleanup();
-    }
-
-    if (!response.ok) {
-      const responseBody = await response.text();
-      console.error('Dashboard API request failed', { status: response.status, url, body: responseBody.slice(0, 1000) });
-      if (response.status === 403 && responseBody.includes('Demo account is read-only')) {
-        showError(t('demo.readOnly'));
-        const demoError = new Error(t('demo.readOnly'));
-        demoError.status = 403;
-        demoError.apiStatus = 'error';
-        throw demoError;
-      }
-      throw errorForResponse(response);
-    }
-
-    const payload = await response.json();
-    if (payload.success === false) {
-      console.error('Dashboard API returned success=false', { url, payload });
-      throw new Error(userDataLoadErrorMessage());
-    }
-    return payload;
-  }
-
-  console.error('Dashboard API connection failed', errors);
-  throw new Error(userDataLoadErrorMessage());
+function postJson(path, body, options = {}) {
+  return sharedPostJson(path, body, requestOptions(options));
 }
 
-async function postJson(path, body) {
-  return requestJson(path, { method: 'POST', body });
-}
-
-async function patchJson(path, body) {
-  return requestJson(path, { method: 'PATCH', body });
+function patchJson(path, body, options = {}) {
+  return sharedPatchJson(path, body, requestOptions(options));
 }
 
 function defaultDates(filter) {
@@ -1651,23 +1563,32 @@ function setPlanSettingsLoading(isLoading) {
 }
 
 async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom = null, dirty = false } = {}) {
+  const request = beginViewRequest('planSettings');
   clearError();
   setPlanSettingsLoading(true);
-  setApiStatus('loading');
   try {
     const params = { month };
     if (copyFrom) params.copy_from = copyFrom;
     const payload = await fetchJson('/dashboard/plan/settings', params, {
       retry: () => loadPlanSettings({ month, copyFrom, dirty }),
+      signal: request.signal,
     });
+    if (!request.isCurrent()) return;
     renderPlanSettings(payload.data, { updateSnapshot: !copyFrom, dirty });
+    viewsWithData.add('planSettings');
     clearError();
-    setApiStatus('ok');
+    setLoadedApiState(payload.data, {
+      empty: !(payload.data?.branches?.length || payload.data?.staff?.length),
+    });
     await loadSyncStatus();
   } catch (error) {
+    if (isSupersededRequest(error) || !request.isCurrent()) return;
     showError(error.message, { apiStatus: error.apiStatus, retry: () => loadPlanSettings({ month, copyFrom, dirty }) });
   } finally {
-    setPlanSettingsLoading(false);
+    if (request.isCurrent()) {
+      setPlanSettingsLoading(false);
+      request.finish();
+    }
   }
 }
 
@@ -1680,7 +1601,7 @@ async function savePlanSettings() {
     renderPlanSettings(payload.data);
     setApiState(t('dash.apiConnected'), 'ok');
   } catch (error) {
-    showError(error.message);
+    showError(error.message, { apiStatus: error.apiStatus, retry: () => savePlanSettings() });
   } finally {
     setPlanSettingsLoading(false);
   }
@@ -1914,19 +1835,30 @@ function setServiceManagementLoading(isLoading) {
 }
 
 async function loadServiceManagement() {
+  const request = beginViewRequest('serviceManagement');
   clearError();
   setServiceManagementLoading(true);
-  setApiStatus('loading');
   try {
-    const payload = await fetchJson('/dashboard/services', serviceManagementParams(), { retry: () => loadServiceManagement() });
+    const payload = await fetchJson('/dashboard/services', serviceManagementParams(), {
+      retry: () => loadServiceManagement(),
+      signal: request.signal,
+    });
+    if (!request.isCurrent()) return;
     renderServiceManagement(payload.data);
+    viewsWithData.add('serviceManagement');
     clearError();
-    setApiStatus('ok');
+    setLoadedApiState(payload.data, {
+      empty: !(payload.data?.rows?.length || payload.data?.groups?.length),
+    });
     await loadSyncStatus();
   } catch (error) {
+    if (isSupersededRequest(error) || !request.isCurrent()) return;
     showError(error.message, { apiStatus: error.apiStatus, retry: () => loadServiceManagement() });
   } finally {
-    setServiceManagementLoading(false);
+    if (request.isCurrent()) {
+      setServiceManagementLoading(false);
+      request.finish();
+    }
   }
 }
 
@@ -1957,7 +1889,7 @@ async function saveServiceManagement() {
     await loadServiceManagement();
     setApiState(t('dash.apiConnected'), 'ok');
   } catch (error) {
-    showError(error.message);
+    showError(error.message, { apiStatus: error.apiStatus, retry: () => saveServiceManagement() });
   } finally {
     setServiceManagementLoading(false);
   }
@@ -2041,9 +1973,12 @@ function renderReviewFactEditor(data) {
   `;
 }
 
-async function loadReviewFactEditor() {
+async function loadReviewFactEditor({ signal = null } = {}) {
   const filter = filterEls.reviewFacts;
-  const payload = await fetchJson('/dashboard/plan/reviews_fact', filterParams(filter), { retry: () => loadReviewFacts() });
+  const payload = await fetchJson('/dashboard/plan/reviews_fact', filterParams(filter), {
+    retry: () => loadReviewFacts(),
+    signal,
+  });
   renderReviewFactEditor(payload.data);
 }
 
@@ -2089,7 +2024,7 @@ async function saveReviewFactEditor() {
     renderReviewFactEditor(payload.data);
     setApiState(t('dash.apiConnected'), 'ok');
   } catch (error) {
-    showError(error.message);
+    showError(error.message, { apiStatus: error.apiStatus, retry: () => saveReviewFactEditor() });
   } finally {
     els.reviewFactSave.textContent = t('dash.saveFact');
     els.reviewFactSave.disabled = !reviewFactRows.length;
@@ -2143,13 +2078,23 @@ function renderBundle(bundle) {
 }
 
 async function loadBranches() {
+  const request = viewRequestScopes.branches.start();
+  const branchInputs = [
+    ...Object.values(filterEls).map((filter) => filter.branch),
+    els.serviceFilterBranch,
+  ].filter(Boolean);
   try {
-    const payload = await fetchJson('/dashboard/branches');
+    const payload = await fetchJson('/dashboard/branches', {}, { signal: request.signal, slowState: false });
+    if (!request.isCurrent()) return;
     branchOptions = payload.data || [];
     Object.values(filterEls).forEach((filter) => renderBranchOptions(filter));
     renderServiceBranchOptions();
+    branchInputs.forEach(clearFilterWarning);
   } catch (error) {
-    showError(error.message);
+    if (isSupersededRequest(error) || !request.isCurrent()) return;
+    branchInputs.forEach((input) => showFilterWarning(input, error.message, () => loadBranches()));
+  } finally {
+    if (request.isCurrent()) request.finish();
   }
 }
 
@@ -2168,12 +2113,18 @@ function renderBranchOptions(filter) {
 
 async function loadStaff(filter, { force = false } = {}) {
   if (force) loadedStaffFilters.delete(filter);
-  if (loadedStaffFilters.has(filter)) return;
+  if (loadedStaffFilters.has(filter)) return 'ready';
+  const request = requestScopeForStaff(filter).start();
   const selected = filter.staff.value;
   try {
     const payload = await fetchJson('/dashboard/staff', {
       company_id: filter.branch.value,
-    }, { retry: () => loadStaff(filter, { force: true }) });
+    }, {
+      retry: () => loadStaff(filter, { force: true }),
+      signal: request.signal,
+      slowState: false,
+    });
+    if (!request.isCurrent()) return 'superseded';
     const staffOptions = payload.data || [];
     const defaultLabel = filter === filterEls.reviewFacts ? t('dash.allStaff') : t('dash.allWorkers');
     filter.staff.innerHTML = `<option value="">${defaultLabel}</option>`;
@@ -2188,9 +2139,24 @@ async function loadStaff(filter, { force = false } = {}) {
     filter.staff.value = staffOptions.some((staff) => String(staff.id) === selected) ? selected : '';
     customFilterDropdowns[filter.staff.id]?.refresh();
     loadedStaffFilters.add(filter);
+    clearFilterWarning(filter.staff);
+    return 'ready';
   } catch (error) {
-    showError(error.message, { apiStatus: error.apiStatus, retry: () => loadStaff(filter, { force: true }) });
+    if (isSupersededRequest(error) || !request.isCurrent()) return 'superseded';
+    showFilterWarning(filter.staff, error.message, () => loadStaff(filter, { force: true }));
+    return 'failed';
+  } finally {
+    if (request.isCurrent()) request.finish();
   }
+}
+
+async function refreshStaffForBranch(filter, loadView) {
+  const expectedBranch = filter.branch.value;
+  filter.staff.value = '';
+  customFilterDropdowns[filter.staff.id]?.refresh();
+  const status = await loadStaff(filter, { force: true });
+  if (!staffRefreshAllowsDataLoad(status, expectedBranch, filter.branch.value)) return;
+  await loadView();
 }
 
 function filterForView(view) {
@@ -2245,6 +2211,11 @@ function viewFromLocation() {
 
 function setActiveView(view) {
   view = accessibleView(view);
+  const previousView = activeView;
+  Object.entries(viewRequestScopes).forEach(([requestView, scope]) => {
+    if (requestView !== 'branches' && requestView !== view) scope.abort();
+  });
+  if (previousView === 'reports' && view !== 'reports') reportsController?.clear();
   activeView = view;
   els.overviewView.classList.toggle('active', view === 'overview');
   els.planView.classList.toggle('active', view === 'plan');
@@ -2268,57 +2239,81 @@ function setActiveView(view) {
 
 async function loadPlanFact() {
   const filter = filterEls.plan;
+  const request = beginViewRequest('plan');
   clearError();
   setFilterLoading(filter, true);
-  setApiStatus('loading');
 
   try {
-    const payload = await fetchJson('/dashboard/widget/plan_fact', filterParams(filter), { retry: () => loadPlanFact() });
+    const payload = await fetchJson('/dashboard/widget/plan_fact', filterParams(filter), {
+      retry: () => loadPlanFact(),
+      signal: request.signal,
+    });
+    if (!request.isCurrent()) return;
     renderPlanFact(payload.data);
+    viewsWithData.add('plan');
     clearError();
-    setApiStatus('ok');
+    setLoadedApiState(payload.data, { empty: !payload.data?.groups?.length });
     await loadSyncStatus();
   } catch (error) {
+    if (isSupersededRequest(error) || !request.isCurrent()) return;
     showError(error.message, { apiStatus: error.apiStatus, retry: () => loadPlanFact() });
   } finally {
-    setFilterLoading(filter, false);
+    if (request.isCurrent()) {
+      setFilterLoading(filter, false);
+      request.finish();
+    }
   }
 }
 
 async function loadReviewFacts() {
   const filter = filterEls.reviewFacts;
+  const request = beginViewRequest('reviewFacts');
   clearError();
   setFilterLoading(filter, true);
-  setApiStatus('loading');
 
   try {
-    await loadReviewFactEditor();
+    await loadReviewFactEditor({ signal: request.signal });
+    if (!request.isCurrent()) return;
+    viewsWithData.add('reviewFacts');
     clearError();
-    setApiStatus('ok');
+    setLoadedApiState(null, { empty: reviewFactRows.length === 0 });
     await loadSyncStatus();
   } catch (error) {
+    if (isSupersededRequest(error) || !request.isCurrent()) return;
     showError(error.message, { apiStatus: error.apiStatus, retry: () => loadReviewFacts() });
   } finally {
-    setFilterLoading(filter, false);
+    if (request.isCurrent()) {
+      setFilterLoading(filter, false);
+      request.finish();
+    }
   }
 }
 
 async function loadDashboard() {
   const filter = filterEls.overview;
+  const request = beginViewRequest('overview');
   clearError();
   setFilterLoading(filter, true);
-  setApiStatus('loading');
 
   try {
-    const payload = await fetchJson('/dashboard/bundle', filterParams(filter), { retry: () => loadDashboard() });
+    const payload = await fetchJson('/dashboard/bundle', filterParams(filter), {
+      retry: () => loadDashboard(),
+      signal: request.signal,
+    });
+    if (!request.isCurrent()) return;
     renderBundle(payload.data);
+    viewsWithData.add('overview');
     clearError();
-    setApiStatus('ok');
+    setLoadedApiState(payload.data, { empty: !payload.data?.summary });
     await loadSyncStatus();
   } catch (error) {
+    if (isSupersededRequest(error) || !request.isCurrent()) return;
     showError(error.message, { apiStatus: error.apiStatus, retry: () => loadDashboard() });
   } finally {
-    setFilterLoading(filter, false);
+    if (request.isCurrent()) {
+      setFilterLoading(filter, false);
+      request.finish();
+    }
   }
 }
 
@@ -2514,8 +2509,7 @@ filterEls.overview.end.addEventListener('change', () => {
   els.overviewPresetButtons.forEach((button) => button.classList.remove('active'));
 });
 filterEls.overview.branch.addEventListener('change', async () => {
-  await loadStaff(filterEls.overview, { force: true });
-  await loadDashboard();
+  await refreshStaffForBranch(filterEls.overview, loadDashboard);
 });
 filterEls.overview.staff.addEventListener('change', () => loadDashboard());
 els.overviewPresetButtons.forEach((button) => {
@@ -2534,8 +2528,7 @@ els.overviewJumpButtons.forEach((button) => {
 
 filterEls.plan.load.addEventListener('click', () => loadPlanFact());
 filterEls.plan.branch.addEventListener('change', async () => {
-  await loadStaff(filterEls.plan, { force: true });
-  await loadPlanFact();
+  await refreshStaffForBranch(filterEls.plan, loadPlanFact);
 });
 filterEls.plan.staff.addEventListener('change', () => loadPlanFact());
 filterEls.reviewFacts.load.addEventListener('click', () => loadReviewFacts());
@@ -2546,8 +2539,7 @@ filterEls.reviewFacts.month.addEventListener('change', async () => {
 filterEls.reviewFacts.start.addEventListener('change', syncReviewFactMonthFromDates);
 filterEls.reviewFacts.end.addEventListener('change', syncReviewFactMonthFromDates);
 filterEls.reviewFacts.branch.addEventListener('change', async () => {
-  await loadStaff(filterEls.reviewFacts, { force: true });
-  await loadReviewFacts();
+  await refreshStaffForBranch(filterEls.reviewFacts, loadReviewFacts);
 });
 filterEls.reviewFacts.staff.addEventListener('change', () => loadReviewFacts());
 els.reviewFactSave.addEventListener('click', () => saveReviewFactEditor());

@@ -51,6 +51,7 @@ from dashboard_service import (
 )
 from dashboard_reports import (
     REPORT_GRANULARITIES,
+    ReportCalculationError,
     fetch_report_data,
     fetch_report_registry,
     report_requires_financials,
@@ -210,6 +211,51 @@ def _hide_plan_fact_financials(plan_fact: dict[str, Any], hidden_codes: frozense
         plan_fact, hidden_plan_codes, hidden_leaderboard_keys, drop_all_money
     ) or {}
     payload['financials_hidden'] = True
+    return payload
+
+
+def _remove_table_field(table: dict[str, Any], field: str, metric: str | None = None) -> None:
+    table['columns'] = [column for column in table.get('columns', []) if column.get('key') != field]
+    for row in table.get('rows', []):
+        row.pop(field, None)
+    ranking = table.get('ranking')
+    if not isinstance(ranking, dict):
+        return
+    if metric is not None:
+        ranking['options'] = [option for option in ranking.get('options', []) if option.get('key') != metric]
+        ranking.get('rows_by_metric', {}).pop(metric, None)
+    for rows in ranking.get('rows_by_metric', {}).values():
+        for row in rows:
+            row.pop(field, None)
+
+
+def _hide_staff_leaderboard_financials(
+    report: dict[str, Any],
+    hidden_codes: frozenset[str],
+) -> dict[str, Any]:
+    """Apply per-metric visibility to the mixed ratings report without leaking raw values."""
+    payload = deepcopy(report)
+    tables = list(payload.get('tables') or [])
+
+    hidden_table_ids: set[str] = set()
+    if 'revenue' in hidden_codes:
+        hidden_table_ids.update({'revenue_barber', 'revenue_admin'})
+        # Every card in this mixed report is derived from the positive-revenue
+        # leaderboards, including the two number-formatted headcounts.
+        payload['cards'] = []
+        payload['charts'] = []
+        extra_table = next((table for table in tables if table.get('id') == 'extra_services'), None)
+        if extra_table is not None:
+            _remove_table_field(extra_table, 'sum', metric='sum')
+    if 'cosmo_sum' in hidden_codes:
+        hidden_table_ids.update({'cosmo_barber', 'cosmo_admin'})
+    if 'avg_check' in hidden_codes:
+        hidden_table_ids.update({'avg_check_plan_branch', 'avg_check_plan_staff'})
+
+    payload['tables'] = [table for table in tables if table.get('id') not in hidden_table_ids]
+    payload['raw'] = {}
+    if hidden_codes:
+        payload['financials_hidden'] = True
     return payload
 
 
@@ -546,6 +592,17 @@ async def dashboard_report_data(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ReportCalculationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'report_calculation_failed',
+                'message': 'Не удалось рассчитать рейтинги за выбранный период.',
+                'retryable': True,
+            },
+        ) from exc
+    if report_id == 'staff_leaderboard':
+        data = _hide_staff_leaderboard_financials(data, hidden_money_codes(ctx))
     return {'success': True, 'data': data}
 
 

@@ -5,13 +5,17 @@ from datetime import date, datetime, time
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 import api
 import auth_deps
 import plan_import
+import dashboard_reports
+import dashboard_routes
+import dashboard_service
+from auth_scope import AccessContext
 from auth_service import create_access_token, hash_password
-from dashboard_service import fetch_plan_fact
+from dashboard_service import _staff_leaderboards_payload, fetch_plan_fact
 from plan_import import (
     import_plan_sheet_csv,
     import_services_sheet_csv,
@@ -540,11 +544,30 @@ async def test_dashboard_staff_leaderboard_report_returns_top_tables(async_sessi
     data = r.json()['data']
     assert data['source_status'] == 'ready'
     table_ids = {table['id'] for table in data['tables']}
-    assert {'extra_services', 'cosmo_barber', 'opz_admin', 'reviews_admin', 'revenue_barber', 'revenue_admin'} <= table_ids
+    assert {
+        'extra_services',
+        'cosmo_barber',
+        'opz_admin',
+        'reviews_admin',
+        'revenue_barber',
+        'revenue_admin',
+        'avg_check_plan_branch',
+        'avg_check_plan_staff',
+    } <= table_ids
+    extra_services = next(table for table in data['tables'] if table['id'] == 'extra_services')
+    cosmo_barber = next(table for table in data['tables'] if table['id'] == 'cosmo_barber')
+    opz_admin = next(table for table in data['tables'] if table['id'] == 'opz_admin')
     revenue_barber = next(table for table in data['tables'] if table['id'] == 'revenue_barber')
     revenue_admin = next(table for table in data['tables'] if table['id'] == 'revenue_admin')
-    assert {'key': 'cosmo_revenue_share_pct', 'label': 'Доля косметики, %', 'format': 'percent'} in revenue_barber['columns']
-    assert {'key': 'cosmo_revenue_share_pct', 'label': 'Доля косметики, %', 'format': 'percent'} in revenue_admin['columns']
+    assert extra_services['ranking']['default_metric'] == 'pct'
+    assert set(extra_services['ranking']['rows_by_metric']) == {'qty', 'sum', 'pct'}
+    assert cosmo_barber['ranking']['default_metric'] == 'sum'
+    assert set(cosmo_barber['ranking']['rows_by_metric']) == {'qty', 'sum', 'pct'}
+    assert opz_admin['ranking']['default_metric'] == 'pct'
+    assert set(opz_admin['ranking']['rows_by_metric']) == {'qty', 'pct'}
+    assert {'key': 'pct', 'label': 'Косметика, %', 'format': 'percent'} in cosmo_barber['columns']
+    assert all(column['key'] != 'cosmo_revenue_share_pct' for column in revenue_barber['columns'])
+    assert all(column['key'] != 'cosmo_revenue_share_pct' for column in revenue_admin['columns'])
 
 
 @pytest.mark.asyncio
@@ -592,7 +615,7 @@ async def test_dashboard_staff_efficiency_revenue_uses_paid_service_rows(async_s
 
 
 @pytest.mark.asyncio
-async def test_dashboard_staff_leaderboard_report_degrades_without_500(async_session, monkeypatch):
+async def test_dashboard_staff_leaderboard_report_returns_retryable_503_on_total_failure(async_session, monkeypatch):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
     await async_session.commit()
@@ -616,10 +639,263 @@ async def test_dashboard_staff_leaderboard_report_degrades_without_500(async_ses
         )
     app.dependency_overrides.clear()
 
-    assert r.status_code == 200
-    data = r.json()['data']
-    assert data['tables'] == []
-    assert data['notes'] and data['notes'][0]['kind'] == 'partial'
+    assert r.status_code == 503
+    detail = r.json()['detail']
+    assert detail == {
+        'code': 'report_calculation_failed',
+        'message': 'Не удалось рассчитать рейтинги за выбранный период.',
+        'retryable': True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_dashboard_staff_leaderboard_returns_partial_with_null_optional_sums(async_session, monkeypatch):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1, fired=0))
+    async_session.add(
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 1, 10), attendance=1)
+    )
+    async_session.add(
+        Transaction(
+            id=1,
+            appointment_id=1,
+            service_id=10,
+            service_title='воск',
+            amount=1,
+            company_id=1,
+        )
+    )
+    await async_session.commit()
+
+    async def unavailable(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(dashboard_service, '_extra_service_revenue_by_staff', unavailable)
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'staff_leaderboard', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    data = response.json()['data']
+    assert data['source_status'] == 'partial'
+    extra = next(table for table in data['tables'] if table['id'] == 'extra_services')
+    assert extra['ranking']['rows_by_metric']['sum'] == []
+    assert extra['ranking']['rows_by_metric']['qty'], data
+    assert extra['ranking']['rows_by_metric']['qty'][0]['sum'] is None
+    assert any(note['kind'] == 'warning' for note in data['notes'])
+
+
+@pytest.mark.asyncio
+async def test_staff_leaderboard_applies_component_money_permissions_without_raw_leaks(async_session, monkeypatch):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    await async_session.commit()
+
+    identity = {'staff': 'Master', 'staff_id': 1, 'company_id': 1, 'company_title': 'Salon'}
+    extra_row = {**identity, 'qty': 2.0, 'sum': 500.0, 'pct': 20.0, 'share_pct': 100.0}
+    cosmo_row = {**identity, 'qty': 1.0, 'sum': 300.0, 'pct': 12.0, 'share_pct': 100.0}
+    opz_row = {**identity, 'qty': 1.0, 'pct': 10.0}
+    value_row = {**identity, 'value': 2500.0}
+    avg_row = {**identity, 'plan': 1000.0, 'fact': 1200.0, 'pct': 120.0}
+
+    async def fake_plan_fact(*args, **kwargs):
+        return {
+            'staff_leaderboards': {
+                'extra_services_rankings': {'qty': [extra_row], 'sum': [extra_row], 'pct': [extra_row]},
+                'cosmo_barber_rankings': {'qty': [cosmo_row], 'sum': [cosmo_row], 'pct': [cosmo_row]},
+                'cosmo_admin_rankings': {'qty': [], 'sum': [], 'pct': []},
+                'opz_barber_rankings': {'qty': [opz_row], 'pct': [opz_row]},
+                'opz_admin_rankings': {'qty': [], 'pct': []},
+                'reviews_admin': [{**identity, 'value': 3.0}],
+                'revenue_barber': [value_row],
+                'revenue_admin': [],
+                'avg_check_plan_branch': [avg_row],
+                'avg_check_plan_staff': [avg_row],
+            }
+        }
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return AccessContext.from_user(
+            user_id=10,
+            role='manager',
+            portal_account_id=1,
+            company_ids=[1],
+            money_metrics=frozenset({'cosmo_sum'}),
+        )
+
+    monkeypatch.setattr(dashboard_reports, 'fetch_plan_fact', fake_plan_fact)
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'staff_leaderboard', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    data = response.json()['data']
+    table_ids = {table['id'] for table in data['tables']}
+    assert {'cosmo_barber', 'extra_services', 'opz_barber', 'reviews_admin'} <= table_ids
+    assert {'revenue_barber', 'revenue_admin', 'avg_check_plan_branch', 'avg_check_plan_staff'}.isdisjoint(table_ids)
+    extra = next(table for table in data['tables'] if table['id'] == 'extra_services')
+    assert 'sum' not in {column['key'] for column in extra['columns']}
+    assert 'sum' not in extra['ranking']['rows_by_metric']
+    assert all('sum' not in row for rows in extra['ranking']['rows_by_metric'].values() for row in rows)
+    assert data['cards'] == []
+    assert data['raw'] == {}
+
+
+def test_staff_leaderboards_sort_stably_and_require_positive_average_check_plan():
+    def group(staff_id, title, *, avg_plan, avg_fact, revenue=200.0, cosmo=50.0):
+        metrics = [
+            {'code': 'avg_check_total', 'plan': avg_plan, 'fact': avg_fact},
+            {'code': 'revenue', 'plan': None, 'fact': revenue},
+            {'code': 'cosmo_sum', 'plan': None, 'fact': cosmo},
+            {'code': 'cosmo_qty', 'plan': None, 'fact': 1.0},
+        ]
+        return {
+            'staff_id': staff_id,
+            'title': title,
+            'company_id': 1,
+            'company_title': 'Salon',
+            'category': 'barber',
+            'metrics': metrics,
+        }
+
+    staff_groups = [
+        group(2, 'Zed', avg_plan=100.0, avg_fact=150.0),
+        group(1, 'Alpha', avg_plan=100.0, avg_fact=150.0),
+        group(3, 'Zero plan', avg_plan=0.0, avg_fact=500.0),
+        group(4, 'No plan', avg_plan=None, avg_fact=500.0),
+    ]
+    branch_groups = [
+        {
+            'company_id': 1,
+            'title': 'Salon',
+            'metrics': [{'code': 'avg_check_total', 'plan': 100.0, 'fact': 80.0}],
+        }
+    ]
+
+    boards = _staff_leaderboards_payload(staff_groups, branch_groups=branch_groups)
+
+    assert [(row['staff'], row['pct']) for row in boards['avg_check_plan_staff']] == [
+        ('Alpha', 150.0),
+        ('Zed', 150.0),
+    ]
+    assert boards['avg_check_plan_branch'][0]['pct'] == 80.0
+    assert boards['cosmo_barber_rankings']['pct'][0]['pct'] == 25.0
+
+
+def test_staff_leaderboard_metric_variants_sort_by_the_selected_measure():
+    def group(staff_id, title, facts):
+        return {
+            'staff_id': staff_id,
+            'title': title,
+            'company_id': 1,
+            'company_title': 'Salon',
+            'category': 'barber',
+            'metrics': [{'code': code, 'plan': None, 'fact': value} for code, value in facts.items()],
+        }
+
+    groups = [
+        group(1, 'Quantity leader', {
+            'wax_qty': 6.0,
+            'camouflage_qty': 4.0,
+            'extra_services_pct': 10.0,
+            'cosmo_qty': 3.0,
+            'cosmo_sum': 100.0,
+            'revenue': 1000.0,
+            'opz_qty': 5.0,
+            'opz_pct': 20.0,
+        }),
+        group(2, 'Percent leader', {
+            'wax_qty': 3.0,
+            'camouflage_qty': 2.0,
+            'extra_services_pct': 30.0,
+            'cosmo_qty': 2.0,
+            'cosmo_sum': 200.0,
+            'revenue': 400.0,
+            'opz_qty': 2.0,
+            'opz_pct': 50.0,
+        }),
+    ]
+
+    boards = _staff_leaderboards_payload(
+        groups,
+        extra_revenue_by_staff={1: 100.0, 2: 500.0},
+    )
+
+    assert boards['extra_services_rankings']['qty'][0]['staff'] == 'Quantity leader'
+    assert boards['extra_services_rankings']['sum'][0]['staff'] == 'Percent leader'
+    assert boards['extra_services_rankings']['pct'][0]['staff'] == 'Percent leader'
+    assert boards['cosmo_barber_rankings']['qty'][0]['staff'] == 'Quantity leader'
+    assert boards['cosmo_barber_rankings']['sum'][0]['staff'] == 'Percent leader'
+    assert boards['cosmo_barber_rankings']['pct'][0]['staff'] == 'Percent leader'
+    assert boards['opz_barber_rankings']['qty'][0]['staff'] == 'Quantity leader'
+    assert boards['opz_barber_rankings']['pct'][0]['staff'] == 'Percent leader'
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_staff_query_count_does_not_grow_with_staff_count(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        Staff(id=1, name='Master 01', position='Барбер', company_id=1, fired=0),
+        Staff(id=2, name='Master 02', position='Барбер', company_id=1, fired=0),
+    ])
+    await async_session.commit()
+
+    statements: list[str] = []
+
+    def count_selects(_connection, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith('SELECT'):
+            statements.append(statement)
+
+    engine = async_session.bind.sync_engine
+    event.listen(engine, 'before_cursor_execute', count_selects)
+    try:
+        await fetch_plan_fact(
+            async_session,
+            date(2025, 1, 1),
+            date(2025, 1, 31),
+            include_all_staff_in_leaderboards=True,
+        )
+        small_count = len(statements)
+
+        async_session.add_all([
+            Staff(id=staff_id, name=f'Master {staff_id:02}', position='Барбер', company_id=1, fired=0)
+            for staff_id in range(3, 23)
+        ])
+        await async_session.commit()
+        statements.clear()
+
+        await fetch_plan_fact(
+            async_session,
+            date(2025, 1, 1),
+            date(2025, 1, 31),
+            include_all_staff_in_leaderboards=True,
+        )
+        large_count = len(statements)
+    finally:
+        event.remove(engine, 'before_cursor_execute', count_selects)
+
+    assert small_count > 0
+    assert large_count <= small_count + 1
 
 
 @pytest.mark.asyncio
@@ -2801,7 +3077,7 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
     ]
     assert [row['staff'] for row in network_boards['revenue_admin']] == ['Delta Admin']
     assert network_boards['revenue_admin'][0]['value'] == 4000.0
-    assert network_boards['revenue_admin'][0]['cosmo_revenue_share_pct'] == 25.0
+    assert network_boards['cosmo_admin'][0]['pct'] == 25.0
     assert [row['staff'] for row in network_boards['avg_check_top']] == [
         'Bravo',
         'Charlie',
@@ -2820,13 +3096,22 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
     report_revenue_barber = next(table for table in report_data['tables'] if table['id'] == 'revenue_barber')
     report_revenue_admin = next(table for table in report_data['tables'] if table['id'] == 'revenue_admin')
     assert [row['staff'] for row in report_revenue_barber['rows']] == ['Bravo', 'Charlie', 'Alpha']
-    assert [(row['staff'], row['value'], row['cosmo_revenue_share_pct']) for row in report_revenue_admin['rows']] == [
-        ('Delta Admin', 4000.0, 25.0),
+    assert report_revenue_admin['rows'] == [
+        {
+            'staff': 'Delta Admin',
+            'staff_id': 4,
+            'company_id': 1,
+            'company_title': 'Salon 1',
+            'value': 4000.0,
+        }
     ]
+    report_cosmo_admin = next(table for table in report_data['tables'] if table['id'] == 'cosmo_admin')
+    assert report_cosmo_admin['rows'][0]['pct'] == 25.0
     report_extra = next(
         table for table in report_data['tables'] if table['id'] == 'extra_services'
     )
-    assert [(row['staff'], row['qty'], row['sum']) for row in report_extra['rows']] == [
+    assert [row['staff'] for row in report_extra['rows']] == ['Bravo', 'Charlie', 'Alpha']
+    assert [(row['staff'], row['qty'], row['sum']) for row in report_extra['ranking']['rows_by_metric']['qty']] == [
         ('Charlie', 4.0, 1500.0),
         ('Alpha', 3.0, 3000.0),
         ('Bravo', 3.0, 5000.0),
@@ -3797,6 +4082,166 @@ async def test_plan_fact_network_opz_matches_overview_even_with_hidden_staff(asy
 
 
 @pytest.mark.asyncio
+async def test_admin_without_user_id_preserves_staff_attribution_in_batch(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, user_id=None))
+    async_session.add(Client(id=1, name='C', company_id=1))
+    await async_session.flush()
+
+    async_session.add_all([
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=2,
+            client_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 12, 0, 0),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            date=datetime(2025, 1, 10, 12, 0, 0),
+            amount=1000.0,
+            record_id=1,
+            sold_item_type='service',
+            master_id=2,
+            company_id=1,
+        ),
+        FinancialTransaction(
+            id=2,
+            date=datetime(2025, 1, 10, 12, 5, 0),
+            amount=300.0,
+            record_id=1,
+            sold_item_type='goods_transaction',
+            master_id=2,
+            company_id=1,
+        ),
+    ])
+    await async_session.commit()
+
+    result = await fetch_plan_fact(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+        include_all_staff_in_leaderboards=True,
+    )
+
+    admin_group = next(group for group in result['groups'] if group['staff_id'] == 2)
+    cells = {cell['code']: cell for cell in admin_group['metrics']}
+    assert cells['revenue']['fact'] == 1300.0
+    assert cells['avg_check_total']['fact'] == 1300.0
+    assert cells['clients']['fact'] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_batched_direct_payment_is_not_duplicated_by_ambiguous_appointment_match(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Barber', position='Барбер', company_id=1))
+    await async_session.flush()
+
+    # record_id=77 matches one visit by external_id and another by the local
+    # fallback id. The payment itself must still contribute exactly once.
+    async_session.add_all([
+        Appointment(
+            id=10,
+            external_id=77,
+            company_id=1,
+            staff_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 12, 0, 0),
+            attendance=1,
+        ),
+        Appointment(
+            id=77,
+            external_id=None,
+            company_id=1,
+            staff_id=1,
+            date=date(2025, 1, 11),
+            datetime=datetime(2025, 1, 11, 12, 0, 0),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            date=datetime(2025, 1, 10, 12, 0, 0),
+            amount=300.0,
+            record_id=77,
+            sold_item_type='goods_transaction',
+            master_id=None,
+            company_id=1,
+        ),
+    ])
+    await async_session.commit()
+
+    result = await fetch_plan_fact(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+        include_all_staff_in_leaderboards=True,
+    )
+
+    parent_cells = {cell['code']: cell for cell in result['parent_group']['metrics']}
+    staff_group = next(group for group in result['groups'] if group['staff_id'] == 1)
+    staff_cells = {cell['code']: cell for cell in staff_group['metrics']}
+    assert parent_cells['revenue']['fact'] == 300.0
+    assert staff_cells['revenue']['fact'] == 300.0
+
+
+@pytest.mark.asyncio
+async def test_staff_scoped_plan_fact_omits_branch_average_check_leaderboard(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Barber', position='Барбер', company_id=1))
+    async_session.add(Appointment(
+        id=1,
+        company_id=1,
+        staff_id=1,
+        date=date(2025, 1, 10),
+        datetime=datetime(2025, 1, 10, 12, 0, 0),
+        attendance=1,
+    ))
+    now = datetime(2025, 1, 1)
+    async_session.add_all([
+        PlanMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=None,
+            metric_code='avg_check_total',
+            value=50.0,
+            updated_at=now,
+        ),
+        PlanMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=1,
+            staff_category='barber',
+            metric_code='avg_check_total',
+            value=100.0,
+            updated_at=now,
+        ),
+    ])
+    await async_session.commit()
+
+    result = await fetch_plan_fact(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+        staff_id=1,
+        include_all_staff_in_leaderboards=True,
+    )
+
+    boards = result['staff_leaderboards']
+    assert boards['avg_check_plan_branch'] == []
+    assert [row['staff_id'] for row in boards['avg_check_plan_staff']] == [1]
+
+
+@pytest.mark.asyncio
 async def test_admin_fact_revenue_uses_created_records_and_goods_cost(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
@@ -3827,6 +4272,17 @@ async def test_admin_fact_revenue_uses_created_records_and_goods_cost(async_sess
             sold_item_id=10,
             sold_item_type='service',
             master_id=1,
+            company_id=1,
+        ),
+        # A masterless direct payment with a dangling record id was excluded by
+        # the pre-batch calculation and must not inflate every administrator.
+        FinancialTransaction(
+            id=2,
+            date=datetime(2025, 1, 10, 13, 0, 0),
+            amount=900.0,
+            record_id=999,
+            sold_item_type='goods_transaction',
+            master_id=None,
             company_id=1,
         ),
         GoodTransaction(

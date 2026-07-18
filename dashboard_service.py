@@ -6,6 +6,7 @@ import asyncio
 import math
 import re
 from calendar import monthrange
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any, Optional
@@ -2261,7 +2262,7 @@ async def _extra_service_revenue_by_staff(
     start: date,
     end: date,
     company_ids: list[int] | None,
-) -> dict[int, float]:
+) -> dict[int, float] | None:
     """Paid revenue of the extra-service categories (wax/camouflage/face/head), per visit master.
 
     Grouped by ``Appointment.staff_id`` to match how the plan/fact quantities are attributed.
@@ -2311,10 +2312,11 @@ async def _extra_service_revenue_by_staff(
     try:
         rows = (await db.execute(stmt)).all()
     except SQLAlchemyError as error:
-        # Degrade gracefully: the leaderboard still renders without the money column.
+        # The other ranking variants are still usable, but a missing aggregate must
+        # not be represented as a real zero.
         print(f'extra-service revenue aggregation failed: {error}')
         await db.rollback()
-        return {}
+        return None
     return {int(row.staff_id): float(row.revenue or 0.0) for row in rows}
 
 
@@ -2557,10 +2559,12 @@ async def _admin_opz_by_created_appointments(
     staff_ids: list[int],
     user_id_by_staff: dict[int, Optional[int]],
     barber_staff_ids: list[int] | None = None,
+    opz_events: list[OpzEvent] | None = None,
 ) -> dict[int, int]:
     if not staff_ids:
         return {}
-    opz_events = await _opz_events(db, start, end, company_id)
+    if opz_events is None:
+        opz_events = await _opz_events(db, start, end, company_id)
     if barber_staff_ids:
         allowed_barbers = {int(staff_id) for staff_id in barber_staff_ids}
         opz_events = [
@@ -2679,6 +2683,269 @@ async def _fact_metric_components(
     values.update(await _service_group_counts(db, start, end, company_id, staff_id))
     values.update(goods_metrics)
     return _derive_metric_values(values, include_zero_derived=True, prefer_explicit=False)
+
+
+async def _staff_fact_components_by_branch(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+    staff_ids: list[int],
+    category_by_staff_id: dict[int, str],
+    user_id_by_staff: dict[int, Optional[int]],
+    admin_clients_by_staff: dict[int, int],
+    admin_opz_by_staff: dict[int, int],
+    review_facts_by_staff: dict[int, float],
+    opz_events: list[OpzEvent],
+) -> dict[int, dict[str, float]]:
+    """Calculate staff facts with a bounded set of branch-level aggregate queries."""
+    if not staff_ids:
+        return {}
+
+    appointment_rows = (
+        await db.execute(
+            select(
+                Appointment.staff_id,
+                Appointment.created_user_id,
+                func.count(func.distinct(Appointment.id)).label('appointments'),
+            )
+            .where(_appt_revenue_filters(start, end, company_id))
+            .group_by(Appointment.staff_id, Appointment.created_user_id)
+        )
+    ).all()
+    appointments_by_staff: dict[int, float] = defaultdict(float)
+    appointments_by_creator: dict[int, float] = defaultdict(float)
+    for row in appointment_rows:
+        if row.staff_id is not None:
+            appointments_by_staff[int(row.staff_id)] += float(row.appointments or 0)
+        if row.created_user_id is not None:
+            appointments_by_creator[int(row.created_user_id)] += float(row.appointments or 0)
+
+    service_rows = (
+        await db.execute(
+            select(
+                Appointment.staff_id,
+                Appointment.created_user_id,
+                func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+            )
+            .select_from(FinancialTransaction)
+            .join(Appointment, financial_appointment_match_condition())
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(
+                _service_paid_filters(start, end, company_id),
+                _physical_account_condition(),
+            )
+            .group_by(Appointment.staff_id, Appointment.created_user_id)
+        )
+    ).all()
+    service_revenue_by_staff: dict[int, float] = defaultdict(float)
+    service_revenue_by_creator: dict[int, float] = defaultdict(float)
+    for row in service_rows:
+        if row.staff_id is not None:
+            service_revenue_by_staff[int(row.staff_id)] += float(row.revenue or 0.0)
+        if row.created_user_id is not None:
+            service_revenue_by_creator[int(row.created_user_id)] += float(row.revenue or 0.0)
+
+    direct_rows = (
+        await db.execute(
+            select(
+                FinancialTransaction.master_id,
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE, FinancialTransaction.amount),
+                            else_=0.0,
+                        )
+                    ),
+                    0.0,
+                ).label('goods_revenue'),
+                func.coalesce(
+                    func.sum(case((_personal_account_condition(), FinancialTransaction.amount), else_=0.0)),
+                    0.0,
+                ).label('topup_revenue'),
+            )
+            .select_from(FinancialTransaction)
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(
+                FinancialTransaction.amount > 0,
+                func.date(FinancialTransaction.date) >= start,
+                func.date(FinancialTransaction.date) <= end,
+                FinancialTransaction.company_id == company_id,
+                _physical_account_condition(),
+                _business_financial_master_condition(),
+                or_(
+                    FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
+                    _personal_account_condition(),
+                ),
+            )
+            .group_by(FinancialTransaction.master_id)
+        )
+    ).all()
+    goods_revenue_by_staff: dict[int, float] = defaultdict(float)
+    topup_revenue_by_staff: dict[int, float] = defaultdict(float)
+    branch_goods_revenue = 0.0
+    branch_topup_revenue = 0.0
+    for row in direct_rows:
+        goods_revenue = float(row.goods_revenue or 0.0)
+        topup_revenue = float(row.topup_revenue or 0.0)
+        branch_goods_revenue += goods_revenue
+        branch_topup_revenue += topup_revenue
+        if row.master_id is not None:
+            goods_revenue_by_staff[int(row.master_id)] += goods_revenue
+            topup_revenue_by_staff[int(row.master_id)] += topup_revenue
+
+    # A payment without master_id used to be attributed through an EXISTS
+    # check, once for every matching visit master. Build the same distinct
+    # payment/staff pairs without joining the branch total above: a direct join
+    # can otherwise multiply one payment when record_id matches two visits.
+    masterless_goods_rows = (
+        await db.execute(
+            select(
+                FinancialTransaction.id.label('payment_id'),
+                Appointment.staff_id,
+                func.max(FinancialTransaction.amount).label('amount'),
+            )
+            .select_from(FinancialTransaction)
+            .join(Appointment, financial_appointment_match_condition())
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(
+                FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
+                FinancialTransaction.master_id.is_(None),
+                FinancialTransaction.amount > 0,
+                func.date(FinancialTransaction.date) >= start,
+                func.date(FinancialTransaction.date) <= end,
+                FinancialTransaction.company_id == company_id,
+                _physical_account_condition(),
+                business_appointment_condition(),
+                Appointment.staff_id.is_not(None),
+            )
+            .group_by(FinancialTransaction.id, Appointment.staff_id)
+        )
+    ).all()
+    for row in masterless_goods_rows:
+        goods_revenue_by_staff[int(row.staff_id)] += float(row.amount or 0.0)
+
+    sold_qty = func.sum(-func.coalesce(GoodTransaction.amount, 0.0))
+    sold_sum = func.sum(func.coalesce(GoodTransaction.cost, 0.0))
+    goods_rows = (
+        await db.execute(
+            select(
+                GoodTransaction.master_id,
+                func.coalesce(sold_qty, 0.0).label('qty'),
+                func.coalesce(sold_sum, 0.0).label('revenue'),
+            )
+            .where(_goods_revenue_filters(start, end, company_id))
+            .group_by(GoodTransaction.master_id)
+        )
+    ).all()
+    goods_metrics_by_staff = {
+        int(row.master_id): {
+            'cosmo_qty': float(row.qty or 0.0),
+            'cosmo_sum': float(row.revenue or 0.0),
+        }
+        for row in goods_rows
+        if row.master_id is not None
+    }
+
+    title_expr = func.lower(func.coalesce(Transaction.service_title, ServiceCatalog.title, ''))
+    service_group_rows = (
+        await db.execute(
+            select(
+                Appointment.staff_id,
+                _service_qty_sum(title_expr, WAX_TITLE_PARTS).label('wax_qty'),
+                _service_qty_sum(title_expr, CAMOUFLAGE_TITLE_PARTS).label('camouflage_qty'),
+                _service_qty_sum(title_expr, FACE_CARE_TITLE_PARTS).label('face_care_qty'),
+                _service_qty_sum(title_expr, HEAD_CARE_TITLE_PARTS).label('head_care_qty'),
+            )
+            .select_from(Transaction)
+            .join(Appointment, Appointment.id == Transaction.appointment_id)
+            .outerjoin(ServiceCatalog, _transaction_service_catalog_join())
+            .where(_appt_revenue_filters(start, end, company_id))
+            .group_by(Appointment.staff_id)
+        )
+    ).all()
+    service_groups_by_staff = {
+        int(row.staff_id): {
+            'wax_qty': float(row.wax_qty or 0.0),
+            'camouflage_qty': float(row.camouflage_qty or 0.0),
+            'face_care_qty': float(row.face_care_qty or 0.0),
+            'head_care_qty': float(row.head_care_qty or 0.0),
+        }
+        for row in service_group_rows
+        if row.staff_id is not None
+    }
+
+    barber_opz_by_staff: dict[int, float] = defaultdict(float)
+    for event in opz_events:
+        if event.barber_staff_id is not None:
+            barber_opz_by_staff[int(event.barber_staff_id)] += 1.0
+
+    facts_by_staff: dict[int, dict[str, float]] = {}
+    for staff_id in staff_ids:
+        is_admin = category_by_staff_id.get(staff_id) == 'administrator'
+        if is_admin:
+            user_id = user_id_by_staff.get(staff_id)
+            if user_id is not None:
+                denominator = appointments_by_creator.get(int(user_id), 0.0)
+                revenue = (
+                    service_revenue_by_creator.get(int(user_id), 0.0)
+                    + branch_goods_revenue
+                    + branch_topup_revenue
+                )
+            else:
+                # Preserve the pre-batch fallback: administrators without a
+                # linked YClients user were calculated by their staff id.
+                denominator = appointments_by_staff.get(staff_id, 0.0)
+                revenue = (
+                    service_revenue_by_staff.get(staff_id, 0.0)
+                    + goods_revenue_by_staff.get(staff_id, 0.0)
+                    + topup_revenue_by_staff.get(staff_id, 0.0)
+                )
+            values = {
+                'revenue': revenue,
+                'clients': float(admin_clients_by_staff.get(staff_id, 0)),
+                'avg_check_denominator': denominator,
+                'opz_qty': float(admin_opz_by_staff.get(staff_id, 0)),
+                REVIEWS_QTY_CODE: float(review_facts_by_staff.get(staff_id, 0.0)),
+            }
+        else:
+            denominator = appointments_by_staff.get(staff_id, 0.0)
+            values = {
+                'revenue': (
+                    service_revenue_by_staff.get(staff_id, 0.0)
+                    + goods_revenue_by_staff.get(staff_id, 0.0)
+                    + topup_revenue_by_staff.get(staff_id, 0.0)
+                ),
+                'clients': denominator,
+                'avg_check_denominator': denominator,
+                'opz_qty': barber_opz_by_staff.get(staff_id, 0.0),
+            }
+            values.update(service_groups_by_staff.get(staff_id, {}))
+        values.update(goods_metrics_by_staff.get(staff_id, {}))
+        facts_by_staff[staff_id] = _derive_metric_values(
+            values,
+            include_zero_derived=True,
+            prefer_explicit=False,
+        )
+    return facts_by_staff
 
 
 async def _plan_metric_components_by_company(
@@ -2905,9 +3172,12 @@ def _staff_leaderboards_payload(
     groups: list[dict[str, Any]],
     limit: int = 5,
     extra_revenue_by_staff: dict[int, float] | None = None,
-) -> dict[str, list[dict[str, Any]]]:
+    extra_revenue_available: bool = True,
+    branch_groups: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Top-N staff leaderboards per metric, used by the ratings report."""
     extra_revenue_by_staff = extra_revenue_by_staff or {}
+    branch_groups = branch_groups or []
     staff = [group for group in groups if group.get('staff_id') is not None]
     barbers = [group for group in staff if (group.get('category') or 'unknown') == 'barber']
     admins = [group for group in staff if (group.get('category') or 'unknown') == 'administrator']
@@ -2915,57 +3185,146 @@ def _staff_leaderboards_payload(
     def share(value: float, total: float) -> Optional[float]:
         return _round_metric_value(100.0 * value / total, 'percent') if total else None
 
-    def leaderboard(source, value_fn, builder) -> list[dict[str, Any]]:
-        scored = [(float(value_fn(group) or 0.0), group) for group in source]
-        total = sum(value for value, _ in scored)
-        scored.sort(key=lambda item: (-item[0], str(item[1].get('title') or '')))
+    def identity(group: dict[str, Any]) -> dict[str, Any]:
+        return {
+            'staff': group.get('title'),
+            'staff_id': group.get('staff_id'),
+            'company_id': group.get('company_id'),
+            'company_title': group.get('company_title'),
+        }
+
+    def top_rows(
+        rows: list[dict[str, Any]],
+        metric: str,
+        *,
+        eligibility=None,
+    ) -> list[dict[str, Any]]:
+        eligible = [
+            row for row in rows
+            if (
+                eligibility(row)
+                if eligibility is not None
+                else row.get(metric) is not None and float(row.get(metric) or 0.0) > 0
+            )
+        ]
+        eligible.sort(key=lambda row: (
+            -float(row.get(metric) or 0.0),
+            str(row.get('staff') or ''),
+            str(row.get('company_title') or ''),
+            int(row.get('company_id') or 0),
+            int(row.get('staff_id') or 0),
+        ))
+        return eligible[:limit]
+
+    extra_total = sum(_extra_service_qty(group) for group in barbers)
+    extra_rows = []
+    for group in barbers:
+        qty = _extra_service_qty(group)
+        row = identity(group)
+        row.update({
+            'qty': _round_metric_value(qty, 'number'),
+            'sum': (
+                _round_metric_value(extra_revenue_by_staff.get(group.get('staff_id'), 0.0), 'money')
+                if extra_revenue_available else None
+            ),
+            'pct': _round_metric_value(_metric_fact_value(group, 'extra_services_pct'), 'percent'),
+            'share_pct': share(qty, extra_total),
+        })
+        extra_rows.append(row)
+
+    def cosmo_rows(source: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        total = sum(_metric_fact_value(group, 'cosmo_sum') for group in source)
         rows = []
-        for value, group in scored[:limit]:
-            row = {'staff': group.get('title'), 'company_id': group.get('company_id')}
-            builder(group, value, total, row)
+        for group in source:
+            amount = _metric_fact_value(group, 'cosmo_sum')
+            revenue = _metric_fact_value(group, 'revenue')
+            row = identity(group)
+            row.update({
+                'qty': _round_metric_value(_metric_fact_value(group, 'cosmo_qty'), 'number'),
+                'sum': _round_metric_value(amount, 'money'),
+                'pct': share(amount, revenue),
+                'share_pct': share(amount, total),
+            })
             rows.append(row)
         return rows
 
-    def extra_builder(group, value, total, row):
-        row['qty'] = _round_metric_value(value, 'number')
-        row['sum'] = _round_metric_value(extra_revenue_by_staff.get(group.get('staff_id'), 0.0), 'money')
-        row['pct'] = _round_metric_value(_metric_fact_value(group, 'extra_services_pct'), 'percent')
-        row['share_pct'] = share(value, total)
+    def opz_rows(source: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows = []
+        for group in source:
+            row = identity(group)
+            row.update({
+                'qty': _round_metric_value(_metric_fact_value(group, 'opz_qty'), 'number'),
+                'pct': _round_metric_value(_metric_fact_value(group, 'opz_pct'), 'percent'),
+            })
+            rows.append(row)
+        return rows
 
-    def cosmo_builder(group, value, total, row):
-        row['qty'] = _round_metric_value(_metric_fact_value(group, 'cosmo_qty'), 'number')
-        row['sum'] = _round_metric_value(value, 'money')
-        row['share_pct'] = share(value, total)
+    def value_rows(source: list[dict[str, Any]], code: str, fmt: str) -> list[dict[str, Any]]:
+        rows = []
+        for group in source:
+            row = identity(group)
+            row['value'] = _round_metric_value(_metric_fact_value(group, code), fmt)
+            rows.append(row)
+        return rows
 
-    def revenue_builder(group, value, total, row):
-        row['value'] = _round_metric_value(value, 'money')
-        row['cosmo_revenue_share_pct'] = share(_metric_fact_value(group, 'cosmo_sum'), value)
+    def avg_check_plan_rows(source: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows = []
+        for group in source:
+            plan = _metric_plan_value(group, 'avg_check_total')
+            if plan is None or plan <= 0:
+                continue
+            fact = _metric_fact_value(group, 'avg_check_total')
+            row = identity(group)
+            row.update({
+                'plan': _round_metric_value(plan, 'money'),
+                'fact': _round_metric_value(fact, 'money'),
+                'pct': _round_metric_value(100.0 * fact / plan, 'percent'),
+            })
+            rows.append(row)
+        return top_rows(rows, 'pct', eligibility=lambda row: float(row.get('plan') or 0.0) > 0)
 
-    def opz_builder(group, value, total, row):
-        row['qty'] = _round_metric_value(value, 'number')
-        row['pct'] = _round_metric_value(_metric_fact_value(group, 'opz_pct'), 'percent')
-
-    def value_builder(fmt):
-        def build(group, value, total, row):
-            row['value'] = _round_metric_value(value, fmt)
-        return build
-
-    def fact(code):
-        return lambda group: _metric_fact_value(group, code)
-
-    revenue_barber = leaderboard(barbers, fact('revenue'), revenue_builder)
-    return {
-        'extra_services': leaderboard(barbers, _extra_service_qty, extra_builder),
-        'cosmo_barber': leaderboard(barbers, fact('cosmo_sum'), cosmo_builder),
-        'cosmo_admin': leaderboard(admins, fact('cosmo_sum'), cosmo_builder),
-        'opz_barber': leaderboard(barbers, fact('opz_qty'), opz_builder),
-        'opz_admin': leaderboard(admins, fact('opz_qty'), opz_builder),
-        'reviews_admin': leaderboard(admins, fact('reviews_qty'), value_builder('number')),
-        'revenue_barber': revenue_barber,
-        'revenue_admin': leaderboard(admins, fact('revenue'), revenue_builder),
-        'revenue_top': revenue_barber,
-        'avg_check_top': leaderboard(barbers, fact('avg_check_total'), value_builder('money')),
+    extra_rankings = {
+        metric: top_rows(extra_rows, metric)
+        for metric in ('qty', 'sum', 'pct')
     }
+    cosmo_barber_rows = cosmo_rows(barbers)
+    cosmo_admin_rows = cosmo_rows(admins)
+    cosmo_barber_rankings = {
+        metric: top_rows(cosmo_barber_rows, metric) for metric in ('qty', 'sum', 'pct')
+    }
+    cosmo_admin_rankings = {
+        metric: top_rows(cosmo_admin_rows, metric) for metric in ('qty', 'sum', 'pct')
+    }
+    opz_barber_rows = opz_rows(barbers)
+    opz_admin_rows = opz_rows(admins)
+    opz_barber_rankings = {metric: top_rows(opz_barber_rows, metric) for metric in ('qty', 'pct')}
+    opz_admin_rankings = {metric: top_rows(opz_admin_rows, metric) for metric in ('qty', 'pct')}
+    revenue_barber = top_rows(value_rows(barbers, 'revenue', 'money'), 'value')
+    revenue_admin = top_rows(value_rows(admins, 'revenue', 'money'), 'value')
+    reviews_admin = top_rows(value_rows(admins, REVIEWS_QTY_CODE, 'number'), 'value')
+    avg_check_legacy = top_rows(value_rows(barbers, 'avg_check_total', 'money'), 'value')
+    payload = {
+        'extra_services': extra_rankings['qty'],
+        'extra_services_rankings': extra_rankings,
+        'cosmo_barber': cosmo_barber_rankings['sum'],
+        'cosmo_barber_rankings': cosmo_barber_rankings,
+        'cosmo_admin': cosmo_admin_rankings['sum'],
+        'cosmo_admin_rankings': cosmo_admin_rankings,
+        'opz_barber': opz_barber_rankings['qty'],
+        'opz_barber_rankings': opz_barber_rankings,
+        'opz_admin': opz_admin_rankings['qty'],
+        'opz_admin_rankings': opz_admin_rankings,
+        'reviews_admin': reviews_admin,
+        'revenue_barber': revenue_barber,
+        'revenue_admin': revenue_admin,
+        'revenue_top': revenue_barber,
+        'avg_check_top': avg_check_legacy,
+        'avg_check_plan_branch': avg_check_plan_rows(branch_groups),
+        'avg_check_plan_staff': avg_check_plan_rows(barbers),
+    }
+    if not extra_revenue_available:
+        payload['_partial_reasons'] = ['extra_service_revenue']
+    return payload
 
 
 def _goods_kpi_execution_payload(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3156,6 +3515,9 @@ async def _staff_plan_groups_for_branch(
     branch_id: int,
     staff_id: Optional[int] = None,
     include_all_when_branch_planned: bool = False,
+    include_all_staff: bool = False,
+    company_title: str | None = None,
+    opz_events: list[OpzEvent] | None = None,
 ) -> list[dict[str, Any]]:
     # Calculate administrator attribution against the same complete staff scope
     # used by the branch view. Applying staff_id before attribution assigns every
@@ -3170,7 +3532,9 @@ async def _staff_plan_groups_for_branch(
         staff_ids,
     )
     has_staff_plans = any(_has_plan_values(plans_by_staff.get(int(staff.id), {})) for staff in staff_rows)
-    if has_staff_plans or not include_all_when_branch_planned:
+    if include_all_staff:
+        staff_rows = list(staff_rows)
+    elif has_staff_plans or not include_all_when_branch_planned:
         staff_rows = [
             staff for staff in staff_rows
             if is_visible_staff_plan(plans_by_staff.get(int(staff.id), {}))
@@ -3210,6 +3574,8 @@ async def _staff_plan_groups_for_branch(
         user_id_by_staff,
         barber_staff_ids or None,
     )
+    if opz_events is None:
+        opz_events = await _opz_events(db, start, end, branch_id)
     admin_opz_by_staff = await _admin_opz_by_created_appointments(
         db,
         start,
@@ -3218,6 +3584,7 @@ async def _staff_plan_groups_for_branch(
         admin_staff_ids,
         user_id_by_staff,
         barber_staff_ids or None,
+        opz_events=opz_events,
     )
     admin_review_facts_by_staff = await _manual_review_fact_values_by_staff(
         db,
@@ -3227,22 +3594,19 @@ async def _staff_plan_groups_for_branch(
         admin_staff_ids,
     )
 
-    facts_by_staff: dict[int, dict[str, float]] = {}
-    for sid in staff_ids:
-        is_admin = categories_by_staff_id.get(sid) == 'administrator'
-        admin_user_id = user_id_by_staff.get(sid) if is_admin else None
-        facts_by_staff[sid] = await _fact_metric_components(
-            db,
-            start,
-            end,
-            branch_id,
-            sid,
-            created_user_id=admin_user_id,
-            clients_override=admin_clients_by_staff.get(sid) if is_admin else None,
-            opz_override=admin_opz_by_staff.get(sid) if is_admin else None,
-        )
-        if is_admin:
-            facts_by_staff[sid][REVIEWS_QTY_CODE] = admin_review_facts_by_staff.get(sid, 0.0)
+    facts_by_staff = await _staff_fact_components_by_branch(
+        db,
+        start,
+        end,
+        branch_id,
+        staff_ids,
+        categories_by_staff_id,
+        user_id_by_staff,
+        admin_clients_by_staff,
+        admin_opz_by_staff,
+        admin_review_facts_by_staff,
+        opz_events,
+    )
 
     groups: list[dict[str, Any]] = []
     for staff in staff_rows:
@@ -3252,6 +3616,7 @@ async def _staff_plan_groups_for_branch(
         metrics = metrics_for_category(category)
         groups.append({
             'company_id': branch_id,
+            'company_title': company_title,
             'staff_id': sid,
             'title': staff.name,
             'position': staff.position,
@@ -4020,6 +4385,7 @@ async def fetch_plan_fact(
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
     include_extra_service_revenue: bool = False,
+    include_all_staff_in_leaderboards: bool = False,
 ) -> dict[str, Any]:
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
     selected_staff: dict[str, Any] | None = None
@@ -4063,7 +4429,14 @@ async def fetch_plan_fact(
 
         branch_id = company_ids[0]
         branch = branches[0]
-        branch_fact = await _fact_metric_components(db, start, end, branch_id)
+        branch_opz_events = await _opz_events(db, start, end, branch_id)
+        branch_fact = await _fact_metric_components(
+            db,
+            start,
+            end,
+            branch_id,
+            opz_override=float(len(branch_opz_events)),
+        )
         branch_review_facts = await _manual_review_fact_values_by_company(db, start, end, [branch_id])
         branch_fact[REVIEWS_QTY_CODE] = branch_review_facts.get(branch_id, 0.0)
         groups = await _staff_plan_groups_for_branch(
@@ -4075,6 +4448,9 @@ async def fetch_plan_fact(
             branch_id,
             staff_id,
             include_all_when_branch_planned=_has_plan_values(plans_by_company.get(branch_id, {})),
+            include_all_staff=include_all_staff_in_leaderboards,
+            company_title=branch['title'],
+            opz_events=branch_opz_events,
         )
         parent_group = {
             'company_id': branch_id,
@@ -4084,7 +4460,7 @@ async def fetch_plan_fact(
         }
         selected_staff_plan = _selected_staff_plan_payload(selected_staff, groups)
         diagnostics = await _client_fact_diagnostics(db, start, end, branch_id, groups)
-        extra_revenue_by_staff = (
+        extra_revenue_result = (
             await _extra_service_revenue_by_staff(db, start, end, [branch_id])
             if include_extra_service_revenue else {}
         )
@@ -4100,15 +4476,28 @@ async def fetch_plan_fact(
             'metrics': list(PLAN_FACT_METRICS),
             'metric_sets': _metric_sets_payload(),
             'diagnostics': diagnostics,
-            'staff_leaderboards': _staff_leaderboards_payload(groups, extra_revenue_by_staff=extra_revenue_by_staff),
+            'staff_leaderboards': _staff_leaderboards_payload(
+                groups,
+                extra_revenue_by_staff=extra_revenue_result or {},
+                extra_revenue_available=extra_revenue_result is not None,
+                branch_groups=[] if staff_id is not None else [parent_group],
+            ),
             'goods_kpi_execution': _goods_kpi_execution_payload(groups),
             'groups': groups,
         }
 
     facts_by_company: dict[int, dict[str, float]] = {}
+    opz_events_by_company: dict[int, list[OpzEvent]] = {}
     staff_groups_by_company: dict[int, list[dict[str, Any]]] = {}
     for branch_id in company_ids:
-        facts_by_company[branch_id] = await _fact_metric_components(db, start, end, branch_id)
+        opz_events_by_company[branch_id] = await _opz_events(db, start, end, branch_id)
+        facts_by_company[branch_id] = await _fact_metric_components(
+            db,
+            start,
+            end,
+            branch_id,
+            opz_override=float(len(opz_events_by_company[branch_id])),
+        )
     review_facts_by_company = await _manual_review_fact_values_by_company(db, start, end, company_ids)
     for branch_id in company_ids:
         facts_by_company.setdefault(branch_id, {})[REVIEWS_QTY_CODE] = review_facts_by_company.get(branch_id, 0.0)
@@ -4121,6 +4510,12 @@ async def fetch_plan_fact(
             branch_id,
             None,
             include_all_when_branch_planned=_has_plan_values(plans_by_company.get(branch_id, {})),
+            include_all_staff=include_all_staff_in_leaderboards,
+            company_title=next(
+                (branch['title'] for branch in branches if int(branch['id']) == branch_id),
+                None,
+            ),
+            opz_events=opz_events_by_company[branch_id],
         )
 
     groups: list[dict[str, Any]] = []
@@ -4164,7 +4559,7 @@ async def fetch_plan_fact(
         for branch_id in company_ids
         for group in staff_groups_by_company.get(branch_id, [])
     ]
-    extra_revenue_by_staff = (
+    extra_revenue_result = (
         await _extra_service_revenue_by_staff(db, start, end, company_ids)
         if include_extra_service_revenue else {}
     )
@@ -4177,7 +4572,10 @@ async def fetch_plan_fact(
         'metric_sets': _metric_sets_payload(),
         'diagnostics': [],
         'staff_leaderboards': _staff_leaderboards_payload(
-            all_staff_groups, extra_revenue_by_staff=extra_revenue_by_staff
+            all_staff_groups,
+            extra_revenue_by_staff=extra_revenue_result or {},
+            extra_revenue_available=extra_revenue_result is not None,
+            branch_groups=[group for group in groups if group.get('scope') == 'branch'],
         ),
         'goods_kpi_execution': _goods_kpi_execution_payload(all_staff_groups),
         'groups': groups,
