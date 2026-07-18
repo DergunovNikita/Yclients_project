@@ -3,6 +3,7 @@ API server for exposing YClients BI data and queued sync controls.
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import hmac
 import io
@@ -1021,7 +1022,7 @@ async def sync_status(
     if ctx is not None and not ctx.full_access:
         portal_account_id = require_tenant_context(ctx)
     return {
-        "sync": get_sync_status(),
+        "sync": await asyncio.to_thread(get_sync_status),
         "queue": await SyncJobService().async_get_status_payload(db, portal_account_id=portal_account_id),
     }
 

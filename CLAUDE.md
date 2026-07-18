@@ -9,7 +9,7 @@
 
 ## Project Overview
 
-ETL/BI система: синхронизация данных из YClients API → PostgreSQL → аналитические views для Metabase.
+Мультитенантная ETL/BI система: YClients API → PostgreSQL → FastAPI portal/dashboard API → Vite MPA; аналитические views также используются опциональным Metabase.
 
 ### Stack
 - **Python 3.12**, FastAPI, SQLAlchemy 2.0, Alembic, Pydantic 2
@@ -42,8 +42,9 @@ auth_service.py     — хэш паролей, JWT, email-токены, отпр
 auth_sessions.py    — refresh-токены, cookie/CSRF, управление сессиями
 auth_scope.py       — AccessContext, скоуп доступа по филиалам
 onboarding_routes.py — онбординг владельца (источник данных, выбор филиалов)
-dashboard_routes.py / dashboard_service.py — API и агрегации дашборда (Chart.js SPA)
-web/                — Vite SPA (login, dashboard, admin, i18n ru/en/it)
+dashboard_routes.py / dashboard_service.py / dashboard_reports.py — API, агрегации и отчёты дашборда
+web/                — Vite MPA (dashboard/reports, auth, onboarding, profile, admin, i18n ru/en/it)
+api/ / web/api/     — варианты same-origin Vercel proxy к backend API
 ```
 
 ## Code Style & Quality
@@ -66,9 +67,10 @@ web/                — Vite SPA (login, dashboard, admin, i18n ru/en/it)
 - Код должен быть self-explanatory
 
 ### Logging
-- Текущий подход: `print()` + `TeeWriter` (stdout + файл в logs/)
-- Логи лаконичные — ошибки, начало/завершение операций, критические решения
-- Формат файлов: `sync_{timestamp}_{mode}_{trigger}.log`
+- Sync-процессы используют `print()` + `TeeWriter` (stdout + файл в `logs/`)
+- FastAPI и auth используют стандартный Python `logging`
+- Логи лаконичные — ошибки, начало/завершение операций, критические решения; не логировать credentials и токены
+- Формат sync-файлов: `sync_{timestamp}_{mode}_{trigger}.log`
 
 ## Running
 
@@ -78,9 +80,11 @@ docker compose run --rm migrate         # alembic migrations
 docker compose run --rm sync            # разовая синхронизация
 docker compose --profile tools run --rm analytics  # обновить views
 python -m scripts.seed_demo             # host: провижининг встроенного read-only demo tenant в основной БД
+cd web && npm run dev                   # frontend: http://127.0.0.1:5173
 ```
 
 - API: http://127.0.0.1:8000
+- Frontend: http://127.0.0.1:5173
 - Metabase: http://127.0.0.1:3000
 - PostgreSQL: 127.0.0.1:5432
 
@@ -98,14 +102,14 @@ python -m scripts.seed_demo             # host: провижининг встр�
 - Запуск: `docker compose run --rm migrate` или `python migrate.py`
 
 ## Architecture Patterns
-- **API (FastAPI)**: полностью async — `AsyncSession` + `asyncpg`, `select()` вместо `db.query()`
+- **API (FastAPI)**: async request/DB layer — `AsyncSession` + `asyncpg`; блокирующие legacy-вызовы выносить через `asyncio.to_thread()`
 - **ETL pipeline**: синхронный — `Session` + `psycopg2`, requests (не async)
 - **Два engine**: async для API (`init_async_database`), sync для ETL (`init_database`)
 - **Worker queue**: polling sync_jobs таблицы, без Celery/Redis
 - **Advisory locks**: предотвращение параллельных sync
 - **Multi-tenant портал**: `PortalAccount` = тенант, `PortalUser` с ролями (`platform_admin`, `owner`, `branch_admin`, `manager`, `viewer`); доступ скоупится по филиалам (`company_ids`). Аутентификация email+пароль (не OAuth)
 - **API auth**: JWT-сессии в httpOnly-cookie (+ Bearer), refresh-токены с ротацией, CSRF для cookie-запросов. Альтернатива — глобальный `X-API-Key` (full-access) и `X-Sync-Token` для `/sync/*`. Скоуп/роли через `require_auth`/`get_dashboard_access`; демо-аккаунт read-only через `forbid_demo`
-- **Prod fail-closed**: в production `config` требует сильные `AUTH_JWT_SECRET`/`SYNC_API_TOKEN`, `AUTH_REQUIRE_LOGIN`, `AUTH_COOKIE_SECURE=true` и выключенную публичную регистрацию (`AUTH_PUBLIC_REGISTRATION_ENABLED=false`)
+- **Prod fail-closed**: в production `config` требует сильные `AUTH_JWT_SECRET`/`SYNC_API_TOKEN`, `AUTH_COOKIE_SECURE=true` и выключенную публичную регистрацию; `AUTH_REQUIRE_LOGIN=false` допустим только при заданном сильном `API_KEY`
 
 ## Testing
 
@@ -135,8 +139,8 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
 - Не документировать в публичном репозитории реальные токены, публичные хосты, правила роутинга и обход аутентификации
 
 ### SQL Safety
-- Все запросы через SQLAlchemy ORM — параметризованные
-- Raw SQL только в `setup_analytics.py` (DDL views, без user input)
+- Прикладные запросы используют SQLAlchemy ORM/Core и параметризованные выражения
+- Raw SQL допустим для инфраструктурных операций: views в `setup_analytics.py`, advisory locks, атомарный claim очереди и bootstrap/maintenance; user input нельзя интерполировать в SQL
 - Параметры пагинации валидируются через FastAPI `Query(ge=, le=)`
 - `/export/csv/{table_name}` — table_name проверяется по whitelist моделей
 

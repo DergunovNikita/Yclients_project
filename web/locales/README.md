@@ -26,7 +26,8 @@ The active locale is persisted in `localStorage` under `app_locale`.
 - `data-i18n-attr="attr:key,attr2:key2"` → sets attributes (e.g. `placeholder:login.emailPlaceholder`).
 
 Call `applyTranslations(root=document)` once on load (and it re-runs automatically on
-`setLocale`). Keep the Russian text inline in the HTML as a no-JS fallback.
+`setLocale`). Current HTML uses Italian inline text as the no-JS fallback; `ru.json`
+remains the source of truth for the translation-key set.
 
 ## Adding a language
 
@@ -42,43 +43,14 @@ Call `applyTranslations(root=document)` once on load (and it re-runs automatical
 2. Reference it via `data-i18n` / `data-i18n-attr` in markup, or `t('key')` in JS.
 3. Missing keys fall back to `ru`, then to the literal key string.
 
-## Wired page (proven pattern)
+## Wired pages
 
-`login.html` + `src/login.js` are fully wired:
-- markup carries `data-i18n` / `data-i18n-attr`,
-- `login.js` sets `<html lang>`, calls `applyTranslations()`, composes the document
-  title from `brand.name`, and mounts the `<select>` switcher via `mountLanguageSwitcher`.
+All Vite entrypoints are wired to the runtime i18n module:
 
-## Rollout checklist (remaining pages)
+- dashboard/reports: `index.html` + `src/main.js`;
+- auth: login, register, forgot/reset password and email verification;
+- portal: onboarding, profile, settings and admin.
 
-For each page below, repeat the login pattern:
-
-1. Add translation keys under a page scope (e.g. `register.*`) to `ru.json`, then
-   mirror into `en.json` and `it.json`.
-2. Add `data-i18n` / `data-i18n-attr` to the page's HTML (keep RU inline as fallback).
-   De-hardcode any brand text to `brand.name` / `brand.mark`.
-3. In the page's `src/*.js`, add at the top:
-   ```js
-   import { applyTranslations, getLocale, mountLanguageSwitcher } from './i18n.js';
-   document.documentElement.lang = getLocale();
-   applyTranslations();
-   mountLanguageSwitcher(document.getElementById('lang-switcher')); // if a slot exists
-   ```
-
-Pages to convert:
-
-- [ ] `register.html` + `src/register.js`
-- [ ] `forgot-password.html` + `src/forgot-password.js`
-- [ ] `reset-password.html` + `src/reset-password.js`
-- [ ] `verify-email.html` + `src/verify-email.js`
-- [ ] `onboarding.html` + `src/onboarding.js`
-- [ ] `settings.html` + `src/settings.js`
-- [ ] `admin.html` + `src/admin.js`
-- [ ] `profile.html` + `src/profile.js`
-
-### Deferred: `index.html` + `src/main.js`
-
-These two are **intentionally deferred**: they had uncommitted work in progress at
-the time i18n was introduced and must not be touched until that work lands. Convert
-them last, after their pending changes are committed, using the same pattern (note
-`main.js` is large — the dashboard/reports strings, so budget for a bigger key set).
+Each page sets `<html lang>`, applies translations and mounts a language switcher
+where the layout provides one. New entrypoints should follow the same pattern and
+must add every new key to all three dictionaries.

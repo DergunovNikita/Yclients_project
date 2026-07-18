@@ -1,6 +1,6 @@
 # YClients BI System
 
-Сервис синхронизации данных YClients в PostgreSQL, публикации BI-таблиц через FastAPI и подготовки аналитических `views` для Metabase.
+Мультитенантный аналитический сервис: синхронизирует данные YClients в PostgreSQL, отдаёт портал и продуктовые отчёты через FastAPI, обслуживает Vite-интерфейс и готовит аналитические `views` для опционального Metabase.
 
 ## Формулы среднего чека
 
@@ -22,12 +22,16 @@
 ## Что входит в проект
 
 - `api.py` - FastAPI API для чтения данных, постановки sync в очередь и просмотра статуса
+- `auth_*.py` - аутентификация, сессии, роли и скоуп доступа по филиалам
+- `onboarding_routes.py` / `yclients_credentials.py` - онбординг и зашифрованные credentials YClients
 - `sync_pipeline.py` - ETL pipeline YClients -> PostgreSQL
 - `sync_worker.py` - worker, который обрабатывает queued sync jobs
 - `main.py` - ручной CLI-запуск синхронизации
 - `migrate.py` - применение Alembic миграций
 - `setup_analytics.py` - создание аналитических `views` в PostgreSQL
-- `dashboard_service.py` / `dashboard_routes.py` — агрегаты для продуктового дашборда (JSON, без Metabase)
+- `dashboard_service.py` / `dashboard_routes.py` / `dashboard_reports.py` — агрегаты и отчёты продуктового дашборда (JSON, без Metabase)
+- `web/` - Vite MPA: дашборд, отчёты, auth, onboarding, profile и admin
+- `api/` / `web/api/` - варианты same-origin proxy для Vercel deployment
 - `docker-compose.yml` - локальный запуск `api`, `worker`, PostgreSQL и Metabase
 - `sync.sh` - ручной запуск one-shot sync через Docker Compose
 
@@ -43,7 +47,7 @@
 
 ## Дашборд и импорт
 
-Каталог [`web/`](web/) содержит Vite + Chart.js frontend для локальной разработки и сборки статического интерфейса. Backend отдает JSON-данные через FastAPI.
+Каталог [`web/`](web/) содержит Vite MPA: основной Chart.js dashboard/reports и отдельные страницы auth, onboarding, profile и admin. В локальной разработке Vite проксирует запросы в FastAPI; production-сборка может обращаться к защищённому API напрямую или через same-origin Vercel proxy.
 
 
 ## Быстрый старт
@@ -57,11 +61,13 @@ cp .env.example .env
 Заполните минимум:
 
 - `APP_ENV=local` для локального запуска
-- `PARTNER_TOKEN`
-- `YCLIENTS_LOGIN`
-- `YCLIENTS_PASSWORD`
 - `DB_PASSWORD`
 - `SYNC_API_TOKEN`
+- стабильный `AUTH_JWT_SECRET` длиной не менее 32 символов
+- стабильный `PORTAL_CREDENTIALS_ENCRYPTION_KEY` длиной не менее 32 символов
+- `AUTH_COOKIE_SECURE=false` и `AUTH_CONSOLE_EMAIL=true` для локального HTTP без SMTP
+
+`PARTNER_TOKEN`, `YCLIENTS_LOGIN` и `YCLIENTS_PASSWORD` в `.env` нужны только для одноразовой миграции старой установки через `scripts/migrate_env_credentials.py`. Новая установка сохраняет credentials в зашифрованном виде через onboarding/admin.
 
 ### 2. Применить миграции
 
@@ -80,7 +86,18 @@ docker compose up -d postgres api worker metabase
 - API: `http://127.0.0.1:8000`
 - Metabase: `http://127.0.0.1:3000`
 
-### 4. Пересоздать аналитические представления
+### 4. Запустить frontend
+
+```bash
+source scripts/dev-env.sh
+cd web
+npm ci
+npm run dev
+```
+
+Frontend будет доступен на `http://127.0.0.1:5173`. Зарегистрируйте владельца через `register.html`; при локальном `AUTH_CONSOLE_EMAIL=true` ссылка подтверждения появится в логах API. Затем onboarding сохранит credentials, предложит выбрать филиалы и поставит начальную синхронизацию в очередь.
+
+### 5. Пересоздать аналитические представления
 
 ```bash
 docker compose run --rm analytics
