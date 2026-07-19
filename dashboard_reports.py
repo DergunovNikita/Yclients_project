@@ -616,13 +616,18 @@ def _table(
     title: str,
     columns: list[tuple[str, str, str]],
     rows: list[dict[str, Any]],
+    *,
+    hide_when_empty: bool = False,
 ) -> dict[str, Any]:
-    return {
+    table = {
         'id': table_id,
         'title': title,
         'columns': [{'key': key, 'label': label, 'format': fmt} for key, label, fmt in columns],
         'rows': rows,
     }
+    if hide_when_empty:
+        table['hide_when_empty'] = True
+    return table
 
 
 def _ranking_table(
@@ -632,8 +637,12 @@ def _ranking_table(
     rows_by_metric: dict[str, list[dict[str, Any]]],
     default_metric: str,
     options: list[tuple[str, str]],
+    *,
+    hide_when_empty: bool = False,
 ) -> dict[str, Any]:
-    table = _table(table_id, title, columns, rows_by_metric.get(default_metric, []))
+    table = _table(
+        table_id, title, columns, rows_by_metric.get(default_metric, []), hide_when_empty=hide_when_empty
+    )
     table['ranking'] = {
         'default_metric': default_metric,
         'options': [{'key': key, 'label': label} for key, label in options],
@@ -1999,8 +2008,6 @@ async def _leaderboard_payload_impl(
     revenue_admin = boards.get('revenue_admin', [])
     base['cards'] = [
         _card('Топ выручка мастера', revenue_barber[0]['value'] if revenue_barber else 0, MONEY_FORMAT),
-        _card('Мастеров в рейтинге', len(revenue_barber), NUMBER_FORMAT),
-        _card('Админов в рейтинге', len(revenue_admin), NUMBER_FORMAT),
     ]
     charts = []
     if revenue_barber:
@@ -2033,6 +2040,7 @@ async def _leaderboard_payload_impl(
             boards.get('extra_services_rankings', {}),
             'pct',
             [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
+            hide_when_empty=True,
         ),
         _ranking_table(
             'cosmo_barber',
@@ -2041,6 +2049,7 @@ async def _leaderboard_payload_impl(
             boards.get('cosmo_barber_rankings', {}),
             'sum',
             [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
+            hide_when_empty=True,
         ),
         _ranking_table(
             'cosmo_admin',
@@ -2049,6 +2058,7 @@ async def _leaderboard_payload_impl(
             boards.get('cosmo_admin_rankings', {}),
             'sum',
             [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
+            hide_when_empty=True,
         ),
         _ranking_table(
             'opz_barber',
@@ -2057,6 +2067,7 @@ async def _leaderboard_payload_impl(
             boards.get('opz_barber_rankings', {}),
             'pct',
             [('qty', 'По количеству'), ('pct', 'По проценту')],
+            hide_when_empty=True,
         ),
         _ranking_table(
             'opz_admin',
@@ -2065,6 +2076,7 @@ async def _leaderboard_payload_impl(
             boards.get('opz_admin_rankings', {}),
             'pct',
             [('qty', 'По количеству'), ('pct', 'По проценту')],
+            hide_when_empty=True,
         ),
         _table(
             'reviews_admin',
@@ -2077,24 +2089,28 @@ async def _leaderboard_payload_impl(
             'Топ по выручке — мастера',
             [staff_col, branch_col, ('value', 'Выручка', MONEY_FORMAT)],
             revenue_barber,
+            hide_when_empty=True,
         ),
         _table(
             'revenue_admin',
             'Топ по выручке — админы',
             [staff_col, branch_col, ('value', 'Выручка', MONEY_FORMAT)],
             revenue_admin,
+            hide_when_empty=True,
         ),
         _table(
             'avg_check_plan_branch',
             'Топ выполнения плана среднего чека — барбершопы',
             [('staff', 'Барбершоп', 'text'), ('plan', 'План', MONEY_FORMAT), ('fact', 'Факт', MONEY_FORMAT), ('pct', 'Выполнение, %', PERCENT_FORMAT)],
             boards.get('avg_check_plan_branch', []),
+            hide_when_empty=True,
         ),
         _table(
             'avg_check_plan_staff',
             'Топ выполнения плана среднего чека — мастера',
             [staff_col, branch_col, ('plan', 'План', MONEY_FORMAT), ('fact', 'Факт', MONEY_FORMAT), ('pct', 'Выполнение, %', PERCENT_FORMAT)],
             boards.get('avg_check_plan_staff', []),
+            hide_when_empty=True,
         ),
     ]
     base['raw'] = {}

@@ -4,9 +4,12 @@ import {
   authFetch,
   ensureOnboardingComplete,
   getSelectedPortalAccountId,
+  hasSessionHint,
+  isAuthFailure,
   loadCurrentUserQuietly,
   redirectToLogin,
   setSelectedPortalAccountId,
+  wait,
 } from './auth.js';
 import {
   createLatestRequestScope,
@@ -2483,23 +2486,37 @@ async function loadStartupUser() {
   return me;
 }
 
-async function init() {
-  reportsController = initReports({ clearError, showError, setApiState });
-  Object.values(filterEls).forEach((filter) => defaultDates(filter));
-  setReviewFactDefaultDates();
-  els.overviewPresetButtons.forEach((button) => {
-    button.classList.toggle('active', button.dataset.overviewPreset === 'month');
-  });
-  els.planSettingsMonth.value = currentMonthValue();
-  renderServicesTable([]);
-  renderExtraServicesTable([]);
-  renderServiceManagement({ rows: [], groups: [], categories: [] });
+const STARTUP_MAX_ATTEMPTS = 3;
+const STARTUP_RETRY_BASE_MS = 800;
+
+async function acquireStartupUser() {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await loadStartupUser();
+    } catch (error) {
+      // A genuine auth failure (401/403) or a missing session hint must go to
+      // login. Transient errors (network/timeout/5xx) keep a live cookie session,
+      // so retry a few times before surfacing a retryable error instead.
+      if (isAuthFailure(error) || !hasSessionHint() || attempt >= STARTUP_MAX_ATTEMPTS) {
+        throw error;
+      }
+      await wait(STARTUP_RETRY_BASE_MS * attempt);
+    }
+  }
+}
+
+async function startSession() {
+  clearError();
   if (!apiKey) {
     let me;
     try {
-      me = await loadStartupUser();
-    } catch {
-      redirectToLogin();
+      me = await acquireStartupUser();
+    } catch (error) {
+      if (isAuthFailure(error) || !hasSessionHint()) {
+        redirectToLogin();
+        return;
+      }
+      showError(t('authErrors.temporaryUnavailable'), { apiStatus: 'error', retry: () => startSession() });
       return;
     }
 
@@ -2545,6 +2562,20 @@ async function init() {
   setActiveView(viewFromLocation());
   await ensureStaffForView(activeView);
   await loadCurrentView();
+}
+
+async function init() {
+  reportsController = initReports({ clearError, showError, setApiState });
+  Object.values(filterEls).forEach((filter) => defaultDates(filter));
+  setReviewFactDefaultDates();
+  els.overviewPresetButtons.forEach((button) => {
+    button.classList.toggle('active', button.dataset.overviewPreset === 'month');
+  });
+  els.planSettingsMonth.value = currentMonthValue();
+  renderServicesTable([]);
+  renderExtraServicesTable([]);
+  renderServiceManagement({ rows: [], groups: [], categories: [] });
+  await startSession();
 }
 
 filterEls.overview.load.addEventListener('click', () => loadDashboard());

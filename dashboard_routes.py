@@ -291,8 +291,8 @@ def _hide_staff_leaderboard_financials(
     hidden_table_ids: set[str] = set()
     if 'revenue' in hidden_codes:
         hidden_table_ids.update({'revenue_barber', 'revenue_admin'})
-        # Every card in this mixed report is derived from the positive-revenue
-        # leaderboards, including the two number-formatted headcounts.
+        # The only card in this mixed report is the top barber revenue, derived
+        # from the positive-revenue leaderboard; drop it with the revenue tables.
         payload['cards'] = []
         payload['charts'] = []
         extra_table = next((table for table in tables if table.get('id') == 'extra_services'), None)

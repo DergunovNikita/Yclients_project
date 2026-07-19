@@ -155,6 +155,10 @@ export function isTransientAuthError(error) {
   return [502, 503, 504].includes(Number(error?.status));
 }
 
+export function isAuthFailure(error) {
+  return [401, 403].includes(Number(error?.status));
+}
+
 export function wait(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);

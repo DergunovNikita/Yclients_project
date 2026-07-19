@@ -1,7 +1,7 @@
 import { escapeHtml, formatValue } from '../format.js';
 import { getLocale, t } from '../../i18n.js';
 import { sourceLabel } from '../registry.js';
-import { rankingRowsForMetric } from '../ranking.js';
+import { rankingRowsForMetric, tableHasRows } from '../ranking.js';
 
 export { rankingRowsForMetric } from '../ranking.js';
 
@@ -71,6 +71,7 @@ function renderTableRows(rows, columns) {
 
 function renderTables(tables = []) {
   return tables.map((table) => {
+    if (table.hide_when_empty && !tableHasRows(table)) return '';
     const rows = table.rows || [];
     const columns = table.columns || [];
     const ranking = table.ranking;

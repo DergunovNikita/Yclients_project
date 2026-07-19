@@ -21,7 +21,7 @@ import {
   mergeServiceManagementResult,
   staffRefreshAllowsDataLoad,
 } from '../src/dashboardRequestState.js';
-import { rankingRowsForMetric } from '../src/reports/ranking.js';
+import { rankingRowsForMetric, tableHasRows } from '../src/reports/ranking.js';
 
 test('HTTP errors retain distinct dashboard states and retry metadata', () => {
   assert.equal(apiStatusForHttpStatus(401), 'auth_required');
@@ -371,4 +371,12 @@ test('ranking variants switch locally through rows_by_metric', () => {
   assert.deepEqual(rankingRowsForMetric(table, 'qty'), [{ staff: 'Quantity' }]);
   assert.deepEqual(rankingRowsForMetric(table, 'pct'), [{ staff: 'Percent' }]);
   assert.deepEqual(rankingRowsForMetric(table, 'missing'), []);
+});
+
+test('tableHasRows detects data across plain rows and ranking metrics', () => {
+  assert.equal(tableHasRows({ rows: [{ staff: 'A' }] }), true);
+  assert.equal(tableHasRows({ rows: [] }), false);
+  assert.equal(tableHasRows({ rows: [], ranking: { rows_by_metric: { qty: [], pct: [] } } }), false);
+  assert.equal(tableHasRows({ rows: [], ranking: { rows_by_metric: { qty: [], pct: [{ staff: 'A' }] } } }), true);
+  assert.equal(tableHasRows({}), false);
 });

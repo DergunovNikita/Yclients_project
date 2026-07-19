@@ -227,6 +227,21 @@ test('login redirect preserves only same-origin return_to paths', async (t) => {
   assert.equal(auth.loginPathWithReturnTo('/login.html', '//evil.example'), '/login.html?return_to=%2F');
 });
 
+test('startup auth failures are distinguished from transient errors', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  assert.equal(auth.isAuthFailure({ status: 401 }), true);
+  assert.equal(auth.isAuthFailure({ status: 403 }), true);
+  assert.equal(auth.isAuthFailure({ status: 500 }), false);
+  assert.equal(auth.isAuthFailure({ status: 503 }), false);
+  assert.equal(auth.isAuthFailure(new TypeError('Failed to fetch')), false);
+  assert.equal(auth.isAuthFailure(undefined), false);
+
+  assert.equal(auth.isTransientAuthError({ status: 503 }), true);
+  assert.equal(auth.isTransientAuthError({ status: 401 }), false);
+});
+
 test('requestWithReauth refreshes once and retries the original request', async (t) => {
   const { auth, server } = await loadAuthModule();
   t.after(() => server.close());
