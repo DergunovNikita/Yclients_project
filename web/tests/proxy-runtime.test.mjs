@@ -5,10 +5,16 @@ import test from 'node:test';
 
 import { buildTargetUrl as buildRootProxyTarget } from '../../api/[...path].js';
 import * as rootProxy from '../../api/_proxy.js';
+import rootServiceAssignmentHandler from '../../api/dashboard/services/[company_id]/[service_id]/kpi_group.js';
+import rootServiceLabelHandler from '../../api/dashboard/services/[company_id]/[service_id]/labels.js';
+import rootServiceGroupHandler from '../../api/dashboard/services/kpi_groups/[group_id].js';
 import credentialByIdHandler from '../api/auth/admin/yclients-credentials/[credential_id].js';
 import { buildTargetUrl as buildAuthProxyTarget } from '../api/auth-proxy.js';
 import { buildTargetUrl as buildWebProxyTarget } from '../api/[...path].js';
 import * as webProxy from '../api/_proxy.js';
+import webServiceAssignmentHandler from '../api/dashboard/services/[company_id]/[service_id]/kpi_group.js';
+import webServiceLabelHandler from '../api/dashboard/services/[company_id]/[service_id]/labels.js';
+import webServiceGroupHandler from '../api/dashboard/services/kpi_groups/[group_id].js';
 
 class ResponseRecorder {
   constructor() {
@@ -294,6 +300,18 @@ test('catch-all proxy enforces dashboard and auth route allowlists', () => {
     assert.equal(metricVisibility.ok, true);
     assert.equal(metricVisibility.target.href, 'https://vm.example.test/dashboard/metric-visibility');
 
+    const serviceBatch = buildWebProxyTarget(requestStub('PATCH', {}, '/api/dashboard/services'));
+    assert.equal(serviceBatch.ok, true);
+    assert.equal(serviceBatch.target.href, 'https://vm.example.test/dashboard/services');
+
+    const serviceLabel = buildRootProxyTarget(requestStub('PATCH', {}, '/api/dashboard/services/1/10/labels'));
+    assert.equal(serviceLabel.ok, true);
+    assert.equal(serviceLabel.target.href, 'https://vm.example.test/dashboard/services/1/10/labels');
+
+    const serviceGroup = buildWebProxyTarget(requestStub('DELETE', {}, '/api/dashboard/services/kpi_groups/3'));
+    assert.equal(serviceGroup.ok, true);
+    assert.equal(serviceGroup.target.href, 'https://vm.example.test/dashboard/services/kpi_groups/3');
+
     const auth = buildRootProxyTarget(requestStub('POST', {}, '/api/auth/admin/users'));
     assert.equal(auth.ok, true);
     assert.equal(auth.target.href, 'https://vm.example.test/dashboard/auth/admin/users');
@@ -350,6 +368,52 @@ test('catch-all proxy rejects encoded traversal and encoded separators', () => {
   }
 });
 
+test('explicit service mutation handlers delegate to the shared proxy target', async () => {
+  const originalOrigin = process.env.VM_API_ORIGIN;
+  const originalFetch = globalThis.fetch;
+  process.env.VM_API_ORIGIN = 'https://vm.example.test';
+  const targets = [];
+
+  globalThis.fetch = async (target) => {
+    targets.push(String(target));
+    return {
+      status: 200,
+      headers: upstreamHeaders([]),
+      async arrayBuffer() {
+        return new TextEncoder().encode('{}').buffer;
+      },
+    };
+  };
+
+  try {
+    const cases = [
+      [rootServiceLabelHandler, 'PATCH', '/api/dashboard/services/1/10/labels'],
+      [rootServiceAssignmentHandler, 'PATCH', '/api/dashboard/services/1/10/kpi_group'],
+      [rootServiceGroupHandler, 'PATCH', '/api/dashboard/services/kpi_groups/3'],
+      [rootServiceGroupHandler, 'DELETE', '/api/dashboard/services/kpi_groups/3'],
+      [webServiceLabelHandler, 'PATCH', '/api/dashboard/services/1/10/labels'],
+      [webServiceAssignmentHandler, 'PATCH', '/api/dashboard/services/1/10/kpi_group'],
+      [webServiceGroupHandler, 'PATCH', '/api/dashboard/services/kpi_groups/3'],
+      [webServiceGroupHandler, 'DELETE', '/api/dashboard/services/kpi_groups/3'],
+    ];
+
+    for (const [handler, method, url] of cases) {
+      const res = new ResponseRecorder();
+      await handler(requestStub(method, {}, url), res);
+      assert.equal(res.statusCode, 200);
+    }
+
+    assert.deepEqual(targets, cases.map(([, , url]) => `https://vm.example.test${url.replace('/api', '')}`));
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalOrigin === undefined) {
+      delete process.env.VM_API_ORIGIN;
+    } else {
+      process.env.VM_API_ORIGIN = originalOrigin;
+    }
+  }
+});
+
 test('direct admin credential handlers delegate through the proxy allowlist', async () => {
   const originalOrigin = process.env.VM_API_ORIGIN;
   const originalFetch = globalThis.fetch;
@@ -392,6 +456,9 @@ test('root and web proxy files stay synchronized', async () => {
     '[...path].js',
     'auth/[...path].js',
     'dashboard/[...path].js',
+    'dashboard/services/[company_id]/[service_id]/labels.js',
+    'dashboard/services/[company_id]/[service_id]/kpi_group.js',
+    'dashboard/services/kpi_groups/[group_id].js',
     'auth/admin/yclients-credentials.js',
     'auth/admin/yclients-credentials/test.js',
     'auth/admin/yclients-credentials/[credential_id].js',

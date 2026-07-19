@@ -11,9 +11,18 @@ import {
 import {
   createLatestRequestScope,
   fetchJson as sharedFetchJson,
+  filterServiceManagementResult,
   isSupersededRequest,
+  latestServiceManagementTimestamp,
+  mergeServiceManagementResult,
   patchJson as sharedPatchJson,
   postJson as sharedPostJson,
+  serviceManagementChanges,
+  serviceManagementControls,
+  serviceManagementLoadAllowed,
+  serviceManagementNavigationAllowed,
+  runServiceManagementMutation,
+  settleServiceManagementLoad,
   staffRefreshAllowsDataLoad,
 } from './dashboardApi.js';
 
@@ -163,6 +172,8 @@ let serviceManagementData = { rows: [], groups: [], categories: [] };
 let serviceManagementSavedData = null;
 let serviceManagementSavedSnapshot = '';
 let serviceManagementDirty = false;
+let serviceManagementLoading = false;
+let serviceManagementMutationPending = false;
 let reportsController = null;
 let selectedTenant = null;
 let retryCurrentView = null;
@@ -1715,7 +1726,12 @@ function renderServiceCatalog(rows) {
                   ${serviceGroupOptionsHtml(row.kpi_group_id)}
                 </select>
               </td>
-              <td>${escapeHtml(formatMoscowDateTime(row.label_updated_at || row.kpi_assignment_updated_at || row.updated_at) || '')}</td>
+              <td>${escapeHtml(formatMoscowDateTime(latestServiceManagementTimestamp(
+                row.updated_at,
+                row.label_updated_at,
+                row.kpi_assignment_updated_at,
+                row.mutation_updated_at,
+              )) || '')}</td>
             </tr>
           `).join('')}
         </tbody>
@@ -1793,8 +1809,7 @@ function collectServiceManagementPayload() {
 function setServiceManagementDirty(isDirty) {
   serviceManagementDirty = isDirty;
   els.serviceManagementDirty.classList.toggle('visible', isDirty);
-  els.serviceManagementSave.disabled = !serviceManagementData;
-  els.serviceManagementReset.disabled = !isDirty || !serviceManagementSavedData;
+  updateServiceManagementControls();
 }
 
 function updateServiceManagementDirtyFromForm() {
@@ -1826,15 +1841,53 @@ function serviceManagementParams() {
 }
 
 function setServiceManagementLoading(isLoading) {
-  els.serviceFilterLoad.disabled = isLoading;
-  els.serviceManagementSave.disabled = isLoading || !serviceManagementData;
-  els.serviceManagementReset.disabled = isLoading || !serviceManagementDirty || !serviceManagementSavedData;
-  els.serviceGroupAdd.disabled = isLoading;
+  serviceManagementLoading = isLoading;
+  updateServiceManagementControls();
   els.serviceFilterLoad.textContent = isLoading ? t('common.loadingShort') : t('dash.refresh');
   els.serviceManagementSave.textContent = isLoading ? t('common.saving') : t('dash.save');
 }
 
+function setServiceManagementMutationLoading(isLoading) {
+  serviceManagementMutationPending = isLoading;
+  setServiceManagementLoading(isLoading);
+}
+
+function updateServiceManagementControls() {
+  const controls = serviceManagementControls({
+    loading: serviceManagementLoading,
+    hasData: Boolean(serviceManagementSavedData),
+    hasSavedData: Boolean(serviceManagementSavedData),
+    dirty: serviceManagementDirty,
+  });
+  els.serviceFilterLoad.disabled = controls.refreshDisabled;
+  [
+    els.serviceFilterBranch,
+    els.serviceFilterCategory,
+    els.serviceFilterGroup,
+    els.serviceFilterExtra,
+    els.serviceFilterQuery,
+  ].forEach((filter) => {
+    filter.disabled = controls.filtersDisabled;
+  });
+  [
+    els.serviceGroupTitle,
+    els.serviceGroupCode,
+    els.serviceGroupDescription,
+    ...els.serviceCatalogTable.querySelectorAll('input, select, button'),
+    ...els.serviceKpiGroupsTable.querySelectorAll('input, select, button'),
+  ].forEach((editor) => {
+    editor.disabled = controls.editorDisabled;
+  });
+  els.serviceManagementSave.disabled = controls.saveDisabled;
+  els.serviceManagementReset.disabled = controls.resetDisabled;
+  els.serviceGroupAdd.disabled = controls.addGroupDisabled;
+}
+
 async function loadServiceManagement() {
+  if (!serviceManagementLoadAllowed({
+    loading: serviceManagementLoading,
+    dirty: serviceManagementDirty,
+  })) return;
   const request = beginViewRequest('serviceManagement');
   clearError();
   setServiceManagementLoading(true);
@@ -1850,77 +1903,74 @@ async function loadServiceManagement() {
     setLoadedApiState(payload.data, {
       empty: !(payload.data?.rows?.length || payload.data?.groups?.length),
     });
-    await loadSyncStatus();
+    void loadSyncStatus();
   } catch (error) {
     if (isSupersededRequest(error) || !request.isCurrent()) return;
     showError(error.message, { apiStatus: error.apiStatus, retry: () => loadServiceManagement() });
   } finally {
-    if (request.isCurrent()) {
-      setServiceManagementLoading(false);
-      request.finish();
-    }
+    settleServiceManagementLoad(request, setServiceManagementLoading);
   }
 }
 
 async function saveServiceManagement() {
+  if (serviceManagementLoading || !serviceManagementDirty) return;
   clearError();
-  setServiceManagementLoading(true);
-  setApiState(t('dash.apiSaving'), 'warn');
   const current = collectServiceManagementPayload();
   const saved = serviceManagementSavedSnapshot ? JSON.parse(serviceManagementSavedSnapshot) : { rows: [], groups: [] };
-  const savedRows = new Map(saved.rows.map((row) => [`${row.company_id}:${row.service_id}`, row]));
-  const savedGroups = new Map(saved.groups.map((group) => [group.id, group]));
-  try {
-    for (const row of current.rows) {
-      const previous = savedRows.get(`${row.company_id}:${row.service_id}`);
-      if (!previous || previous.is_extra !== row.is_extra) {
-        await patchJson(`/dashboard/services/${row.company_id}/${row.service_id}/labels`, { is_extra: row.is_extra });
-      }
-      if (!previous || previous.kpi_group_id !== row.kpi_group_id) {
-        await patchJson(`/dashboard/services/${row.company_id}/${row.service_id}/kpi_group`, { group_id: row.kpi_group_id });
-      }
-    }
-    for (const group of current.groups) {
-      const previous = savedGroups.get(group.id);
-      if (!previous || JSON.stringify(previous) !== JSON.stringify(group)) {
-        await patchJson(`/dashboard/services/kpi_groups/${group.id}`, group);
-      }
-    }
-    await loadServiceManagement();
-    setApiState(t('dash.apiConnected'), 'ok');
-  } catch (error) {
-    showError(error.message, { apiStatus: error.apiStatus, retry: () => saveServiceManagement() });
-  } finally {
-    setServiceManagementLoading(false);
+  const changes = serviceManagementChanges(current, saved);
+  if (!changes.row_changes.length && !changes.group_changes.length) {
+    setServiceManagementDirty(false);
+    return;
   }
+  setApiState(t('dash.apiSaving'), 'warn');
+  await runServiceManagementMutation(
+    () => patchJson('/dashboard/services', changes),
+    {
+      setLoading: setServiceManagementMutationLoading,
+      onSuccess: (payload) => {
+        const currentData = mergeServiceManagementResult(serviceManagementData, current);
+        const mergedData = mergeServiceManagementResult(currentData, payload.data);
+        renderServiceManagement(filterServiceManagementResult(mergedData, serviceManagementParams()));
+        setApiState(t('dash.apiConnected'), 'ok');
+      },
+      onError: (error) => {
+        showError(error.message, { apiStatus: error.apiStatus, retry: () => saveServiceManagement() });
+      },
+    },
+  );
 }
 
 async function addServiceKpiGroup() {
+  if (serviceManagementLoading || serviceManagementDirty) return;
   clearError();
   const title = els.serviceGroupTitle.value.trim();
   if (!title) {
     showError(t('dash.kpiGroupTitleRequired'));
     return;
   }
-  setServiceManagementLoading(true);
   setApiState(t('dash.apiSaving'), 'warn');
-  try {
-    await postJson('/dashboard/services/kpi_groups', {
+  await runServiceManagementMutation(
+    () => postJson('/dashboard/services/kpi_groups', {
       title,
       code: els.serviceGroupCode.value.trim() || null,
       description: els.serviceGroupDescription.value.trim() || null,
       is_active: true,
-    });
-    els.serviceGroupTitle.value = '';
-    els.serviceGroupCode.value = '';
-    els.serviceGroupDescription.value = '';
-    await loadServiceManagement();
-    setApiState(t('dash.apiConnected'), 'ok');
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    setServiceManagementLoading(false);
-  }
+    }),
+    {
+      setLoading: setServiceManagementMutationLoading,
+      onSuccess: (payload) => {
+        renderServiceManagement(mergeServiceManagementResult(serviceManagementData, {
+          rows: [],
+          groups: [payload.data],
+        }));
+        els.serviceGroupTitle.value = '';
+        els.serviceGroupCode.value = '';
+        els.serviceGroupDescription.value = '';
+        setApiState(t('dash.apiConnected'), 'ok');
+      },
+      onError: (error) => showError(error.message),
+    },
+  );
 }
 
 function renderReviewFactEditor(data) {
@@ -2590,6 +2640,10 @@ document.addEventListener('click', async (event) => {
   const href = link.getAttribute('href');
   if (!href || !href.startsWith('/reports')) return;
   event.preventDefault();
+  if (!serviceManagementNavigationAllowed({
+    mutationPending: serviceManagementMutationPending,
+    activeView,
+  })) return;
   history.pushState({ view: 'reports' }, '', href);
   setActiveView('reports');
   await ensureStaffForView('reports');
@@ -2600,6 +2654,13 @@ els.viewLinks.forEach((link) => {
   link.addEventListener('click', async (event) => {
     const view = link.dataset.viewLink;
     if (!view) return;
+    if (!serviceManagementNavigationAllowed({
+      mutationPending: serviceManagementMutationPending,
+      activeView,
+    })) {
+      event.preventDefault();
+      return;
+    }
     if (!canAccessView(view)) {
       event.preventDefault();
       history.replaceState({ view: 'overview' }, '', '/#overview');
@@ -2617,6 +2678,7 @@ els.viewLinks.forEach((link) => {
       setPlanSettingsDirty(false);
       allowDirtyPlanSettingsNavigation = true;
     }
+    if (serviceManagementDirty) setServiceManagementDirty(false);
     const paths = {
       overview: '/#overview',
       plan: '/#plan-fact',
@@ -2635,6 +2697,13 @@ els.viewLinks.forEach((link) => {
 window.addEventListener('hashchange', async () => {
   const nextView = viewFromLocation();
   if (nextView === activeView) return;
+  if (!serviceManagementNavigationAllowed({
+    mutationPending: serviceManagementMutationPending,
+    activeView,
+  })) {
+    history.replaceState({ view: 'serviceManagement' }, '', '/#services');
+    return;
+  }
   if (planSettingsDirty && activeView === 'planSettings' && nextView !== 'planSettings') {
     if (!allowDirtyPlanSettingsNavigation && !confirmDiscardPlanSettings()) {
       window.location.hash = '#plan-settings';
@@ -2657,12 +2726,19 @@ window.addEventListener('hashchange', async () => {
 window.addEventListener('popstate', async () => {
   const nextView = viewFromLocation();
   if (nextView === activeView && nextView !== 'reports') return;
+  if (!serviceManagementNavigationAllowed({
+    mutationPending: serviceManagementMutationPending,
+    activeView,
+  })) {
+    history.pushState({ view: 'serviceManagement' }, '', '/#services');
+    return;
+  }
   setActiveView(nextView);
   await ensureStaffForView(nextView);
   await loadCurrentView();
 });
 window.addEventListener('beforeunload', (event) => {
-  if (!planSettingsDirty && !serviceManagementDirty) return;
+  if (!planSettingsDirty && !serviceManagementDirty && !serviceManagementMutationPending) return;
   event.preventDefault();
   event.returnValue = '';
 });

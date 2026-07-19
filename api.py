@@ -226,6 +226,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     for error in exc.errors():
         item = dict(error)
         item.pop('input', None)
+        if item.get('ctx'):
+            item['ctx'] = {
+                key: str(value) if isinstance(value, BaseException) else value
+                for key, value in item['ctx'].items()
+            }
         sanitized.append(item)
     response = JSONResponse(status_code=422, content={'detail': sanitized})
     return _apply_security_headers(request, response)

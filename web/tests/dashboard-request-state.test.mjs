@@ -5,11 +5,20 @@ import {
   apiStatusForHttpStatus,
   createLatestRequestScope,
   createTimedAbortContext,
+  filterServiceManagementResult,
+  latestServiceManagementTimestamp,
   reportDataCacheKey,
   reportDataState,
   reportRefreshPresentation,
   reportScopedFilterAllowsLoad,
   responseError,
+  runServiceManagementMutation,
+  serviceManagementChanges,
+  serviceManagementControls,
+  serviceManagementLoadAllowed,
+  serviceManagementNavigationAllowed,
+  settleServiceManagementLoad,
+  mergeServiceManagementResult,
   staffRefreshAllowsDataLoad,
 } from '../src/dashboardRequestState.js';
 import { rankingRowsForMetric } from '../src/reports/ranking.js';
@@ -109,6 +118,204 @@ test('branch data loads after staff success or failure, but not after stale refr
   assert.equal(staffRefreshAllowsDataLoad('failed', '1', 1), true);
   assert.equal(staffRefreshAllowsDataLoad('superseded', '1', '1'), false);
   assert.equal(staffRefreshAllowsDataLoad('ready', '1', '2'), false);
+});
+
+test('service management sends only changed fields in one batch', () => {
+  const saved = {
+    rows: [
+      { company_id: 1, service_id: 10, is_extra: false, kpi_group_id: null },
+      { company_id: 1, service_id: 20, is_extra: false, kpi_group_id: 2 },
+    ],
+    groups: [
+      { id: 2, title: 'Care', code: 'care', description: '', sort_order: 0, is_active: true },
+    ],
+  };
+  const current = structuredClone(saved);
+  current.rows[0].is_extra = true;
+  current.rows[1].kpi_group_id = null;
+  current.groups[0].title = 'Face Care';
+
+  assert.deepEqual(serviceManagementChanges(current, saved), {
+    row_changes: [
+      { company_id: 1, service_id: 10, is_extra: true },
+      { company_id: 1, service_id: 20, kpi_group_id: null },
+    ],
+    group_changes: [{ id: 2, title: 'Face Care' }],
+  });
+  assert.deepEqual(serviceManagementChanges(saved, saved), { row_changes: [], group_changes: [] });
+});
+
+test('service management controls reflect dirty and loading state', () => {
+  assert.deepEqual(serviceManagementControls({ loading: false, hasData: true, hasSavedData: true, dirty: false }), {
+    filtersDisabled: false,
+    editorDisabled: false,
+    refreshDisabled: false,
+    saveDisabled: true,
+    resetDisabled: true,
+    addGroupDisabled: false,
+  });
+  assert.deepEqual(serviceManagementControls({ loading: false, hasData: true, hasSavedData: true, dirty: true }), {
+    filtersDisabled: true,
+    editorDisabled: false,
+    refreshDisabled: true,
+    saveDisabled: false,
+    resetDisabled: false,
+    addGroupDisabled: true,
+  });
+  assert.deepEqual(serviceManagementControls({ loading: true, hasData: true, hasSavedData: true, dirty: true }), {
+    filtersDisabled: true,
+    editorDisabled: true,
+    refreshDisabled: true,
+    saveDisabled: true,
+    resetDisabled: true,
+    addGroupDisabled: true,
+  });
+  assert.equal(serviceManagementLoadAllowed({ loading: false, dirty: false }), true);
+  assert.equal(serviceManagementLoadAllowed({ loading: false, dirty: true }), false);
+  assert.equal(serviceManagementLoadAllowed({ loading: true, dirty: false }), false);
+});
+
+test('failed service mutation keeps edits retryable and blocks overlapping reloads', async () => {
+  let dirty = true;
+  let loading = false;
+  let rejectMutation;
+  let observedError = null;
+  let successCalled = false;
+  const pendingMutation = new Promise((resolve, reject) => {
+    rejectMutation = reject;
+  });
+
+  const operation = runServiceManagementMutation(
+    () => pendingMutation,
+    {
+      setLoading: (value) => { loading = value; },
+      onSuccess: () => { successCalled = true; },
+      onError: (error) => { observedError = error; },
+    },
+  );
+
+  assert.equal(loading, true);
+  assert.equal(serviceManagementLoadAllowed({ loading, dirty }), false);
+  const timeout = Object.assign(new Error('timeout'), { apiStatus: 'timeout' });
+  rejectMutation(timeout);
+  const result = await operation;
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, timeout);
+  assert.equal(observedError, timeout);
+  assert.equal(successCalled, false);
+  assert.equal(dirty, true);
+  assert.equal(loading, false);
+  assert.equal(serviceManagementLoadAllowed({ loading, dirty }), false);
+});
+
+test('an aborted service load releases its loading state', () => {
+  const scope = createLatestRequestScope();
+  const request = scope.start();
+  let loading = true;
+
+  scope.abort();
+  settleServiceManagementLoad(request, (value) => { loading = value; });
+
+  assert.equal(request.signal.aborted, true);
+  assert.equal(request.isCurrent(), false);
+  assert.equal(loading, false);
+});
+
+test('pending service mutations block every SPA navigation path', () => {
+  assert.equal(serviceManagementNavigationAllowed({
+    mutationPending: true,
+    activeView: 'serviceManagement',
+  }), false);
+  assert.equal(serviceManagementNavigationAllowed({
+    mutationPending: false,
+    activeView: 'serviceManagement',
+  }), true);
+  assert.equal(serviceManagementNavigationAllowed({
+    mutationPending: true,
+    activeView: 'overview',
+  }), true);
+});
+
+test('service management displays the latest catalog mutation timestamp', () => {
+  assert.equal(latestServiceManagementTimestamp(
+    '2026-07-01T10:00:00',
+    '2026-07-10T10:00:00',
+    null,
+    '2026-07-18T10:00:00',
+  ), '2026-07-18T10:00:00');
+  assert.equal(latestServiceManagementTimestamp(null, '2026-07-10T10:00:00', null), '2026-07-10T10:00:00');
+  assert.equal(latestServiceManagementTimestamp(null, null), null);
+});
+
+test('service management removes saved rows that no longer match active filters', () => {
+  const data = {
+    rows: [
+      { company_id: 1, service_id: 10, is_extra: false, kpi_group_id: 2 },
+      { company_id: 1, service_id: 20, is_extra: true, kpi_group_id: 3 },
+      { company_id: 1, service_id: 30, is_extra: true, kpi_group_id: 2 },
+    ],
+    groups: [{ id: 2 }, { id: 3 }],
+    total: 3,
+  };
+
+  const extraOnly = filterServiceManagementResult(data, { is_extra: true });
+  assert.deepEqual(extraOnly.rows.map((row) => row.service_id), [20, 30]);
+  assert.equal(extraOnly.total, 2);
+
+  const selectedGroup = filterServiceManagementResult(data, { kpi_group_id: '2' });
+  assert.deepEqual(selectedGroup.rows.map((row) => row.service_id), [10, 30]);
+  assert.equal(selectedGroup.total, 2);
+  assert.equal(selectedGroup.groups, data.groups);
+});
+
+test('service management merges normalized batch and created group results', () => {
+  const data = {
+    rows: [{
+      company_id: 1,
+      service_id: 10,
+      title: 'Mask',
+      is_extra: false,
+      label_updated_at: '2026-07-01T10:00:00',
+      kpi_group_id: null,
+      kpi_assignment_updated_at: null,
+    }],
+    groups: [{ id: 1, title: 'Old', code: 'old', is_active: true }],
+    categories: ['Care'],
+  };
+  const merged = mergeServiceManagementResult(data, {
+    rows: [{
+      company_id: 1,
+      service_id: 10,
+      is_extra: true,
+      label_updated_at: '2026-07-18T10:00:00',
+      kpi_group_id: 2,
+      kpi_assignment_updated_at: '2026-07-18T10:00:00',
+      mutation_updated_at: '2026-07-18T10:00:00',
+    }],
+    groups: [
+      { id: 1, title: 'Renamed', code: 'old', is_active: true },
+      { id: 2, title: 'New', code: 'new', is_active: true },
+    ],
+  });
+
+  assert.deepEqual(merged.rows, [
+    {
+      company_id: 1,
+      service_id: 10,
+      title: 'Mask',
+      is_extra: true,
+      label_updated_at: '2026-07-18T10:00:00',
+      kpi_group_id: 2,
+      kpi_assignment_updated_at: '2026-07-18T10:00:00',
+      mutation_updated_at: '2026-07-18T10:00:00',
+    },
+  ]);
+  assert.deepEqual(merged.groups, [
+    { id: 1, title: 'Renamed', code: 'old', is_active: true },
+    { id: 2, title: 'New', code: 'new', is_active: true },
+  ]);
+  assert.deepEqual(merged.categories, ['Care']);
 });
 
 test('a deep-linked branch or staff never degrades to a broader scope', () => {

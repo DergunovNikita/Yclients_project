@@ -8,7 +8,7 @@ import re
 from calendar import monthrange
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Optional
 
 from sqlalchemy import String, and_, case, cast, delete, exists, func, or_, select
@@ -1846,13 +1846,47 @@ async def save_service_label(
     allowed_company_ids: list[int] | None = None,
     portal_account_id: int | None = None,
 ) -> dict[str, Any]:
+    catalog = await _editable_service_catalog(
+        db,
+        company_id,
+        service_id,
+        allowed_company_ids=allowed_company_ids,
+    )
+    await _apply_service_label(db, catalog, is_extra=is_extra, now=datetime.utcnow())
+    await db.commit()
+    return await fetch_dashboard_services(
+        db,
+        company_id=company_id,
+        q=str(service_id),
+        allowed_company_ids=allowed_company_ids,
+        portal_account_id=portal_account_id,
+    )
+
+
+async def _editable_service_catalog(
+    db: AsyncSession,
+    company_id: int,
+    service_id: int,
+    *,
+    allowed_company_ids: list[int] | None,
+) -> ServiceCatalog:
     if allowed_company_ids is not None and company_id not in set(allowed_company_ids):
         raise ValueError('company is not allowed')
     catalog = await _service_catalog_row(db, company_id, service_id)
     if catalog is None:
         raise ValueError('unknown service for company')
+    return catalog
 
-    now = datetime.utcnow()
+
+async def _apply_service_label(
+    db: AsyncSession,
+    catalog: ServiceCatalog,
+    *,
+    is_extra: bool,
+    now: datetime,
+) -> None:
+    company_id = int(catalog.company_id)
+    service_id = int(catalog.service_id)
     if is_extra:
         legacy_service = await db.get(Service, service_id)
         if legacy_service is None:
@@ -1890,15 +1924,6 @@ async def save_service_label(
                 ServiceLabel.service_id == service_id,
             )
         )
-
-    await db.commit()
-    return await fetch_dashboard_services(
-        db,
-        company_id=company_id,
-        q=str(service_id),
-        allowed_company_ids=allowed_company_ids,
-        portal_account_id=portal_account_id,
-    )
 
 
 async def create_service_kpi_group(
@@ -1942,33 +1967,63 @@ async def update_service_kpi_group(
     sort_order: int | None = None,
     is_active: bool | None = None,
 ) -> dict[str, Any]:
+    group = await _editable_service_kpi_group(db, group_id, portal_account_id=portal_account_id)
+    fields = {
+        key: value
+        for key, value in {
+            'title': title,
+            'code': code,
+            'description': description,
+            'sort_order': sort_order,
+            'is_active': is_active,
+        }.items()
+        if value is not None
+    }
+    await _apply_service_kpi_group_change(db, group, fields=fields, now=datetime.utcnow())
+    await db.commit()
+    await db.refresh(group)
+    return _service_kpi_group_payload(group)
+
+
+async def _editable_service_kpi_group(
+    db: AsyncSession,
+    group_id: int,
+    *,
+    portal_account_id: int | None,
+) -> ServiceKpiGroup:
     group = await db.get(ServiceKpiGroup, group_id)
-    if group is None:
+    if group is None or (portal_account_id is not None and group.portal_account_id != portal_account_id):
         raise ValueError('unknown KPI group')
-    if portal_account_id is not None and group.portal_account_id != portal_account_id:
-        raise ValueError('unknown KPI group')
-    if title is not None:
+    return group
+
+
+async def _apply_service_kpi_group_change(
+    db: AsyncSession,
+    group: ServiceKpiGroup,
+    *,
+    fields: dict[str, Any],
+    now: datetime,
+) -> None:
+    if 'title' in fields:
+        title = fields['title']
         clean_title = str(title or '').strip()
         if not clean_title:
             raise ValueError('title is required')
         group.title = clean_title
-    if code is not None:
+    if 'code' in fields:
         group.code = await _unique_service_group_code(
             db,
-            code,
+            fields['code'],
             portal_account_id=group.portal_account_id,
-            ignore_group_id=group_id,
+            ignore_group_id=group.id,
         )
-    if description is not None:
-        group.description = str(description or '').strip() or None
-    if sort_order is not None:
-        group.sort_order = int(sort_order or 0)
-    if is_active is not None:
-        group.is_active = bool(is_active)
-    group.updated_at = datetime.utcnow()
-    await db.commit()
-    await db.refresh(group)
-    return _service_kpi_group_payload(group)
+    if 'description' in fields:
+        group.description = str(fields['description'] or '').strip() or None
+    if 'sort_order' in fields:
+        group.sort_order = int(fields['sort_order'] or 0)
+    if 'is_active' in fields:
+        group.is_active = bool(fields['is_active'])
+    group.updated_at = now
 
 
 async def archive_service_kpi_group(
@@ -1994,12 +2049,50 @@ async def save_service_kpi_assignment(
     allowed_company_ids: list[int] | None = None,
     portal_account_id: int | None = None,
 ) -> dict[str, Any]:
-    if allowed_company_ids is not None and company_id not in set(allowed_company_ids):
-        raise ValueError('company is not allowed')
-    catalog = await _service_catalog_row(db, company_id, service_id)
-    if catalog is None:
-        raise ValueError('unknown service for company')
+    catalog = await _editable_service_catalog(
+        db,
+        company_id,
+        service_id,
+        allowed_company_ids=allowed_company_ids,
+    )
+    if group_id is not None:
+        await _active_service_kpi_group(db, group_id, portal_account_id=portal_account_id)
+    await _apply_service_kpi_assignment(db, catalog, group_id=group_id, now=datetime.utcnow())
+    await db.commit()
+    return await fetch_dashboard_services(
+        db,
+        company_id=company_id,
+        q=str(service_id),
+        allowed_company_ids=allowed_company_ids,
+        portal_account_id=portal_account_id,
+    )
 
+
+async def _active_service_kpi_group(
+    db: AsyncSession,
+    group_id: int,
+    *,
+    portal_account_id: int | None,
+) -> ServiceKpiGroup:
+    group = await db.get(ServiceKpiGroup, group_id)
+    if (
+        group is None
+        or not group.is_active
+        or (portal_account_id is not None and group.portal_account_id != portal_account_id)
+    ):
+        raise ValueError('unknown active KPI group')
+    return group
+
+
+async def _apply_service_kpi_assignment(
+    db: AsyncSession,
+    catalog: ServiceCatalog,
+    *,
+    group_id: int | None,
+    now: datetime,
+) -> None:
+    company_id = int(catalog.company_id)
+    service_id = int(catalog.service_id)
     if group_id is None:
         await db.execute(
             delete(ServiceKpiAssignment).where(
@@ -2007,23 +2100,8 @@ async def save_service_kpi_assignment(
                 ServiceKpiAssignment.service_id == service_id,
             )
         )
-        await db.commit()
-        return await fetch_dashboard_services(
-            db,
-            company_id=company_id,
-            q=str(service_id),
-            allowed_company_ids=allowed_company_ids,
-            portal_account_id=portal_account_id,
-        )
-
-    group = await db.get(ServiceKpiGroup, group_id)
-    if group is None or not group.is_active:
-        raise ValueError('unknown active KPI group')
-    if portal_account_id is not None and group.portal_account_id != portal_account_id:
-        raise ValueError('unknown active KPI group')
-
+        return
     assignment = await db.get(ServiceKpiAssignment, {'company_id': company_id, 'service_id': service_id})
-    now = datetime.utcnow()
     if assignment is None:
         db.add(
             ServiceKpiAssignment(
@@ -2038,14 +2116,108 @@ async def save_service_kpi_assignment(
         assignment.group_id = group_id
         assignment.source = 'dashboard'
         assignment.updated_at = now
-    await db.commit()
-    return await fetch_dashboard_services(
-        db,
-        company_id=company_id,
-        q=str(service_id),
-        allowed_company_ids=allowed_company_ids,
-        portal_account_id=portal_account_id,
-    )
+
+
+async def save_service_management(
+    db: AsyncSession,
+    *,
+    row_changes: list[dict[str, Any]],
+    group_changes: list[dict[str, Any]],
+    allowed_company_ids: list[int] | None,
+    portal_account_id: int,
+) -> dict[str, list[dict[str, Any]]]:
+    """Validate and persist a service-management batch in one transaction."""
+    if not row_changes and not group_changes:
+        return {'rows': [], 'groups': []}
+
+    catalogs: dict[tuple[int, int], ServiceCatalog] = {}
+    groups: dict[int, ServiceKpiGroup] = {}
+    group_fields = {
+        int(change['id']): {key: value for key, value in change.items() if key != 'id'}
+        for change in group_changes
+    }
+    try:
+        for change in row_changes:
+            key = (int(change['company_id']), int(change['service_id']))
+            catalogs[key] = await _editable_service_catalog(
+                db,
+                *key,
+                allowed_company_ids=allowed_company_ids,
+            )
+
+        for group_id in group_fields:
+            groups[group_id] = await _editable_service_kpi_group(
+                db,
+                group_id,
+                portal_account_id=portal_account_id,
+            )
+
+        for change in row_changes:
+            if 'kpi_group_id' not in change or change['kpi_group_id'] is None:
+                continue
+            group_id = int(change['kpi_group_id'])
+            group = groups.get(group_id)
+            if group is None:
+                group = await _editable_service_kpi_group(
+                    db,
+                    group_id,
+                    portal_account_id=portal_account_id,
+                )
+                groups[group_id] = group
+            final_active = group_fields.get(group_id, {}).get('is_active', group.is_active)
+            if not final_active:
+                raise ValueError('unknown active KPI group')
+
+        now = datetime.now(UTC).replace(tzinfo=None)
+        for group_id, fields in group_fields.items():
+            await _apply_service_kpi_group_change(db, groups[group_id], fields=fields, now=now)
+
+        for change in row_changes:
+            key = (int(change['company_id']), int(change['service_id']))
+            catalog = catalogs[key]
+            if 'is_extra' in change:
+                await _apply_service_label(db, catalog, is_extra=bool(change['is_extra']), now=now)
+            if 'kpi_group_id' in change:
+                await _apply_service_kpi_assignment(
+                    db,
+                    catalog,
+                    group_id=change['kpi_group_id'],
+                    now=now,
+                )
+
+        await db.flush()
+        normalized_rows = []
+        for company_id, service_id in catalogs:
+            label = await db.scalar(
+                select(ServiceLabel).where(
+                    ServiceLabel.company_id == company_id,
+                    ServiceLabel.service_id == service_id,
+                )
+            )
+            assignment = await db.scalar(
+                select(ServiceKpiAssignment).where(
+                    ServiceKpiAssignment.company_id == company_id,
+                    ServiceKpiAssignment.service_id == service_id,
+                )
+            )
+            normalized_rows.append({
+                'company_id': company_id,
+                'service_id': service_id,
+                'is_extra': bool(label.is_extra) if label is not None else False,
+                'label_updated_at': _iso_datetime(label.updated_at) if label is not None else None,
+                'kpi_group_id': assignment.group_id if assignment is not None else None,
+                'kpi_assignment_updated_at': (
+                    _iso_datetime(assignment.updated_at) if assignment is not None else None
+                ),
+                'mutation_updated_at': _iso_datetime(now),
+            })
+
+        normalized_groups = [_service_kpi_group_payload(groups[int(change['id'])]) for change in group_changes]
+        await db.commit()
+        return {'rows': normalized_rows, 'groups': normalized_groups}
+    except Exception:
+        await db.rollback()
+        raise
 
 
 async def fetch_top_services(

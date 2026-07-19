@@ -44,6 +44,7 @@ from models import (
     Service,
     ServiceCatalog,
     ServiceKpiAssignment,
+    ServiceKpiGroup,
     ServiceLabel,
     Staff,
     StaffSchedule,
@@ -1191,6 +1192,11 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             json={'is_extra': True},
             headers={'Authorization': f'Bearer {manager_token}'},
         )
+        manager_service_batch = await client.patch(
+            '/dashboard/services',
+            json={'row_changes': [], 'group_changes': []},
+            headers={'Authorization': f'Bearer {manager_token}'},
+        )
         manager_review_facts = await client.get(
             '/dashboard/plan/reviews_fact',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
@@ -1253,6 +1259,7 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     assert manager_plan_settings.status_code == 403
     assert manager_services.status_code == 403
     assert manager_service_label.status_code == 403
+    assert manager_service_batch.status_code == 403
     assert manager_review_facts.status_code == 403
     assert owner_revenue_daily.status_code == 200
     assert sum(row['revenue'] for row in owner_revenue_daily.json()['data']) == 3000.0
@@ -5087,6 +5094,294 @@ async def test_dashboard_service_kpi_groups_and_single_assignment(async_session)
         assert archived.json()['data']['is_active'] is False
 
     app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_service_batch_update_is_atomic_and_normalized(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        PortalAccount(id=1, label='Tenant', created_at=datetime(2025, 1, 1)),
+        ServiceKpiGroup(
+            id=1,
+            portal_account_id=1,
+            code='care',
+            title='Care',
+            is_active=True,
+            sort_order=0,
+            created_at=datetime(2025, 1, 1),
+            updated_at=datetime(2025, 1, 1),
+        ),
+        ServiceCatalog(
+            company_id=1,
+            service_id=10,
+            title='Black Mask',
+            category_title='Care',
+            updated_at=datetime(2025, 1, 1, 0, 0, 0),
+        ),
+        ServiceCatalog(
+            company_id=1,
+            service_id=20,
+            title='Head Care',
+            category_title='Care',
+            updated_at=datetime(2025, 1, 1, 0, 0, 0),
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        group_id = 1
+
+        updated = await client.patch('/dashboard/services', json={
+            'row_changes': [
+                {'company_id': 1, 'service_id': 10, 'is_extra': True, 'kpi_group_id': group_id},
+            ],
+            'group_changes': [
+                {'id': group_id, 'title': 'Face Care', 'description': None, 'sort_order': 5},
+            ],
+        })
+
+        unassigned = await client.patch('/dashboard/services', json={
+            'row_changes': [{'company_id': 1, 'service_id': 10, 'kpi_group_id': None}],
+            'group_changes': [],
+        })
+        no_op = await client.patch('/dashboard/services', json={'row_changes': [], 'group_changes': []})
+
+        rolled_back = await client.patch('/dashboard/services', json={
+            'row_changes': [
+                {'company_id': 1, 'service_id': 20, 'is_extra': True},
+                {'company_id': 1, 'service_id': 999, 'is_extra': True},
+            ],
+            'group_changes': [],
+        })
+
+    app.dependency_overrides.clear()
+
+    assert updated.status_code == 200, updated.text
+    normalized_row = updated.json()['data']['rows'][0]
+    assert {key: normalized_row[key] for key in (
+        'company_id', 'service_id', 'is_extra', 'kpi_group_id'
+    )} == {
+        'company_id': 1,
+        'service_id': 10,
+        'is_extra': True,
+        'kpi_group_id': group_id,
+    }
+    assert normalized_row['label_updated_at']
+    assert normalized_row['kpi_assignment_updated_at']
+    assert normalized_row['mutation_updated_at']
+    normalized_group = updated.json()['data']['groups'][0]
+    assert normalized_group['portal_account_id'] is not None
+    assert {key: normalized_group[key] for key in (
+        'id', 'code', 'title', 'description', 'is_active', 'sort_order'
+    )} == {
+        'id': group_id,
+        'code': 'care',
+        'title': 'Face Care',
+        'description': '',
+        'is_active': True,
+        'sort_order': 5,
+    }
+    assert normalized_group['created_at']
+    assert normalized_group['updated_at']
+    assert unassigned.status_code == 200
+    assert unassigned.json()['data']['rows'][0]['kpi_group_id'] is None
+    assert unassigned.json()['data']['rows'][0]['kpi_assignment_updated_at'] is None
+    assert unassigned.json()['data']['rows'][0]['mutation_updated_at']
+    assert no_op.status_code == 200
+    assert no_op.json()['data'] == {'rows': [], 'groups': []}
+    assert rolled_back.status_code == 400
+    assert rolled_back.json()['detail'] == 'unknown service for company'
+
+    labels = (await async_session.execute(select(ServiceLabel))).scalars().all()
+    assignments = (await async_session.execute(select(ServiceKpiAssignment))).scalars().all()
+    group = await async_session.get(ServiceKpiGroup, group_id)
+    assert [(row.company_id, row.service_id, row.is_extra) for row in labels] == [(1, 10, True)]
+    assert assignments == []
+    assert group.title == 'Face Care'
+
+
+@pytest.mark.asyncio
+async def test_dashboard_service_batch_rolls_back_after_partial_apply(async_session, monkeypatch):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        PortalAccount(id=1, label='Tenant', created_at=datetime(2025, 1, 1)),
+        ServiceKpiGroup(
+            id=1,
+            portal_account_id=1,
+            code='care',
+            title='Care',
+            is_active=True,
+            sort_order=0,
+            created_at=datetime(2025, 1, 1),
+            updated_at=datetime(2025, 1, 1),
+        ),
+        ServiceCatalog(
+            company_id=1,
+            service_id=10,
+            title='Black Mask',
+            updated_at=datetime(2025, 1, 1),
+        ),
+        ServiceCatalog(
+            company_id=1,
+            service_id=20,
+            title='Head Care',
+            updated_at=datetime(2025, 1, 1),
+        ),
+    ])
+    await async_session.commit()
+
+    original_apply_label = dashboard_service._apply_service_label
+    applied_labels = 0
+
+    async def fail_after_second_label(db, catalog, *, is_extra, now):
+        nonlocal applied_labels
+        await original_apply_label(db, catalog, is_extra=is_extra, now=now)
+        applied_labels += 1
+        if applied_labels == 2:
+            raise RuntimeError('forced failure after partial apply')
+
+    monkeypatch.setattr(dashboard_service, '_apply_service_label', fail_after_second_label)
+
+    with pytest.raises(RuntimeError, match='forced failure after partial apply'):
+        await dashboard_service.save_service_management(
+            async_session,
+            row_changes=[
+                {'company_id': 1, 'service_id': 10, 'is_extra': True},
+                {'company_id': 1, 'service_id': 20, 'is_extra': True},
+            ],
+            group_changes=[{'id': 1, 'title': 'Changed'}],
+            allowed_company_ids=[1],
+            portal_account_id=1,
+        )
+
+    labels = (await async_session.execute(select(ServiceLabel))).scalars().all()
+    legacy_services = (await async_session.execute(select(Service))).scalars().all()
+    group = await async_session.get(ServiceKpiGroup, 1)
+    assert applied_labels == 2
+    assert labels == []
+    assert legacy_services == []
+    assert group.title == 'Care'
+
+
+@pytest.mark.asyncio
+async def test_dashboard_service_batch_validates_changes_and_branch_scope(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add_all([
+        Company(id=1, title='Allowed', group_id=1),
+        Company(id=2, title='Foreign', group_id=1),
+        PortalAccount(id=1, label='Tenant', created_at=datetime(2025, 1, 1)),
+        PortalAccount(id=2, label='Other tenant', created_at=datetime(2025, 1, 1)),
+        PortalBranch(portal_account_id=1, company_id=1),
+        ServiceKpiGroup(
+            id=1,
+            portal_account_id=1,
+            code='care',
+            title='Care',
+            is_active=True,
+            sort_order=0,
+            created_at=datetime(2025, 1, 1),
+            updated_at=datetime(2025, 1, 1),
+        ),
+        ServiceKpiGroup(
+            id=99,
+            portal_account_id=2,
+            code='foreign',
+            title='Foreign',
+            is_active=True,
+            sort_order=0,
+            created_at=datetime(2025, 1, 1),
+            updated_at=datetime(2025, 1, 1),
+        ),
+        ServiceCatalog(company_id=1, service_id=10, title='Allowed', updated_at=datetime(2025, 1, 1)),
+        ServiceCatalog(company_id=2, service_id=20, title='Foreign', updated_at=datetime(2025, 1, 1)),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return AccessContext.from_user(
+            user_id=10,
+            role='branch_admin',
+            portal_account_id=1,
+            company_ids=[1],
+        )
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        foreign = await client.patch('/dashboard/services', json={
+            'row_changes': [{'company_id': 2, 'service_id': 20, 'is_extra': True}],
+            'group_changes': [],
+        })
+        foreign_group = await client.patch('/dashboard/services', json={
+            'row_changes': [{'company_id': 1, 'service_id': 10, 'kpi_group_id': 99}],
+            'group_changes': [],
+        })
+        foreign_group_change = await client.patch('/dashboard/services', json={
+            'row_changes': [],
+            'group_changes': [{'id': 99, 'title': 'Changed'}],
+        })
+        empty_row = await client.patch('/dashboard/services', json={
+            'row_changes': [{'company_id': 1, 'service_id': 10}],
+            'group_changes': [],
+        })
+        duplicate_rows = await client.patch('/dashboard/services', json={
+            'row_changes': [
+                {'company_id': 1, 'service_id': 10, 'is_extra': True},
+                {'company_id': 1, 'service_id': 10, 'kpi_group_id': None},
+            ],
+            'group_changes': [],
+        })
+        null_label = await client.patch('/dashboard/services', json={
+            'row_changes': [{'company_id': 1, 'service_id': 10, 'is_extra': None}],
+            'group_changes': [],
+        })
+        empty_group = await client.patch('/dashboard/services', json={
+            'row_changes': [],
+            'group_changes': [{'id': 1}],
+        })
+        null_group_state = await client.patch('/dashboard/services', json={
+            'row_changes': [],
+            'group_changes': [{'id': 1, 'is_active': None}],
+        })
+        duplicate_groups = await client.patch('/dashboard/services', json={
+            'row_changes': [],
+            'group_changes': [
+                {'id': 1, 'title': 'One'},
+                {'id': 1, 'title': 'Two'},
+            ],
+        })
+        inactive_assignment = await client.patch('/dashboard/services', json={
+            'row_changes': [{'company_id': 1, 'service_id': 10, 'kpi_group_id': 1}],
+            'group_changes': [{'id': 1, 'is_active': False}],
+        })
+
+    app.dependency_overrides.clear()
+
+    assert foreign.status_code == 400
+    assert foreign.json()['detail'] == 'company is not allowed'
+    assert foreign_group.status_code == 400
+    assert foreign_group.json()['detail'] == 'unknown KPI group'
+    assert foreign_group_change.status_code == 400
+    assert foreign_group_change.json()['detail'] == 'unknown KPI group'
+    assert empty_row.status_code == 422
+    assert duplicate_rows.status_code == 422
+    assert null_label.status_code == 422
+    assert empty_group.status_code == 422
+    assert null_group_state.status_code == 422
+    assert duplicate_groups.status_code == 422
+    assert inactive_assignment.status_code == 400
+    assert inactive_assignment.json()['detail'] == 'unknown active KPI group'
 
 
 @pytest.mark.asyncio

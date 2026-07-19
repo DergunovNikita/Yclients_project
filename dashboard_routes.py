@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +38,7 @@ from dashboard_service import (
     fetch_dashboard_services,
     fetch_service_kpi_groups,
     save_service_label,
+    save_service_management,
     create_service_kpi_group,
     update_service_kpi_group,
     archive_service_kpi_group,
@@ -133,6 +134,56 @@ class ServiceKpiGroupPayload(BaseModel):
 
 class ServiceKpiAssignmentPayload(BaseModel):
     group_id: int | None = None
+
+
+class ServiceManagementRowChange(BaseModel):
+    company_id: int
+    service_id: int
+    is_extra: bool | None = None
+    kpi_group_id: int | None = None
+
+    @model_validator(mode='after')
+    def validate_change(self):
+        changed_fields = self.model_fields_set & {'is_extra', 'kpi_group_id'}
+        if not changed_fields:
+            raise ValueError('service row change must include is_extra or kpi_group_id')
+        if 'is_extra' in changed_fields and self.is_extra is None:
+            raise ValueError('is_extra cannot be null')
+        return self
+
+
+class ServiceManagementGroupChange(BaseModel):
+    id: int
+    title: str | None = None
+    code: str | None = None
+    description: str | None = None
+    sort_order: int | None = None
+    is_active: bool | None = None
+
+    @model_validator(mode='after')
+    def validate_change(self):
+        mutable_fields = {'title', 'code', 'description', 'sort_order', 'is_active'}
+        if not self.model_fields_set & mutable_fields:
+            raise ValueError('service group change must include at least one mutable field')
+        for field in ('title', 'code', 'sort_order', 'is_active'):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f'{field} cannot be null')
+        return self
+
+
+class ServiceManagementPayload(BaseModel):
+    row_changes: list[ServiceManagementRowChange] = Field(default_factory=list)
+    group_changes: list[ServiceManagementGroupChange] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def validate_unique_targets(self):
+        row_keys = [(item.company_id, item.service_id) for item in self.row_changes]
+        if len(row_keys) != len(set(row_keys)):
+            raise ValueError('duplicate service row change')
+        group_ids = [item.id for item in self.group_changes]
+        if len(group_ids) != len(set(group_ids)):
+            raise ValueError('duplicate service group change')
+        return self
 
 
 def _parse_range(start: date, end: date) -> tuple[date, date]:
@@ -405,6 +456,28 @@ async def dashboard_services(
             portal_account_id=await _require_kpi_portal_account_id(db, ctx),
         ),
     }
+
+
+@router.patch('/services', dependencies=[Depends(forbid_demo)])
+async def dashboard_services_save(
+    payload: ServiceManagementPayload,
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    """Atomically persist dashboard-managed service and KPI group changes."""
+    _require_settings_admin(ctx)
+    allowed_company_ids, _ = user_branch_ids(ctx)
+    try:
+        data = await save_service_management(
+            db,
+            row_changes=[item.model_dump(exclude_unset=True) for item in payload.row_changes],
+            group_changes=[item.model_dump(exclude_unset=True) for item in payload.group_changes],
+            allowed_company_ids=allowed_company_ids,
+            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
 
 
 @router.get('/services/kpi_groups')

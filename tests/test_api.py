@@ -708,6 +708,45 @@ async def test_sync_routes_reject_missing_or_wrong_token(async_session, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_sync_status_preserves_payload_and_offloads_sync_lookup(async_session, monkeypatch):
+    async def override_db():
+        yield async_session
+
+    sync_payload = {'status': 'idle'}
+    queue_payload = {'queued': 0, 'running': 0}
+    offloaded = []
+
+    def fake_get_sync_status():
+        return sync_payload
+
+    async def fake_to_thread(func, *args):
+        offloaded.append(func)
+        return func(*args)
+
+    class FakeSyncJobService:
+        async def async_get_status_payload(self, db, *, portal_account_id=None):
+            assert db is async_session
+            assert portal_account_id is None
+            return queue_payload
+
+    monkeypatch.setattr(api, 'SYNC_API_TOKEN', 'test-sync-token')
+    monkeypatch.setattr(api, 'get_sync_status', fake_get_sync_status)
+    monkeypatch.setattr(api.asyncio, 'to_thread', fake_to_thread)
+    monkeypatch.setattr(api, 'SyncJobService', FakeSyncJobService)
+    app.dependency_overrides[api.get_async_db] = override_db
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get('/sync/status', headers={'X-Sync-Token': 'test-sync-token'})
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() == {'sync': sync_payload, 'queue': queue_payload}
+    assert offloaded == [fake_get_sync_status]
+
+
+@pytest.mark.asyncio
 async def test_csv_export_streams_rows(async_session):
     async_session.add(GoodTransaction(id=1, company_id=7, type_id=1, amount=2.0, cost=10.0))
     async_session.add(GoodTransaction(id=2, company_id=7, type_id=3, amount=1.0, cost=5.0))

@@ -2824,6 +2824,14 @@ async def test_forbid_demo_blocks_writes_but_allows_reads(auth_db):
             assert resp.status_code == 403, (path, resp.status_code, resp.text)
             assert resp.json()['detail'] == 'Demo account is read-only'
 
+        batch = await client.patch(
+            '/dashboard/services',
+            headers=headers,
+            json={'row_changes': [], 'group_changes': []},
+        )
+        assert batch.status_code == 403
+        assert batch.json()['detail'] == 'Demo account is read-only'
+
         me = await client.get('/auth/me', headers=headers)
         assert me.status_code == 200
         assert me.json()['data']['is_demo'] is True

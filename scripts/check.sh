@@ -39,5 +39,6 @@ fi
 
 cd "$ROOT_DIR/web"
 "$NODE_BIN/npm" run test:auth
+"$NODE_BIN/npm" run test:dashboard
 "$NODE_BIN/node" ./node_modules/vite/bin/vite.js build
 "$NODE_BIN/npm" run scan:auth-build
