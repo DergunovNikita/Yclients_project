@@ -161,9 +161,33 @@ export function isAuthFailure(error) {
 
 export function requiresLogin(error) {
   // A definitive 401/403, or no session hint at all, means we are unauthenticated
-  // and must go to login. Transient errors (network/timeout/5xx) with a live
-  // session are recoverable and must not trigger a logout.
+  // and must go to login. Any other error (5xx, network, timeout) while a session
+  // hint is present is not an auth verdict and must not trigger a logout.
   return isAuthFailure(error) || !hasSessionHint();
+}
+
+export function shouldRetryStartup(error, attempt, maxAttempts) {
+  // Retry anything that is not a definitive auth failure / lost session, while the
+  // budget remains; login-required errors and an exhausted budget stop the loop.
+  return !requiresLogin(error) && attempt < maxAttempts;
+}
+
+const STARTUP_MAX_ATTEMPTS = 3;
+const STARTUP_BACKOFF_MS = 800;
+
+export async function acquireStartupSession(load, {
+  maxAttempts = STARTUP_MAX_ATTEMPTS,
+  backoffMs = STARTUP_BACKOFF_MS,
+  waitFn = wait,
+} = {}) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await load();
+    } catch (error) {
+      if (!shouldRetryStartup(error, attempt, maxAttempts)) throw error;
+      await waitFn(backoffMs * attempt);
+    }
+  }
 }
 
 export function wait(ms) {

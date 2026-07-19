@@ -1,3 +1,5 @@
+import { tableHasRows } from './reports/ranking.js';
+
 export function apiStatusForHttpStatus(status) {
   if (status === 401) return 'auth_required';
   if (status === 403) return 'forbidden';
@@ -25,10 +27,7 @@ export function responseError(response, payload, fallback) {
 
 export function reportDataState(data) {
   if (data?.source_status === 'partial') return 'partial';
-  const hasRows = data?.tables?.some((table) => (
-    table.rows?.length
-    || Object.values(table.ranking?.rows_by_metric || {}).some((rows) => rows?.length)
-  ));
+  const hasRows = data?.tables?.some(tableHasRows);
   return data?.cards?.length || data?.charts?.length || hasRows ? 'ready' : 'empty';
 }
 

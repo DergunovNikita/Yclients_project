@@ -250,6 +250,65 @@ test('startup auth failures are distinguished from transient errors', async (t) 
   assert.equal(auth.requiresLogin({ status: 503 }), true);
 });
 
+test('startup retry budget retries transient errors but never login-required ones', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  document.cookie = 'portal_csrf=csrf-runtime-token';
+  // Transient error with a live session: retry while budget remains.
+  assert.equal(auth.shouldRetryStartup({ status: 503 }, 1, 3), true);
+  assert.equal(auth.shouldRetryStartup({ status: 503 }, 2, 3), true);
+  // Budget exhausted: stop (caller surfaces a retryable error, stays on page).
+  assert.equal(auth.shouldRetryStartup({ status: 503 }, 3, 3), false);
+  // Login-required (401): never retried, even on the first attempt.
+  assert.equal(auth.shouldRetryStartup({ status: 401 }, 1, 3), false);
+  // No session hint: login-required, so never retried.
+  document.cookie = '';
+  assert.equal(auth.shouldRetryStartup({ status: 503 }, 1, 3), false);
+});
+
+test('acquireStartupSession retries transient failures within budget but not login-required ones', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+  document.cookie = 'portal_csrf=csrf-runtime-token';
+
+  const httpError = (status) => Object.assign(new Error(`http ${status}`), { status });
+
+  // Succeeds after two transient failures; backoff grows with the attempt.
+  let okCalls = 0;
+  const okWaits = [];
+  const recovered = await auth.acquireStartupSession(async () => {
+    okCalls += 1;
+    if (okCalls < 3) throw httpError(503);
+    return { data: { ok: true } };
+  }, { maxAttempts: 3, backoffMs: 800, waitFn: (ms) => { okWaits.push(ms); return Promise.resolve(); } });
+  assert.deepEqual(recovered, { data: { ok: true } });
+  assert.equal(okCalls, 3);
+  assert.deepEqual(okWaits, [800, 1600]);
+
+  // Persistent transient failure: capped at maxAttempts, then rethrows.
+  let downCalls = 0;
+  const downWaits = [];
+  await assert.rejects(
+    auth.acquireStartupSession(async () => { downCalls += 1; throw httpError(503); },
+      { maxAttempts: 3, backoffMs: 800, waitFn: (ms) => { downWaits.push(ms); return Promise.resolve(); } }),
+    /http 503/,
+  );
+  assert.equal(downCalls, 3);
+  assert.deepEqual(downWaits, [800, 1600]);
+
+  // Login-required error: thrown immediately, no retry, no wait.
+  let authCalls = 0;
+  let authWaited = false;
+  await assert.rejects(
+    auth.acquireStartupSession(async () => { authCalls += 1; throw httpError(401); },
+      { maxAttempts: 3, backoffMs: 800, waitFn: () => { authWaited = true; return Promise.resolve(); } }),
+    /http 401/,
+  );
+  assert.equal(authCalls, 1);
+  assert.equal(authWaited, false);
+});
+
 test('requestWithReauth refreshes once and retries the original request', async (t) => {
   const { auth, server } = await loadAuthModule();
   t.after(() => server.close());

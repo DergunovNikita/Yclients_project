@@ -2078,6 +2078,9 @@ async def _leaderboard_payload_impl(
             [('qty', 'По количеству'), ('pct', 'По проценту')],
             hide_when_empty=True,
         ),
+        # Not hide_when_empty: manual review facts are often unfilled, so this
+        # top anchors the report (and shows its empty state) even when all
+        # other leaderboards are empty for the period.
         _table(
             'reviews_admin',
             'Топ по отзывам — админы',

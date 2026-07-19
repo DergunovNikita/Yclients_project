@@ -569,6 +569,12 @@ async def test_dashboard_staff_leaderboard_report_returns_top_tables(async_sessi
     assert {'key': 'pct', 'label': 'Косметика, %', 'format': 'percent'} in cosmo_barber['columns']
     assert all(column['key'] != 'cosmo_revenue_share_pct' for column in revenue_barber['columns'])
     assert all(column['key'] != 'cosmo_revenue_share_pct' for column in revenue_admin['columns'])
+    assert [card['label'] for card in data['cards']] == ['Топ выручка мастера']
+    reviews_admin = next(table for table in data['tables'] if table['id'] == 'reviews_admin')
+    assert extra_services.get('hide_when_empty') is True
+    assert opz_admin.get('hide_when_empty') is True
+    assert revenue_barber.get('hide_when_empty') is True
+    assert 'hide_when_empty' not in reviews_admin
 
 
 @pytest.mark.asyncio

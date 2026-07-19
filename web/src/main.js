@@ -1,6 +1,7 @@
 import Chart from 'chart.js/auto';
 import { enhanceSelect } from './customSelect.js';
 import {
+  acquireStartupSession,
   authFetch,
   ensureOnboardingComplete,
   getSelectedPortalAccountId,
@@ -8,7 +9,6 @@ import {
   redirectToLogin,
   requiresLogin,
   setSelectedPortalAccountId,
-  wait,
 } from './auth.js';
 import {
   createLatestRequestScope,
@@ -2485,30 +2485,12 @@ async function loadStartupUser() {
   return me;
 }
 
-const STARTUP_MAX_ATTEMPTS = 3;
-const STARTUP_RETRY_BASE_MS = 800;
-
-async function acquireStartupUser() {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      return await loadStartupUser();
-    } catch (error) {
-      // Errors that require login, or an exhausted retry budget, stop the loop.
-      // Transient errors (network/timeout/5xx) with a live session are retried.
-      if (requiresLogin(error) || attempt >= STARTUP_MAX_ATTEMPTS) {
-        throw error;
-      }
-      await wait(STARTUP_RETRY_BASE_MS * attempt);
-    }
-  }
-}
-
 async function startSession() {
   clearError();
   if (!apiKey) {
     let me;
     try {
-      me = await acquireStartupUser();
+      me = await acquireStartupSession(loadStartupUser);
     } catch (error) {
       if (requiresLogin(error)) {
         redirectToLogin();

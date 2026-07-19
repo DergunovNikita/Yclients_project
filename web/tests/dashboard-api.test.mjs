@@ -267,3 +267,44 @@ test('shared dashboard API handles transport, errors, retries and mutations', as
     assert.deepEqual(payload.data, { fallback: true });
   });
 });
+
+test('renderReportData hides flagged empty tops but keeps ranking data in a non-default metric', async (t) => {
+  globalThis.localStorage = new MemoryStorage();
+  const server = await createServer({
+    appType: 'custom',
+    logLevel: 'silent',
+    root: new URL('..', import.meta.url).pathname,
+    server: { middlewareMode: true },
+  });
+  t.after(() => server.close());
+  const { renderReportData } = await server.ssrLoadModule('/src/reports/renderers/generic.js');
+
+  const container = { innerHTML: '', querySelectorAll: () => [], querySelector: () => null };
+  const charts = { clear() {}, render() {} };
+
+  renderReportData(container, {
+    source_status: 'ready',
+    cards: [],
+    charts: [],
+    tables: [
+      { id: 'flagged_empty', title: 'Hidden Empty Top', columns: [], rows: [], hide_when_empty: true },
+      {
+        id: 'ranking_nondefault',
+        title: 'Kept Ranking Top',
+        columns: [{ key: 'staff', label: 'Staff', format: 'text' }],
+        rows: [],
+        hide_when_empty: true,
+        ranking: {
+          default_metric: 'pct',
+          options: [{ key: 'qty', label: 'Qty' }, { key: 'pct', label: 'Pct' }],
+          rows_by_metric: { qty: [{ staff: 'Master' }], pct: [] },
+        },
+      },
+      { id: 'anchor_empty', title: 'Anchor Top', columns: [], rows: [] },
+    ],
+  }, charts);
+
+  assert.ok(!container.innerHTML.includes('Hidden Empty Top'), 'flagged empty table is omitted');
+  assert.ok(container.innerHTML.includes('Kept Ranking Top'), 'ranking with data only in a non-default metric is kept');
+  assert.ok(container.innerHTML.includes('Anchor Top'), 'unflagged empty table still renders as an anchor');
+});
