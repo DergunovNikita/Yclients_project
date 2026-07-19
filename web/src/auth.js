@@ -159,6 +159,13 @@ export function isAuthFailure(error) {
   return [401, 403].includes(Number(error?.status));
 }
 
+export function requiresLogin(error) {
+  // A definitive 401/403, or no session hint at all, means we are unauthenticated
+  // and must go to login. Transient errors (network/timeout/5xx) with a live
+  // session are recoverable and must not trigger a logout.
+  return isAuthFailure(error) || !hasSessionHint();
+}
+
 export function wait(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);

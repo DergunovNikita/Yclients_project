@@ -4,10 +4,9 @@ import {
   authFetch,
   ensureOnboardingComplete,
   getSelectedPortalAccountId,
-  hasSessionHint,
-  isAuthFailure,
   loadCurrentUserQuietly,
   redirectToLogin,
+  requiresLogin,
   setSelectedPortalAccountId,
   wait,
 } from './auth.js';
@@ -2494,10 +2493,9 @@ async function acquireStartupUser() {
     try {
       return await loadStartupUser();
     } catch (error) {
-      // A genuine auth failure (401/403) or a missing session hint must go to
-      // login. Transient errors (network/timeout/5xx) keep a live cookie session,
-      // so retry a few times before surfacing a retryable error instead.
-      if (isAuthFailure(error) || !hasSessionHint() || attempt >= STARTUP_MAX_ATTEMPTS) {
+      // Errors that require login, or an exhausted retry budget, stop the loop.
+      // Transient errors (network/timeout/5xx) with a live session are retried.
+      if (requiresLogin(error) || attempt >= STARTUP_MAX_ATTEMPTS) {
         throw error;
       }
       await wait(STARTUP_RETRY_BASE_MS * attempt);
@@ -2512,7 +2510,7 @@ async function startSession() {
     try {
       me = await acquireStartupUser();
     } catch (error) {
-      if (isAuthFailure(error) || !hasSessionHint()) {
+      if (requiresLogin(error)) {
         redirectToLogin();
         return;
       }

@@ -240,6 +240,14 @@ test('startup auth failures are distinguished from transient errors', async (t) 
 
   assert.equal(auth.isTransientAuthError({ status: 503 }), true);
   assert.equal(auth.isTransientAuthError({ status: 401 }), false);
+
+  // requiresLogin folds the auth-status check with the session hint (csrf cookie).
+  document.cookie = 'portal_csrf=csrf-runtime-token';
+  assert.equal(auth.requiresLogin({ status: 401 }), true);
+  assert.equal(auth.requiresLogin({ status: 503 }), false);
+  assert.equal(auth.requiresLogin(new TypeError('Failed to fetch')), false);
+  document.cookie = '';
+  assert.equal(auth.requiresLogin({ status: 503 }), true);
 });
 
 test('requestWithReauth refreshes once and retries the original request', async (t) => {
