@@ -491,7 +491,13 @@ export function initReports({ clearError, showError, setApiState }) {
     try {
       await ensureLoaded();
     } catch (error) {
-      showError(error.message);
+      showError(error.message, {
+        apiStatus: error.apiStatus,
+        retry: async () => {
+          state.loaded = false;
+          await loadFromLocation();
+        },
+      });
       showCatalog(false);
       return;
     }
