@@ -49,7 +49,12 @@ def verify_password(password: str, password_hash: str) -> bool:
     return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
 
 
-def create_access_token(user_id: int, role: str, token_version: int = 0) -> str:
+def create_access_token(
+    user_id: int,
+    role: str,
+    token_version: int = 0,
+    session_id: int | None = None,
+) -> str:
     payload = {
         'sub': str(user_id),
         'role': role,
@@ -57,6 +62,8 @@ def create_access_token(user_id: int, role: str, token_version: int = 0) -> str:
         'exp': datetime.utcnow() + timedelta(minutes=AUTH_JWT_EXPIRE_MINUTES),
         'iat': datetime.utcnow(),
     }
+    if session_id is not None:
+        payload['sid'] = int(session_id)
     return jwt.encode(payload, AUTH_JWT_SECRET, algorithm='HS256')
 
 

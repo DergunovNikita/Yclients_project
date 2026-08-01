@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from fastapi import HTTPException, Request, Response, status
-from sqlalchemy import select, update
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import (
@@ -19,6 +19,7 @@ from config import (
     AUTH_CSRF_HEADER_NAME,
     AUTH_JWT_EXPIRE_MINUTES,
     AUTH_JWT_SECRET,
+    AUTH_MAX_ACTIVE_SESSIONS,
     AUTH_REFRESH_TOKEN_EXPIRE_DAYS,
 )
 from models import PortalRefreshToken, PortalUser
@@ -118,8 +119,9 @@ async def issue_session(
     )
     db.add(refresh)
     await db.flush()
+    await _maintain_user_sessions(db, user.id, now, enforce_limit=not user.is_demo)
 
-    access_token = access_token_fn(user)
+    access_token = access_token_fn(user, refresh.id)
     return IssuedSession(
         access_token=access_token,
         refresh_token=raw_refresh,
@@ -135,7 +137,7 @@ async def rotate_session(
     *,
     access_token_fn,
 ) -> tuple[PortalUser, IssuedSession]:
-    """Validate the refresh token, revoke it, and issue a new pair (rotation)."""
+    """Validate and rotate a refresh token without creating another DB row."""
     refresh = await _load_active_refresh(db, raw_refresh)
     user = (
         await db.execute(select(PortalUser).where(PortalUser.id == refresh.user_id))
@@ -143,18 +145,34 @@ async def rotate_session(
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail='User inactive')
 
-    refresh.revoked_at = datetime.utcnow()
-    issued = await issue_session(db, user, request, access_token_fn=access_token_fn)
+    raw_rotated_refresh = secrets.token_urlsafe(48)
+    csrf_token = secrets.token_urlsafe(32)
+    now = datetime.utcnow()
+    user_agent = request.headers.get('user-agent', '')
+
+    refresh.token_hash = _hash_token(raw_rotated_refresh)
+    refresh.expires_at = now + timedelta(days=AUTH_REFRESH_TOKEN_EXPIRE_DAYS)
+    refresh.last_used_at = now
+    refresh.user_agent = user_agent[:500] if user_agent else None
+    refresh.device_label = parse_device_label(user_agent)
+    refresh.ip_hash = _hash_ip(extract_client_ip(request))
+    await db.flush()
+    await _maintain_user_sessions(db, user.id, now, enforce_limit=not user.is_demo)
+
+    issued = IssuedSession(
+        access_token=access_token_fn(user, refresh.id),
+        refresh_token=raw_rotated_refresh,
+        csrf_token=csrf_token,
+        refresh_record=refresh,
+    )
     return user, issued
 
 
 async def revoke_refresh(db: AsyncSession, raw_refresh: str) -> None:
-    """Mark a single refresh token as revoked. Silently no-op if unknown."""
+    """Delete a single refresh token. Silently no-op if unknown."""
     token_hash = _hash_token(raw_refresh)
     await db.execute(
-        update(PortalRefreshToken)
-        .where(PortalRefreshToken.token_hash == token_hash, PortalRefreshToken.revoked_at.is_(None))
-        .values(revoked_at=datetime.utcnow())
+        delete(PortalRefreshToken).where(PortalRefreshToken.token_hash == token_hash)
     )
 
 
@@ -164,24 +182,27 @@ async def revoke_user_sessions(
     *,
     except_refresh: str | None = None,
 ) -> None:
-    """Revoke all refresh tokens for a user. Used by logout-all and password change."""
-    stmt = (
-        update(PortalRefreshToken)
-        .where(PortalRefreshToken.user_id == user_id, PortalRefreshToken.revoked_at.is_(None))
-        .values(revoked_at=datetime.utcnow())
-    )
+    """Delete all refresh tokens for a user. Used by logout-all and password change."""
+    stmt = delete(PortalRefreshToken).where(PortalRefreshToken.user_id == user_id)
     if except_refresh is not None:
         stmt = stmt.where(PortalRefreshToken.token_hash != _hash_token(except_refresh))
     await db.execute(stmt)
 
 
-async def list_user_sessions(db: AsyncSession, user_id: int) -> list[PortalRefreshToken]:
+async def list_user_sessions(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    enforce_limit: bool = True,
+) -> list[PortalRefreshToken]:
+    now = datetime.utcnow()
+    await _maintain_user_sessions(db, user_id, now, enforce_limit=enforce_limit)
     rows = await db.execute(
         select(PortalRefreshToken)
         .where(
             PortalRefreshToken.user_id == user_id,
             PortalRefreshToken.revoked_at.is_(None),
-            PortalRefreshToken.expires_at > datetime.utcnow(),
+            PortalRefreshToken.expires_at > now,
         )
         .order_by(PortalRefreshToken.last_used_at.desc().nullslast(), PortalRefreshToken.id.desc())
     )
@@ -190,15 +211,55 @@ async def list_user_sessions(db: AsyncSession, user_id: int) -> list[PortalRefre
 
 async def revoke_session_by_id(db: AsyncSession, user_id: int, session_id: int) -> bool:
     result = await db.execute(
-        update(PortalRefreshToken)
+        delete(PortalRefreshToken)
         .where(
             PortalRefreshToken.id == session_id,
             PortalRefreshToken.user_id == user_id,
-            PortalRefreshToken.revoked_at.is_(None),
         )
-        .values(revoked_at=datetime.utcnow())
     )
     return bool(result.rowcount)
+
+
+async def _maintain_user_sessions(
+    db: AsyncSession,
+    user_id: int,
+    now: datetime,
+    *,
+    enforce_limit: bool,
+) -> None:
+    """Remove inactive records and retire least-recently-used excess sessions."""
+    await db.execute(
+        delete(PortalRefreshToken).where(
+            PortalRefreshToken.user_id == user_id,
+            or_(
+                PortalRefreshToken.revoked_at.is_not(None),
+                PortalRefreshToken.expires_at <= now,
+            ),
+        )
+    )
+    if not enforce_limit:
+        return
+
+    max_active = max(1, int(AUTH_MAX_ACTIVE_SESSIONS))
+    excess_ids = list(
+        (
+            await db.scalars(
+                select(PortalRefreshToken.id)
+                .where(
+                    PortalRefreshToken.user_id == user_id,
+                    PortalRefreshToken.revoked_at.is_(None),
+                    PortalRefreshToken.expires_at > now,
+                )
+                .order_by(
+                    PortalRefreshToken.last_used_at.desc().nullslast(),
+                    PortalRefreshToken.id.desc(),
+                )
+                .offset(max_active)
+            )
+        ).all()
+    )
+    if excess_ids:
+        await db.execute(delete(PortalRefreshToken).where(PortalRefreshToken.id.in_(excess_ids)))
 
 
 async def _load_active_refresh(db: AsyncSession, raw_refresh: str) -> PortalRefreshToken:

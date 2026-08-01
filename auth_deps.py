@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +14,7 @@ from auth_service import decode_access_token, load_portal_account_branch_ids, lo
 from auth_sessions import ACCESS_COOKIE_NAME, enforce_csrf
 from config import API_KEY, AUTH_REQUIRE_LOGIN, IS_PRODUCTION
 from database import get_async_db
-from models import PortalMetricVisibility, PortalUser, Staff
+from models import PortalMetricVisibility, PortalRefreshToken, PortalUser, Staff
 from plan_config import ALL_MONEY_CODES, CONFIGURABLE_MONEY_ROLES, default_money_codes_for_role
 
 OPEN_PATH_PREFIXES = (
@@ -56,8 +58,23 @@ async def _user_from_token(
     except jwt.PyJWTError as exc:
         raise HTTPException(status_code=401, detail='Invalid or expired token') from exc
 
-    user_id = int(payload['sub'])
-    user = (await db.execute(select(PortalUser).where(PortalUser.id == user_id))).scalar_one_or_none()
+    try:
+        user_id = int(payload['sub'])
+        session_id = int(payload['sid']) if payload.get('sid') is not None else None
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail='Invalid or expired token') from exc
+
+    user_stmt = select(PortalUser).where(PortalUser.id == user_id)
+    if session_id is not None:
+        user_stmt = user_stmt.join(
+            PortalRefreshToken,
+            PortalRefreshToken.user_id == PortalUser.id,
+        ).where(
+            PortalRefreshToken.id == session_id,
+            PortalRefreshToken.revoked_at.is_(None),
+            PortalRefreshToken.expires_at > datetime.utcnow(),
+        )
+    user = (await db.execute(user_stmt)).scalar_one_or_none()
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail='User not found or inactive')
 

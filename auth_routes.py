@@ -302,8 +302,8 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     }
 
 
-def _access_token_for(user: PortalUser) -> str:
-    return create_access_token(user.id, user.role, user.token_version)
+def _access_token_for(user: PortalUser, session_id: int) -> str:
+    return create_access_token(user.id, user.role, user.token_version, session_id)
 
 
 def _session_payload(user: PortalUser, branch_ids: list[int], csrf_token: str) -> dict:
@@ -511,7 +511,8 @@ async def list_sessions(
     user: PortalUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
-    sessions = await list_user_sessions(db, user.id)
+    sessions = await list_user_sessions(db, user.id, enforce_limit=not user.is_demo)
+    await db.commit()
     return {
         'success': True,
         'data': [

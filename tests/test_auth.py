@@ -1,7 +1,7 @@
 """Portal auth and branch access control tests."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 
 import api
 import auth_routes
+import auth_sessions
 from api import app
 from auth_sessions import ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME
 from auth_service import TOKEN_PURPOSE_RESET, create_access_token, create_email_token, hash_password
@@ -22,6 +23,7 @@ from models import (
     PortalAuditEvent,
     PortalEmailToken,
     PortalBranch,
+    PortalRefreshToken,
     PortalUser,
     PortalUserBranch,
     Staff,
@@ -124,6 +126,11 @@ async def test_refresh_keeps_cookie_session_without_returning_access_token(auth_
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         login = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})
         assert login.status_code == 200
+        initial_session = (await auth_db.scalars(
+            select(PortalRefreshToken).where(PortalRefreshToken.user_id == 1)
+        )).one()
+        initial_session_id = initial_session.id
+        initial_token_hash = initial_session.token_hash
         missing_csrf = await client.post('/auth/refresh')
         bearer_without_csrf = await client.post(
             '/auth/refresh',
@@ -131,6 +138,9 @@ async def test_refresh_keeps_cookie_session_without_returning_access_token(auth_
         )
         csrf = client.cookies.get(AUTH_CSRF_COOKIE_NAME)
         refresh = await client.post('/auth/refresh', headers={'X-CSRF-Token': csrf})
+        rotated_sessions = list((await auth_db.scalars(
+            select(PortalRefreshToken).where(PortalRefreshToken.user_id == 1)
+        )).all())
 
     app.dependency_overrides.clear()
 
@@ -141,10 +151,80 @@ async def test_refresh_keeps_cookie_session_without_returning_access_token(auth_
     assert 'access_token' not in payload['data']
     assert 'token_type' not in payload['data']
     assert payload['data']['user']['email'] == 'admin@example.com'
+    assert len(rotated_sessions) == 1
+    assert rotated_sessions[0].id == initial_session_id
+    assert rotated_sessions[0].token_hash != initial_token_hash
     set_cookie_headers = refresh.headers.get_list('set-cookie')
     assert any(f'{ACCESS_COOKIE_NAME}=' in item and 'HttpOnly' in item for item in set_cookie_headers)
     assert any(f'{REFRESH_COOKIE_NAME}=' in item and 'HttpOnly' in item for item in set_cookie_headers)
     assert any(f'{AUTH_CSRF_COOKIE_NAME}=' in item and 'HttpOnly' not in item for item in set_cookie_headers)
+
+
+@pytest.mark.asyncio
+async def test_sessions_list_removes_inactive_and_oldest_excess_sessions(auth_db, monkeypatch):
+    monkeypatch.setattr(auth_sessions, 'AUTH_MAX_ACTIVE_SESSIONS', 3)
+    now = datetime.utcnow()
+    auth_db.add_all([
+        PortalRefreshToken(
+            id=100 + offset,
+            user_id=1,
+            token_hash=f'active-{offset}',
+            expires_at=now + timedelta(days=10),
+            last_used_at=now - timedelta(hours=offset),
+            created_at=now - timedelta(days=offset),
+        )
+        for offset in range(5)
+    ])
+    auth_db.add_all([
+        PortalRefreshToken(
+            id=200,
+            user_id=1,
+            token_hash='expired',
+            expires_at=now - timedelta(seconds=1),
+            last_used_at=now - timedelta(days=40),
+            created_at=now - timedelta(days=40),
+        ),
+        PortalRefreshToken(
+            id=201,
+            user_id=1,
+            token_hash='revoked',
+            expires_at=now + timedelta(days=10),
+            revoked_at=now - timedelta(days=1),
+            last_used_at=now - timedelta(days=1),
+            created_at=now - timedelta(days=1),
+        ),
+    ])
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    bearer = create_access_token(1, 'owner')
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get('/auth/sessions', headers={'Authorization': f'Bearer {bearer}'})
+        removed_session = await client.get(
+            '/auth/me',
+            headers={'Authorization': f'Bearer {create_access_token(1, "owner", session_id=104)}'},
+        )
+        kept_session = await client.get(
+            '/auth/me',
+            headers={'Authorization': f'Bearer {create_access_token(1, "owner", session_id=100)}'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert [item['id'] for item in response.json()['data']] == [100, 101, 102]
+    remaining_ids = list((await auth_db.scalars(
+        select(PortalRefreshToken.id)
+        .where(PortalRefreshToken.user_id == 1)
+        .order_by(PortalRefreshToken.id)
+    )).all())
+    assert remaining_ids == [100, 101, 102]
+    assert removed_session.status_code == 401
+    assert kept_session.status_code == 200
 
 
 @pytest.mark.asyncio

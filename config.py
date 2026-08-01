@@ -190,6 +190,9 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
 AUTH_JWT_SECRET = os.getenv('AUTH_JWT_SECRET', 'change_me_local_jwt_secret')
 AUTH_JWT_EXPIRE_MINUTES = _get_int('AUTH_JWT_EXPIRE_MINUTES', 30)
 AUTH_REFRESH_TOKEN_EXPIRE_DAYS = _get_int('AUTH_REFRESH_TOKEN_EXPIRE_DAYS', 30)
+# Keep the most recently used browser sessions and retire older logins. The
+# shared demo account is exempt because many visitors use it concurrently.
+AUTH_MAX_ACTIVE_SESSIONS = _get_int('AUTH_MAX_ACTIVE_SESSIONS', 10)
 AUTH_REQUIRE_LOGIN = _get_bool('AUTH_REQUIRE_LOGIN', not bool(API_KEY))
 AUTH_PUBLIC_REGISTRATION_ENABLED = _get_bool(
     'AUTH_PUBLIC_REGISTRATION_ENABLED',

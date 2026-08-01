@@ -810,7 +810,7 @@ class PortalRefreshToken(Base):
 
     __tablename__ = 'portal_refresh_tokens'
     __table_args__ = (
-        Index('ix_portal_refresh_tokens_user_id', 'user_id'),
+        Index('ix_portal_refresh_tokens_user_state', 'user_id', 'revoked_at', 'last_used_at'),
         {'schema': SYSTEM_SCHEMA},
     )
 
