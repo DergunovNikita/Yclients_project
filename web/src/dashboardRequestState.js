@@ -31,6 +31,18 @@ export function reportDataState(data) {
   return data?.cards?.length || data?.charts?.length || hasRows ? 'ready' : 'empty';
 }
 
+export function reportFilterVisibility(filters = {}) {
+  return {
+    dateRange: filters.date_range !== false,
+    granularity: filters.granularity !== false,
+    compare: filters.compare !== false,
+  };
+}
+
+export function shouldRenderReportDataLabel(raw) {
+  return raw !== null && raw !== undefined && raw !== '' && Number.isFinite(Number(raw));
+}
+
 export function reportRefreshPresentation(previousData) {
   return previousData
     ? { state: 'refreshing', retainedData: previousData }

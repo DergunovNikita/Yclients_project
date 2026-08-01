@@ -1,6 +1,7 @@
 import Chart from 'chart.js/auto';
 
 import { formatValue } from './format.js';
+import { shouldRenderReportDataLabel } from '../dashboardRequestState.js';
 
 const PALETTE = [
   '#0f766e',
@@ -34,8 +35,8 @@ const dataLabelsPlugin = {
 
       meta.data.forEach((element, index) => {
         const raw = dataset.data?.[index];
+        if (!shouldRenderReportDataLabel(raw)) return;
         const numericValue = Number(raw);
-        if (!Number.isFinite(numericValue)) return;
 
         const position = element.tooltipPosition();
         const isDoughnut = chart.config.type === 'doughnut';

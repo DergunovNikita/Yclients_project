@@ -31,6 +31,7 @@ from models import (
     Comment,
     Company,
     FinancialTransaction,
+    GoodCatalog,
     GoodTransaction,
     Group,
     ManualFactMetric,
@@ -124,6 +125,7 @@ async def test_dashboard_reports_registry_contract(async_session):
     assert by_id['revenue_dynamics']['filters']['compare'] is True
     assert by_id['year_over_year']['status'] == 'ready'
     assert by_id['year_over_year']['group'] == 'finance'
+    assert by_id['year_over_year']['filters']['date_range'] is False
     assert by_id['new_vs_returning_cross']['status'] == 'ready'
     assert by_id['new_vs_returning_cross']['group'] == 'clients'
     assert by_id['staff_leaderboard']['status'] == 'ready'
@@ -295,15 +297,48 @@ async def test_dashboard_client_reports_revenue_uses_paid_service_rows(async_ses
     async_session.add_all([
         Client(id=1, name='Paying Client', company_id=1),
         Client(id=2, name='No Payment Client', company_id=1),
+        Client(id=3, name='Payment Only Client', company_id=1),
     ])
     await async_session.flush()
     async_session.add_all([
         Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 10), attendance=1),
         Appointment(id=2, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 11), attendance=1),
         Appointment(id=3, company_id=1, staff_id=1, client_id=2, date=date(2025, 1, 12), attendance=1),
+        Appointment(id=4, company_id=1, staff_id=1, client_id=3, date=date(2024, 12, 20), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all(_paid_service_revenue_filter_rows())
+    async_session.add_all([
+        *(
+            row
+            for row in _paid_service_revenue_filter_rows()
+            if row.sold_item_type != 'goods_transaction'
+        ),
+        AccountCatalog(
+            company_id=1,
+            account_id=99,
+            title='Бонусный счет',
+            updated_at=datetime(2025, 1, 1),
+        ),
+        FinancialTransaction(
+            id=6,
+            date=datetime(2025, 1, 20, 12),
+            amount=700.0,
+            record_id=4,
+            sold_item_type='service',
+            master_id=1,
+            company_id=1,
+        ),
+        FinancialTransaction(
+            id=7,
+            date=datetime(2025, 1, 20, 13),
+            amount=9000.0,
+            record_id=1,
+            sold_item_type='service',
+            master_id=1,
+            account_id=99,
+            company_id=1,
+        ),
+    ])
     await async_session.commit()
 
     async def override_db():
@@ -320,41 +355,77 @@ async def test_dashboard_client_reports_revenue_uses_paid_service_rows(async_ses
 
     assert r.status_code == 200
     data = r.json()['data']
-    assert [card['value'] for card in data['cards']] == [2, 3, 1500.0, 750.0]
+    card_values = [card['value'] for card in data['cards']]
+    assert card_values[:3] == [3, 3, 2200.0]
+    assert card_values[3] == pytest.approx(2200.0 / 3)
     frequency_by_bucket = {row['bucket']: row for row in data['raw']['visit_frequency']}
+    assert frequency_by_bucket['0 визитов']['clients'] == 1
+    assert frequency_by_bucket['0 визитов']['revenue'] == 700.0
     assert frequency_by_bucket['1 визит']['clients'] == 1
     assert frequency_by_bucket['1 визит']['revenue'] == 0.0
     assert frequency_by_bucket['2-3 визита']['clients'] == 1
     assert frequency_by_bucket['2-3 визита']['revenue'] == 1500.0
 
+    overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    plan_fact = await dashboard_service._fact_metric_components(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        1,
+    )
+    assert data['cards'][2]['value'] == overview['revenue']['service_revenue'] == 2200.0
+    assert data['cards'][2]['value'] == plan_fact['revenue']
+
 
 @pytest.mark.asyncio
-async def test_dashboard_year_over_year_report_uses_aggregate_entities_without_service_slice(async_session):
+async def test_dashboard_year_over_year_uses_actual_history_and_overview_formulas(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 8, 1, 12, 0),
+    )
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
     async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add_all([Client(id=value, name=f'Client {value}', company_id=1) for value in range(1, 9)])
+    await async_session.flush()
     async_session.add_all([
-        Client(id=1, name='Client 2024 A', company_id=1),
-        Client(id=2, name='Client 2024 B', company_id=1),
-        Client(id=3, name='Client 2025 A', company_id=1),
-        Client(id=4, name='Client 2025 B', company_id=1),
-        Client(id=5, name='Client 2025 C', company_id=1),
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2023, 5, 10), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2023, 6, 11), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=3, date=date(2024, 1, 10), attendance=1),
+        Appointment(id=4, company_id=1, staff_id=1, client_id=4, date=date(2024, 12, 11), attendance=1),
+        Appointment(id=5, company_id=1, staff_id=1, client_id=5, date=date(2025, 1, 10), attendance=1),
+        Appointment(id=6, company_id=1, staff_id=1, client_id=6, date=date(2025, 8, 12), attendance=1),
+        # Future visits, including one later today, are not factual boundaries.
+        Appointment(id=7, company_id=1, staff_id=1, client_id=7, date=date(2027, 1, 10), attendance=0),
+        Appointment(id=8, company_id=1, staff_id=1, client_id=8, date=date(2026, 8, 1), datetime=datetime(2026, 8, 1, 18, 0), attendance=1),
     ])
     await async_session.flush()
     async_session.add_all([
-        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2024, 1, 10), attendance=1),
-        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2024, 1, 11), attendance=1),
-        Appointment(id=3, company_id=1, staff_id=1, client_id=3, date=date(2025, 1, 10), attendance=1),
-        Appointment(id=4, company_id=1, staff_id=1, client_id=4, date=date(2025, 1, 11), attendance=1),
-        Appointment(id=5, company_id=1, staff_id=1, client_id=5, date=date(2025, 1, 12), attendance=1),
-    ])
-    await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2024, 1, 10, 12, 0), amount=1000.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2024, 1, 11, 12, 0), amount=1000.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=3, date=datetime(2025, 1, 10, 12, 0), amount=1500.0, record_id=3, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=4, date=datetime(2025, 1, 11, 12, 0), amount=1500.0, record_id=4, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=5, date=datetime(2025, 1, 12, 12, 0), amount=1500.0, record_id=5, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=1, date=datetime(2023, 5, 10, 12, 0), amount=1000.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=2, date=datetime(2023, 6, 11, 12, 0), amount=1200.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=3, date=datetime(2023, 5, 15, 12, 0), amount=100.0, expense_title='Пополнение личного счета', sold_item_type='personal_account', master_id=1, company_id=1),
+        FinancialTransaction(id=4, date=datetime(2024, 1, 10, 12, 0), amount=1500.0, record_id=3, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=5, date=datetime(2024, 12, 11, 12, 0), amount=2000.0, record_id=4, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=6, date=datetime(2024, 2, 10, 12, 0), amount=400.0, sold_item_id=10, sold_item_type='goods_transaction', master_id=1, company_id=1),
+        FinancialTransaction(id=7, date=datetime(2025, 1, 10, 12, 0), amount=2500.0, record_id=5, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=8, date=datetime(2025, 8, 12, 12, 0), amount=3000.0, record_id=6, sold_item_type='service', master_id=1, company_id=1),
+        # A revenue fact after the last visit must advance actual latest_year.
+        FinancialTransaction(id=9, date=datetime(2026, 7, 20, 12, 0), amount=500.0, expense_title='Пополнение личного счета', sold_item_type='personal_account', master_id=1, company_id=1),
+        FinancialTransaction(id=10, date=datetime(2026, 8, 1, 10, 0), amount=200.0, expense_title='Пополнение личного счета', sold_item_type='personal_account', master_id=1, company_id=1),
+        FinancialTransaction(id=11, date=datetime(2026, 8, 1, 18, 0), amount=999.0, expense_title='Пополнение личного счета', sold_item_type='personal_account', master_id=1, company_id=1),
+        SyncSourceState(company_id=1, source='appointments_detail', period_start=date(2023, 1, 1), period_end=date(2026, 12, 31), synced_at=datetime(2026, 8, 1)),
+        SyncSourceState(company_id=1, source='financial_transactions_detail', period_start=date(2023, 1, 1), period_end=date(2026, 12, 31), synced_at=datetime(2026, 8, 1)),
+        SyncSourceState(company_id=1, source='goods_transactions_detail', period_start=date(2023, 1, 1), period_end=date(2026, 12, 31), synced_at=datetime(2026, 8, 1)),
     ])
     await async_session.commit()
 
@@ -363,47 +434,191 @@ async def test_dashboard_year_over_year_report_uses_aggregate_entities_without_s
 
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        r = await client.get(
-            '/dashboard/reports/data',
-            params={
-                'report_id': 'year_over_year',
-                'start_date': '2025-01-01',
-                'end_date': '2025-01-31',
-                'company_id': 1,
-            },
-        )
+    statement_count = 0
+
+    def count_statements(*_args):
+        nonlocal statement_count
+        statement_count += 1
+
+    event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
+    try:
+        async with AsyncClient(transport=transport, base_url='http://test') as client:
+            r = await client.get(
+                '/dashboard/reports/data',
+                params={
+                    'report_id': 'year_over_year',
+                    'start_date': '2025-01-01',
+                    'end_date': '2025-01-31',
+                    'company_id': 1,
+                },
+            )
+    finally:
+        event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
     app.dependency_overrides.clear()
 
     assert r.status_code == 200
     data = r.json()['data']
     assert data['report_id'] == 'year_over_year'
+    assert statement_count <= 15
     assert data['source_status'] == 'ready'
     assert data['raw']['service_detail_excluded'] is True
-    assert [row['year'] for row in data['raw']['years']] == [2022, 2023, 2024, 2025, 2026]
-    assert data['raw']['start_year'] == 2022
-    assert data['raw']['end_year'] == 2026
-    assert data['raw']['months_in_scope'] == ['01']
+    assert [row['year'] for row in data['raw']['years']] == [2023, 2024, 2025, 2026]
+    assert data['raw']['activity_start'] == '2023-05-10'
+    assert data['raw']['activity_end'] == '2026-08-01'
+    assert data['raw']['latest_year'] == 2026
+    assert data['raw']['months_in_scope'] == [f'{month:02d}' for month in range(1, 13)]
     years_by_year = {row['year']: row for row in data['raw']['years']}
-    assert years_by_year[2022]['revenue'] == 0.0
-    assert years_by_year[2023]['revenue'] == 0.0
-    assert years_by_year[2024]['revenue'] == 2000.0
+    assert years_by_year[2023]['period_start'] == '2023-05-10'
+    assert years_by_year[2023]['is_partial_year'] is True
+    assert years_by_year[2023]['revenue'] == 2300.0
+    assert years_by_year[2024]['is_partial_year'] is False
+    assert years_by_year[2024]['revenue'] == 3900.0
     assert years_by_year[2024]['appointments'] == 2
-    assert years_by_year[2024]['avg_check'] == 1000.0
-    assert years_by_year[2025]['revenue'] == 4500.0
-    assert years_by_year[2025]['appointments'] == 3
-    assert years_by_year[2025]['avg_check'] == 1500.0
-    assert years_by_year[2025]['revenue_change_pct'] == 125.0
-    assert years_by_year[2025]['appointments_change_pct'] == 50.0
-    assert years_by_year[2026]['revenue'] == 0.0
+    assert years_by_year[2024]['avg_check'] == 1950.0
+    assert years_by_year[2025]['period_end'] == '2025-12-31'
+    assert years_by_year[2025]['is_partial_year'] is False
+    assert years_by_year[2025]['revenue'] == 5500.0
+    assert years_by_year[2025]['appointments'] == 2
+    assert years_by_year[2025]['avg_check'] == 2750.0
+    assert years_by_year[2025]['revenue_change_pct'] == 41.03
+    assert years_by_year[2025]['comparison_status'] == 'comparable'
+    assert years_by_year[2026]['period_end'] == '2026-08-01'
+    assert years_by_year[2026]['is_partial_year'] is True
+    assert years_by_year[2026]['revenue'] == 700.0
+    assert years_by_year[2026]['appointments'] == 0
+    assert years_by_year[2026]['comparison_status'] == 'different_period'
     assert {table['id'] for table in data['tables']} == {'years', 'months'}
     monthly_chart = next(chart for chart in data['charts'] if chart['id'] == 'monthly_revenue_yoy')
-    assert monthly_chart['labels'] == ['01']
-    assert [dataset['label'] for dataset in monthly_chart['datasets']] == ['2022', '2023', '2024', '2025', '2026']
+    assert monthly_chart['labels'] == [f'{month:02d}' for month in range(1, 13)]
+    assert [dataset['label'] for dataset in monthly_chart['datasets']] == ['2023', '2024', '2025', '2026']
+    datasets = {dataset['label']: dataset['data'] for dataset in monthly_chart['datasets']}
+    assert datasets['2023'][:4] == [None, None, None, None]
+    assert datasets['2023'][4:6] == [1100.0, 1200.0]
+    assert datasets['2024'][0:2] == [1500.0, 400.0]
+    assert datasets['2024'][11] == 2000.0
+    assert datasets['2025'][0] == 2500.0
+    assert datasets['2025'][7] == 3000.0
+    assert datasets['2025'][8:] == [0.0, 0.0, 0.0, 0.0]
+    assert datasets['2026'][:6] == [0.0] * 6
+    assert datasets['2026'][6] == 500.0
+    assert datasets['2026'][7] == 200.0
+    assert datasets['2026'][8:] == [None, None, None, None]
+    for year, expected in ((2023, 2300.0), (2024, 3900.0), (2025, 5500.0), (2026, 700.0)):
+        assert sum(value or 0 for value in datasets[str(year)]) == expected
+
+    overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    plan_fact_components = await dashboard_service._fact_metric_components(
+        async_session, date(2025, 1, 1), date(2025, 12, 31), 1
+    )
+    assert years_by_year[2025]['revenue'] == overview['revenue']['total']
+    assert years_by_year[2025]['revenue'] == plan_fact_components['revenue']
+    assert years_by_year[2025]['appointments'] == overview['revenue']['appointments']
+    assert years_by_year[2025]['appointments'] == plan_fact_components['avg_check_denominator']
 
 
 @pytest.mark.asyncio
-async def test_dashboard_year_over_year_rejects_cross_year_period(async_session):
+async def test_year_over_year_current_december_31_remains_partial(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 12, 31, 12, 0),
+    )
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            date=date(2025, 1, 1),
+            datetime=datetime(2025, 1, 1, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            date=date(2025, 12, 31),
+            datetime=datetime(2025, 12, 31, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=3,
+            company_id=1,
+            staff_id=1,
+            date=date(2026, 1, 1),
+            datetime=datetime(2026, 1, 1, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=4,
+            company_id=1,
+            staff_id=1,
+            date=date(2026, 12, 31),
+            datetime=datetime(2026, 12, 31, 10),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            record_id=1,
+            sold_item_type='service',
+            date=datetime(2025, 1, 1, 10),
+            amount=100.0,
+        ),
+        FinancialTransaction(
+            id=2,
+            company_id=1,
+            master_id=1,
+            record_id=3,
+            sold_item_type='service',
+            date=datetime(2026, 1, 1, 10),
+            amount=200.0,
+        ),
+    ])
+    for source in (
+        'appointments_detail',
+        'financial_transactions_detail',
+        'goods_transactions_detail',
+    ):
+        async_session.add(SyncSourceState(
+            company_id=1,
+            source=source,
+            period_start=date(2025, 1, 1),
+            period_end=date(2026, 12, 31),
+            synced_at=datetime(2026, 12, 31, 12),
+        ))
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 12, 1),
+        date(2026, 12, 31),
+        allowed_company_ids=[1],
+    )
+    years = {row['year']: row for row in report['raw']['years']}
+
+    assert years[2025]['is_partial_year'] is False
+    assert years[2026]['is_partial_year'] is True
+    assert years[2026]['period_status'] == 'Неполный'
+    assert years[2026]['comparison_status'] == 'different_period'
+    assert years[2026]['revenue_change_pct'] is None
+
+
+@pytest.mark.asyncio
+async def test_dashboard_year_over_year_empty_scope_returns_empty_actual_history(async_session):
     async def override_db():
         yield async_session
 
@@ -420,8 +635,1142 @@ async def test_dashboard_year_over_year_rejects_cross_year_period(async_session)
         )
     app.dependency_overrides.clear()
 
-    assert response.status_code == 400
-    assert 'within one calendar year' in response.json()['detail']
+    assert response.status_code == 200
+    data = response.json()['data']
+    assert data['source_status'] == 'partial'
+    assert data['raw']['years'] == []
+    assert data['raw']['months'] == []
+    assert data['raw']['latest_year'] is None
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_history_can_start_with_direct_revenue_only(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 8, 1, 12, 0),
+    )
+    fact_day = date(2021, 4, 5)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            sold_item_id=10,
+            sold_item_type='goods_transaction',
+            date=datetime(2021, 4, 5, 12),
+            amount=250.0,
+        ),
+    ])
+    for source in (
+        'appointments_detail',
+        'financial_transactions_detail',
+        'goods_transactions_detail',
+    ):
+        async_session.add(SyncSourceState(
+            company_id=1,
+            source=source,
+            period_start=fact_day,
+            period_end=date(2026, 8, 1),
+            synced_at=datetime(2021, 4, 5, 13),
+        ))
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+
+    assert report['raw']['activity_start'] == fact_day.isoformat()
+    assert report['raw']['activity_end'] == fact_day.isoformat()
+    assert report['raw']['latest_year'] == 2021
+    assert report['raw']['years'][0]['revenue'] == 250.0
+    assert report['raw']['years'][0]['goods_revenue'] == 250.0
+    assert report['raw']['years'][0]['appointments'] == 0
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_history_includes_payment_before_completed_visit(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 8, 1, 12, 0),
+    )
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            date=date(2024, 1, 2),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            record_id=1,
+            sold_item_id=10,
+            sold_item_type='service',
+            date=datetime(2023, 12, 30, 12),
+            amount=100.0,
+        ),
+    ])
+    appointment_state = SyncSourceState(
+        company_id=1,
+        source='appointments_detail',
+        period_start=date(2023, 12, 30),
+        period_end=date(2023, 12, 31),
+        synced_at=datetime(2024, 1, 2, 13),
+    )
+    async_session.add(appointment_state)
+    for source in ('financial_transactions_detail', 'goods_transactions_detail'):
+        async_session.add(SyncSourceState(
+            company_id=1,
+            source=source,
+            period_start=date(2023, 12, 30),
+            period_end=date(2026, 8, 1),
+            synced_at=datetime(2024, 1, 2, 13),
+        ))
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+    years = {row['year']: row for row in report['raw']['years']}
+
+    assert report['raw']['activity_start'] == '2023-12-30'
+    assert report['raw']['activity_end'] == '2024-01-02'
+    december = next(
+        row
+        for row in report['raw']['months']
+        if row['year'] == 2023 and row['month'] == 12
+    )
+    assert years[2023]['source_status'] == 'partial'
+    assert years[2023]['revenue'] is None
+    assert december['revenue'] is None
+
+    appointment_state.period_end = date(2026, 8, 1)
+    await async_session.commit()
+    covered_report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+    covered_years = {row['year']: row for row in covered_report['raw']['years']}
+    assert covered_years[2023]['revenue'] == 100.0
+    assert covered_years[2024]['appointments'] == 1
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_masks_linked_direct_revenue_without_appointment_coverage(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 8, 1, 12, 0),
+    )
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            date=date(2024, 1, 10),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=None,
+            record_id=1,
+            sold_item_id=10,
+            sold_item_type='goods_transaction',
+            date=datetime(2024, 1, 10, 12),
+            amount=100.0,
+        ),
+        FinancialTransaction(
+            id=2,
+            company_id=1,
+            master_id=None,
+            record_id=1,
+            expense_title='Пополнение личного счета',
+            sold_item_type='personal_account',
+            date=datetime(2024, 1, 10, 13),
+            amount=50.0,
+        ),
+        SyncSourceState(
+            company_id=1,
+            source='financial_transactions_detail',
+            period_start=date(2024, 1, 10),
+            period_end=date(2024, 1, 10),
+            synced_at=datetime(2024, 1, 10, 14),
+        ),
+        SyncSourceState(
+            company_id=1,
+            source='goods_transactions_detail',
+            period_start=date(2024, 1, 10),
+            period_end=date(2024, 1, 10),
+            synced_at=datetime(2024, 1, 10, 14),
+        ),
+    ])
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+    annual = report['raw']['years'][0]
+    january = next(row for row in report['raw']['months'] if row['month'] == 1)
+
+    assert annual['source_status'] == 'partial'
+    assert annual['goods_revenue'] is None
+    assert annual['topup_revenue'] is None
+    assert annual['revenue'] is None
+    assert january['goods_revenue'] is None
+    assert january['topup_revenue'] is None
+    assert january['revenue'] is None
+
+
+@pytest.mark.asyncio
+async def test_factual_cutoff_is_shared_by_overview_plan_fact_daily_and_years(
+    async_session,
+    monkeypatch,
+):
+    factual_at = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: factual_at)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Company(id=2, title='Salon 2', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Staff(id=2, name='Master 2', position='Барбер', company_id=2),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 12),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            record_id=1,
+            sold_item_id=10,
+            sold_item_type='service',
+            date=datetime(2025, 1, 10, 12),
+            amount=100.0,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            date=date(2026, 8, 1),
+            datetime=datetime(2026, 8, 1, 18),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=2,
+            company_id=1,
+            master_id=1,
+            record_id=2,
+            sold_item_id=10,
+            sold_item_type='service',
+            date=datetime(2026, 8, 1, 10),
+            amount=700.0,
+        ),
+        Appointment(
+            id=3,
+            company_id=2,
+            staff_id=2,
+            date=date(2026, 8, 1),
+            datetime=datetime(2026, 8, 1, 18),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=3,
+            company_id=2,
+            master_id=None,
+            record_id=3,
+            sold_item_id=20,
+            sold_item_type='goods_transaction',
+            date=datetime(2026, 8, 1, 10),
+            amount=300.0,
+        ),
+        FinancialTransaction(
+            id=4,
+            company_id=1,
+            master_id=None,
+            record_id=2,
+            sold_item_id=30,
+            sold_item_type='goods_transaction',
+            date=datetime(2026, 8, 1, 10),
+            amount=250.0,
+        ),
+    ])
+    for source in (
+        'appointments_detail',
+        'financial_transactions_detail',
+        'goods_transactions_detail',
+    ):
+        async_session.add(SyncSourceState(
+            company_id=1,
+            source=source,
+            period_start=date(2025, 1, 1),
+            period_end=date(2026, 12, 31),
+            synced_at=factual_at,
+        ))
+    await async_session.commit()
+
+    overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2026, 1, 1),
+        date(2026, 12, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+        factual_at=factual_at,
+    )
+    daily = await dashboard_service.fetch_revenue_daily(
+        async_session,
+        date(2026, 1, 1),
+        date(2026, 12, 31),
+        company_id=1,
+        include_opz=False,
+        factual_at=factual_at,
+    )
+    plan_fact = await fetch_plan_fact(
+        async_session,
+        date(2026, 1, 1),
+        date(2026, 12, 31),
+        company_id=1,
+        include_all_staff_in_leaderboards=True,
+        factual_at=factual_at,
+    )
+    network_plan_fact = await fetch_plan_fact(
+        async_session,
+        date(2026, 1, 1),
+        date(2026, 12, 31),
+        allowed_company_ids=[1, 2],
+        include_all_staff_in_leaderboards=True,
+        factual_at=factual_at,
+    )
+    year_report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        company_id=1,
+    )
+    parent_facts = {
+        cell['code']: cell['fact']
+        for cell in plan_fact['parent_group']['metrics']
+    }
+
+    assert overview['revenue']['total'] == 0.0
+    assert overview['revenue']['appointments'] == 0
+    assert daily == []
+    assert parent_facts['revenue'] == 0.0
+    assert parent_facts['clients'] == 0.0
+    network_parent_facts = {
+        cell['code']: cell['fact']
+        for cell in next(
+            group for group in network_plan_fact['groups'] if group['scope'] == 'network'
+        )['metrics']
+    }
+    assert network_parent_facts['revenue'] == 0.0
+    assert all(
+        next(cell['fact'] for cell in group['metrics'] if cell['code'] == 'revenue') == 0.0
+        for group in network_plan_fact['groups']
+        if group['scope'] == 'branch'
+    )
+    assert year_report['raw']['latest_year'] == 2025
+    assert year_report['period']['end'] == '2026-08-01'
+    assert year_report['raw']['activity_end'] == '2025-01-10'
+    assert [row['year'] for row in year_report['raw']['years']] == [2025, 2026]
+    years = {row['year']: row for row in year_report['raw']['years']}
+    assert years[2025]['revenue'] == 100.0
+    assert years[2026]['revenue'] == 0.0
+    assert years[2026]['appointments'] == 0
+    assert years[2026]['is_partial_year'] is True
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_uses_configured_branch_scope_when_access_is_unrestricted(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 8, 1, 12, 0),
+    )
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Configured salon', group_id=1),
+        Company(id=2, title='Unconfigured salon', group_id=1),
+        Staff(id=1, name='Configured master', position='Барбер', company_id=1),
+        Staff(id=2, name='Unconfigured master', position='Барбер', company_id=2),
+        PortalAccount(id=1, label='Tenant', created_at=datetime(2024, 1, 1)),
+        PortalBranch(portal_account_id=1, company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            date=date(2024, 1, 1),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=2,
+            staff_id=2,
+            date=date(2025, 1, 1),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            record_id=1,
+            sold_item_id=10,
+            sold_item_type='service',
+            date=datetime(2024, 1, 1, 12),
+            amount=100.0,
+        ),
+        FinancialTransaction(
+            id=2,
+            company_id=2,
+            master_id=2,
+            record_id=2,
+            sold_item_id=20,
+            sold_item_type='service',
+            date=datetime(2025, 1, 1, 12),
+            amount=900.0,
+        ),
+    ])
+    for source in (
+        'appointments_detail',
+        'financial_transactions_detail',
+        'goods_transactions_detail',
+    ):
+        async_session.add(SyncSourceState(
+            company_id=1,
+            source=source,
+            period_start=date(2024, 1, 1),
+            period_end=date(2024, 12, 31),
+            synced_at=datetime(2025, 1, 1),
+        ))
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+    )
+
+    assert report['raw']['latest_year'] == 2024
+    assert [row['year'] for row in report['raw']['years']] == [2024, 2025, 2026]
+    years = {row['year']: row for row in report['raw']['years']}
+    assert years[2024]['revenue'] == 100.0
+    assert years[2025]['revenue'] is None
+    assert years[2026]['revenue'] is None
+
+    overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2024, 1, 1),
+        date(2025, 12, 31),
+        include_appointments_breakdown=False,
+    )
+    daily = await dashboard_service.fetch_revenue_daily(
+        async_session,
+        date(2024, 1, 1),
+        date(2025, 12, 31),
+        include_opz=False,
+    )
+    top_services = await dashboard_service.fetch_top_services(
+        async_session,
+        date(2024, 1, 1),
+        date(2025, 12, 31),
+    )
+
+    assert overview['revenue']['total'] == 100.0
+    assert overview['revenue']['appointments'] == 1
+    assert sum(row['revenue'] for row in daily) == 100.0
+    assert sum(row['appointments'] for row in daily) == 1
+    assert [row['date'] for row in daily] == ['2024-01-01']
+    assert [row['revenue'] for row in top_services] == [100.0]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_year_over_year_keeps_partial_multi_company_year(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 8, 1, 12),
+    )
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add_all([
+        Company(id=1, title='Salon 1', group_id=1),
+        Company(id=2, title='Salon 2', group_id=1),
+        Company(id=3, title='Unsynced salon', group_id=1),
+        Staff(id=1, name='Master 1', position='Барбер', company_id=1),
+        Staff(id=2, name='Master 2', position='Барбер', company_id=2),
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2023, 1, 1), attendance=1),
+        Appointment(id=2, company_id=2, staff_id=2, date=date(2023, 1, 1), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, date=date(2024, 12, 31), attendance=1),
+        Appointment(id=4, company_id=2, staff_id=2, date=date(2024, 12, 31), attendance=1),
+        FinancialTransaction(id=1, company_id=1, master_id=1, record_id=1, sold_item_type='service', date=datetime(2023, 1, 1, 12), amount=100.0),
+        FinancialTransaction(id=2, company_id=2, master_id=2, record_id=2, sold_item_type='service', date=datetime(2023, 1, 1, 12), amount=200.0),
+        FinancialTransaction(id=3, company_id=1, master_id=1, record_id=3, sold_item_type='service', date=datetime(2024, 12, 31, 12), amount=300.0),
+        FinancialTransaction(id=4, company_id=2, master_id=2, record_id=4, sold_item_type='service', date=datetime(2024, 12, 31, 12), amount=400.0),
+        SyncSourceState(company_id=1, source='appointments_detail', period_start=date(2023, 1, 1), period_end=date(2024, 12, 31), synced_at=datetime(2025, 1, 1)),
+        SyncSourceState(company_id=1, source='financial_transactions_detail', period_start=date(2023, 1, 1), period_end=date(2024, 12, 31), synced_at=datetime(2025, 1, 1)),
+        SyncSourceState(company_id=2, source='appointments_detail', period_start=date(2023, 1, 1), period_end=date(2024, 12, 31), synced_at=datetime(2025, 1, 1)),
+        SyncSourceState(company_id=2, source='financial_transactions_detail', period_start=date(2023, 1, 1), period_end=date(2023, 12, 31), synced_at=datetime(2025, 1, 1)),
+        SyncSourceState(company_id=1, source='goods_transactions_detail', period_start=date(2023, 1, 1), period_end=date(2024, 12, 31), synced_at=datetime(2025, 1, 1)),
+        SyncSourceState(company_id=2, source='goods_transactions_detail', period_start=date(2023, 1, 1), period_end=date(2024, 12, 31), synced_at=datetime(2025, 1, 1)),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'year_over_year',
+                'start_date': '2024-01-01',
+                'end_date': '2024-12-31',
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    data = response.json()['data']
+    assert data['source_status'] == 'partial'
+    assert 'financial_transactions_detail' in data['missing_sources']
+    assert [row['year'] for row in data['raw']['years']] == [2023, 2024, 2025, 2026]
+    years = {row['year']: row for row in data['raw']['years']}
+    # Company 3 has no local facts or coverage and still participates in scope.
+    assert years[2023]['source_status'] == 'partial'
+    assert 'appointments_detail' in years[2023]['missing_components']
+    assert years[2024]['revenue'] is None
+    assert years[2024]['appointments'] is None
+    assert years[2024]['avg_check'] is None
+    assert years[2024]['source_status'] == 'partial'
+    assert years[2024]['comparison_status'] == 'incomplete_source'
+    assert years[2024]['revenue_change_pct'] is None
+    assert years[2025]['revenue'] is None
+    assert years[2026]['revenue'] is None
+    cards = {card['label']: card['value'] for card in data['cards']}
+    assert cards['Выручка последнего года'] is None
+    assert cards['Визиты последнего года'] is None
+    charts = {chart['id']: chart for chart in data['charts']}
+    assert charts['year_revenue']['datasets'][0]['data'] == [None, None, None, None]
+    assert charts['year_appointments']['datasets'][0]['data'] == [None, None, None, None]
+    december_2024 = next(
+        row
+        for row in data['raw']['months']
+        if row['year'] == 2024 and row['month'] == 12
+    )
+    assert december_2024['revenue'] is None
+    assert december_2024['appointments'] is None
+    assert december_2024['source_status'] == 'partial'
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_query_count_does_not_grow_with_history_years(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 8, 1, 12, 0),
+    )
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add_all([
+        Company(id=1, title='Salon 1', group_id=1),
+        Company(id=2, title='Salon 2', group_id=1),
+        Staff(id=1, name='Master 1', position='Барбер', company_id=1),
+        Staff(id=2, name='Master 2', position='Барбер', company_id=2),
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2015, 1, 1), attendance=1),
+        Appointment(id=2, company_id=2, staff_id=2, date=date(2026, 7, 1), attendance=1),
+        FinancialTransaction(id=1, company_id=1, master_id=1, record_id=1, sold_item_type='service', date=datetime(2015, 1, 1, 12), amount=100.0),
+        FinancialTransaction(id=2, company_id=2, master_id=2, record_id=2, sold_item_type='service', date=datetime(2026, 7, 1, 12), amount=200.0),
+    ])
+    for company_id in (1, 2):
+        for source in (
+            'appointments_detail',
+            'financial_transactions_detail',
+            'goods_transactions_detail',
+        ):
+            async_session.add(SyncSourceState(
+                company_id=company_id,
+                source=source,
+                period_start=date(2015, 1, 1),
+                period_end=date(2026, 12, 31),
+                synced_at=datetime(2026, 8, 1),
+            ))
+    await async_session.commit()
+
+    statement_count = 0
+
+    def count_statements(*_args):
+        nonlocal statement_count
+        statement_count += 1
+
+    event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
+    try:
+        data = await dashboard_reports.fetch_report_data(
+            async_session,
+            'year_over_year',
+            date(2026, 1, 1),
+            date(2026, 1, 31),
+            allowed_company_ids=[1, 2],
+        )
+    finally:
+        event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
+
+    assert [row['year'] for row in data['raw']['years']] == list(range(2015, 2027))
+    assert data['raw']['latest_year'] == 2026
+    assert statement_count <= 15
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_opz_deduplicates_repeated_client_per_year(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 8, 1, 12, 0),
+    )
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add_all([
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Client(id=1, name='Returning client', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2024, 1, 10),
+            datetime=datetime(2024, 1, 10, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2024, 2, 1),
+            create_date=datetime(2024, 1, 10, 12),
+            attendance=0,
+        ),
+        Appointment(
+            id=3,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=4,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 2, 1),
+            create_date=datetime(2025, 1, 10, 12),
+            attendance=0,
+        ),
+        SyncSourceState(
+            company_id=1,
+            source='appointments_detail',
+            period_start=date(2024, 1, 1),
+            period_end=date(2025, 12, 31),
+            synced_at=datetime(2026, 8, 1),
+        ),
+        SyncSourceState(
+            company_id=1,
+            source='financial_transactions_detail',
+            period_start=date(2024, 1, 1),
+            period_end=date(2025, 12, 31),
+            synced_at=datetime(2026, 8, 1),
+        ),
+        SyncSourceState(
+            company_id=1,
+            source='goods_transactions_detail',
+            period_start=date(2024, 1, 1),
+            period_end=date(2025, 12, 31),
+            synced_at=datetime(2026, 8, 1),
+        ),
+    ])
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        allowed_company_ids=[1],
+    )
+    years = {row['year']: row for row in report['raw']['years']}
+    overview_2024 = await dashboard_service.fetch_summary(
+        async_session,
+        date(2024, 1, 10),
+        date(2024, 12, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    overview_2025 = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 2, 1),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+
+    assert years[2024]['opz_qty'] == overview_2024['visit_metrics']['opz_qty'] == 1.0
+    assert years[2025]['opz_qty'] == overview_2025['visit_metrics']['opz_qty'] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_opz_fact_advances_latest_year(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 8, 1, 12, 0),
+    )
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Client(id=1, name='Client', company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2024, 12, 31),
+            datetime=datetime(2024, 12, 31, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 2, 1),
+            create_date=datetime(2025, 1, 1, 12),
+            attendance=0,
+        ),
+    ])
+    for source in (
+        'appointments_detail',
+        'financial_transactions_detail',
+        'goods_transactions_detail',
+    ):
+        async_session.add(SyncSourceState(
+            company_id=1,
+            source=source,
+            period_start=date(2024, 1, 1),
+            period_end=date(2025, 12, 31),
+            synced_at=datetime(2026, 8, 1),
+        ))
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2025, 1, 1),
+        date(2025, 1, 1),
+        allowed_company_ids=[1],
+    )
+    years = {row['year']: row for row in report['raw']['years']}
+    overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 1),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    plan_fact = await dashboard_service._fact_metric_components(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 1),
+        1,
+    )
+
+    assert report['raw']['activity_end'] == '2025-01-01'
+    assert report['raw']['latest_year'] == 2025
+    assert years[2025]['opz_qty'] == overview['visit_metrics']['opz_qty'] == 1.0
+    assert years[2025]['opz_qty'] == plan_fact['opz_qty']
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_masks_opz_when_dependent_appointments_are_uncovered(
+    async_session,
+    monkeypatch,
+):
+    factual_at = datetime(2026, 8, 1, 12)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: factual_at)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Client(id=1, name='Client', company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2024, 12, 31),
+            datetime=datetime(2024, 12, 31, 12),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 2, 1),
+            create_date=datetime(2025, 1, 1, 10),
+            attendance=0,
+        ),
+    ])
+    appointment_state = SyncSourceState(
+        company_id=1,
+        source='appointments_detail',
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 12, 31),
+        synced_at=factual_at,
+    )
+    async_session.add(appointment_state)
+    for source in ('financial_transactions_detail', 'goods_transactions_detail'):
+        async_session.add(SyncSourceState(
+            company_id=1,
+            source=source,
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 12, 31),
+            synced_at=factual_at,
+        ))
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+    year_2025 = next(row for row in report['raw']['years'] if row['year'] == 2025)
+
+    assert year_2025['source_status'] == 'partial'
+    assert year_2025['missing_components'] == ['appointments_detail']
+    assert year_2025['opz_qty'] is None
+    assert year_2025['opz_pct'] is None
+    assert year_2025['revenue'] == 0.0
+    assert year_2025['appointments'] == 0
+
+    appointment_state.period_start = date(2024, 12, 31)
+    appointment_state.period_end = date(2025, 12, 31)
+    await async_session.commit()
+    covered_report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+    covered_2025 = next(
+        row for row in covered_report['raw']['years'] if row['year'] == 2025
+    )
+
+    assert covered_2025['source_status'] == 'ready'
+    assert covered_2025['opz_qty'] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_opz_year_facts_ignore_later_same_day_visit_for_staff(
+    async_session,
+):
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Factual master', position='Барбер', company_id=1),
+        Staff(id=2, name='Future master', position='Барбер', company_id=1),
+        Client(id=1, name='Client', company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2026, 7, 31),
+            datetime=datetime(2026, 7, 31, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2026, 8, 15),
+            create_date=datetime(2026, 8, 1, 10),
+            attendance=0,
+        ),
+        Appointment(
+            id=3,
+            company_id=1,
+            staff_id=2,
+            client_id=1,
+            date=date(2026, 8, 1),
+            datetime=datetime(2026, 8, 1, 18),
+            attendance=1,
+        ),
+    ])
+    await async_session.commit()
+
+    facts = await dashboard_service.fetch_opz_year_facts(
+        async_session,
+        date(2026, 7, 31),
+        date(2026, 8, 1),
+        company_id=1,
+        staff_id=1,
+        factual_at=datetime(2026, 8, 1, 12),
+    )
+
+    assert facts['latest_date'] == date(2026, 8, 1)
+    assert facts['counts'] == {2026: 1.0}
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_goods_source_controls_count_and_latest_year(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 8, 1, 12, 0),
+    )
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            date=date(2024, 1, 10),
+            attendance=1,
+        ),
+        GoodTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            type_id=1,
+            document_id=1,
+            amount=-2.0,
+            date=datetime(2026, 7, 20, 12),
+        ),
+        SyncSourceState(
+            company_id=1,
+            source='appointments_detail',
+            period_start=date(2024, 1, 1),
+            period_end=date(2026, 12, 31),
+            synced_at=datetime(2026, 8, 1),
+        ),
+        SyncSourceState(
+            company_id=1,
+            source='financial_transactions_detail',
+            period_start=date(2024, 1, 1),
+            period_end=date(2026, 12, 31),
+            synced_at=datetime(2026, 8, 1),
+        ),
+    ])
+    await async_session.commit()
+
+    missing_goods = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+    missing_years = {row['year']: row for row in missing_goods['raw']['years']}
+    july_2026 = next(
+        row
+        for row in missing_goods['raw']['months']
+        if row['year'] == 2026 and row['month'] == 7
+    )
+    assert missing_goods['raw']['latest_year'] == 2026
+    assert missing_years[2026]['goods_count'] is None
+    assert missing_years[2026]['source_status'] == 'partial'
+    assert 'goods_transactions_detail' in missing_years[2026]['missing_components']
+    assert july_2026['revenue'] == 0.0
+    assert july_2026['source_status'] == 'ready'
+
+    async_session.add(SyncSourceState(
+        company_id=1,
+        source='goods_transactions_detail',
+        period_start=date(2024, 1, 1),
+        period_end=date(2026, 12, 31),
+        synced_at=datetime(2026, 8, 1),
+    ))
+    await async_session.commit()
+    ready_goods = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+    ready_2026 = next(row for row in ready_goods['raw']['years'] if row['year'] == 2026)
+    overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2026, 1, 1),
+        date(2026, 7, 20),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    assert ready_goods['raw']['activity_end'] == '2026-07-20'
+    assert ready_2026['source_status'] == 'ready'
+    assert ready_2026['goods_count'] == overview['revenue']['goods_count'] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_nonfactual_visits_do_not_advance_latest_year(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 8, 1, 12, 0),
+    )
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            date=date(2024, 1, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            date=date(2026, 6, 20),
+            attendance=-1,
+        ),
+        Appointment(
+            id=3,
+            company_id=1,
+            staff_id=1,
+            date=date(2026, 8, 1),
+            datetime=datetime(2026, 8, 1, 18),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            record_id=3,
+            sold_item_type='service',
+            # The payment date is inside the retained historical window, but
+            # the linked visit itself is still later than report_now.
+            date=datetime(2024, 1, 10, 10),
+            amount=700.0,
+        ),
+    ])
+    for source in (
+        'appointments_detail',
+        'financial_transactions_detail',
+        'goods_transactions_detail',
+    ):
+        async_session.add(SyncSourceState(
+            company_id=1,
+            source=source,
+            period_start=date(2024, 1, 1),
+            period_end=date(2026, 12, 31),
+            synced_at=datetime(2026, 8, 1),
+        ))
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+
+    assert report['raw']['activity_end'] == '2024-01-10'
+    assert report['raw']['latest_year'] == 2024
+    assert [row['year'] for row in report['raw']['years']] == [2024, 2025, 2026]
+    years = {row['year']: row for row in report['raw']['years']}
+    assert years[2024]['revenue'] == 0.0
+    assert years[2024]['appointments'] == 1
+    assert years[2024]['is_latest_year'] is True
+    assert years[2025]['revenue'] == 0.0
+    assert years[2026]['revenue'] == 0.0
+    assert years[2026]['is_partial_year'] is True
+    current_months = [
+        row
+        for row in report['raw']['months']
+        if row['year'] == 2026
+    ]
+    assert [row['revenue'] for row in current_months[:8]] == [0.0] * 8
+    assert [row['revenue'] for row in current_months[8:]] == [None] * 4
 
 
 @pytest.mark.asyncio
@@ -581,15 +1930,51 @@ async def test_dashboard_staff_leaderboard_report_returns_top_tables(async_sessi
 async def test_dashboard_staff_efficiency_revenue_uses_paid_service_rows(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
-    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
-    async_session.add(Client(id=1, name='Client', company_id=1))
+    async_session.add_all([
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Staff(id=2, name='Payment only master', position='Барбер', company_id=1),
+        Client(id=1, name='Client', company_id=1),
+        Client(id=2, name='Payment only client', company_id=1),
+    ])
     await async_session.flush()
     async_session.add_all([
         Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 10), attendance=1),
         Appointment(id=2, company_id=1, staff_id=1, client_id=1, date=date(2025, 1, 11), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=2, client_id=2, date=date(2024, 12, 20), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all(_paid_service_revenue_filter_rows())
+    async_session.add_all([
+        *(
+            row
+            for row in _paid_service_revenue_filter_rows()
+            if row.sold_item_type != 'goods_transaction'
+        ),
+        AccountCatalog(
+            company_id=1,
+            account_id=99,
+            title='Бонусный счет',
+            updated_at=datetime(2025, 1, 1),
+        ),
+        FinancialTransaction(
+            id=10,
+            date=datetime(2025, 1, 10, 13, 0),
+            amount=9999.0,
+            record_id=1,
+            sold_item_type='service',
+            master_id=1,
+            account_id=99,
+            company_id=1,
+        ),
+        FinancialTransaction(
+            id=11,
+            date=datetime(2025, 1, 20, 12),
+            amount=700.0,
+            record_id=3,
+            sold_item_type='service',
+            master_id=2,
+            company_id=1,
+        ),
+    ])
     await async_session.commit()
 
     async def override_db():
@@ -605,7 +1990,8 @@ async def test_dashboard_staff_efficiency_revenue_uses_paid_service_rows(async_s
     app.dependency_overrides.clear()
 
     assert r.status_code == 200
-    rows = r.json()['data']['raw']['staff']
+    data = r.json()['data']
+    rows = data['raw']['staff']
     assert rows == [
         {
             'staff_id': 1,
@@ -617,8 +2003,219 @@ async def test_dashboard_staff_efficiency_revenue_uses_paid_service_rows(async_s
             'clients': 1,
             'revenue': 1500.0,
             'avg_check': 750.0,
-        }
+        },
+        {
+            'staff_id': 2,
+            'staff_name': 'Payment only master',
+            'company_title': 'Salon',
+            'appointments': 0,
+            'completed': 0,
+            'not_completed': 0,
+            'clients': 0,
+            'revenue': 700.0,
+            'avg_check': 0.0,
+        },
     ]
+    overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    plan_fact = await dashboard_service._fact_metric_components(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        1,
+    )
+    assert data['cards'][2]['value'] == overview['revenue']['service_revenue'] == 2200.0
+    assert data['cards'][2]['value'] == plan_fact['revenue']
+
+
+@pytest.mark.asyncio
+async def test_goods_report_revenue_matches_paid_overview_component(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add(
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            date=date(2025, 1, 10),
+            attendance=1,
+        )
+    )
+    async_session.add_all([
+        GoodCatalog(
+            company_id=1,
+            good_id=10,
+            title='Помада',
+            updated_at=datetime(2025, 1, 1),
+        ),
+        GoodTransaction(
+            id=1,
+            document_id=50,
+            type_id=1,
+            good_id=10,
+            good_title='Помада',
+            amount=-2.0,
+            cost=3.0,
+            master_id=1,
+            company_id=1,
+            date=datetime(2025, 1, 10, 12, 0),
+        ),
+        FinancialTransaction(
+            id=1,
+            date=datetime(2025, 1, 10, 12, 0),
+            amount=2400.0,
+            record_id=1,
+            sold_item_id=10,
+            sold_item_type='goods_transaction',
+            master_id=None,
+            company_id=1,
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'goods_dynamics',
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+                'company_id': 1,
+                'granularity': 'month',
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    data = response.json()['data']
+    cards = {card['label']: card['value'] for card in data['cards']}
+    assert cards['Выручка товаров'] == 2400.0
+    assert cards['Единиц продано'] == 2.0
+    assert data['raw']['goods'] == [{
+        'good_title': 'Помада',
+        'sales_count': 1,
+        'units': 2.0,
+        'revenue': 2400.0,
+    }]
+    assert data['raw']['by_staff'] == [{
+        'staff_name': 'Master',
+        'sales_count': 1,
+        'revenue': 2400.0,
+    }]
+    overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    assert cards['Выручка товаров'] == overview['revenue']['goods_revenue']
+
+
+@pytest.mark.asyncio
+async def test_service_breakdowns_use_the_overview_physical_account_filter(async_session):
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Service(id=10, title='Воск', company_id=1),
+        AccountCatalog(
+            company_id=1,
+            account_id=1,
+            title='Наличные',
+            updated_at=datetime(2025, 1, 1),
+        ),
+        AccountCatalog(
+            company_id=1,
+            account_id=2,
+            title='Бонусный счет',
+            updated_at=datetime(2025, 1, 1),
+        ),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            date=date(2025, 1, 10),
+            attendance=1,
+        ),
+        Transaction(
+            id=1,
+            appointment_id=1,
+            service_id=10,
+            service_title='Воск',
+            amount=1,
+            company_id=1,
+        ),
+        ServiceCatalog(
+            company_id=1,
+            service_id=10,
+            title='Воск',
+            updated_at=datetime(2025, 1, 1),
+        ),
+        ServiceLabel(
+            company_id=1,
+            service_id=10,
+            is_extra=True,
+            source='test',
+            updated_at=datetime(2025, 1, 1),
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            account_id=1,
+            record_id=1,
+            sold_item_id=10,
+            sold_item_type='service',
+            master_id=1,
+            date=datetime(2025, 1, 10, 12, 0),
+            amount=100.0,
+        ),
+        FinancialTransaction(
+            id=2,
+            company_id=1,
+            account_id=2,
+            record_id=1,
+            sold_item_id=10,
+            sold_item_type='service',
+            master_id=1,
+            date=datetime(2025, 1, 10, 12, 1),
+            amount=900.0,
+        ),
+    ])
+    await async_session.commit()
+
+    top_services = await dashboard_service.fetch_top_services(
+        async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1
+    )
+    extra_services = await dashboard_service.fetch_extra_services(
+        async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1
+    )
+    leaderboard_extra_revenue = await dashboard_service._extra_service_revenue_by_staff(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        [1],
+    )
+
+    assert len(top_services) == 1
+    assert top_services[0]['revenue'] == 100.0
+    assert len(extra_services) == 1
+    assert extra_services[0]['revenue'] == 100.0
+    assert leaderboard_extra_revenue == {1: 100.0}
 
 
 @pytest.mark.asyncio
@@ -936,6 +2533,43 @@ async def test_dashboard_bundle_requires_api_key(async_session, monkeypatch):
 
     app.dependency_overrides.clear()
     monkeypatch.setattr(auth_deps, 'API_KEY', '')
+
+
+@pytest.mark.asyncio
+async def test_dashboard_bundle_passes_one_factual_cutoff_to_every_metric_block(
+    async_session,
+    monkeypatch,
+):
+    cutoffs = []
+
+    def fake_fetch(result):
+        async def fetch(*args, **kwargs):
+            cutoffs.append(kwargs.get('factual_at'))
+            return result
+
+        return fetch
+
+    monkeypatch.setattr(dashboard_routes, 'fetch_summary', fake_fetch({}))
+    monkeypatch.setattr(dashboard_routes, 'fetch_revenue_daily', fake_fetch([]))
+    monkeypatch.setattr(dashboard_routes, 'fetch_top_services', fake_fetch([]))
+    monkeypatch.setattr(dashboard_routes, 'fetch_extra_services', fake_fetch([]))
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/dashboard/bundle',
+            params={'start_date': '2026-08-01', 'end_date': '2026-08-01'},
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert len(cutoffs) == 4
+    assert cutoffs[0] is not None
+    assert all(cutoff == cutoffs[0] for cutoff in cutoffs)
 
 
 @pytest.mark.asyncio
@@ -1983,6 +3617,7 @@ async def test_summary_excludes_placeholder_admin_appointments_from_revenue_and_
         'revenue': 1000.0,
         'service_revenue': 1000.0,
         'goods_revenue': 0.0,
+        'topup_revenue': 0.0,
         'appointments': 1,
         'opz_qty': 0,
         'opz_pct': 0.0,
@@ -2573,8 +4208,9 @@ async def test_dashboard_bundle_filters_by_staff(async_session):
         {
             'date': '2025-01-10',
             'revenue': 1300.0,
-            'service_revenue': 1000.0,
+                'service_revenue': 1000.0,
                 'goods_revenue': 300.0,
+                'topup_revenue': 0.0,
                 'appointments': 1,
                 'opz_qty': 1,
                 'opz_pct': 100.0,
@@ -4152,7 +5788,10 @@ async def test_admin_without_user_id_preserves_staff_attribution_in_batch(async_
 async def test_batched_direct_payment_is_not_duplicated_by_ambiguous_appointment_match(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
-    async_session.add(Staff(id=1, name='Barber', position='Барбер', company_id=1))
+    async_session.add_all([
+        Staff(id=1, name='External match', position='Барбер', company_id=1),
+        Staff(id=2, name='Local fallback', position='Барбер', company_id=1),
+    ])
     await async_session.flush()
 
     # record_id=77 matches one visit by external_id and another by the local
@@ -4171,7 +5810,7 @@ async def test_batched_direct_payment_is_not_duplicated_by_ambiguous_appointment
             id=77,
             external_id=None,
             company_id=1,
-            staff_id=1,
+            staff_id=2,
             date=date(2025, 1, 11),
             datetime=datetime(2025, 1, 11, 12, 0, 0),
             attendance=1,
@@ -4198,9 +5837,30 @@ async def test_batched_direct_payment_is_not_duplicated_by_ambiguous_appointment
 
     parent_cells = {cell['code']: cell for cell in result['parent_group']['metrics']}
     staff_group = next(group for group in result['groups'] if group['staff_id'] == 1)
+    fallback_group = next(group for group in result['groups'] if group['staff_id'] == 2)
     staff_cells = {cell['code']: cell for cell in staff_group['metrics']}
+    fallback_cells = {cell['code']: cell for cell in fallback_group['metrics']}
+    external_rows = await dashboard_service.fetch_paid_goods_rows(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+        staff_id=1,
+    )
+    fallback_rows = await dashboard_service.fetch_paid_goods_rows(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+        staff_id=2,
+    )
     assert parent_cells['revenue']['fact'] == 300.0
     assert staff_cells['revenue']['fact'] == 300.0
+    assert fallback_cells['revenue']['fact'] == 0.0
+    assert [(row['master_id'], row['staff_name']) for row in external_rows] == [
+        (1, 'External match')
+    ]
+    assert fallback_rows == []
 
 
 @pytest.mark.asyncio
@@ -6001,3 +7661,771 @@ async def test_plan_sheet_csv_imports_google_thousands_commas(async_session):
         'avg_check_total': 3655.0,
         'cosmo_sum': 138000.0,
     }
+
+
+@pytest.mark.asyncio
+async def test_service_report_cards_use_complete_overview_totals_beyond_top_25(
+    async_session,
+    monkeypatch,
+):
+    factual_at = datetime(2026, 8, 1, 12)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: factual_at)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            date=date(2026, 8, 1),
+            datetime=datetime(2026, 8, 1, 10),
+            attendance=1,
+        ),
+    ])
+    expected_revenue = 0.0
+    for index in range(30):
+        service_id = 100 + index
+        amount = float(index + 1)
+        expected_revenue += amount
+        async_session.add(Transaction(
+            id=index + 1,
+            appointment_id=1,
+            service_id=service_id,
+            service_title=f'Service {index:02}',
+            amount=1,
+            company_id=1,
+        ))
+        async_session.add(FinancialTransaction(
+            id=index + 1,
+            company_id=1,
+            master_id=1,
+            record_id=1,
+            sold_item_id=service_id,
+            sold_item_type='service',
+            date=datetime(2026, 8, 1, 10),
+            amount=amount,
+        ))
+    async_session.add(Transaction(
+        id=31,
+        appointment_id=1,
+        service_id=999,
+        service_title='Included package service',
+        amount=1,
+        company_id=1,
+    ))
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'service_combos',
+        date(2026, 8, 1),
+        date(2026, 8, 1),
+        company_id=1,
+    )
+    overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2026, 8, 1),
+        date(2026, 8, 1),
+        company_id=1,
+        include_appointments_breakdown=False,
+        factual_at=factual_at,
+    )
+    complete_detail = await dashboard_service.fetch_top_services(
+        async_session,
+        date(2026, 8, 1),
+        date(2026, 8, 1),
+        company_id=1,
+        limit=None,
+        factual_at=factual_at,
+    )
+    cards = {card['label']: card['value'] for card in report['cards']}
+    services_table = next(table for table in report['tables'] if table['id'] == 'services')
+
+    assert cards['Выручка услуг'] == expected_revenue
+    assert cards['Выручка услуг'] == overview['revenue']['service_revenue']
+    assert cards['Услуг оказано'] == overview['revenue']['service_count'] == 31.0
+    assert cards['Уникальных услуг'] == 31
+    assert len(services_table['rows']) == 25
+    free_service = next(
+        row for row in complete_detail if row['title'] == 'Included package service'
+    )
+    assert free_service['sold'] == 1
+    assert free_service['revenue'] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_goods_report_uses_shared_factual_cutoff_for_units_and_revenue(
+    async_session,
+    monkeypatch,
+):
+    factual_at = datetime(2026, 8, 1, 12)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: factual_at)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        GoodTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            good_id=10,
+            good_title='Wax',
+            type_id=1,
+            date=datetime(2026, 8, 1, 10),
+            amount=-1.0,
+        ),
+        GoodTransaction(
+            id=2,
+            company_id=1,
+            master_id=1,
+            good_id=20,
+            good_title='Future care',
+            type_id=1,
+            date=datetime(2026, 8, 1, 18),
+            amount=-4.0,
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            sold_item_id=10,
+            sold_item_type='goods_transaction',
+            date=datetime(2026, 8, 1, 10),
+            amount=100.0,
+        ),
+        FinancialTransaction(
+            id=2,
+            company_id=1,
+            master_id=1,
+            sold_item_id=20,
+            sold_item_type='goods_transaction',
+            date=datetime(2026, 8, 1, 18),
+            amount=900.0,
+        ),
+    ])
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'goods_dynamics',
+        date(2026, 8, 1),
+        date(2026, 8, 1),
+        company_id=1,
+    )
+    overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2026, 8, 1),
+        date(2026, 8, 1),
+        company_id=1,
+        include_appointments_breakdown=False,
+        factual_at=factual_at,
+    )
+    cards = {card['label']: card['value'] for card in report['cards']}
+
+    assert cards['Выручка товаров'] == 100.0
+    assert cards['Выручка товаров'] == overview['revenue']['goods_revenue']
+    assert cards['Единиц продано'] == 1.0
+    assert report['raw']['by_period'] == [{
+        'period': '2026-08-01',
+        'sales_count': 1,
+        'units': 1.0,
+        'revenue': 100.0,
+    }]
+
+
+@pytest.mark.asyncio
+async def test_ready_report_slices_share_one_factual_cutoff(
+    async_session,
+    monkeypatch,
+):
+    factual_at = datetime(2026, 8, 1, 12)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: factual_at)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Client(id=1, name='Current client', company_id=1),
+        Client(id=2, name='At-risk client', company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2026, 5, 1),
+            datetime=datetime(2026, 5, 1, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2026, 8, 1),
+            datetime=datetime(2026, 8, 1, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=3,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2026, 8, 1),
+            datetime=datetime(2026, 8, 1, 18),
+            attendance=1,
+        ),
+        Appointment(
+            id=4,
+            company_id=1,
+            staff_id=1,
+            client_id=2,
+            date=date(2026, 5, 1),
+            datetime=datetime(2026, 5, 1, 11),
+            attendance=1,
+        ),
+        Appointment(
+            id=5,
+            company_id=1,
+            staff_id=1,
+            client_id=2,
+            date=date(2026, 8, 1),
+            datetime=datetime(2026, 8, 1, 19),
+            attendance=1,
+        ),
+    ])
+    for appointment_id, amount, moment in (
+        (1, 50.0, datetime(2026, 5, 1, 10)),
+        (2, 100.0, datetime(2026, 8, 1, 10)),
+        (3, 900.0, datetime(2026, 8, 1, 11)),
+        (4, 60.0, datetime(2026, 5, 1, 11)),
+        (5, 800.0, datetime(2026, 8, 1, 11, 30)),
+    ):
+        async_session.add(FinancialTransaction(
+            id=appointment_id,
+            company_id=1,
+            master_id=1,
+            record_id=appointment_id,
+            sold_item_id=10,
+            sold_item_type='service',
+            date=moment,
+            amount=amount,
+        ))
+    await async_session.commit()
+
+    staff_report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'staff_efficiency',
+        date(2026, 8, 1),
+        date(2026, 8, 1),
+        company_id=1,
+    )
+    client_report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'top_clients_pareto',
+        date(2026, 8, 1),
+        date(2026, 8, 1),
+        company_id=1,
+    )
+    recency_report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'new_vs_returning_cross',
+        date(2026, 8, 1),
+        date(2026, 8, 1),
+        company_id=1,
+    )
+    churn_report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'revenue_at_risk',
+        date(2026, 8, 1),
+        date(2026, 8, 1),
+        company_id=1,
+    )
+    booking_report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'peak_load',
+        date(2026, 8, 1),
+        date(2026, 8, 1),
+        company_id=1,
+    )
+
+    staff_cards = {card['label']: card['value'] for card in staff_report['cards']}
+    client_cards = {card['label']: card['value'] for card in client_report['cards']}
+    churn_cards = {card['label']: card['value'] for card in churn_report['cards']}
+    booking_cards = {card['label']: card['value'] for card in booking_report['cards']}
+    assert staff_cards['Завершено записей'] == 1
+    assert staff_cards['Выручка услуг'] == 100.0
+    assert client_cards['Визитов'] == 1
+    assert client_cards['Выручка клиентов'] == 100.0
+    assert recency_report['raw']['summary_metrics']['unique_clients'] == 1
+    assert churn_cards['Спящие'] == 1
+    assert churn_cards['Выручка под риском'] == 60.0
+    assert booking_cards['Всего записей'] == 1
+    assert booking_cards['Завершено'] == 1
+
+
+@pytest.mark.asyncio
+async def test_client_report_exposes_anonymous_residual_and_reconciles_totals(
+    async_session,
+    monkeypatch,
+):
+    factual_at = datetime(2026, 8, 1, 12)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: factual_at)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Client(id=1, name='Known client', company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2026, 7, 1),
+            datetime=datetime(2026, 7, 1, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=None,
+            date=date(2026, 7, 1),
+            datetime=datetime(2026, 7, 1, 11),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            record_id=1,
+            sold_item_id=10,
+            sold_item_type='service',
+            date=datetime(2026, 7, 1, 10),
+            amount=100.0,
+        ),
+        FinancialTransaction(
+            id=2,
+            company_id=1,
+            master_id=1,
+            record_id=2,
+            sold_item_id=10,
+            sold_item_type='service',
+            date=datetime(2026, 7, 1, 11),
+            amount=200.0,
+        ),
+    ])
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'top_clients_pareto',
+        date(2026, 7, 1),
+        date(2026, 7, 1),
+        company_id=1,
+    )
+    overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2026, 7, 1),
+        date(2026, 7, 1),
+        company_id=1,
+        include_appointments_breakdown=False,
+        factual_at=factual_at,
+    )
+    cards = {card['label']: card['value'] for card in report['cards']}
+
+    assert cards['Клиентов'] == overview['visit_metrics']['unique_clients'] == 1
+    assert cards['Визитов'] == overview['revenue']['appointments'] == 2
+    assert cards['Выручка клиентов'] == overview['revenue']['service_revenue'] == 300.0
+    assert report['raw']['anonymous_residual'] == {
+        'visits': 1,
+        'revenue': 200.0,
+    }
+    assert sum(row['revenue'] for row in report['raw']['segments']) == 300.0
+    assert sum(
+        row['revenue_pct'] for row in report['raw']['pareto']
+    ) == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
+async def test_future_ended_client_reports_measure_recency_at_factual_cutoff(
+    async_session,
+    monkeypatch,
+):
+    factual_at = datetime(2026, 8, 1, 12)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: factual_at)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Client(id=1, name='Recent client', company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2026, 7, 1),
+            datetime=datetime(2026, 7, 1, 10),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            record_id=1,
+            sold_item_type='service',
+            date=datetime(2026, 7, 1, 10),
+            amount=100.0,
+        ),
+    ])
+    await async_session.commit()
+
+    rows = await dashboard_reports._clients_rows(
+        async_session,
+        date(2000, 1, 1),
+        date(2026, 12, 31),
+        1,
+        None,
+        None,
+        factual_at,
+    )
+    churn = await dashboard_reports.fetch_report_data(
+        async_session,
+        'revenue_at_risk',
+        date(2026, 1, 1),
+        date(2026, 12, 31),
+        company_id=1,
+    )
+    cards = {card['label']: card['value'] for card in churn['cards']}
+
+    assert rows[0]['days_since_last_visit'] == 31
+    assert cards['Под риском'] == 0
+    assert cards['Спящие'] == 0
+    assert cards['Потерянные'] == 0
+    assert cards['Выручка под риском'] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_yoy_changes_remain_available_for_metrics_with_complete_sources(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 8, 1, 12),
+    )
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2024, 1, 1), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, date=date(2024, 12, 31), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, date=date(2025, 1, 1), attendance=1),
+        Appointment(id=4, company_id=1, staff_id=1, date=date(2025, 12, 31), attendance=1),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            record_id=1,
+            sold_item_type='service',
+            date=datetime(2024, 1, 1, 12),
+            amount=100.0,
+        ),
+        FinancialTransaction(
+            id=2,
+            company_id=1,
+            master_id=1,
+            record_id=3,
+            sold_item_type='service',
+            date=datetime(2025, 1, 1, 12),
+            amount=200.0,
+        ),
+        SyncSourceState(
+            company_id=1,
+            source='appointments_detail',
+            period_start=date(2024, 1, 1),
+            period_end=date(2025, 12, 31),
+            synced_at=datetime(2026, 1, 1),
+        ),
+        SyncSourceState(
+            company_id=1,
+            source='financial_transactions_detail',
+            period_start=date(2024, 1, 1),
+            period_end=date(2025, 12, 31),
+            synced_at=datetime(2026, 1, 1),
+        ),
+    ])
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        company_id=1,
+    )
+    years = {row['year']: row for row in report['raw']['years']}
+
+    assert years[2024]['source_status'] == 'partial'
+    assert years[2025]['source_status'] == 'partial'
+    assert years[2025]['comparison_status'] == 'incomplete_source'
+    assert years[2025]['goods_count'] is None
+    assert years[2025]['revenue_change_pct'] == 100.0
+    assert years[2025]['appointments_change_pct'] == 0.0
+    assert years[2025]['avg_check_change_pct'] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_linked_masterless_topup_reconciles_staff_overview_plan_fact_and_yoy(
+    async_session,
+    monkeypatch,
+):
+    factual_at = datetime(2026, 8, 1, 12)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: factual_at)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Appointment(
+            id=1,
+            external_id=77,
+            company_id=1,
+            staff_id=1,
+            date=date(2024, 1, 10),
+            datetime=datetime(2024, 1, 10, 10),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=None,
+            record_id=77,
+            sold_item_type='personal_account',
+            expense_title='Пополнение личного счета',
+            date=datetime(2025, 7, 1, 12),
+            amount=250.0,
+        ),
+    ])
+    for source in (
+        'appointments_detail',
+        'financial_transactions_detail',
+        'goods_transactions_detail',
+    ):
+        async_session.add(SyncSourceState(
+            company_id=1,
+            source=source,
+            period_start=date(2024, 1, 1),
+            period_end=date(2025, 12, 31),
+            synced_at=factual_at,
+        ))
+    await async_session.commit()
+
+    branch_overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+        factual_at=factual_at,
+    )
+    staff_overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        staff_id=1,
+        include_appointments_breakdown=False,
+        factual_at=factual_at,
+    )
+    plan_fact = await fetch_plan_fact(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        include_all_staff_in_leaderboards=True,
+    )
+    yoy = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        staff_id=1,
+        company_id=1,
+    )
+
+    parent_cells = {
+        cell['code']: cell for cell in plan_fact['parent_group']['metrics']
+    }
+    staff_group = next(group for group in plan_fact['groups'] if group['staff_id'] == 1)
+    staff_cells = {cell['code']: cell for cell in staff_group['metrics']}
+    yoy_2025 = next(row for row in yoy['raw']['years'] if row['year'] == 2025)
+
+    assert branch_overview['revenue']['topup_revenue'] == 250.0
+    assert staff_overview['revenue']['topup_revenue'] == 250.0
+    assert parent_cells['revenue']['fact'] == 250.0
+    assert staff_cells['revenue']['fact'] == 250.0
+    assert yoy['raw']['activity_end'] == '2025-07-01'
+    assert yoy['raw']['latest_year'] == 2025
+    assert yoy_2025['topup_revenue'] == 250.0
+    assert yoy_2025['revenue'] == 250.0
+
+
+@pytest.mark.asyncio
+async def test_yoy_keeps_uncovered_current_year_unknown_after_last_fact(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard_reports,
+        '_report_now',
+        lambda: datetime(2026, 8, 1, 12),
+    )
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            date=date(2025, 6, 1),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            record_id=1,
+            sold_item_type='service',
+            date=datetime(2025, 6, 1, 12),
+            amount=100.0,
+        ),
+    ])
+    for source in (
+        'appointments_detail',
+        'financial_transactions_detail',
+        'goods_transactions_detail',
+    ):
+        async_session.add(SyncSourceState(
+            company_id=1,
+            source=source,
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 12, 31),
+            synced_at=datetime(2026, 1, 1),
+        ))
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        company_id=1,
+    )
+    years = {row['year']: row for row in report['raw']['years']}
+
+    assert report['source_status'] == 'partial'
+    assert report['raw']['latest_year'] == 2025
+    assert set(years) == {2025, 2026}
+    assert years[2025]['revenue'] == 100.0
+    assert years[2026]['is_partial_year'] is True
+    assert years[2026]['source_status'] == 'partial'
+    assert years[2026]['revenue'] is None
+    assert years[2026]['appointments'] is None
+    assert all(
+        row['revenue'] is None
+        for row in report['raw']['months']
+        if row['year'] == 2026
+    )
+
+
+@pytest.mark.asyncio
+async def test_yoy_admin_scope_matches_plan_fact_creator_attribution(
+    async_session,
+    monkeypatch,
+):
+    factual_at = datetime(2026, 8, 1, 12)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: factual_at)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Barber', position='Барбер', company_id=1),
+        Staff(
+            id=2,
+            name='Admin',
+            position='Администратор',
+            company_id=1,
+            user_id=500,
+        ),
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            created_user_id=500,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 10),
+            attendance=1,
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            master_id=1,
+            record_id=1,
+            sold_item_type='service',
+            date=datetime(2025, 1, 10, 10),
+            amount=500.0,
+        ),
+        FinancialTransaction(
+            id=2,
+            company_id=1,
+            master_id=None,
+            record_id=None,
+            sold_item_type='personal_account',
+            expense_title='Пополнение личного счета',
+            date=datetime(2025, 2, 10, 10),
+            amount=250.0,
+        ),
+    ])
+    for source in (
+        'appointments_detail',
+        'financial_transactions_detail',
+        'goods_transactions_detail',
+    ):
+        async_session.add(SyncSourceState(
+            company_id=1,
+            source=source,
+            period_start=date(2025, 1, 1),
+            period_end=date(2026, 12, 31),
+            synced_at=factual_at,
+        ))
+    await async_session.commit()
+
+    plan_fact = await fetch_plan_fact(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        include_all_staff_in_leaderboards=True,
+        factual_at=factual_at,
+    )
+    yoy = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        staff_id=2,
+    )
+
+    admin_group = next(group for group in plan_fact['groups'] if group['staff_id'] == 2)
+    admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
+    yoy_2025 = next(row for row in yoy['raw']['years'] if row['year'] == 2025)
+
+    assert admin_cells['revenue']['fact'] == 750.0
+    assert admin_cells['clients']['fact'] == 1.0
+    assert yoy['raw']['latest_year'] == 2025
+    assert yoy_2025['revenue'] == 750.0
+    assert yoy_2025['service_revenue'] == 500.0
+    assert yoy_2025['topup_revenue'] == 250.0
+    assert yoy_2025['appointments'] == 1
+    assert yoy_2025['avg_check'] == 750.0

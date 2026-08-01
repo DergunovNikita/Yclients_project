@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Optional
 
-from sqlalchemy import String, and_, case, cast, delete, exists, func, or_, select
+from sqlalchemy import String, and_, case, cast, delete, exists, extract, func, or_, select
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -22,6 +22,7 @@ from models import (
     Appointment,
     Company,
     FinancialTransaction,
+    GoodCatalog,
     GoodTransaction,
     ManualFactMetric,
     PlanBranchSetting,
@@ -142,6 +143,7 @@ class OpzEvent:
     client_id: int
     create_date: datetime
     appointment_date: date
+    last_visit_date: date
     barber_staff_id: Optional[int]
     created_user_id: Optional[int]
 
@@ -218,6 +220,7 @@ async def _local_appointments_breakdown(
     start: date,
     end: date,
     staff_id: Optional[int] = None,
+    factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
     if not company_ids:
         return _ready_appointments_breakdown(
@@ -228,7 +231,10 @@ async def _local_appointments_breakdown(
         Appointment.company_id.in_(company_ids),
         Appointment.date >= start,
         Appointment.date <= end,
+        business_appointment_condition(),
     ]
+    if factual_at is not None:
+        filters.append(_appointment_factual_at_condition(factual_at))
     if staff_id is not None:
         filters.append(Appointment.staff_id == staff_id)
     row = (
@@ -307,6 +313,7 @@ async def _fetch_appointments_breakdown(
     start_or_end: date,
     end_or_staff_id: date | Optional[int],
     staff_id: Optional[int] = None,
+    factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
     if isinstance(db_or_company_ids, list):
         db = None
@@ -319,6 +326,16 @@ async def _fetch_appointments_breakdown(
         company_ids = company_ids_or_start
         start = start_or_end
         end = end_or_staff_id
+
+    if db is not None and factual_at is not None and end >= factual_at.date():
+        return await _local_appointments_breakdown(
+            db,
+            company_ids,
+            start,
+            end,
+            staff_id,
+            factual_at,
+        )
 
     try:
         if db is None:
@@ -342,9 +359,17 @@ async def fetch_appointments_breakdown(
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
     company_ids = await _appointment_company_ids(db, company_id, staff_id, allowed_company_ids)
-    return await _fetch_appointments_breakdown(db, company_ids, start, end, staff_id)
+    return await _fetch_appointments_breakdown(
+        db,
+        company_ids,
+        start,
+        end,
+        staff_id,
+        factual_at,
+    )
 
 
 def _is_waitlist_staff_name(value: Any) -> bool:
@@ -378,21 +403,52 @@ def business_appointment_condition():
 
 
 def financial_appointment_match_condition():
+    external_candidate = aliased(Appointment)
+    has_external_match = exists(
+        select(1)
+        .where(
+            external_candidate.company_id == FinancialTransaction.company_id,
+            external_candidate.external_id == FinancialTransaction.record_id,
+        )
+        .correlate(FinancialTransaction)
+    )
     return and_(
         FinancialTransaction.company_id == Appointment.company_id,
         or_(
             FinancialTransaction.record_id == Appointment.external_id,
-            and_(Appointment.external_id.is_(None), FinancialTransaction.record_id == Appointment.id),
+            and_(
+                Appointment.external_id.is_(None),
+                FinancialTransaction.record_id == Appointment.id,
+                ~has_external_match,
+            ),
         ),
     )
 
 
-def _business_financial_master_condition():
-    linked_business_appointment = exists(
-        select(1).where(
+def _financial_attributed_staff_id():
+    linked_staff_id = (
+        select(Appointment.staff_id)
+        .where(
             financial_appointment_match_condition(),
             business_appointment_condition(),
         )
+        .correlate(FinancialTransaction)
+        .order_by(Appointment.id.asc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    return func.coalesce(FinancialTransaction.master_id, linked_staff_id)
+
+
+def _business_financial_master_condition(factual_at: Optional[datetime] = None):
+    linked_conditions = [
+        financial_appointment_match_condition(),
+        business_appointment_condition(),
+    ]
+    if factual_at is not None:
+        linked_conditions.append(_appointment_factual_at_condition(factual_at))
+    linked_business_appointment = exists(
+        select(1).where(*linked_conditions)
     )
     return or_(
         and_(
@@ -420,6 +476,24 @@ def _company_scope_clause(column, company_id: Optional[int], allowed_company_ids
     if allowed_company_ids is not None:
         return column.in_(allowed_company_ids) if allowed_company_ids else column.in_([])
     return None
+
+
+def _factual_now() -> datetime:
+    return datetime.now()
+
+
+def _appointment_factual_at_condition(factual_at: datetime):
+    factual_date = factual_at.date()
+    return or_(
+        Appointment.date < factual_date,
+        and_(
+            Appointment.date == factual_date,
+            or_(
+                Appointment.datetime.is_(None),
+                Appointment.datetime <= factual_at,
+            ),
+        ),
+    )
 
 
 def _coerce_time(value: Any) -> time | None:
@@ -455,6 +529,7 @@ def _appt_revenue_filters(
     staff_id: Optional[int] = None,
     created_user_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ):
     parts = [
         Appointment.attendance == COMPLETED_ATTENDANCE,
@@ -469,6 +544,8 @@ def _appt_revenue_filters(
         parts.append(Appointment.created_user_id == created_user_id)
     elif staff_id is not None:
         parts.append(Appointment.staff_id == staff_id)
+    if factual_at is not None:
+        parts.append(_appointment_factual_at_condition(factual_at))
     return and_(*parts)
 
 
@@ -498,6 +575,7 @@ def _goods_revenue_filters(
     company_id: Optional[int],
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ):
     parts = [
         GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
@@ -510,6 +588,8 @@ def _goods_revenue_filters(
         parts.append(scope)
     if staff_id is not None:
         parts.append(GoodTransaction.master_id == staff_id)
+    if factual_at is not None:
+        parts.append(GoodTransaction.date <= factual_at)
     return and_(*parts)
 
 
@@ -520,6 +600,7 @@ def _service_paid_filters(
     staff_id: Optional[int] = None,
     created_user_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ):
     parts = [
         FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
@@ -536,6 +617,11 @@ def _service_paid_filters(
         parts.append(Appointment.created_user_id == created_user_id)
     elif staff_id is not None:
         parts.append(Appointment.staff_id == staff_id)
+    if factual_at is not None:
+        parts.extend((
+            FinancialTransaction.date <= factual_at,
+            _appointment_factual_at_condition(factual_at),
+        ))
     return and_(*parts)
 
 
@@ -545,36 +631,28 @@ def _goods_paid_filters(
     company_id: Optional[int],
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ):
     parts = [
         FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
         FinancialTransaction.amount > 0,
         func.date(FinancialTransaction.date) >= start,
         func.date(FinancialTransaction.date) <= end,
-        _business_financial_master_condition(),
+        _business_financial_master_condition(factual_at),
     ]
     scope = _company_scope_clause(FinancialTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
         parts.append(scope)
     if staff_id is not None:
         parts.append(_financial_staff_attribution_condition(staff_id))
+    if factual_at is not None:
+        parts.append(FinancialTransaction.date <= factual_at)
     return and_(*parts)
 
 
 def _financial_staff_attribution_condition(staff_id: int):
-    """Prefer the payment master, falling back to the linked visit master."""
-    return or_(
-        FinancialTransaction.master_id == staff_id,
-        and_(
-            FinancialTransaction.master_id.is_(None),
-            exists(
-                select(1).where(
-                    financial_appointment_match_condition(),
-                    Appointment.staff_id == staff_id,
-                )
-            ),
-        ),
-    )
+    """Use the same deterministic master for filtering and returned rows."""
+    return _financial_attributed_staff_id() == staff_id
 
 
 async def _goods_paid_revenue_total(
@@ -583,10 +661,20 @@ async def _goods_paid_revenue_total(
     company_id: Optional[int],
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ) -> float:
     stmt = (
         select(func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'))
-        .where(_goods_paid_filters(dr.start, dr.end, company_id, staff_id, allowed_company_ids))
+        .where(
+            _goods_paid_filters(
+                dr.start,
+                dr.end,
+                company_id,
+                staff_id,
+                allowed_company_ids,
+                factual_at,
+            )
+        )
     )
     row = (await db.execute(stmt)).one()
     return float(row.revenue or 0)
@@ -598,6 +686,7 @@ async def _goods_sold_count(
     company_id: Optional[int],
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ) -> float:
     sold_qty = func.coalesce(
         func.sum(func.abs(func.coalesce(GoodTransaction.amount, 0.0))),
@@ -605,7 +694,16 @@ async def _goods_sold_count(
     )
     stmt = (
         select(sold_qty.label('qty'))
-        .where(_goods_revenue_filters(dr.start, dr.end, company_id, staff_id, allowed_company_ids))
+        .where(
+            _goods_revenue_filters(
+                dr.start,
+                dr.end,
+                company_id,
+                staff_id,
+                allowed_company_ids,
+                factual_at,
+            )
+        )
     )
     row = (await db.execute(stmt)).one()
     return float(row.qty or 0)
@@ -674,6 +772,7 @@ async def _average_check_block(
     staff_id: Optional[int] = None,
     created_user_id: Optional[int] = None,
     company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
     visit_filters = [
         Appointment.attendance == COMPLETED_ATTENDANCE,
@@ -689,6 +788,8 @@ async def _average_check_block(
         visit_filters.append(Appointment.created_user_id == created_user_id)
     elif staff_id is not None:
         visit_filters.append(Appointment.staff_id == staff_id)
+    if factual_at is not None:
+        visit_filters.append(_appointment_factual_at_condition(factual_at))
 
     visit_row = (
         await db.execute(
@@ -716,6 +817,8 @@ async def _average_check_block(
         goods_filters.append(GoodTransaction.company_id.in_(company_ids))
     if staff_id is not None and created_user_id is None:
         goods_filters.append(GoodTransaction.master_id == staff_id)
+    if factual_at is not None:
+        goods_filters.append(GoodTransaction.date <= factual_at)
     goods_checks = int(
         await db.scalar(
             select(func.count(func.distinct(GoodTransaction.document_id))).where(*goods_filters)
@@ -729,6 +832,8 @@ async def _average_check_block(
         func.date(FinancialTransaction.date) <= dr.end,
         _physical_account_condition(),
     ]
+    if factual_at is not None:
+        base_payment_filters.append(FinancialTransaction.date <= factual_at)
 
     service_filters = [
         *base_payment_filters,
@@ -744,6 +849,8 @@ async def _average_check_block(
         service_filters.append(Appointment.created_user_id == created_user_id)
     elif staff_id is not None:
         service_filters.append(Appointment.staff_id == staff_id)
+    if factual_at is not None:
+        service_filters.append(_appointment_factual_at_condition(factual_at))
     service_revenue = float(
         await db.scalar(
             select(func.coalesce(func.sum(FinancialTransaction.amount), 0.0))
@@ -763,7 +870,7 @@ async def _average_check_block(
 
     classified_revenue = {}
     direct_payment_filters = list(base_payment_filters)
-    direct_payment_filters.append(_business_financial_master_condition())
+    direct_payment_filters.append(_business_financial_master_condition(factual_at))
     if company_id is not None:
         direct_payment_filters.append(FinancialTransaction.company_id == company_id)
     elif company_ids is not None:
@@ -777,7 +884,7 @@ async def _average_check_block(
         (
             'topup_revenue',
             _personal_account_condition(),
-            FinancialTransaction.master_id == staff_id if staff_id is not None else None,
+            _financial_staff_attribution_condition(staff_id) if staff_id is not None else None,
         ),
     ):
         metric_filters = [*direct_payment_filters, condition]
@@ -873,6 +980,7 @@ async def _client_visit_frequency_block(
     company_id: Optional[int],
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
     filters = [
         Appointment.attendance == COMPLETED_ATTENDANCE,
@@ -886,6 +994,8 @@ async def _client_visit_frequency_block(
         filters.append(scope)
     if staff_id is not None:
         filters.append(Appointment.staff_id == staff_id)
+    if factual_at is not None:
+        filters.append(_appointment_factual_at_condition(factual_at))
 
     visits_by_client = (
         select(
@@ -945,6 +1055,7 @@ async def _client_recency_block(
     company_id: Optional[int],
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     scope_filters = [
@@ -954,6 +1065,8 @@ async def _client_recency_block(
     ]
     if scope is not None:
         scope_filters.append(scope)
+    if factual_at is not None:
+        scope_filters.append(_appointment_factual_at_condition(factual_at))
     current_filters = list(scope_filters)
     if staff_id is not None:
         current_filters.append(Appointment.staff_id == staff_id)
@@ -1014,8 +1127,11 @@ async def _client_recency_block(
 def _title_matches(title_expr, parts: tuple[str, ...]):
     conditions = []
     for part in parts:
-        conditions.append(title_expr.like(f'%{part.lower()}%'))
-        conditions.append(title_expr.like(f'%{part}%'))
+        # PostgreSQL lower() handles Cyrillic, while SQLite's built-in lower()
+        # only normalizes ASCII.  Keep the common source spellings explicit so
+        # report formulas behave identically in production and local tests.
+        spellings = {part, part.lower(), part.capitalize(), part.upper()}
+        conditions.extend(title_expr.like(f'%{spelling}%') for spelling in spellings)
     return or_(*conditions)
 
 
@@ -1199,6 +1315,7 @@ async def _revenue_block(
     created_user_id: Optional[int] = None,
     include_goods: bool = True,
     allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
     cond = _appt_revenue_filters(
         dr.start,
@@ -1207,6 +1324,7 @@ async def _revenue_block(
         staff_id,
         created_user_id=created_user_id,
         allowed_company_ids=allowed_company_ids,
+        factual_at=factual_at,
     )
     extra_appt = case(
         (ServiceLabel.is_extra.is_(True), Appointment.id),
@@ -1256,6 +1374,13 @@ async def _revenue_block(
         .select_from(FinancialTransaction)
         .join(Appointment, financial_appointment_match_condition())
         .outerjoin(ServiceLabel, _financial_service_label_join())
+        .outerjoin(
+            AccountCatalog,
+            and_(
+                AccountCatalog.company_id == FinancialTransaction.company_id,
+                AccountCatalog.account_id == FinancialTransaction.account_id,
+            ),
+        )
         .where(
             _service_paid_filters(
                 dr.start,
@@ -1264,7 +1389,9 @@ async def _revenue_block(
                 staff_id,
                 created_user_id=created_user_id,
                 allowed_company_ids=allowed_company_ids,
-            )
+                factual_at=factual_at,
+            ),
+            _physical_account_condition(),
         )
     )
     row = (await db.execute(counts_stmt)).one()
@@ -1272,12 +1399,16 @@ async def _revenue_block(
     service_revenue = float(paid_row.revenue or 0)
     extra_service_revenue = float(paid_row.extra_service_revenue or 0)
     goods_revenue = (
-        await _goods_paid_revenue_total(db, dr, company_id, staff_id, allowed_company_ids)
+        await _goods_paid_revenue_total(
+            db, dr, company_id, staff_id, allowed_company_ids, factual_at
+        )
         if include_goods
         else 0.0
     )
     goods_count = (
-        await _goods_sold_count(db, dr, company_id, staff_id, allowed_company_ids)
+        await _goods_sold_count(
+            db, dr, company_id, staff_id, allowed_company_ids, factual_at
+        )
         if include_goods
         else 0.0
     )
@@ -1303,30 +1434,56 @@ async def fetch_summary(
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
+    *,
+    include_appointments_breakdown: bool = True,
+    factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
+    factual_at = factual_at or _factual_now()
     current_dr = DateRange(start=start, end=end)
     prev_dr = current_dr.previous_period()
-    appointment_company_ids = await _appointment_company_ids(db, company_id, staff_id)
-    if allowed_company_ids is not None:
-        allowed_set = {int(item) for item in allowed_company_ids}
-        appointment_company_ids = [item for item in appointment_company_ids if item in allowed_set]
-    appointments_task = asyncio.create_task(
-        _fetch_appointments_breakdown(db, appointment_company_ids, start, end, staff_id)
+    appointment_company_ids = await _appointment_company_ids(
+        db, company_id, staff_id, allowed_company_ids
     )
-    previous_appointments_task = asyncio.create_task(
-        _fetch_appointments_breakdown(
-            db,
-            appointment_company_ids,
-            prev_dr.start,
-            prev_dr.end,
-            staff_id,
+    effective_company_ids = appointment_company_ids
+    appointments_task = (
+        asyncio.create_task(
+            _fetch_appointments_breakdown(
+                db,
+                appointment_company_ids,
+                start,
+                end,
+                staff_id,
+                factual_at,
+            )
         )
+        if include_appointments_breakdown
+        else None
     )
 
-    cur = await _revenue_block(db, current_dr, company_id, staff_id, allowed_company_ids=allowed_company_ids)
-    prev = await _revenue_block(db, prev_dr, company_id, staff_id, allowed_company_ids=allowed_company_ids)
+    cur = await _revenue_block(
+        db,
+        current_dr,
+        company_id,
+        staff_id,
+        allowed_company_ids=effective_company_ids,
+        factual_at=factual_at,
+    )
+    prev = await _revenue_block(
+        db,
+        prev_dr,
+        company_id,
+        staff_id,
+        allowed_company_ids=effective_company_ids,
+        factual_at=factual_at,
+    )
     cur_opz_qty = await _opz_count_scope(
-        db, start, end, company_id, staff_id, company_ids=appointment_company_ids
+        db,
+        start,
+        end,
+        company_id,
+        staff_id,
+        company_ids=appointment_company_ids,
+        factual_at=factual_at,
     )
     prev_opz_qty = await _opz_count_scope(
         db,
@@ -1335,43 +1492,60 @@ async def fetch_summary(
         company_id,
         staff_id,
         company_ids=appointment_company_ids,
+        factual_at=factual_at,
     )
-    avg_company_ids = appointment_company_ids if company_id is None else None
     cur_average_check = await _average_check_block(
-        db, current_dr, company_id, staff_id, company_ids=avg_company_ids
+        db,
+        current_dr,
+        company_id,
+        staff_id,
+        company_ids=effective_company_ids,
+        factual_at=factual_at,
     )
     prev_average_check = await _average_check_block(
-        db, prev_dr, company_id, staff_id, company_ids=avg_company_ids
+        db,
+        prev_dr,
+        company_id,
+        staff_id,
+        company_ids=effective_company_ids,
+        factual_at=factual_at,
     )
     client_frequency = await _client_visit_frequency_block(
         db,
         current_dr,
         company_id,
         staff_id,
-        allowed_company_ids=allowed_company_ids,
+        allowed_company_ids=effective_company_ids,
+        factual_at=factual_at,
     )
     cur_client_recency = await _client_recency_block(
         db,
         current_dr,
         company_id,
         staff_id,
-        allowed_company_ids=allowed_company_ids,
+        allowed_company_ids=effective_company_ids,
+        factual_at=factual_at,
     )
     prev_client_recency = await _client_recency_block(
         db,
         prev_dr,
         company_id,
         staff_id,
-        allowed_company_ids=allowed_company_ids,
+        allowed_company_ids=effective_company_ids,
+        factual_at=factual_at,
     )
     for block, average_check in ((cur, cur_average_check), (prev, prev_average_check)):
         block['service_revenue'] = average_check['service_revenue']
         block['goods_revenue'] = average_check['goods_revenue']
         block['topup_revenue'] = average_check['topup_revenue']
         block['revenue'] = average_check['numerator']
-    appointments_breakdown = await appointments_task
-    previous_appointments_breakdown = await previous_appointments_task
     local_completed = int(cur['appointments'] or 0)
+    if appointments_task is not None:
+        appointments_breakdown = await appointments_task
+    else:
+        appointments_breakdown = await _local_appointments_breakdown(
+            db, appointment_company_ids, start, end, staff_id
+        )
     exact_completed = appointments_breakdown.get('completed')
     appointments_breakdown = {
         **appointments_breakdown,
@@ -1390,16 +1564,11 @@ async def fetch_summary(
 
     cur_rev = cur['revenue']
     prev_rev = prev['revenue']
-    cur_appointments = float(
-        appointments_breakdown['completed']
-        if appointments_breakdown['source_status'] == 'ready'
-        else local_completed
-    )
-    prev_appointments = float(
-        previous_appointments_breakdown['completed']
-        if previous_appointments_breakdown['source_status'] == 'ready'
-        else prev['appointments']
-    )
+    # Overview, plan/fact and reports must share one denominator. YClients
+    # record_stats remains a reconciliation diagnostic, but it must not silently
+    # replace the locally attributable completed visits used by all breakdowns.
+    cur_appointments = float(cur_average_check['completed_appointments'])
+    prev_appointments = float(prev_average_check['completed_appointments'])
     cur_avg_total = float(cur_average_check['total'])
     prev_avg_total = float(prev_average_check['total'])
     cur_avg_services = _safe_div(cur['service_revenue'], cur_appointments)
@@ -1558,6 +1727,371 @@ async def fetch_summary(
     }
 
 
+async def fetch_year_over_year_facts(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: Optional[int] = None,
+    staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
+    created_user_id: Optional[int] = None,
+) -> dict[str, Any]:
+    """Batch annual/monthly facts using the Overview/plan-fact primitives."""
+
+    def annual_bucket() -> dict[str, float | int]:
+        return {
+            'revenue': 0.0,
+            'service_revenue': 0.0,
+            'goods_revenue': 0.0,
+            'topup_revenue': 0.0,
+            'extra_service_revenue': 0.0,
+            'appointments': 0,
+            'unique_clients': 0,
+            'service_count': 0.0,
+            'goods_count': 0.0,
+            'extra_service_count': 0.0,
+        }
+
+    def monthly_bucket() -> dict[str, float | int]:
+        return {
+            'revenue': 0.0,
+            'service_revenue': 0.0,
+            'goods_revenue': 0.0,
+            'topup_revenue': 0.0,
+            'appointments': 0,
+        }
+
+    annual: defaultdict[int, dict[str, float | int]] = defaultdict(annual_bucket)
+    monthly: defaultdict[int, defaultdict[int, dict[str, float | int]]] = defaultdict(
+        lambda: defaultdict(monthly_bucket)
+    )
+
+    appointment_year = extract('year', Appointment.date)
+    appointment_month = extract('month', Appointment.date)
+    appointment_filters = [
+        _appt_revenue_filters(
+            start,
+            end,
+            company_id,
+            staff_id,
+            created_user_id=created_user_id,
+            allowed_company_ids=allowed_company_ids,
+            factual_at=factual_at,
+        )
+    ]
+    extra_amount = case(
+        (ServiceLabel.is_extra.is_(True), func.coalesce(Transaction.amount, 0)),
+        else_=0,
+    )
+    appointment_annual_rows = (
+        await db.execute(
+            select(
+                appointment_year.label('year'),
+                func.count(func.distinct(Appointment.id)).label('appointments'),
+                func.count(func.distinct(Appointment.client_id)).label('unique_clients'),
+                func.coalesce(func.sum(func.coalesce(Transaction.amount, 0)), 0).label('service_count'),
+                func.coalesce(func.sum(extra_amount), 0).label('extra_service_count'),
+            )
+            .select_from(Appointment)
+            .outerjoin(Transaction, Transaction.appointment_id == Appointment.id)
+            .outerjoin(ServiceLabel, _transaction_service_label_join())
+            .where(*appointment_filters)
+            .group_by(appointment_year)
+        )
+    ).all()
+    for row in appointment_annual_rows:
+        bucket = annual[int(row.year)]
+        bucket['appointments'] = int(row.appointments or 0)
+        bucket['unique_clients'] = int(row.unique_clients or 0)
+        bucket['service_count'] = float(row.service_count or 0)
+        bucket['extra_service_count'] = float(row.extra_service_count or 0)
+
+    appointment_month_rows = (
+        await db.execute(
+            select(
+                appointment_year.label('year'),
+                appointment_month.label('month'),
+                func.count(func.distinct(Appointment.id)).label('appointments'),
+            )
+            .select_from(Appointment)
+            .where(*appointment_filters)
+            .group_by(appointment_year, appointment_month)
+        )
+    ).all()
+    for row in appointment_month_rows:
+        monthly[int(row.year)][int(row.month)]['appointments'] = int(row.appointments or 0)
+
+    payment_year = extract('year', FinancialTransaction.date)
+    payment_month = extract('month', FinancialTransaction.date)
+    service_filters = [
+        _service_paid_filters(
+            start,
+            end,
+            company_id,
+            staff_id,
+            created_user_id=created_user_id,
+            allowed_company_ids=allowed_company_ids,
+            factual_at=factual_at,
+        ),
+        _physical_account_condition(),
+    ]
+    extra_revenue = case(
+        (ServiceLabel.is_extra.is_(True), FinancialTransaction.amount),
+        else_=0.0,
+    )
+    service_rows = (
+        await db.execute(
+            select(
+                payment_year.label('year'),
+                payment_month.label('month'),
+                func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('service_revenue'),
+                func.coalesce(func.sum(extra_revenue), 0.0).label('extra_service_revenue'),
+            )
+            .select_from(FinancialTransaction)
+            .join(Appointment, financial_appointment_match_condition())
+            .outerjoin(ServiceLabel, _financial_service_label_join())
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(*service_filters)
+            .group_by(payment_year, payment_month)
+        )
+    ).all()
+    for row in service_rows:
+        year = int(row.year)
+        month = int(row.month)
+        service_revenue = float(row.service_revenue or 0)
+        extra_service_revenue = float(row.extra_service_revenue or 0)
+        annual[year]['service_revenue'] += service_revenue
+        annual[year]['extra_service_revenue'] += extra_service_revenue
+        monthly[year][month]['service_revenue'] = service_revenue
+
+    direct_component = FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE
+    if staff_id is not None and created_user_id is None:
+        direct_component = or_(
+            and_(direct_component, _financial_staff_attribution_condition(staff_id)),
+            and_(
+                _personal_account_condition(),
+                _financial_staff_attribution_condition(staff_id),
+            ),
+        )
+    else:
+        direct_component = or_(direct_component, _personal_account_condition())
+    direct_filters = [
+        FinancialTransaction.amount > 0,
+        func.date(FinancialTransaction.date) >= start,
+        func.date(FinancialTransaction.date) <= end,
+        _physical_account_condition(),
+        _business_financial_master_condition(factual_at),
+        direct_component,
+    ]
+    direct_scope = _company_scope_clause(
+        FinancialTransaction.company_id, company_id, allowed_company_ids
+    )
+    if direct_scope is not None:
+        direct_filters.append(direct_scope)
+    if factual_at is not None:
+        direct_filters.append(FinancialTransaction.date <= factual_at)
+    goods_amount = case(
+        (FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE, FinancialTransaction.amount),
+        else_=0.0,
+    )
+    topup_amount = case(
+        (_personal_account_condition(), FinancialTransaction.amount),
+        else_=0.0,
+    )
+    direct_rows = (
+        await db.execute(
+            select(
+                payment_year.label('year'),
+                payment_month.label('month'),
+                func.coalesce(func.sum(goods_amount), 0.0).label('goods_revenue'),
+                func.coalesce(func.sum(topup_amount), 0.0).label('topup_revenue'),
+            )
+            .select_from(FinancialTransaction)
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(*direct_filters)
+            .group_by(payment_year, payment_month)
+        )
+    ).all()
+    for row in direct_rows:
+        year = int(row.year)
+        month = int(row.month)
+        goods_revenue = float(row.goods_revenue or 0)
+        topup_revenue = float(row.topup_revenue or 0)
+        annual[year]['goods_revenue'] += goods_revenue
+        annual[year]['topup_revenue'] += topup_revenue
+        monthly[year][month]['goods_revenue'] = goods_revenue
+        monthly[year][month]['topup_revenue'] = topup_revenue
+
+    dependency_component = or_(
+        and_(
+            FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
+            Appointment.attendance == COMPLETED_ATTENDANCE,
+            business_appointment_condition(),
+        ),
+        and_(
+            FinancialTransaction.master_id.is_(None),
+            direct_component,
+            business_appointment_condition(),
+        ),
+    )
+    dependency_filters = [
+        FinancialTransaction.amount > 0,
+        func.date(FinancialTransaction.date) >= start,
+        func.date(FinancialTransaction.date) <= end,
+        _physical_account_condition(),
+        dependency_component,
+    ]
+    dependency_scope = _company_scope_clause(
+        FinancialTransaction.company_id, company_id, allowed_company_ids
+    )
+    if dependency_scope is not None:
+        dependency_filters.append(dependency_scope)
+    if created_user_id is not None:
+        dependency_filters.append(or_(
+            and_(
+                FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
+                Appointment.created_user_id == created_user_id,
+            ),
+            and_(
+                FinancialTransaction.master_id.is_(None),
+                direct_component,
+            ),
+        ))
+    elif staff_id is not None:
+        dependency_filters.append(or_(
+            and_(
+                FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
+                Appointment.staff_id == staff_id,
+            ),
+            and_(
+                FinancialTransaction.master_id.is_(None),
+                direct_component,
+            ),
+        ))
+    if factual_at is not None:
+        dependency_filters.extend((
+            FinancialTransaction.date <= factual_at,
+            _appointment_factual_at_condition(factual_at),
+        ))
+    dependency_rows = (
+        await db.execute(
+            select(
+                FinancialTransaction.company_id.label('company_id'),
+                payment_year.label('year'),
+                payment_month.label('month'),
+                func.min(Appointment.date).label('appointment_start'),
+                func.max(Appointment.date).label('appointment_end'),
+            )
+            .select_from(FinancialTransaction)
+            .join(Appointment, financial_appointment_match_condition())
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(*dependency_filters)
+            .group_by(
+                FinancialTransaction.company_id,
+                payment_year,
+                payment_month,
+            )
+        )
+    ).all()
+    annual_dependencies: defaultdict[int, dict[int, tuple[date, date]]] = defaultdict(dict)
+    monthly_dependencies: defaultdict[
+        int, defaultdict[int, dict[int, tuple[date, date]]]
+    ] = defaultdict(lambda: defaultdict(dict))
+    for row in dependency_rows:
+        dependency_start = _coerce_date(row.appointment_start)
+        dependency_end = _coerce_date(row.appointment_end)
+        year = int(row.year)
+        month = int(row.month)
+        item_company_id = int(row.company_id)
+        current = annual_dependencies[year].get(item_company_id)
+        annual_dependencies[year][item_company_id] = (
+            min(current[0], dependency_start) if current else dependency_start,
+            max(current[1], dependency_end) if current else dependency_end,
+        )
+        monthly_dependencies[year][month][item_company_id] = (
+            dependency_start,
+            dependency_end,
+        )
+
+    goods_year = extract('year', GoodTransaction.date)
+    goods_filters = [
+        _goods_revenue_filters(
+            start,
+            end,
+            company_id,
+            staff_id,
+            allowed_company_ids,
+            factual_at,
+        )
+    ]
+    goods_rows = (
+        await db.execute(
+            select(
+                goods_year.label('year'),
+                func.coalesce(
+                    func.sum(func.abs(func.coalesce(GoodTransaction.amount, 0.0))),
+                    0.0,
+                ).label('goods_count'),
+            )
+            .where(*goods_filters)
+            .group_by(goods_year)
+        )
+    ).all()
+    for row in goods_rows:
+        annual[int(row.year)]['goods_count'] = float(row.goods_count or 0)
+
+    for year, values in annual.items():
+        values['revenue'] = (
+            float(values['service_revenue'])
+            + float(values['goods_revenue'])
+            + float(values['topup_revenue'])
+        )
+    for year_months in monthly.values():
+        for values in year_months.values():
+            values['revenue'] = (
+                float(values['service_revenue'])
+                + float(values['goods_revenue'])
+                + float(values['topup_revenue'])
+            )
+    return {
+        'annual': {year: dict(values) for year, values in annual.items()},
+        'monthly': {
+            year: {month: dict(values) for month, values in months.items()}
+            for year, months in monthly.items()
+        },
+        'appointment_dependencies': {
+            'annual': {
+                year: dict(values) for year, values in annual_dependencies.items()
+            },
+            'monthly': {
+                year: {
+                    month: dict(values) for month, values in months.items()
+                }
+                for year, months in monthly_dependencies.items()
+            },
+        },
+    }
+
+
 async def fetch_revenue_daily(
     db: AsyncSession,
     start: date,
@@ -1566,71 +2100,160 @@ async def fetch_revenue_daily(
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     include_financials: bool = True,
+    include_opz: bool = True,
+    factual_at: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
+    factual_at = factual_at or _factual_now()
+    effective_company_ids = await _appointment_company_ids(
+        db, company_id, staff_id, allowed_company_ids
+    )
+    allowed_company_ids = effective_company_ids
     appt_stmt = (
         select(
             Appointment.date.label('d'),
             func.count(func.distinct(Appointment.id)).label('appointments'),
         )
         .select_from(Appointment)
-        .where(_appt_revenue_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids))
+        .where(
+            _appt_revenue_filters(
+                start,
+                end,
+                company_id,
+                staff_id,
+                allowed_company_ids=allowed_company_ids,
+                factual_at=factual_at,
+            )
+        )
         .group_by(Appointment.date)
     )
 
     if include_financials:
+        payment_day = func.date(FinancialTransaction.date)
         svc_stmt = (
             select(
-                Appointment.date.label('d'),
+                payment_day.label('d'),
                 func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
             )
-            .select_from(Appointment)
-            .join(FinancialTransaction, financial_appointment_match_condition())
-            .where(
-                _service_paid_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids),
+            .select_from(FinancialTransaction)
+            .join(Appointment, financial_appointment_match_condition())
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
             )
-            .group_by(Appointment.date)
+            .where(
+                _service_paid_filters(
+                    start,
+                    end,
+                    company_id,
+                    staff_id,
+                    allowed_company_ids=allowed_company_ids,
+                    factual_at=factual_at,
+                ),
+                _physical_account_condition(),
+            )
+            .group_by(payment_day)
         )
-        goods_day = func.date(FinancialTransaction.date)
         goods_stmt = (
             select(
-                goods_day.label('d'),
+                payment_day.label('d'),
                 func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
             )
-            .where(_goods_paid_filters(start, end, company_id, staff_id, allowed_company_ids))
-            .group_by(goods_day)
+            .select_from(FinancialTransaction)
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(
+                _goods_paid_filters(
+                    start,
+                    end,
+                    company_id,
+                    staff_id,
+                    allowed_company_ids,
+                    factual_at,
+                ),
+                _physical_account_condition(),
+            )
+            .group_by(payment_day)
+        )
+        topup_filters = [
+            FinancialTransaction.amount > 0,
+            payment_day >= start,
+            payment_day <= end,
+            _physical_account_condition(),
+            _business_financial_master_condition(factual_at),
+            _personal_account_condition(),
+        ]
+        topup_scope = _company_scope_clause(
+            FinancialTransaction.company_id, company_id, allowed_company_ids
+        )
+        if topup_scope is not None:
+            topup_filters.append(topup_scope)
+        if staff_id is not None:
+            topup_filters.append(_financial_staff_attribution_condition(staff_id))
+        topup_filters.append(FinancialTransaction.date <= factual_at)
+        topup_stmt = (
+            select(
+                payment_day.label('d'),
+                func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+            )
+            .select_from(FinancialTransaction)
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(*topup_filters)
+            .group_by(payment_day)
         )
         svc_rows = (await db.execute(svc_stmt)).all()
         goods_rows = (await db.execute(goods_stmt)).all()
+        topup_rows = (await db.execute(topup_stmt)).all()
     else:
         svc_rows = []
         goods_rows = []
+        topup_rows = []
 
     appt_rows = (await db.execute(appt_stmt)).all()
-    company_ids = await _appointment_company_ids(db, company_id, staff_id, allowed_company_ids)
     opz_by_date: dict[date, int] = {}
-    for item_company_id in company_ids:
-        events = await _opz_events(db, start, end, item_company_id)
-        if staff_id is not None:
-            events = [event for event in events if event.barber_staff_id == staff_id]
-        for event in events:
-            event_date = event.create_date.date()
-            opz_by_date[event_date] = opz_by_date.get(event_date, 0) + 1
+    if include_opz:
+        for item_company_id in effective_company_ids:
+            events = await _opz_events(
+                db, start, end, item_company_id, factual_at=factual_at
+            )
+            if staff_id is not None:
+                events = [event for event in events if event.barber_staff_id == staff_id]
+            for event in events:
+                event_date = event.create_date.date()
+                opz_by_date[event_date] = opz_by_date.get(event_date, 0) + 1
 
     by_date: dict[date, dict[str, float | int]] = {}
     for r in svc_rows:
         day = _coerce_date(r.d)
-        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
+        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'topup_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
         by_date[day]['service_revenue'] = float(r.revenue or 0)
     for r in appt_rows:
         day = _coerce_date(r.d)
-        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
+        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'topup_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
         by_date[day]['appointments'] = int(r.appointments or 0)
     for r in goods_rows:
         day = _coerce_date(r.d)
-        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
+        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'topup_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
         by_date[day]['goods_revenue'] = float(r.revenue or 0)
+    for r in topup_rows:
+        day = _coerce_date(r.d)
+        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'topup_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
+        by_date[day]['topup_revenue'] = float(r.revenue or 0)
     for day, opz_qty in opz_by_date.items():
-        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
+        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'topup_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
         by_date[day]['opz_qty'] = opz_qty
 
     rows = []
@@ -1643,9 +2266,14 @@ async def fetch_revenue_daily(
         }
         if include_financials:
             row.update({
-                'revenue': float(v['service_revenue']) + float(v['goods_revenue']),
+                'revenue': (
+                    float(v['service_revenue'])
+                    + float(v['goods_revenue'])
+                    + float(v['topup_revenue'])
+                ),
                 'service_revenue': float(v['service_revenue']),
                 'goods_revenue': float(v['goods_revenue']),
+                'topup_revenue': float(v['topup_revenue']),
             })
         rows.append(row)
     return rows
@@ -2225,10 +2853,15 @@ async def fetch_top_services(
     start: date,
     end: date,
     company_id: Optional[int] = None,
-    limit: int = 10,
+    limit: Optional[int] = 10,
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
+    factual_at = factual_at or _factual_now()
+    allowed_company_ids = await _appointment_company_ids(
+        db, company_id, staff_id, allowed_company_ids
+    )
     title_expr = func.trim(func.coalesce(func.nullif(Transaction.service_title, ''), ServiceCatalog.title, ''))
     group_key = _service_group_key(title_expr, Transaction.service_id)
     count_stmt = (
@@ -2244,7 +2877,14 @@ async def fetch_top_services(
         .join(Appointment, Appointment.id == Transaction.appointment_id)
         .outerjoin(ServiceCatalog, _transaction_service_catalog_join())
         .where(
-            _appt_revenue_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids),
+            _appt_revenue_filters(
+                start,
+                end,
+                company_id,
+                staff_id,
+                allowed_company_ids=allowed_company_ids,
+                factual_at=factual_at,
+            ),
         )
         .group_by(group_key)
     )
@@ -2285,33 +2925,127 @@ async def fetch_top_services(
             ),
         )
         .outerjoin(ServiceCatalog, _financial_service_catalog_join())
-        .where(_service_paid_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids))
+        .outerjoin(
+            AccountCatalog,
+            and_(
+                AccountCatalog.company_id == FinancialTransaction.company_id,
+                AccountCatalog.account_id == FinancialTransaction.account_id,
+            ),
+        )
+        .where(
+            _service_paid_filters(
+                start,
+                end,
+                company_id,
+                staff_id,
+                allowed_company_ids=allowed_company_ids,
+                factual_at=factual_at,
+            ),
+            _physical_account_condition(),
+        )
         .group_by(paid_group_key)
         .order_by(paid_revenue.desc())
-        .limit(limit)
     )
     count_rows = (await db.execute(count_stmt)).all()
     paid_rows = (await db.execute(paid_stmt)).all()
     counts_by_key = {str(r.group_key): r for r in count_rows}
+    paid_by_key = {str(r.group_key): r for r in paid_rows}
     out = []
-    for r in paid_rows:
-        key = str(r.group_key)
+    for key in counts_by_key.keys() | paid_by_key.keys():
         counts = counts_by_key.get(key)
+        paid = paid_by_key.get(key)
         out.append({
-            'service_id': counts.service_id if counts is not None else r.service_id,
-            'title': (counts.service_title if counts is not None else r.service_title) or '',
+            'service_id': counts.service_id if counts is not None else paid.service_id,
+            'title': (
+                counts.service_title if counts is not None else paid.service_title
+            ) or '',
             'sold': int((counts.sold if counts is not None else 0) or 0),
-            'revenue': float(r.revenue or 0),
+            'revenue': float((paid.revenue if paid is not None else 0) or 0),
             'service_count': max(
                 int((counts.service_count if counts is not None else 0) or 0),
-                int(r.service_count or 0),
+                int((paid.service_count if paid is not None else 0) or 0),
             ),
             'branch_count': max(
                 int((counts.branch_count if counts is not None else 0) or 0),
-                int(r.branch_count or 0),
+                int((paid.branch_count if paid is not None else 0) or 0),
             ),
         })
-    return out
+    out.sort(
+        key=lambda item: (
+            float(item['revenue']),
+            int(item['sold']),
+            str(item['title']),
+        ),
+        reverse=True,
+    )
+    return out[:limit] if limit is not None else out
+
+
+async def fetch_paid_goods_rows(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: Optional[int] = None,
+    staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
+) -> list[dict[str, Any]]:
+    """Paid goods operations using the Overview/plan-fact revenue formula."""
+    factual_at = factual_at or _factual_now()
+    attributed_staff_id = _financial_attributed_staff_id()
+    stmt = (
+        select(
+            FinancialTransaction.id,
+            FinancialTransaction.company_id,
+            FinancialTransaction.sold_item_id.label('good_id'),
+            FinancialTransaction.date,
+            FinancialTransaction.amount,
+            attributed_staff_id.label('master_id'),
+            GoodCatalog.title.label('good_title'),
+            Staff.name.label('staff_name'),
+        )
+        .select_from(FinancialTransaction)
+        .outerjoin(
+            AccountCatalog,
+            and_(
+                AccountCatalog.company_id == FinancialTransaction.company_id,
+                AccountCatalog.account_id == FinancialTransaction.account_id,
+            ),
+        )
+        .outerjoin(
+            GoodCatalog,
+            and_(
+                GoodCatalog.company_id == FinancialTransaction.company_id,
+                GoodCatalog.good_id == FinancialTransaction.sold_item_id,
+            ),
+        )
+        .outerjoin(Staff, Staff.id == attributed_staff_id)
+        .where(
+            _goods_paid_filters(
+                start,
+                end,
+                company_id,
+                staff_id,
+                allowed_company_ids,
+                factual_at,
+            ),
+            _physical_account_condition(),
+        )
+        .order_by(FinancialTransaction.date.asc(), FinancialTransaction.id.asc())
+    )
+    return [
+        {
+            'id': row.id,
+            'company_id': row.company_id,
+            'good_id': row.good_id,
+            'good_title': row.good_title,
+            'date': row.date,
+            'amount': float(row.amount or 0),
+            'master_id': row.master_id,
+            'staff_name': row.staff_name,
+        }
+        for row in (await db.execute(stmt)).all()
+    ]
 
 
 async def fetch_extra_services(
@@ -2322,7 +3056,12 @@ async def fetch_extra_services(
     limit: Optional[int] = None,
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
+    factual_at = factual_at or _factual_now()
+    allowed_company_ids = await _appointment_company_ids(
+        db, company_id, staff_id, allowed_company_ids
+    )
     title_expr = func.trim(func.coalesce(func.nullif(Transaction.service_title, ''), ServiceCatalog.title, ''))
     group_key = _service_group_key(title_expr, Transaction.service_id)
     count_stmt = (
@@ -2339,7 +3078,14 @@ async def fetch_extra_services(
         .join(ServiceLabel, _transaction_service_label_join())
         .outerjoin(ServiceCatalog, _transaction_service_catalog_join())
         .where(
-            _appt_revenue_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids),
+            _appt_revenue_filters(
+                start,
+                end,
+                company_id,
+                staff_id,
+                allowed_company_ids=allowed_company_ids,
+                factual_at=factual_at,
+            ),
             ServiceLabel.is_extra.is_(True),
         )
         .group_by(group_key)
@@ -2377,9 +3123,24 @@ async def fetch_extra_services(
         )
         .join(ServiceLabel, _financial_service_label_join())
         .outerjoin(ServiceCatalog, _financial_service_catalog_join())
+        .outerjoin(
+            AccountCatalog,
+            and_(
+                AccountCatalog.company_id == FinancialTransaction.company_id,
+                AccountCatalog.account_id == FinancialTransaction.account_id,
+            ),
+        )
         .where(
-            _service_paid_filters(start, end, company_id, staff_id, allowed_company_ids=allowed_company_ids),
+            _service_paid_filters(
+                start,
+                end,
+                company_id,
+                staff_id,
+                allowed_company_ids=allowed_company_ids,
+                factual_at=factual_at,
+            ),
             ServiceLabel.is_extra.is_(True),
+            _physical_account_condition(),
         )
         .group_by(paid_group_key)
     )
@@ -2406,6 +3167,7 @@ async def _service_group_counts(
     end: date,
     company_id: int,
     staff_id: Optional[int] = None,
+    factual_at: Optional[datetime] = None,
 ) -> dict[str, float]:
     title_expr = func.lower(func.coalesce(Transaction.service_title, ServiceCatalog.title, ''))
     stmt = (
@@ -2418,7 +3180,11 @@ async def _service_group_counts(
         .select_from(Transaction)
         .join(Appointment, Appointment.id == Transaction.appointment_id)
         .outerjoin(ServiceCatalog, _transaction_service_catalog_join())
-        .where(_appt_revenue_filters(start, end, company_id, staff_id))
+        .where(
+            _appt_revenue_filters(
+                start, end, company_id, staff_id, factual_at=factual_at
+            )
+        )
     )
     row = (await db.execute(stmt)).one()
     return {
@@ -2434,6 +3200,7 @@ async def _extra_service_revenue_by_staff(
     start: date,
     end: date,
     company_ids: list[int] | None,
+    factual_at: Optional[datetime] = None,
 ) -> dict[int, float] | None:
     """Paid revenue of the extra-service categories (wax/camouflage/face/head), per visit master.
 
@@ -2474,8 +3241,23 @@ async def _extra_service_revenue_by_staff(
             ),
         )
         .outerjoin(ServiceCatalog, _financial_service_catalog_join())
+        .outerjoin(
+            AccountCatalog,
+            and_(
+                AccountCatalog.company_id == FinancialTransaction.company_id,
+                AccountCatalog.account_id == FinancialTransaction.account_id,
+            ),
+        )
         .where(
-            _service_paid_filters(start, end, None, None, allowed_company_ids=company_ids),
+            _service_paid_filters(
+                start,
+                end,
+                None,
+                None,
+                allowed_company_ids=company_ids,
+                factual_at=factual_at,
+            ),
+            _physical_account_condition(),
             extra_match,
             Appointment.staff_id.is_not(None),
         )
@@ -2498,6 +3280,7 @@ async def _goods_sales_metrics(
     end: date,
     company_id: int,
     staff_id: Optional[int] = None,
+    factual_at: Optional[datetime] = None,
 ) -> dict[str, float]:
     # YClients stores goods sales as negative stock movements.
     sold_qty = func.sum(-func.coalesce(GoodTransaction.amount, 0.0))
@@ -2507,7 +3290,11 @@ async def _goods_sales_metrics(
             func.coalesce(sold_qty, 0.0).label('qty'),
             func.coalesce(sold_sum, 0.0).label('revenue'),
         )
-        .where(_goods_revenue_filters(start, end, company_id, staff_id))
+        .where(
+            _goods_revenue_filters(
+                start, end, company_id, staff_id, factual_at=factual_at
+            )
+        )
     )
     row = (await db.execute(stmt)).one()
     return {
@@ -2522,6 +3309,9 @@ async def _opz_events(
     end: date,
     company_id: int,
     created_user_id: Optional[int] = None,
+    *,
+    deduplicate_by_year: bool = False,
+    factual_at: Optional[datetime] = None,
 ) -> list[OpzEvent]:
     create_start = datetime.combine(start, time.min)
     create_end = datetime.combine(end + timedelta(days=1), time.min)
@@ -2535,6 +3325,8 @@ async def _opz_events(
     ]
     if created_user_id is not None:
         candidate_filters.append(Appointment.created_user_id == created_user_id)
+    if factual_at is not None:
+        candidate_filters.append(Appointment.create_date <= factual_at)
     candidates_stmt = (
         select(
             Appointment.id,
@@ -2559,6 +3351,8 @@ async def _opz_events(
         Appointment.date.is_not(None),
         Appointment.date <= end,
     ]
+    if factual_at is not None:
+        visit_filters.append(_appointment_factual_at_condition(factual_at))
     visits_stmt = (
         select(
             Appointment.company_id,
@@ -2576,7 +3370,7 @@ async def _opz_events(
         visits_by_client.setdefault((visit.company_id, visit.client_id), []).append(visit)
 
     events: list[OpzEvent] = []
-    booked_clients: set[tuple[int, int]] = set()
+    booked_clients: set[tuple[int, ...]] = set()
     for candidate in candidates:
         create_day = candidate.create_date.date()
         last_visits = [
@@ -2600,6 +3394,8 @@ async def _opz_events(
         if create_day not in {last_visit_date, last_visit_date + timedelta(days=1)}:
             continue
         client_key = (int(candidate.company_id), int(candidate.client_id))
+        if deduplicate_by_year:
+            client_key = (*client_key, create_day.year)
         if client_key in booked_clients:
             continue
         booked_clients.add(client_key)
@@ -2610,6 +3406,7 @@ async def _opz_events(
                 client_id=int(candidate.client_id),
                 create_date=candidate.create_date,
                 appointment_date=_coerce_date(candidate.date),
+                last_visit_date=last_visit_date,
                 barber_staff_id=int(last_visit.staff_id) if last_visit.staff_id is not None else None,
                 created_user_id=(
                     int(candidate.created_user_id)
@@ -2629,8 +3426,16 @@ async def _opz_count(
     company_id: int,
     staff_id: Optional[int] = None,
     created_user_id: Optional[int] = None,
+    factual_at: Optional[datetime] = None,
 ) -> float:
-    events = await _opz_events(db, start, end, company_id, created_user_id=created_user_id)
+    events = await _opz_events(
+        db,
+        start,
+        end,
+        company_id,
+        created_user_id=created_user_id,
+        factual_at=factual_at,
+    )
     if staff_id is not None:
         events = [event for event in events if event.barber_staff_id == staff_id]
     return float(len(events))
@@ -2643,13 +3448,82 @@ async def _opz_count_scope(
     company_id: Optional[int],
     staff_id: Optional[int],
     company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
 ) -> float:
     if company_ids is None:
         company_ids = await _appointment_company_ids(db, company_id, staff_id)
     total = 0.0
     for item_company_id in company_ids:
-        total += await _opz_count(db, start, end, item_company_id, staff_id=staff_id)
+        total += await _opz_count(
+            db,
+            start,
+            end,
+            item_company_id,
+            staff_id=staff_id,
+            factual_at=factual_at,
+        )
     return total
+
+
+async def fetch_opz_year_facts(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: Optional[int],
+    staff_id: Optional[int],
+    allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
+    created_user_id: Optional[int] = None,
+) -> dict[str, Any]:
+    """Load OPZ once per branch, returning annual counts and latest fact."""
+    company_ids = await _appointment_company_ids(
+        db, company_id, staff_id, allowed_company_ids
+    )
+    counts: dict[int, float] = defaultdict(float)
+    appointment_dependencies: defaultdict[
+        int, dict[int, tuple[date, date]]
+    ] = defaultdict(dict)
+    latest_date: date | None = None
+    for item_company_id in company_ids:
+        events = await _opz_events(
+            db,
+            start,
+            end,
+            item_company_id,
+            deduplicate_by_year=True,
+            factual_at=factual_at,
+        )
+        for event in events:
+            if (
+                created_user_id is not None
+                and event.created_user_id != created_user_id
+            ):
+                continue
+            if (
+                created_user_id is None
+                and staff_id is not None
+                and event.barber_staff_id != staff_id
+            ):
+                continue
+            event_year = event.create_date.year
+            counts[event_year] += 1.0
+            dependency_start = min(event.last_visit_date, event.appointment_date)
+            dependency_end = max(event.last_visit_date, event.appointment_date)
+            current = appointment_dependencies[event_year].get(item_company_id)
+            appointment_dependencies[event_year][item_company_id] = (
+                min(current[0], dependency_start) if current else dependency_start,
+                max(current[1], dependency_end) if current else dependency_end,
+            )
+            event_date = event.create_date.date()
+            latest_date = max(latest_date, event_date) if latest_date is not None else event_date
+    return {
+        'counts': dict(counts),
+        'latest_date': latest_date,
+        'appointment_dependencies': {
+            year: dict(values)
+            for year, values in appointment_dependencies.items()
+        },
+    }
 
 
 async def _admin_event_counts(
@@ -2732,11 +3606,14 @@ async def _admin_opz_by_created_appointments(
     user_id_by_staff: dict[int, Optional[int]],
     barber_staff_ids: list[int] | None = None,
     opz_events: list[OpzEvent] | None = None,
+    factual_at: Optional[datetime] = None,
 ) -> dict[int, int]:
     if not staff_ids:
         return {}
     if opz_events is None:
-        opz_events = await _opz_events(db, start, end, company_id)
+        opz_events = await _opz_events(
+            db, start, end, company_id, factual_at=factual_at
+        )
     if barber_staff_ids:
         allowed_barbers = {int(staff_id) for staff_id in barber_staff_ids}
         opz_events = [
@@ -2763,6 +3640,7 @@ async def _admin_clients_by_finished_appointments(
     staff_ids: list[int],
     user_id_by_staff: dict[int, Optional[int]],
     barber_staff_ids: list[int] | None = None,
+    factual_at: Optional[datetime] = None,
 ) -> dict[int, int]:
     """Assign each finished appointment to at most one admin, keeping admin totals aligned with barbers."""
     if not staff_ids:
@@ -2776,6 +3654,8 @@ async def _admin_clients_by_finished_appointments(
     ]
     if barber_staff_ids:
         appointment_filters.append(Appointment.staff_id.in_(barber_staff_ids))
+    if factual_at is not None:
+        appointment_filters.append(_appointment_factual_at_condition(factual_at))
 
     appointment_rows = (
         await db.execute(
@@ -2814,16 +3694,21 @@ async def _fact_metric_components(
     created_user_id: Optional[int] = None,
     clients_override: Optional[float] = None,
     opz_override: Optional[float] = None,
+    factual_at: Optional[datetime] = None,
 ) -> dict[str, float]:
+    factual_at = factual_at or _factual_now()
     average_check = await _average_check_block(
         db,
         DateRange(start, end),
         company_id,
         staff_id,
         created_user_id=created_user_id,
+        factual_at=factual_at,
     )
     opz_staff_id = None if created_user_id is not None else staff_id
-    goods_metrics = await _goods_sales_metrics(db, start, end, company_id, staff_id)
+    goods_metrics = await _goods_sales_metrics(
+        db, start, end, company_id, staff_id, factual_at
+    )
     clients_count = float(clients_override) if clients_override is not None else float(
         await db.scalar(
             select(func.count(func.distinct(Appointment.id))).where(
@@ -2833,6 +3718,7 @@ async def _fact_metric_components(
                     company_id,
                     staff_id,
                     created_user_id=created_user_id,
+                    factual_at=factual_at,
                 )
             )
         )
@@ -2849,10 +3735,15 @@ async def _fact_metric_components(
                 db, start, end, company_id,
                 staff_id=opz_staff_id,
                 created_user_id=created_user_id,
+                factual_at=factual_at,
             )
         ),
     }
-    values.update(await _service_group_counts(db, start, end, company_id, staff_id))
+    values.update(
+        await _service_group_counts(
+            db, start, end, company_id, staff_id, factual_at
+        )
+    )
     values.update(goods_metrics)
     return _derive_metric_values(values, include_zero_derived=True, prefer_explicit=False)
 
@@ -2869,8 +3760,10 @@ async def _staff_fact_components_by_branch(
     admin_opz_by_staff: dict[int, int],
     review_facts_by_staff: dict[int, float],
     opz_events: list[OpzEvent],
+    factual_at: Optional[datetime] = None,
 ) -> dict[int, dict[str, float]]:
     """Calculate staff facts with a bounded set of branch-level aggregate queries."""
+    factual_at = factual_at or _factual_now()
     if not staff_ids:
         return {}
 
@@ -2881,7 +3774,11 @@ async def _staff_fact_components_by_branch(
                 Appointment.created_user_id,
                 func.count(func.distinct(Appointment.id)).label('appointments'),
             )
-            .where(_appt_revenue_filters(start, end, company_id))
+            .where(
+                _appt_revenue_filters(
+                    start, end, company_id, factual_at=factual_at
+                )
+            )
             .group_by(Appointment.staff_id, Appointment.created_user_id)
         )
     ).all()
@@ -2910,7 +3807,9 @@ async def _staff_fact_components_by_branch(
                 ),
             )
             .where(
-                _service_paid_filters(start, end, company_id),
+                _service_paid_filters(
+                    start, end, company_id, factual_at=factual_at
+                ),
                 _physical_account_condition(),
             )
             .group_by(Appointment.staff_id, Appointment.created_user_id)
@@ -2924,10 +3823,11 @@ async def _staff_fact_components_by_branch(
         if row.created_user_id is not None:
             service_revenue_by_creator[int(row.created_user_id)] += float(row.revenue or 0.0)
 
+    attributed_staff_id = _financial_attributed_staff_id()
     direct_rows = (
         await db.execute(
             select(
-                FinancialTransaction.master_id,
+                attributed_staff_id.label('attributed_staff_id'),
                 func.coalesce(
                     func.sum(
                         case(
@@ -2956,13 +3856,14 @@ async def _staff_fact_components_by_branch(
                 func.date(FinancialTransaction.date) <= end,
                 FinancialTransaction.company_id == company_id,
                 _physical_account_condition(),
-                _business_financial_master_condition(),
+                _business_financial_master_condition(factual_at),
                 or_(
                     FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
                     _personal_account_condition(),
                 ),
+                FinancialTransaction.date <= factual_at,
             )
-            .group_by(FinancialTransaction.master_id)
+            .group_by(attributed_staff_id)
         )
     ).all()
     goods_revenue_by_staff: dict[int, float] = defaultdict(float)
@@ -2974,46 +3875,9 @@ async def _staff_fact_components_by_branch(
         topup_revenue = float(row.topup_revenue or 0.0)
         branch_goods_revenue += goods_revenue
         branch_topup_revenue += topup_revenue
-        if row.master_id is not None:
-            goods_revenue_by_staff[int(row.master_id)] += goods_revenue
-            topup_revenue_by_staff[int(row.master_id)] += topup_revenue
-
-    # A payment without master_id used to be attributed through an EXISTS
-    # check, once for every matching visit master. Build the same distinct
-    # payment/staff pairs without joining the branch total above: a direct join
-    # can otherwise multiply one payment when record_id matches two visits.
-    masterless_goods_rows = (
-        await db.execute(
-            select(
-                FinancialTransaction.id.label('payment_id'),
-                Appointment.staff_id,
-                func.max(FinancialTransaction.amount).label('amount'),
-            )
-            .select_from(FinancialTransaction)
-            .join(Appointment, financial_appointment_match_condition())
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
-            .where(
-                FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
-                FinancialTransaction.master_id.is_(None),
-                FinancialTransaction.amount > 0,
-                func.date(FinancialTransaction.date) >= start,
-                func.date(FinancialTransaction.date) <= end,
-                FinancialTransaction.company_id == company_id,
-                _physical_account_condition(),
-                business_appointment_condition(),
-                Appointment.staff_id.is_not(None),
-            )
-            .group_by(FinancialTransaction.id, Appointment.staff_id)
-        )
-    ).all()
-    for row in masterless_goods_rows:
-        goods_revenue_by_staff[int(row.staff_id)] += float(row.amount or 0.0)
+        if row.attributed_staff_id is not None:
+            goods_revenue_by_staff[int(row.attributed_staff_id)] += goods_revenue
+            topup_revenue_by_staff[int(row.attributed_staff_id)] += topup_revenue
 
     sold_qty = func.sum(-func.coalesce(GoodTransaction.amount, 0.0))
     sold_sum = func.sum(func.coalesce(GoodTransaction.cost, 0.0))
@@ -3024,7 +3888,11 @@ async def _staff_fact_components_by_branch(
                 func.coalesce(sold_qty, 0.0).label('qty'),
                 func.coalesce(sold_sum, 0.0).label('revenue'),
             )
-            .where(_goods_revenue_filters(start, end, company_id))
+            .where(
+                _goods_revenue_filters(
+                    start, end, company_id, factual_at=factual_at
+                )
+            )
             .group_by(GoodTransaction.master_id)
         )
     ).all()
@@ -3050,7 +3918,11 @@ async def _staff_fact_components_by_branch(
             .select_from(Transaction)
             .join(Appointment, Appointment.id == Transaction.appointment_id)
             .outerjoin(ServiceCatalog, _transaction_service_catalog_join())
-            .where(_appt_revenue_filters(start, end, company_id))
+            .where(
+                _appt_revenue_filters(
+                    start, end, company_id, factual_at=factual_at
+                )
+            )
             .group_by(Appointment.staff_id)
         )
     ).all()
@@ -3576,6 +4448,7 @@ async def _client_fact_diagnostics(
     end: date,
     branch_id: int,
     groups: list[dict[str, Any]],
+    factual_at: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
     barber_groups = [group for group in groups if group.get('category') == 'barber']
     admin_groups = [group for group in groups if group.get('category') == 'administrator']
@@ -3609,7 +4482,11 @@ async def _client_fact_diagnostics(
         if row.user_id is None
     ]
 
-    unassigned_filters = [_appt_revenue_filters(start, end, branch_id)]
+    unassigned_filters = [
+        _appt_revenue_filters(
+            start, end, branch_id, factual_at=factual_at
+        )
+    ]
     if valid_admin_user_ids:
         unassigned_filters.append(
             or_(
@@ -3690,7 +4567,9 @@ async def _staff_plan_groups_for_branch(
     include_all_staff: bool = False,
     company_title: str | None = None,
     opz_events: list[OpzEvent] | None = None,
+    factual_at: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
+    factual_at = factual_at or _factual_now()
     # Calculate administrator attribution against the same complete staff scope
     # used by the branch view. Applying staff_id before attribution assigns every
     # unclaimed event to the only remaining administrator and changes their fact.
@@ -3745,9 +4624,12 @@ async def _staff_plan_groups_for_branch(
         admin_staff_ids,
         user_id_by_staff,
         barber_staff_ids or None,
+        factual_at=factual_at,
     )
     if opz_events is None:
-        opz_events = await _opz_events(db, start, end, branch_id)
+        opz_events = await _opz_events(
+            db, start, end, branch_id, factual_at=factual_at
+        )
     admin_opz_by_staff = await _admin_opz_by_created_appointments(
         db,
         start,
@@ -3757,6 +4639,7 @@ async def _staff_plan_groups_for_branch(
         user_id_by_staff,
         barber_staff_ids or None,
         opz_events=opz_events,
+        factual_at=factual_at,
     )
     admin_review_facts_by_staff = await _manual_review_fact_values_by_staff(
         db,
@@ -3778,6 +4661,7 @@ async def _staff_plan_groups_for_branch(
         admin_opz_by_staff,
         admin_review_facts_by_staff,
         opz_events,
+        factual_at,
     )
 
     groups: list[dict[str, Any]] = []
@@ -4558,7 +5442,9 @@ async def fetch_plan_fact(
     force_allowed: bool = False,
     include_extra_service_revenue: bool = False,
     include_all_staff_in_leaderboards: bool = False,
+    factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
+    factual_at = factual_at or _factual_now()
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
     selected_staff: dict[str, Any] | None = None
     if staff_id is not None:
@@ -4601,13 +5487,16 @@ async def fetch_plan_fact(
 
         branch_id = company_ids[0]
         branch = branches[0]
-        branch_opz_events = await _opz_events(db, start, end, branch_id)
+        branch_opz_events = await _opz_events(
+            db, start, end, branch_id, factual_at=factual_at
+        )
         branch_fact = await _fact_metric_components(
             db,
             start,
             end,
             branch_id,
             opz_override=float(len(branch_opz_events)),
+            factual_at=factual_at,
         )
         branch_review_facts = await _manual_review_fact_values_by_company(db, start, end, [branch_id])
         branch_fact[REVIEWS_QTY_CODE] = branch_review_facts.get(branch_id, 0.0)
@@ -4623,6 +5512,7 @@ async def fetch_plan_fact(
             include_all_staff=include_all_staff_in_leaderboards,
             company_title=branch['title'],
             opz_events=branch_opz_events,
+            factual_at=factual_at,
         )
         parent_group = {
             'company_id': branch_id,
@@ -4631,9 +5521,13 @@ async def fetch_plan_fact(
             'metrics': _metric_cells(plans_by_company.get(branch_id, {}), branch_fact),
         }
         selected_staff_plan = _selected_staff_plan_payload(selected_staff, groups)
-        diagnostics = await _client_fact_diagnostics(db, start, end, branch_id, groups)
+        diagnostics = await _client_fact_diagnostics(
+            db, start, end, branch_id, groups, factual_at
+        )
         extra_revenue_result = (
-            await _extra_service_revenue_by_staff(db, start, end, [branch_id])
+            await _extra_service_revenue_by_staff(
+                db, start, end, [branch_id], factual_at
+            )
             if include_extra_service_revenue else {}
         )
 
@@ -4662,13 +5556,16 @@ async def fetch_plan_fact(
     opz_events_by_company: dict[int, list[OpzEvent]] = {}
     staff_groups_by_company: dict[int, list[dict[str, Any]]] = {}
     for branch_id in company_ids:
-        opz_events_by_company[branch_id] = await _opz_events(db, start, end, branch_id)
+        opz_events_by_company[branch_id] = await _opz_events(
+            db, start, end, branch_id, factual_at=factual_at
+        )
         facts_by_company[branch_id] = await _fact_metric_components(
             db,
             start,
             end,
             branch_id,
             opz_override=float(len(opz_events_by_company[branch_id])),
+            factual_at=factual_at,
         )
     review_facts_by_company = await _manual_review_fact_values_by_company(db, start, end, company_ids)
     for branch_id in company_ids:
@@ -4688,6 +5585,7 @@ async def fetch_plan_fact(
                 None,
             ),
             opz_events=opz_events_by_company[branch_id],
+            factual_at=factual_at,
         )
 
     groups: list[dict[str, Any]] = []
@@ -4699,6 +5597,7 @@ async def fetch_plan_fact(
             DateRange(start, end),
             None,
             company_ids=company_ids,
+            factual_at=factual_at,
         )
         network_fact['revenue'] = float(network_average_check['numerator'] or 0.0)
         network_fact['avg_check_denominator'] = float(network_average_check['denominator'] or 0.0)
@@ -4732,7 +5631,9 @@ async def fetch_plan_fact(
         for group in staff_groups_by_company.get(branch_id, [])
     ]
     extra_revenue_result = (
-        await _extra_service_revenue_by_staff(db, start, end, company_ids)
+        await _extra_service_revenue_by_staff(
+            db, start, end, company_ids, factual_at
+        )
         if include_extra_service_revenue else {}
     )
 

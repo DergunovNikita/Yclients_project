@@ -625,8 +625,6 @@ async def dashboard_report_data(
     compare_start_date: date | None = Query(None),
     compare_end_date: date | None = Query(None),
     compare_staff_id: int | None = Query(None),
-    start_year: int = Query(2022, ge=2000, le=2100),
-    end_year: int = Query(2026, ge=2000, le=2100),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -659,8 +657,6 @@ async def dashboard_report_data(
             compare_start_date,
             compare_end_date,
             compare_staff_id,
-            start_year=start_year,
-            end_year=end_year,
             allowed_company_ids=scope['allowed_company_ids'],
         )
     except ValueError as exc:
@@ -703,6 +699,7 @@ async def dashboard_widget_summary(
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
     await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
+    factual_at = datetime.now()
     summary = await fetch_summary(
         db,
         start,
@@ -710,6 +707,7 @@ async def dashboard_widget_summary(
         scope['company_id'],
         staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
+        factual_at=factual_at,
     )
     hidden = hidden_money_codes(ctx)
     if hidden:
@@ -1047,6 +1045,7 @@ async def dashboard_bundle(
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
     await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
+    factual_at = datetime.now()
     summary = await fetch_summary(
         db,
         start,
@@ -1054,6 +1053,7 @@ async def dashboard_bundle(
         scope['company_id'],
         staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
+        factual_at=factual_at,
     )
     hidden = hidden_money_codes(ctx)
     can_see_financials = can_view_financials(ctx)
@@ -1065,6 +1065,7 @@ async def dashboard_bundle(
         staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
         include_financials=can_see_financials,
+        factual_at=factual_at,
     )
     if not can_see_financials:
         return {
@@ -1087,6 +1088,7 @@ async def dashboard_bundle(
         10,
         staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
+        factual_at=factual_at,
     )
     extra_services = await fetch_extra_services(
         db,
@@ -1096,6 +1098,7 @@ async def dashboard_bundle(
         None,
         staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
+        factual_at=factual_at,
     )
     return {
         'success': True,

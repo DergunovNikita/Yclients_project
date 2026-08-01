@@ -35,8 +35,16 @@ from models import (
 from sync_parsing import parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_time
 
 TRANSACTIONAL_STATE_KEY = 'transactions_last_success_date'
+HISTORICAL_COVERAGE_STATE_KEY = 'historical_source_coverage_v1'
 FULL_REFRESH_CLEANUP_STEP = 'Full refresh cleanup'
 PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
+APPOINTMENTS_SOURCE = 'appointments_detail'
+GOODS_TRANSACTIONS_SOURCE = 'goods_transactions_detail'
+FULL_REFRESH_COVERAGE_SOURCES = (
+    APPOINTMENTS_SOURCE,
+    PERSONAL_ACCOUNT_SOURCE,
+    GOODS_TRANSACTIONS_SOURCE,
+)
 
 
 def _valid_staff_email(value) -> str | None:
@@ -206,10 +214,59 @@ def transactional_state_key(company_id: int) -> str:
     return f'{TRANSACTIONAL_STATE_KEY}:company:{int(company_id)}'
 
 
+def historical_coverage_state_key(company_id: int) -> str:
+    return f'{HISTORICAL_COVERAGE_STATE_KEY}:company:{int(company_id)}'
+
+
 def full_sync_start_date(end_date: date) -> date:
     if SYNC_DAYS and SYNC_DAYS > 0:
         return end_date - timedelta(days=SYNC_DAYS)
     return min(SYNC_HISTORY_START_DATE, end_date)
+
+
+def historical_sync_start_date(end_date: date) -> date:
+    """Lower bound used when certifying the complete YClients history."""
+    return min(SYNC_HISTORY_START_DATE, end_date)
+
+
+def has_complete_historical_source_coverage(
+    db,
+    company_id: int,
+    through_date: date,
+) -> bool:
+    history_start = historical_sync_start_date(through_date)
+    covered_sources = {
+        state.source
+        for state in (
+            db.query(SyncSourceState)
+            .filter(
+                SyncSourceState.company_id == int(company_id),
+                SyncSourceState.source.in_(FULL_REFRESH_COVERAGE_SOURCES),
+                SyncSourceState.period_start <= history_start,
+                SyncSourceState.period_end >= through_date,
+            )
+            .all()
+        )
+    }
+    return covered_sources == set(FULL_REFRESH_COVERAGE_SOURCES)
+
+
+def has_valid_historical_coverage_marker(
+    db,
+    company_id: int,
+) -> bool:
+    raw_value = get_sync_state_value(db, historical_coverage_state_key(company_id))
+    if not raw_value:
+        return False
+    try:
+        certified_through = date.fromisoformat(raw_value)
+    except ValueError:
+        return False
+    return has_complete_historical_source_coverage(
+        db,
+        company_id,
+        certified_through,
+    )
 
 
 def resolve_transaction_window(db, end_date: date, state_key: str = TRANSACTIONAL_STATE_KEY):
@@ -247,16 +304,30 @@ def company_has_transactional_rows(db, company_id: int) -> bool:
 def resolve_company_sync_window(db, end_date: date, requested_mode: str, company_id: int):
     normalized_mode = (requested_mode or 'incremental').strip().lower()
     if normalized_mode == 'full':
-        return full_sync_start_date(end_date), 'full'
+        return historical_sync_start_date(end_date), 'full'
 
     scoped_key = transactional_state_key(company_id)
-    if get_sync_state_value(db, scoped_key):
+    scoped_checkpoint = get_sync_state_value(db, scoped_key)
+    legacy_checkpoint = get_sync_state_value(db, TRANSACTIONAL_STATE_KEY)
+    has_legacy_company = bool(legacy_checkpoint) and company_has_transactional_rows(
+        db, company_id
+    )
+    if (
+        (scoped_checkpoint or has_legacy_company)
+        and not has_valid_historical_coverage_marker(db, company_id)
+    ):
+        # One full pass is mandatory after introducing detailed source coverage.
+        # Otherwise a legacy incremental checkpoint would only certify the recent
+        # lookback window and every historical YoY value would remain unknown.
+        return historical_sync_start_date(end_date), 'full'
+
+    if scoped_checkpoint:
         return resolve_transaction_window(db, end_date, scoped_key)
 
-    if get_sync_state_value(db, TRANSACTIONAL_STATE_KEY) and company_has_transactional_rows(db, company_id):
+    if has_legacy_company:
         return resolve_transaction_window(db, end_date, TRANSACTIONAL_STATE_KEY)
 
-    return full_sync_start_date(end_date), 'full'
+    return historical_sync_start_date(end_date), 'full'
 
 
 def purge_full_refresh_window(db, company_id: int, start_date: str, end_date: str, schedule_end_date: str):
@@ -325,6 +396,19 @@ def purge_full_refresh_window(db, company_id: int, start_date: str, end_date: st
             )
             .delete(synchronize_session=False)
         )
+        invalidate_sync_source_coverage(
+            db,
+            company_id,
+            FULL_REFRESH_COVERAGE_SOURCES,
+            start_bound,
+            end_bound,
+        )
+        historical_state = db.get(
+            SyncState,
+            historical_coverage_state_key(company_id),
+        )
+        if historical_state is not None:
+            db.delete(historical_state)
         db.commit()
         print(
             "  ✓ Full refresh cleanup: "
@@ -340,6 +424,39 @@ def purge_full_refresh_window(db, company_id: int, start_date: str, end_date: st
         db.rollback()
         print(f"  ✗ Ошибка очистки перед full refresh: {e}")
         return False
+
+
+def invalidate_sync_source_coverage(
+    db,
+    company_id: int,
+    sources: Iterable[str],
+    period_start: date,
+    period_end: date,
+) -> None:
+    """Remove a purged interval without advertising a gap as synchronized."""
+    states = (
+        db.query(SyncSourceState)
+        .filter(
+            SyncSourceState.company_id == company_id,
+            SyncSourceState.source.in_(tuple(sources)),
+            SyncSourceState.period_start <= period_end,
+            SyncSourceState.period_end >= period_start,
+        )
+        .all()
+    )
+    for state in states:
+        left_end = period_start - timedelta(days=1)
+        right_start = period_end + timedelta(days=1)
+        has_left = state.period_start <= left_end
+        has_right = right_start <= state.period_end
+        if has_right:
+            # One row can hold only one contiguous interval. Prefer the newer
+            # side when a middle slice is removed; this never bridges the gap.
+            state.period_start = right_start
+        elif has_left:
+            state.period_end = left_end
+        else:
+            db.delete(state)
 
 
 def steps_successful(results, step_names) -> bool:
@@ -1347,7 +1464,19 @@ def sync_records(api: YClientsAPI, db, company_id: str,
         return False
     if not records:
         print("  Нет записей за указанный период")
-        return True
+        try:
+            cid = _db_company_id(company_id, db_company_id)
+            if db is not None:
+                mark_sync_source_coverage(
+                    db, cid, APPOINTMENTS_SOURCE, start_date, end_date
+                )
+                db.commit()
+            return True
+        except Exception as e:
+            if db is not None:
+                db.rollback()
+            print(f"  ✗ Ошибка: {e}")
+            return False
 
     print(f"  Найдено: {len(records)}")
 
@@ -1432,6 +1561,9 @@ def sync_records(api: YClientsAPI, db, company_id: str,
                 db.add(tx)
                 tx_count += 1
 
+        mark_sync_source_coverage(
+            db, cid, APPOINTMENTS_SOURCE, start_date, end_date
+        )
         db.commit()
         print(
             f"  ✓ Записи сохранены ({len(records)} шт.), "
@@ -1449,28 +1581,52 @@ def sync_records(api: YClientsAPI, db, company_id: str,
 # 13. Финансовые транзакции
 # ===================================================================
 
-def mark_personal_account_source_coverage(db, company_id: int, start_date: str | None, end_date: str | None):
+def mark_sync_source_coverage(
+    db,
+    company_id: int,
+    source: str,
+    start_date: str | None,
+    end_date: str | None,
+):
     if not start_date or not end_date:
         return
     state = db.get(
         SyncSourceState,
-        {'company_id': company_id, 'source': PERSONAL_ACCOUNT_SOURCE},
+        {'company_id': company_id, 'source': source},
     )
     period_start = parse_date(start_date)
     period_end = parse_date(end_date)
     if state is None:
         state = SyncSourceState(
             company_id=company_id,
-            source=PERSONAL_ACCOUNT_SOURCE,
+            source=source,
             period_start=period_start,
             period_end=period_end,
             synced_at=datetime.now(),
         )
         db.add(state)
     else:
-        state.period_start = min(state.period_start, period_start)
-        state.period_end = max(state.period_end, period_end)
+        intervals_touch = (
+            period_start <= state.period_end + timedelta(days=1)
+            and period_end >= state.period_start - timedelta(days=1)
+        )
+        if intervals_touch:
+            state.period_start = min(state.period_start, period_start)
+            state.period_end = max(state.period_end, period_end)
+        elif period_end > state.period_end:
+            # The schema stores one contiguous interval. Never bridge a gap and
+            # falsely advertise it as complete; retain the newest interval.
+            state.period_start = period_start
+            state.period_end = period_end
         state.synced_at = datetime.now()
+
+
+def mark_personal_account_source_coverage(
+    db, company_id: int, start_date: str | None, end_date: str | None
+):
+    mark_sync_source_coverage(
+        db, company_id, PERSONAL_ACCOUNT_SOURCE, start_date, end_date
+    )
 
 
 def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
@@ -1605,7 +1761,19 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
         return False
     if not txns:
         print("  Нет данных")
-        return True
+        try:
+            cid = _db_company_id(company_id, db_company_id)
+            if db is not None:
+                mark_sync_source_coverage(
+                    db, cid, GOODS_TRANSACTIONS_SOURCE, start_date, end_date
+                )
+                db.commit()
+            return True
+        except Exception as e:
+            if db is not None:
+                db.rollback()
+            print(f"  ✗ Ошибка: {e}")
+            return False
 
     print(f"  Найдено: {len(txns)}")
 
@@ -1691,6 +1859,9 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
                 obj.company_id = cid
                 obj.date = tx_date
 
+        mark_sync_source_coverage(
+            db, cid, GOODS_TRANSACTIONS_SOURCE, start_date, end_date
+        )
         db.commit()
         print(f"  ✓ Товарные транзакции сохранены ({len(txns)} шт.)")
         return True
@@ -2472,6 +2643,24 @@ def execute_sync(
                 company_step_results = step_results[company_step_start:]
                 if steps_successful(company_step_results, checkpoint_step_names):
                     set_sync_state_value(db, transactional_state_key(company.id), ed)
+                    if (
+                        company_sync_mode == 'full'
+                        and has_complete_historical_source_coverage(
+                            db,
+                            company.id,
+                            end,
+                        )
+                    ):
+                        set_sync_state_value(
+                            db,
+                            historical_coverage_state_key(company.id),
+                            ed,
+                        )
+                    elif company_sync_mode == 'full':
+                        print(
+                            "! Полное историческое покрытие источников не подтверждено; "
+                            f"инкрементальный режим не включен [{company_label}]"
+                        )
                     print(f"✓ Обновлено состояние инкрементальной синхронизации [{company_label}]: {ed}")
                 else:
                     print(f"! Состояние инкрементальной синхронизации не обновлено [{company_label}]")

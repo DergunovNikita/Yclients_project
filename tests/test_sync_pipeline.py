@@ -154,6 +154,11 @@ def patch_execute_sync_dependencies(monkeypatch, db, credential, *, purge_result
     monkeypatch.setattr(sync_pipeline, 'mark_credential_success_sync', lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sync_pipeline, 'mark_credential_failure_sync', lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sync_pipeline, 'purge_full_refresh_window', lambda *_args, **_kwargs: purge_result)
+    monkeypatch.setattr(
+        sync_pipeline,
+        'has_complete_historical_source_coverage',
+        lambda *_args, **_kwargs: True,
+    )
     for name in SYNC_STEP_FUNCTIONS:
         monkeypatch.setattr(sync_pipeline, name, lambda *_args, **_kwargs: True)
 
@@ -192,6 +197,7 @@ TRANSACTIONAL_WINDOW_TABLES = [
     GoodTransaction.__table__,
     Comment.__table__,
     SyncState.__table__,
+    SyncSourceState.__table__,
 ]
 
 
@@ -207,6 +213,15 @@ def test_company_window_uses_scoped_checkpoint_first(monkeypatch):
         db.add(Appointment(id=1, company_id=1, date=date(2026, 6, 20)))
         db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-30'))
         db.add(SyncState(key=transactional_state_key(1), value='2026-06-20'))
+        db.add(SyncState(key=sync_pipeline.historical_coverage_state_key(1), value='2026-06-20'))
+        for source in sync_pipeline.FULL_REFRESH_COVERAGE_SOURCES:
+            db.add(SyncSourceState(
+                company_id=1,
+                source=source,
+                period_start=date(2026, 1, 1),
+                period_end=date(2026, 6, 20),
+                synced_at=datetime(2026, 6, 20),
+            ))
         db.commit()
 
         assert sync_pipeline.resolve_company_sync_window(db, date(2026, 7, 1), 'incremental', 1) == (
@@ -226,6 +241,15 @@ def test_company_window_falls_back_to_global_for_existing_transactional_company(
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
         db.add(Appointment(id=1, company_id=1, date=date(2026, 6, 20)))
         db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-30'))
+        db.add(SyncState(key=sync_pipeline.historical_coverage_state_key(1), value='2026-06-20'))
+        for source in sync_pipeline.FULL_REFRESH_COVERAGE_SOURCES:
+            db.add(SyncSourceState(
+                company_id=1,
+                source=source,
+                period_start=date(2026, 1, 1),
+                period_end=date(2026, 6, 20),
+                synced_at=datetime(2026, 6, 20),
+            ))
         db.commit()
 
         assert sync_pipeline.resolve_company_sync_window(db, date(2026, 7, 1), 'incremental', 1) == (
@@ -271,6 +295,70 @@ def test_company_has_transactional_rows_detects_existing_sources(row):
         assert sync_pipeline.company_has_transactional_rows(db, 1) is True
 
 
+def test_limited_window_marker_cannot_certify_complete_history(monkeypatch):
+    monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 30)
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
+    monkeypatch.setattr(sync_pipeline, 'SYNC_INCREMENTAL', True)
+
+    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.add(Appointment(id=1, company_id=1, date=date(2023, 2, 10)))
+        db.add(SyncState(key=transactional_state_key(1), value='2026-06-30'))
+        db.add(SyncState(
+            key=sync_pipeline.historical_coverage_state_key(1),
+            value='2026-06-30',
+        ))
+        for source in sync_pipeline.FULL_REFRESH_COVERAGE_SOURCES:
+            db.add(SyncSourceState(
+                company_id=1,
+                source=source,
+                period_start=date(2026, 6, 1),
+                period_end=date(2026, 6, 30),
+                synced_at=datetime(2026, 6, 30),
+            ))
+        db.commit()
+
+        assert sync_pipeline.has_valid_historical_coverage_marker(db, 1) is False
+        assert sync_pipeline.resolve_company_sync_window(
+            db,
+            date(2026, 7, 1),
+            'incremental',
+            1,
+        ) == (date(2000, 1, 1), 'full')
+
+
+def test_missing_historical_source_interval_invalidates_existing_marker(monkeypatch):
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2022, 1, 1))
+    monkeypatch.setattr(sync_pipeline, 'SYNC_INCREMENTAL', True)
+
+    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.add(Appointment(id=1, company_id=1, date=date(2023, 2, 10)))
+        db.add(SyncState(key=transactional_state_key(1), value='2026-06-30'))
+        db.add(SyncState(
+            key=sync_pipeline.historical_coverage_state_key(1),
+            value='2026-06-30',
+        ))
+        for source in sync_pipeline.FULL_REFRESH_COVERAGE_SOURCES[:-1]:
+            db.add(SyncSourceState(
+                company_id=1,
+                source=source,
+                period_start=date(2022, 1, 1),
+                period_end=date(2026, 6, 30),
+                synced_at=datetime(2026, 6, 30),
+            ))
+        db.commit()
+
+        assert sync_pipeline.resolve_company_sync_window(
+            db,
+            date(2026, 7, 1),
+            'incremental',
+            1,
+        ) == (date(2022, 1, 1), 'full')
+
+
 def test_execute_sync_updates_company_scoped_checkpoint(monkeypatch):
     with sqlite_session_with_system([Group.__table__, Company.__table__, SyncState.__table__]) as db:
         db.add(Group(id=1, title='G1'))
@@ -295,6 +383,45 @@ def test_execute_sync_updates_company_scoped_checkpoint(monkeypatch):
         assert result['window_start'] == sync_pipeline.full_sync_start_date(date(2026, 6, 30)).isoformat()
         assert db.get(SyncState, sync_pipeline.TRANSACTIONAL_STATE_KEY) is None
         assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
+        assert db.get(
+            SyncState, sync_pipeline.historical_coverage_state_key(1)
+        ).value == '2026-06-30'
+
+
+def test_execute_sync_does_not_certify_incomplete_historical_coverage(monkeypatch):
+    with sqlite_session_with_system([Group.__table__, Company.__table__, SyncState.__table__]) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.commit()
+
+        credential = YClientsCredentialValue(
+            id=11,
+            title='Tenant credential',
+            partner_token='partner',
+            login='login',
+            password='password',
+            company_ids=(1,),
+            portal_account_id=7,
+        )
+        patch_execute_sync_dependencies(monkeypatch, db, credential)
+        monkeypatch.setattr(
+            sync_pipeline,
+            'has_complete_historical_source_coverage',
+            lambda *_args, **_kwargs: False,
+        )
+
+        result = execute_sync(
+            mode='full',
+            end_date=date(2026, 6, 30),
+            portal_account_id=7,
+        )
+
+        assert result['success'] is True
+        assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
+        assert db.get(
+            SyncState,
+            sync_pipeline.historical_coverage_state_key(1),
+        ) is None
 
 
 def test_execute_sync_uses_global_checkpoint_for_existing_company_without_purge(monkeypatch):
@@ -303,6 +430,7 @@ def test_execute_sync_uses_global_checkpoint_for_existing_company_without_purge(
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
         db.add(Appointment(id=1, company_id=1, date=date(2026, 6, 20)))
         db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-28'))
+        db.add(SyncState(key=sync_pipeline.historical_coverage_state_key(1), value='2026-06-20'))
         db.commit()
 
         credential = YClientsCredentialValue(
@@ -331,6 +459,56 @@ def test_execute_sync_uses_global_checkpoint_for_existing_company_without_purge(
         assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
 
 
+def test_execute_sync_forces_one_time_history_backfill_for_legacy_checkpoint(monkeypatch):
+    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.add(Appointment(id=1, company_id=1, date=date(2023, 2, 10)))
+        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-28'))
+        for source in sync_pipeline.FULL_REFRESH_COVERAGE_SOURCES:
+            db.add(SyncSourceState(
+                company_id=1,
+                source=source,
+                period_start=date(2026, 6, 26),
+                period_end=date(2026, 6, 30),
+                synced_at=datetime(2026, 6, 30),
+            ))
+        db.commit()
+
+        credential = YClientsCredentialValue(
+            id=11,
+            title='Tenant credential',
+            partner_token='partner',
+            login='login',
+            password='password',
+            company_ids=(1,),
+            portal_account_id=7,
+        )
+        purge_calls = []
+        patch_execute_sync_dependencies(monkeypatch, db, credential)
+        monkeypatch.setattr(
+            sync_pipeline,
+            'purge_full_refresh_window',
+            lambda *_args, **_kwargs: purge_calls.append(_args) or True,
+        )
+
+        result = execute_sync(
+            mode='incremental',
+            end_date=date(2026, 6, 30),
+            portal_account_id=7,
+        )
+
+        assert result['success'] is True
+        assert result['mode'] == 'full'
+        assert result['window_start'] == sync_pipeline.full_sync_start_date(
+            date(2026, 6, 30)
+        ).isoformat()
+        assert purge_calls
+        assert db.get(
+            SyncState, sync_pipeline.historical_coverage_state_key(1)
+        ).value == '2026-06-30'
+
+
 def test_execute_sync_does_not_checkpoint_when_full_cleanup_fails(monkeypatch):
     with sqlite_session_with_system([Group.__table__, Company.__table__, SyncState.__table__]) as db:
         db.add(Group(id=1, title='G1'))
@@ -355,6 +533,9 @@ def test_execute_sync_does_not_checkpoint_when_full_cleanup_fails(monkeypatch):
 
         assert result['success'] is False
         assert db.get(SyncState, transactional_state_key(1)) is None
+        assert db.get(
+            SyncState, sync_pipeline.historical_coverage_state_key(1)
+        ) is None
         assert skipped_calls == []
         cleanup = next(item for item in result['step_results'] if item['key'] == sync_pipeline.FULL_REFRESH_CLEANUP_STEP)
         assert cleanup['success'] is False
@@ -390,6 +571,9 @@ def test_execute_sync_full_refreshes_new_company_even_with_global_checkpoint(mon
         assert result['mode'] == 'full'
         assert purge_calls
         assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
+        assert db.get(
+            SyncState, sync_pipeline.historical_coverage_state_key(1)
+        ).value == '2026-06-30'
 
 
 def test_execute_sync_skips_credentials_without_assigned_companies(monkeypatch):
@@ -445,6 +629,96 @@ def test_checkpoint_steps_fail_when_source_is_unavailable():
     assert sync_financial_transactions(FakeFinancialTransactionsAPI(None), None, '1') is False
     assert sync_goods_transactions(FakeGoodsTransactionsAPI(None), None, '1') is False
     assert sync_comments(FakeCommentsAPI(None), None, '1') is False
+
+
+def test_empty_appointment_and_goods_windows_persist_source_coverage():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Appointment.__table__,
+            GoodTransaction.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.commit()
+
+        assert sync_records(
+            FakeRecordsAPI([]),
+            db,
+            '1',
+            start_date='2025-01-01',
+            end_date='2025-01-31',
+        ) is True
+        assert sync_goods_transactions(
+            FakeGoodsTransactionsAPI([]),
+            db,
+            '1',
+            start_date='2025-01-01',
+            end_date='2025-01-31',
+        ) is True
+
+        appointment_state = db.get(
+            SyncSourceState,
+            {'company_id': 1, 'source': 'appointments_detail'},
+        )
+        goods_state = db.get(
+            SyncSourceState,
+            {'company_id': 1, 'source': 'goods_transactions_detail'},
+        )
+        assert (appointment_state.period_start, appointment_state.period_end) == (
+            date(2025, 1, 1),
+            date(2025, 1, 31),
+        )
+        assert (goods_state.period_start, goods_state.period_end) == (
+            date(2025, 1, 1),
+            date(2025, 1, 31),
+        )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_source_coverage_does_not_bridge_disjoint_sync_windows():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[Group.__table__, Company.__table__, SyncSourceState.__table__],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.commit()
+
+        sync_pipeline.mark_sync_source_coverage(
+            db, 1, 'appointments_detail', '2024-01-01', '2024-01-31'
+        )
+        db.commit()
+        sync_pipeline.mark_sync_source_coverage(
+            db, 1, 'appointments_detail', '2025-01-01', '2025-01-31'
+        )
+        db.commit()
+
+        state = db.get(
+            SyncSourceState,
+            {'company_id': 1, 'source': 'appointments_detail'},
+        )
+        assert (state.period_start, state.period_end) == (
+            date(2025, 1, 1),
+            date(2025, 1, 31),
+        )
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_sync_clients_scopes_external_id_by_internal_company():
@@ -728,6 +1002,8 @@ def test_sync_financial_transactions_empty_window_persists_source_coverage():
 
 def test_full_refresh_purge_keeps_goods_transactions_outside_requested_window():
     engine = create_engine('sqlite:///:memory:')
+    with engine.begin() as conn:
+        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
     Base.metadata.create_all(
         engine,
         tables=[
@@ -739,6 +1015,8 @@ def test_full_refresh_purge_keeps_goods_transactions_outside_requested_window():
             GoodTransaction.__table__,
             Comment.__table__,
             StaffSchedule.__table__,
+            SyncState.__table__,
+            SyncSourceState.__table__,
         ],
     )
     Session = sessionmaker(bind=engine)
@@ -756,6 +1034,121 @@ def test_full_refresh_purge_keeps_goods_transactions_outside_requested_window():
 
         remaining = db.query(GoodTransaction).order_by(GoodTransaction.id).all()
         assert [(row.id, row.cost) for row in remaining] == [(1, 10)]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_full_refresh_purge_invalidates_coverage_until_each_source_succeeds():
+    engine = create_engine('sqlite:///:memory:')
+    with engine.begin() as conn:
+        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Appointment.__table__,
+            Transaction.__table__,
+            FinancialTransaction.__table__,
+            GoodTransaction.__table__,
+            Comment.__table__,
+            StaffSchedule.__table__,
+            SyncState.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add_all([
+            Appointment(id=1, company_id=1, date=date(2025, 1, 10), attendance=1),
+            FinancialTransaction(
+                id=1,
+                company_id=1,
+                date=datetime(2025, 1, 10, 12),
+                amount=100.0,
+            ),
+            SyncSourceState(
+                company_id=1,
+                source=sync_pipeline.APPOINTMENTS_SOURCE,
+                period_start=date(2025, 1, 1),
+                period_end=date(2025, 1, 31),
+                synced_at=datetime(2025, 2, 1),
+            ),
+            SyncSourceState(
+                company_id=1,
+                source=sync_pipeline.PERSONAL_ACCOUNT_SOURCE,
+                period_start=date(2025, 1, 1),
+                period_end=date(2025, 1, 31),
+                synced_at=datetime(2025, 2, 1),
+            ),
+            SyncSourceState(
+                company_id=1,
+                source=sync_pipeline.GOODS_TRANSACTIONS_SOURCE,
+                period_start=date(2025, 1, 1),
+                period_end=date(2025, 1, 31),
+                synced_at=datetime(2025, 2, 1),
+            ),
+            SyncState(
+                key=transactional_state_key(1),
+                value='2025-01-31',
+            ),
+            SyncState(
+                key=sync_pipeline.historical_coverage_state_key(1),
+                value='2025-01-31',
+            ),
+        ])
+        db.commit()
+
+        assert purge_full_refresh_window(
+            db,
+            1,
+            '2025-01-01',
+            '2025-01-31',
+            '2025-01-31',
+        ) is True
+        assert db.query(SyncSourceState).count() == 0
+        assert db.get(
+            SyncState, sync_pipeline.historical_coverage_state_key(1)
+        ) is None
+
+        assert sync_records(
+            FakeRecordsAPI([]),
+            db,
+            '1',
+            start_date='2025-01-01',
+            end_date='2025-01-31',
+        ) is True
+        assert sync_financial_transactions(
+            FakeFinancialTransactionsAPI(None),
+            db,
+            '1',
+            start_date='2025-01-01',
+            end_date='2025-01-31',
+        ) is False
+
+        appointment_state = db.get(
+            SyncSourceState,
+            {'company_id': 1, 'source': sync_pipeline.APPOINTMENTS_SOURCE},
+        )
+        financial_state = db.get(
+            SyncSourceState,
+            {'company_id': 1, 'source': sync_pipeline.PERSONAL_ACCOUNT_SOURCE},
+        )
+        assert (appointment_state.period_start, appointment_state.period_end) == (
+            date(2025, 1, 1),
+            date(2025, 1, 31),
+        )
+        assert financial_state is None
+        assert sync_pipeline.resolve_company_sync_window(
+            db,
+            date(2025, 2, 1),
+            'incremental',
+            1,
+        )[1] == 'full'
     finally:
         db.close()
         engine.dispose()

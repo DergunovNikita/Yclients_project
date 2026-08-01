@@ -13,6 +13,7 @@ import { defaultReportDates, escapeHtml, formatDate } from './format.js';
 import { GROUP_LABELS, STATUS_LABELS, sourceLabel } from './registry.js';
 import { renderReportData } from './renderers/generic.js';
 import { t } from '../i18n.js';
+import { reportFilterVisibility } from '../dashboardRequestState.js';
 
 const FAVORITES_KEY = 'yclients_reports_favorites';
 
@@ -119,6 +120,8 @@ export function initReports({ clearError, showError, setApiState }) {
     content: document.getElementById('reports-report-content'),
     start: document.getElementById('report-start'),
     end: document.getElementById('report-end'),
+    startField: document.getElementById('report-start')?.closest('label'),
+    endField: document.getElementById('report-end')?.closest('label'),
     branch: document.getElementById('report-branch'),
     staff: document.getElementById('report-staff'),
     granularity: document.getElementById('report-granularity'),
@@ -385,10 +388,6 @@ export function initReports({ clearError, showError, setApiState }) {
       params.compare_start_date = els.compareStart.value;
       params.compare_end_date = els.compareEnd.value;
     }
-    if (state.activeReportId === 'year_over_year') {
-      params.start_year = 2022;
-      params.end_year = 2026;
-    }
     return params;
   }
 
@@ -408,8 +407,11 @@ export function initReports({ clearError, showError, setApiState }) {
 
   function applyReportFilterVisibility(meta) {
     const filters = meta.filters || {};
-    if (els.granularityField) els.granularityField.hidden = filters.granularity === false;
-    const canCompare = filters.compare !== false;
+    const visibility = reportFilterVisibility(filters);
+    if (els.startField) els.startField.hidden = !visibility.dateRange;
+    if (els.endField) els.endField.hidden = !visibility.dateRange;
+    if (els.granularityField) els.granularityField.hidden = !visibility.granularity;
+    const canCompare = visibility.compare;
     if (els.compareRow) els.compareRow.hidden = !canCompare;
     if (!canCompare) {
       els.compareEnabled.checked = false;

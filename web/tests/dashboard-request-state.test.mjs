@@ -9,6 +9,7 @@ import {
   latestServiceManagementTimestamp,
   reportDataCacheKey,
   reportDataState,
+  reportFilterVisibility,
   reportRefreshPresentation,
   reportScopedFilterAllowsLoad,
   responseError,
@@ -18,6 +19,7 @@ import {
   serviceManagementLoadAllowed,
   serviceManagementNavigationAllowed,
   settleServiceManagementLoad,
+  shouldRenderReportDataLabel,
   mergeServiceManagementResult,
   staffRefreshAllowsDataLoad,
 } from '../src/dashboardRequestState.js';
@@ -49,6 +51,23 @@ test('report payload distinguishes partial, empty and ready states', () => {
     source_status: 'ready',
     tables: [{ rows: [], ranking: { rows_by_metric: { sum: [], qty: [{ id: 1 }] } } }],
   }), 'ready');
+});
+
+test('year-over-year filter metadata hides dates and null chart points stay unlabeled', () => {
+  assert.deepEqual(reportFilterVisibility({
+    date_range: false,
+    granularity: false,
+    compare: false,
+  }), {
+    dateRange: false,
+    granularity: false,
+    compare: false,
+  });
+  assert.equal(shouldRenderReportDataLabel(null), false);
+  assert.equal(shouldRenderReportDataLabel(undefined), false);
+  assert.equal(shouldRenderReportDataLabel(''), false);
+  assert.equal(shouldRenderReportDataLabel(0), true);
+  assert.equal(shouldRenderReportDataLabel(1250), true);
 });
 
 test('refreshing a cached report retains that report while the request is pending', () => {
