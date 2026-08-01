@@ -97,12 +97,35 @@ jobs:
             'sudo journalctl -u yclients-auto-deploy.service -n 120 --no-pager'
           exit "$deploy_status"
 
-      - name: Post-deploy incremental sync
+      # A first full historical pass runs for hours and prints nothing while it pages
+      # the YClients API. Tethered to this SSH session it died on an idle disconnect
+      # (Broken pipe, exit 255) after 2 of 6 branches, leaving the history half-loaded
+      # while the job still reported success. Launch it detached instead: the sync
+      # outlives both this step and the connection, and a launch failure is now
+      # visible rather than swallowed by continue-on-error.
+      - name: Launch post-deploy sync (detached on VM)
         if: env.VM_HOST != '' && env.VM_USER != '' && env.VM_SSH_KEY != '' && env.VM_PROJECT_DIR != ''
-        continue-on-error: true
         run: |
-          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" "$VM_USER@$VM_HOST" \
-            "cd \"$VM_PROJECT_DIR\" && docker compose --profile tools run --rm sync"
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" \
+            "$VM_USER@$VM_HOST" bash -s -- "$VM_PROJECT_DIR" "$GITHUB_SHA" <<'REMOTE'
+          set -euo pipefail
+          project_dir="$1"
+          sha="$2"
+          cd "$project_dir"
+          # Fail loudly on a missing tool. Backgrounding the launch instead would let
+          # `set -e` miss the error and report a sync that never actually started.
+          command -v setsid >/dev/null || { echo 'setsid is unavailable on the VM' >&2; exit 1; }
+          command -v docker >/dev/null || { echo 'docker is unavailable on the VM' >&2; exit 1; }
+          mkdir -p logs
+          log_path="logs/post_deploy_sync_${sha}.log"
+          # --fork makes setsid detach and return regardless of whether it already is a
+          # process group leader; without it setsid execs and blocks this step for hours.
+          setsid --fork nohup docker compose --profile tools run --rm sync \
+            >"$log_path" 2>&1 </dev/null
+          echo "Sync launched detached."
+          echo "This job does not wait for it — a green deploy does not mean the sync finished."
+          echo "Follow on the VM: tail -f ${project_dir}/${log_path}"
+          REMOTE
 
       - name: Post-deploy Google Sheets import
         if: env.VM_HOST != '' && env.VM_USER != '' && env.VM_SSH_KEY != '' && env.VM_PROJECT_DIR != ''
