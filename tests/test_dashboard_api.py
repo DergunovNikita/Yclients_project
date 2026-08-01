@@ -1,7 +1,7 @@
 """Dashboard JSON API (product portal metrics)."""
 
 import csv
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -9,10 +9,12 @@ from sqlalchemy import event, select
 
 import api
 import auth_deps
+import config
 import plan_import
 import dashboard_reports
 import dashboard_routes
 import dashboard_service
+import sync_pipeline
 from auth_scope import AccessContext
 from auth_service import create_access_token, hash_password
 from dashboard_service import _staff_leaderboards_payload, fetch_plan_fact
@@ -520,6 +522,92 @@ async def test_dashboard_year_over_year_uses_actual_history_and_overview_formula
     assert years_by_year[2025]['revenue'] == plan_fact_components['revenue']
     assert years_by_year[2025]['appointments'] == overview['revenue']['appointments']
     assert years_by_year[2025]['appointments'] == plan_fact_components['avg_check_denominator']
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_charts_render_values_after_full_historical_sync(
+    async_session,
+    monkeypatch,
+):
+    """Charts must carry numbers, not an all-None series, once a full sync certifies coverage.
+
+    The coverage window is derived from sync_pipeline rather than hardcoded, so a change
+    that stops a full sync from certifying the history fails here instead of silently
+    rendering empty charts.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add_all([Client(id=value, name=f'Client {value}', company_id=1) for value in range(1, 5)])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2023, 5, 10), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2024, 6, 11), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=3, date=date(2025, 7, 12), attendance=1),
+        Appointment(id=4, company_id=1, staff_id=1, client_id=4, date=date(2026, 2, 13), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2023, 5, 10, 12, 0), amount=1000.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=2, date=datetime(2024, 6, 11, 12, 0), amount=2000.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=3, date=datetime(2025, 7, 12, 12, 0), amount=3000.0, record_id=3, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=4, date=datetime(2026, 2, 13, 12, 0), amount=4000.0, record_id=4, sold_item_type='service', master_id=1, company_id=1),
+    ])
+
+    # Exactly what execute_sync() persists after one forced full historical pass.
+    sync_end = report_now.date()
+    sync_start = sync_pipeline.historical_sync_start_date(sync_end)
+    schedule_end = sync_end + timedelta(days=config.SCHEDULE_DAYS)
+    async_session.add_all([
+        SyncSourceState(company_id=1, source='appointments_detail', period_start=sync_start, period_end=schedule_end, synced_at=report_now),
+        SyncSourceState(company_id=1, source='financial_transactions_detail', period_start=sync_start, period_end=sync_end, synced_at=report_now),
+        SyncSourceState(company_id=1, source='goods_transactions_detail', period_start=sync_start, period_end=sync_end, synced_at=report_now),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        r = await client.get(
+            '/dashboard/reports/data',
+            # year_over_year ignores the range, but the endpoint still requires it
+            # and the frontend keeps sending it from its hidden date inputs.
+            params={
+                'report_id': 'year_over_year',
+                'start_date': '2026-07-01',
+                'end_date': '2026-07-31',
+                'company_id': 1,
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert r.status_code == 200
+    data = r.json()['data']
+    assert data['source_status'] == 'ready'
+    assert data['missing_sources'] == []
+
+    charts = {chart['id']: chart for chart in data['charts']}
+    assert 'year_revenue' in charts
+
+    revenue_series = charts['year_revenue']['datasets'][0]['data']
+    assert None not in revenue_series
+    assert revenue_series == [1000.0, 2000.0, 3000.0, 4000.0]
+
+    appointments_series = charts['year_appointments']['datasets'][0]['data']
+    assert None not in appointments_series
+    assert appointments_series == [1, 1, 1, 1]
+
+    # Every chart must plot at least one real point; an all-None series reads as an empty chart.
+    for chart_id, chart in charts.items():
+        for dataset in chart['datasets']:
+            assert any(
+                value is not None for value in dataset['data']
+            ), f'chart {chart_id} dataset {dataset.get("label")!r} has no plottable value'
 
 
 @pytest.mark.asyncio
