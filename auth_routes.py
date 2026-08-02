@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime
 
@@ -54,7 +55,7 @@ from auth_sessions import (
     rotate_session,
     set_auth_cookies,
 )
-from data_sources import SOURCE_YCLIENTS, adapter_from_payload, normalize_source_type
+from data_sources import SOURCE_YCLIENTS, authenticated_adapter_from_payload, normalize_source_type
 from database import get_async_db
 from models import Company, PortalAccount, PortalBranch, PortalUser, Staff, YClientsCredential
 from portal_audit import log_portal_audit
@@ -275,7 +276,7 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     user = PortalUser(
         portal_account_id=None,
         email=email,
-        password_hash=hash_password(body.password),
+        password_hash=await asyncio.to_thread(hash_password, body.password),
         full_name=body.full_name,
         role='owner',
         is_active=True,
@@ -333,7 +334,7 @@ async def login(
     email = normalize_email(body.email)
     enforce_auth_rate_limit(request, AUTH_RATE_LIMIT_ROUTES['login'], email)
     user = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
-    if user is None or not verify_password(body.password, user.password_hash):
+    if user is None or not await asyncio.to_thread(verify_password, body.password, user.password_hash):
         raise HTTPException(status_code=401, detail='Invalid email or password')
     if not user_can_login(user):
         raise HTTPException(status_code=403, detail='Account disabled')
@@ -604,7 +605,7 @@ async def reset_password(
     user = await consume_email_token(db, body.token, TOKEN_PURPOSE_RESET)
     if user is None:
         raise HTTPException(status_code=400, detail='Invalid or expired token')
-    user.password_hash = hash_password(body.password)
+    user.password_hash = await asyncio.to_thread(hash_password, body.password)
     user.password_changed_at = datetime.utcnow()
     bump_user_token_version(user)
     await revoke_user_sessions(db, user.id)
@@ -618,12 +619,12 @@ async def change_password(
     user: PortalUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
-    if not verify_password(body.current_password, user.password_hash):
+    if not await asyncio.to_thread(verify_password, body.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail='Неверный текущий пароль')
     if body.current_password == body.new_password:
         raise HTTPException(status_code=400, detail='Новый пароль должен отличаться от текущего')
 
-    user.password_hash = hash_password(body.new_password)
+    user.password_hash = await asyncio.to_thread(hash_password, body.new_password)
     user.password_changed_at = datetime.utcnow()
     bump_user_token_version(user)
     await revoke_user_sessions(db, user.id)
@@ -661,9 +662,10 @@ async def _active_admin_branch_ids(
     return await _actor_branch_ids(db, actor)
 
 
-def _same_tenant(actor: PortalUser, target: PortalUser) -> bool:
+def _same_tenant(actor: PortalUser, target: PortalUser, active_portal_account_id: int | None = None) -> bool:
+    """A platform_admin sees every tenant unless one is currently selected, others only their own."""
     if actor.role == 'platform_admin':
-        return True
+        return active_portal_account_id is None or target.portal_account_id == active_portal_account_id
     return actor.portal_account_id is not None and actor.portal_account_id == target.portal_account_id
 
 
@@ -794,16 +796,17 @@ async def _validate_credential_companies(
 
 
 def _test_source_credentials(source_type: str | None, partner_token: str, login: str, password: str) -> dict:
-    normalized = normalize_source_type(source_type)
-    adapter = adapter_from_payload(
-        normalized,
+    adapter = authenticated_adapter_from_payload(
+        source_type,
         partner_token=partner_token,
         login=login,
         password=password,
     )
-    if not adapter.authenticate():
-        raise HTTPException(status_code=400, detail='Data source authentication failed')
-    return {'success': True, 'source_type': normalized, 'message': 'Data source credentials are valid'}
+    return {
+        'success': True,
+        'source_type': adapter.source_type,
+        'message': 'Data source credentials are valid',
+    }
 
 
 async def _sync_credential_companies_from_yclients(
@@ -814,14 +817,12 @@ async def _sync_credential_companies_from_yclients(
     password: str,
     source_type: str = SOURCE_YCLIENTS,
 ) -> list[int]:
-    adapter = adapter_from_payload(
+    adapter = authenticated_adapter_from_payload(
         source_type,
         partner_token=partner_token,
         login=login,
         password=password,
     )
-    if not adapter.authenticate():
-        raise HTTPException(status_code=400, detail='Data source authentication failed')
     company_ids = sorted(item.company_id for item in adapter.list_branches())
     materialized_company_ids = await adapter.materialize_branches(db, portal_account_id, company_ids)
     return sorted(set(materialized_company_ids))
@@ -907,9 +908,7 @@ async def admin_list_users(
     payload = []
     staff_ids_by_user = await _load_staff_ids_by_portal_user(db, [user.id for user in users])
     for user in users:
-        if actor.role == 'platform_admin' and user.portal_account_id != active_portal_account_id:
-            continue
-        if not _same_tenant(actor, user):
+        if not _same_tenant(actor, user, active_portal_account_id):
             continue
         branch_ids = await load_user_access_branch_ids(db, user)
         if can_list_user(actor.role, actor_branch_ids, user.role, branch_ids):
@@ -984,7 +983,7 @@ async def admin_create_user(
     user = PortalUser(
         portal_account_id=portal_account_id,
         email=email,
-        password_hash=hash_password(password),
+        password_hash=await asyncio.to_thread(hash_password, password),
         full_name=body.full_name,
         role=body.role,
         is_active=True,
@@ -1650,9 +1649,7 @@ async def admin_list_initial_passwords(
 
     payload = []
     for user in users:
-        if actor.role == 'platform_admin' and user.portal_account_id != active_portal_account_id:
-            continue
-        if not _same_tenant(actor, user):
+        if not _same_tenant(actor, user, active_portal_account_id):
             continue
         branch_ids = await load_user_access_branch_ids(db, user)
         if not can_manage_user(actor.role, actor_branch_ids, user.role, branch_ids):
@@ -1699,14 +1696,10 @@ async def admin_distribute_credentials(
             continue
 
         user_email = user.email
-        portal_account_id = user.portal_account_id
         user_role = user.role
         user_object_id = user.id
 
-        if actor.role == 'platform_admin' and portal_account_id != active_portal_account_id:
-            errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Access denied'})
-            continue
-        if not _same_tenant(actor, user):
+        if not _same_tenant(actor, user, active_portal_account_id):
             errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Access denied'})
             continue
         branch_ids = await load_user_access_branch_ids(db, user)

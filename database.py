@@ -40,6 +40,17 @@ def alembic_config_value(value: str) -> str:
     return value.replace('%', '%%')
 
 
+def quote_identifier(dialect, value: str) -> str:
+    """Validate and quote an identifier for raw DDL (views, TRUNCATE, CREATE SCHEMA).
+
+    Raises:
+        ValueError: if the identifier is not a plain alphanumeric/underscore name.
+    """
+    if not value.replace('_', '').isalnum() or not value[0].isalpha():
+        raise ValueError(f'Unsafe SQL identifier: {value!r}')
+    return dialect.identifier_preparer.quote(value)
+
+
 class Database:
     """Sync connection wrapper — used by ETL pipeline and worker."""
 

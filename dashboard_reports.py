@@ -21,10 +21,12 @@ from dashboard_service import (
     SERVICE_SOLD_ITEM_TYPE,
     _business_financial_master_condition,
     _business_staff_id_condition,
+    _company_scope_clause,
     _appointment_factual_at_condition,
     _financial_staff_attribution_condition,
     _appointment_company_ids,
     _personal_account_condition,
+    _pct_change,
     _physical_account_condition,
     _service_paid_filters,
     business_appointment_condition,
@@ -791,10 +793,9 @@ def _appointment_conditions(
         conditions.append(Appointment.attendance == COMPLETED_ATTENDANCE)
     if factual_at is not None:
         conditions.append(_appointment_factual_at_condition(factual_at))
-    if company_id is not None:
-        conditions.append(Appointment.company_id == company_id)
-    elif allowed_company_ids is not None:
-        conditions.append(Appointment.company_id.in_(allowed_company_ids))
+    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        conditions.append(scope)
     if staff_id is not None:
         conditions.append(Appointment.staff_id == staff_id)
     return conditions
@@ -827,12 +828,6 @@ def _aggregate_daily(rows: list[dict[str, Any]], granularity: str) -> list[dict[
         grouped[key]['topup_revenue'] += float(row.get('topup_revenue') or 0)
         grouped[key]['appointments'] += float(row.get('appointments') or 0)
     return [{'period': key, **values} for key, values in sorted(grouped.items())]
-
-
-def _pct_change(current: float, previous: float) -> float | None:
-    if previous == 0:
-        return None if current == 0 else 100.0
-    return round(100.0 * (current - previous) / previous, 2)
 
 
 def _comparison_rows(current_cards: list[dict[str, Any]], compare_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -893,10 +888,9 @@ async def _year_over_year_activity_bounds(
         ),
         business_appointment_condition(),
     ]
-    if company_id is not None:
-        appointment_conditions.append(Appointment.company_id == company_id)
-    elif allowed_company_ids is not None:
-        appointment_conditions.append(Appointment.company_id.in_(allowed_company_ids))
+    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        appointment_conditions.append(scope)
     if created_user_id is not None:
         appointment_conditions.append(Appointment.created_user_id == created_user_id)
     elif staff_id is not None:
@@ -921,10 +915,9 @@ async def _year_over_year_activity_bounds(
         business_appointment_condition(),
         _physical_account_condition(),
     ]
-    if company_id is not None:
-        service_conditions.append(Appointment.company_id == company_id)
-    elif allowed_company_ids is not None:
-        service_conditions.append(Appointment.company_id.in_(allowed_company_ids))
+    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        service_conditions.append(scope)
     if created_user_id is not None:
         service_conditions.append(Appointment.created_user_id == created_user_id)
     elif staff_id is not None:
@@ -970,10 +963,9 @@ async def _year_over_year_activity_bounds(
         _physical_account_condition(),
         direct_component,
     ]
-    if company_id is not None:
-        direct_conditions.append(FinancialTransaction.company_id == company_id)
-    elif allowed_company_ids is not None:
-        direct_conditions.append(FinancialTransaction.company_id.in_(allowed_company_ids))
+    scope = _company_scope_clause(FinancialTransaction.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        direct_conditions.append(scope)
     direct_bounds = (
         await db.execute(
             select(
@@ -998,10 +990,9 @@ async def _year_over_year_activity_bounds(
         GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
         _business_staff_id_condition(GoodTransaction.master_id),
     ]
-    if company_id is not None:
-        goods_conditions.append(GoodTransaction.company_id == company_id)
-    elif allowed_company_ids is not None:
-        goods_conditions.append(GoodTransaction.company_id.in_(allowed_company_ids))
+    scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        goods_conditions.append(scope)
     if staff_id is not None:
         goods_conditions.append(GoodTransaction.master_id == staff_id)
     goods_day = func.date(GoodTransaction.date)
@@ -2450,10 +2441,9 @@ async def _last_staff_by_client(
         Appointment.attendance == COMPLETED_ATTENDANCE,
         _appointment_factual_at_condition(factual_at),
     ]
-    if company_id is not None:
-        conditions.append(Appointment.company_id == company_id)
-    elif allowed_company_ids is not None:
-        conditions.append(Appointment.company_id.in_(allowed_company_ids))
+    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        conditions.append(scope)
     if staff_id is not None:
         conditions.append(Appointment.staff_id == staff_id)
     stmt = (
@@ -2605,16 +2595,15 @@ async def _goods_payload(
     factual_at: datetime,
 ) -> dict[str, Any]:
     conditions = [
-        GoodTransaction.type_id == 1,
+        GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
         func.date(GoodTransaction.date) >= start,
         func.date(GoodTransaction.date) <= end,
         GoodTransaction.date <= factual_at,
         _business_staff_id_condition(GoodTransaction.master_id),
     ]
-    if company_id is not None:
-        conditions.append(GoodTransaction.company_id == company_id)
-    elif allowed_company_ids is not None:
-        conditions.append(GoodTransaction.company_id.in_(allowed_company_ids))
+    scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        conditions.append(scope)
     if staff_id is not None:
         conditions.append(GoodTransaction.master_id == staff_id)
     stmt = (
@@ -3095,10 +3084,9 @@ async def _nps_payload(
         func.date(Comment.date) >= start,
         func.date(Comment.date) <= end,
     ]
-    if company_id is not None:
-        conditions.append(Comment.company_id == company_id)
-    elif allowed_company_ids is not None:
-        conditions.append(Comment.company_id.in_(allowed_company_ids))
+    scope = _company_scope_clause(Comment.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        conditions.append(scope)
     stmt = (
         select(Comment.rating, Comment.text, Comment.date, Comment.master_id, Staff.name.label('staff_name'))
         .outerjoin(Staff, Staff.id == Comment.master_id)

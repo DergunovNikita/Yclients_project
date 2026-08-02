@@ -643,7 +643,7 @@ def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int | Non
                     db.query(Company)
                     .filter(
                         Company.portal_account_id == portal_account_id,
-                        Company.source_type == 'yclients',
+                        Company.source_type == SOURCE_YCLIENTS,
                         Company.external_id.in_(company_ids),
                     )
                     .all()
@@ -1455,6 +1455,24 @@ def sync_goods(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
 # 12. Записи (appointments) и транзакции (услуги внутри записи)
 # ===================================================================
 
+def _commit_empty_source_coverage(
+    db, company_id: str, source: str, start_date: str | None, end_date: str | None,
+    db_company_id: int | None,
+) -> bool:
+    """Record that a source returned no rows for the period so the gap is not re-fetched forever."""
+    try:
+        cid = _db_company_id(company_id, db_company_id)
+        if db is not None:
+            mark_sync_source_coverage(db, cid, source, start_date, end_date)
+            db.commit()
+        return True
+    except Exception as e:
+        if db is not None:
+            db.rollback()
+        print(f"  ✗ Ошибка: {e}")
+        return False
+
+
 def sync_records(api: YClientsAPI, db, company_id: str,
                  start_date: str = None, end_date: str = None,
                  db_company_id: int | None = None):
@@ -1466,19 +1484,9 @@ def sync_records(api: YClientsAPI, db, company_id: str,
         return False
     if not records:
         print("  Нет записей за указанный период")
-        try:
-            cid = _db_company_id(company_id, db_company_id)
-            if db is not None:
-                mark_sync_source_coverage(
-                    db, cid, APPOINTMENTS_SOURCE, start_date, end_date
-                )
-                db.commit()
-            return True
-        except Exception as e:
-            if db is not None:
-                db.rollback()
-            print(f"  ✗ Ошибка: {e}")
-            return False
+        return _commit_empty_source_coverage(
+            db, company_id, APPOINTMENTS_SOURCE, start_date, end_date, db_company_id
+        )
 
     print(f"  Найдено: {len(records)}")
 
@@ -1623,14 +1631,6 @@ def mark_sync_source_coverage(
         state.synced_at = datetime.now()
 
 
-def mark_personal_account_source_coverage(
-    db, company_id: int, start_date: str | None, end_date: str | None
-):
-    mark_sync_source_coverage(
-        db, company_id, PERSONAL_ACCOUNT_SOURCE, start_date, end_date
-    )
-
-
 def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                                 start_date: str = None, end_date: str = None,
                                 db_company_id: int | None = None):
@@ -1644,17 +1644,9 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
         return False
     if not txns:
         print("  Нет данных")
-        try:
-            cid = _db_company_id(company_id, db_company_id)
-            if db is not None:
-                mark_personal_account_source_coverage(db, cid, start_date, end_date)
-                db.commit()
-            return True
-        except Exception as e:
-            if db is not None:
-                db.rollback()
-            print(f"  ✗ Ошибка: {e}")
-            return False
+        return _commit_empty_source_coverage(
+            db, company_id, PERSONAL_ACCOUNT_SOURCE, start_date, end_date, db_company_id
+        )
 
     try:
         cid = _db_company_id(company_id, db_company_id)
@@ -1734,7 +1726,7 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                 obj.sold_item_type = t.get('sold_item_type')
                 obj.company_id = cid
 
-        mark_personal_account_source_coverage(db, cid, start_date, end_date)
+        mark_sync_source_coverage(db, cid, PERSONAL_ACCOUNT_SOURCE, start_date, end_date)
 
         db.commit()
         print(f"  ✓ Финансовые транзакции сохранены ({len(txns)} шт.)")
@@ -1763,19 +1755,9 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
         return False
     if not txns:
         print("  Нет данных")
-        try:
-            cid = _db_company_id(company_id, db_company_id)
-            if db is not None:
-                mark_sync_source_coverage(
-                    db, cid, GOODS_TRANSACTIONS_SOURCE, start_date, end_date
-                )
-                db.commit()
-            return True
-        except Exception as e:
-            if db is not None:
-                db.rollback()
-            print(f"  ✗ Ошибка: {e}")
-            return False
+        return _commit_empty_source_coverage(
+            db, company_id, GOODS_TRANSACTIONS_SOURCE, start_date, end_date, db_company_id
+        )
 
     print(f"  Найдено: {len(txns)}")
 

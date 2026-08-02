@@ -6,14 +6,7 @@ from typing import Any, Optional
 from sqlalchemy import func, select, text
 
 from models import SyncJob, SyncJobEvent
-
-
-def _serialize_dt(value) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value
-    return value.isoformat()
+from sync_parsing import serialize_dt
 
 
 class SyncJobService:
@@ -199,9 +192,9 @@ class SyncJobService:
             'current_stage': job.current_stage,
             'step_results': job.step_results or [],
             'cancel_requested': bool(job.cancel_requested),
-            'requested_at': _serialize_dt(job.requested_at),
-            'started_at': _serialize_dt(job.started_at),
-            'finished_at': _serialize_dt(job.finished_at),
+            'requested_at': serialize_dt(job.requested_at),
+            'started_at': serialize_dt(job.started_at),
+            'finished_at': serialize_dt(job.finished_at),
             'run_id': job.run_id,
             'error_message': job.error_message,
         }
@@ -219,7 +212,7 @@ class SyncJobService:
             'elapsed_seconds': event.elapsed_seconds,
             'message': event.message,
             'payload': event.payload or {},
-            'created_at': _serialize_dt(event.created_at),
+            'created_at': serialize_dt(event.created_at),
         }
 
     def record_event(

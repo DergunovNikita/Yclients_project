@@ -20,21 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER  # noqa: E402
-from database import alembic_config_value, build_database_url, init_database  # noqa: E402
+from database import alembic_config_value, build_database_url, init_database, quote_identifier  # noqa: E402
 from models import SYSTEM_SCHEMA, Base  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _quote_identifier(conn, value: str) -> str:
-    if not value.replace('_', '').isalnum() or not value[0].isalpha():
-        raise ValueError(f'Unsafe SQL identifier: {value!r}')
-    return conn.dialect.identifier_preparer.quote(value)
-
-
 def bootstrap_database(database) -> None:
     with database.engine.begin() as conn:
-        conn.exec_driver_sql(f'CREATE SCHEMA IF NOT EXISTS {_quote_identifier(conn, SYSTEM_SCHEMA)}')
+        conn.exec_driver_sql(f'CREATE SCHEMA IF NOT EXISTS {quote_identifier(conn.dialect, SYSTEM_SCHEMA)}')
     Base.metadata.create_all(database.engine)
 
     cfg = Config(str(REPO_ROOT / 'alembic.ini'))

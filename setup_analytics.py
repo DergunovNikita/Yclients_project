@@ -2,9 +2,11 @@
 Создание аналитических представлений (views) в PostgreSQL.
 Эти views используются BI-инструментами (Metabase и др.) для построения дашбордов.
 """
+import re
+
 from sqlalchemy import text
 from config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
-from database import init_database
+from database import init_database, quote_identifier
 
 VIEWS = [
     # ----------------------------------------------------------------
@@ -496,38 +498,9 @@ VIEWS = [
                                                         AS quarter_label_ru,
         DATE_TRUNC('quarter', gs.dt)::date              AS quarter_start_date,
         EXTRACT(MONTH FROM gs.dt)::int                  AS month_num,
-        CASE EXTRACT(MONTH FROM gs.dt)::int
-            WHEN 1 THEN 'Январь'
-            WHEN 2 THEN 'Февраль'
-            WHEN 3 THEN 'Март'
-            WHEN 4 THEN 'Апрель'
-            WHEN 5 THEN 'Май'
-            WHEN 6 THEN 'Июнь'
-            WHEN 7 THEN 'Июль'
-            WHEN 8 THEN 'Август'
-            WHEN 9 THEN 'Сентябрь'
-            WHEN 10 THEN 'Октябрь'
-            WHEN 11 THEN 'Ноябрь'
-            ELSE 'Декабрь'
-        END                                             AS month_name_ru,
-        CONCAT(
-            CASE EXTRACT(MONTH FROM gs.dt)::int
-                WHEN 1 THEN 'Январь'
-                WHEN 2 THEN 'Февраль'
-                WHEN 3 THEN 'Март'
-                WHEN 4 THEN 'Апрель'
-                WHEN 5 THEN 'Май'
-                WHEN 6 THEN 'Июнь'
-                WHEN 7 THEN 'Июль'
-                WHEN 8 THEN 'Август'
-                WHEN 9 THEN 'Сентябрь'
-                WHEN 10 THEN 'Октябрь'
-                WHEN 11 THEN 'Ноябрь'
-                ELSE 'Декабрь'
-            END,
-            ' ',
-            EXTRACT(YEAR FROM gs.dt)::int
-        )                                               AS month_label_ru,
+        m.month_name_ru                                 AS month_name_ru,
+        CONCAT(m.month_name_ru, ' ', EXTRACT(YEAR FROM gs.dt)::int)
+                                                        AS month_label_ru,
         TO_CHAR(gs.dt, 'YYYY-MM')                       AS month_key,
         DATE_TRUNC('month', gs.dt)::date                AS month_start_date,
         EXTRACT(WEEK FROM gs.dt)::int                   AS week_num,
@@ -548,6 +521,22 @@ VIEWS = [
         TO_CHAR(gs.dt, 'YYYY-MM-DD')                    AS date_key
     FROM bounds b
     CROSS JOIN LATERAL generate_series(b.min_date, b.max_date, INTERVAL '1 day') AS gs(dt)
+    CROSS JOIN LATERAL (
+        SELECT CASE EXTRACT(MONTH FROM gs.dt)::int
+            WHEN 1 THEN 'Январь'
+            WHEN 2 THEN 'Февраль'
+            WHEN 3 THEN 'Март'
+            WHEN 4 THEN 'Апрель'
+            WHEN 5 THEN 'Май'
+            WHEN 6 THEN 'Июнь'
+            WHEN 7 THEN 'Июль'
+            WHEN 8 THEN 'Август'
+            WHEN 9 THEN 'Сентябрь'
+            WHEN 10 THEN 'Октябрь'
+            WHEN 11 THEN 'Ноябрь'
+            ELSE 'Декабрь'
+        END AS month_name_ru
+    ) m
     ORDER BY gs.dt ASC
     """,
 
@@ -801,11 +790,37 @@ LEGACY_VIEWS = [
     "v_certificates_stats",
 ]
 
+VIEW_DESCRIPTIONS = {
+    "v_revenue_daily": "выручка по дням",
+    "v_revenue_by_staff": "выручка по сотрудникам",
+    "v_popular_services": "популярные услуги",
+    "v_staff_workload": "загрузка сотрудников",
+    "v_client_analytics": "клиентская аналитика и сегментация",
+    "v_revenue_monthly": "выручка по месяцам",
+    "v_attendance_stats": "конверсия записей (посещаемость)",
+    "v_finance_daily": "финансовый поток по дням",
+    "v_finance_by_account": "финансы по кассам",
+    "v_finance_monthly": "финансы по месяцам",
+    "v_goods_sales": "продажи товаров",
+    "v_goods_movement": "движение товаров по складам",
+    "v_staff_reviews": "рейтинг сотрудников по отзывам",
+    "v_reviews_monthly": "отзывы по месяцам",
+    "v_schedule_utilization": "загрузка расписания",
+    "v_companies_lookup": "справочник филиалов",
+    "v_services_lookup": "справочник услуг",
+    "v_calendar": "BI-календарь: месяцы, недели, кварталы",
+    "v_appointments_enriched": "записи с человекочитаемыми полями",
+    "v_financial_transactions_enriched": "финансы с календарём и названиями",
+    "v_goods_transactions_enriched": "товары с названиями операций",
+    "v_average_check_components": "компоненты среднего чека",
+}
 
-def quote_identifier(conn, value: str) -> str:
-    if not value.replace("_", "").isalnum() or not value[0].isalpha():
-        raise ValueError(f"Unsafe SQL identifier: {value!r}")
-    return conn.dialect.identifier_preparer.quote(value)
+_VIEW_NAME_RE = re.compile(r'CREATE OR REPLACE VIEW\s+(\w+)', re.IGNORECASE)
+
+
+def view_names() -> list[str]:
+    """View names in VIEWS order, so the CLI summary cannot drift from what is actually created."""
+    return [match.group(1) for view_sql in VIEWS if (match := _VIEW_NAME_RE.search(view_sql))]
 
 
 def refresh_analytics_views(verbose: bool = True):
@@ -821,7 +836,7 @@ def refresh_analytics_views(verbose: bool = True):
 
     with database.engine.connect() as conn:
         for view_name in LEGACY_VIEWS:
-            conn.exec_driver_sql(f"DROP VIEW IF EXISTS {quote_identifier(conn, view_name)}")
+            conn.exec_driver_sql(f"DROP VIEW IF EXISTS {quote_identifier(conn.dialect, view_name)}")
         conn.commit()
 
         for i, view_sql in enumerate(VIEWS, 1):
@@ -839,27 +854,8 @@ def refresh_analytics_views(verbose: bool = True):
 
     if verbose:
         print(f"\n✓ Успешно создано {created_count} из {len(VIEWS)} аналитических представлений:")
-        print("  - v_revenue_daily            — выручка по дням")
-        print("  - v_revenue_by_staff         — выручка по сотрудникам")
-        print("  - v_popular_services         — популярные услуги")
-        print("  - v_staff_workload           — загрузка сотрудников")
-        print("  - v_client_analytics         — клиентская аналитика и сегментация")
-        print("  - v_revenue_monthly          — выручка по месяцам")
-        print("  - v_attendance_stats         — конверсия записей (посещаемость)")
-        print("  - v_finance_daily            — финансовый поток по дням")
-        print("  - v_finance_by_account       — финансы по кассам")
-        print("  - v_finance_monthly          — финансы по месяцам")
-        print("  - v_goods_sales              — продажи товаров")
-        print("  - v_goods_movement           — движение товаров по складам")
-        print("  - v_staff_reviews            — рейтинг сотрудников по отзывам")
-        print("  - v_reviews_monthly          — отзывы по месяцам")
-        print("  - v_schedule_utilization     — загрузка расписания")
-        print("  - v_companies_lookup         — справочник филиалов")
-        print("  - v_services_lookup          — справочник услуг")
-        print("  - v_calendar                 — BI-календарь: месяцы, недели, кварталы")
-        print("  - v_appointments_enriched    — записи с человекочитаемыми полями")
-        print("  - v_financial_transactions_enriched — финансы с календарём и названиями")
-        print("  - v_goods_transactions_enriched     — товары с названиями операций")
+        for name in view_names():
+            print(f"  - {name:<34} — {VIEW_DESCRIPTIONS.get(name, '')}".rstrip(' —'))
         if failed_views:
             print(f"\n✗ Ошибки были в view: {', '.join(map(str, failed_views))}")
 

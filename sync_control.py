@@ -5,14 +5,7 @@ from sqlalchemy import text
 
 from config import SYNC_LOCK_ID
 from models import SyncRun, SyncState, SyncStepRun
-
-
-def _serialize_dt(value) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value
-    return value.isoformat()
+from sync_parsing import serialize_dt
 
 
 class SyncControlService:
@@ -102,7 +95,7 @@ class SyncControlService:
         if not state:
             state = SyncState(key=key)
             db.add(state)
-        state.value = _serialize_dt(value)
+        state.value = serialize_dt(value)
         state.updated_at = datetime.now()
         db.commit()
 
@@ -144,8 +137,8 @@ class SyncControlService:
             'trigger_type': run.trigger_type,
             'status': run.status,
             'initiator': run.initiator,
-            'started_at': _serialize_dt(run.started_at),
-            'finished_at': _serialize_dt(run.finished_at),
+            'started_at': serialize_dt(run.started_at),
+            'finished_at': serialize_dt(run.finished_at),
             'log_path': run.log_path,
             'message': run.message,
         }

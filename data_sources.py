@@ -282,6 +282,27 @@ def adapter_from_payload(
     raise HTTPException(status_code=400, detail=f'Unsupported source_type: {normalized}')
 
 
+def authenticated_adapter_from_payload(
+    source_type: str | None,
+    *,
+    partner_token: str,
+    login: str,
+    password: str,
+    **api_kwargs,
+) -> DataSourceAdapter:
+    """Build an adapter for the given credentials and reject them if they do not authenticate."""
+    adapter = adapter_from_payload(
+        source_type,
+        partner_token=partner_token,
+        login=login,
+        password=password,
+        **api_kwargs,
+    )
+    if not adapter.authenticate():
+        raise HTTPException(status_code=400, detail='Data source authentication failed')
+    return adapter
+
+
 def adapter_from_credential(
     source_type: str | None,
     credential: YClientsCredential,

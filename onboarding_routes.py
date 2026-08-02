@@ -16,7 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_deps import forbid_demo, get_current_user
 from database import get_async_db
-from data_sources import SOURCE_YCLIENTS, adapter_from_credential, adapter_from_payload, normalize_source_type
+from data_sources import (
+    SOURCE_YCLIENTS,
+    adapter_from_credential,
+    authenticated_adapter_from_payload,
+    normalize_source_type,
+)
 from models import Company, PortalAccount, PortalBranch, PortalUser, YClientsCredential, YClientsCredentialCompany
 from portal_audit import log_portal_audit
 from portal_tenant_ownership import can_reassign_branch_from_tenant
@@ -129,15 +134,13 @@ async def onboarding_credentials(
 ):
     _require_owner(user)
 
-    source_type = normalize_source_type(body.source_type)
-    adapter = adapter_from_payload(
-        source_type,
+    adapter = authenticated_adapter_from_payload(
+        body.source_type,
         partner_token=body.partner_token,
         login=body.login,
         password=body.password,
     )
-    if not adapter.authenticate():
-        raise HTTPException(status_code=400, detail='Data source authentication failed')
+    source_type = adapter.source_type
 
     available = [item.as_payload() for item in adapter.list_branches()]
     if not available:

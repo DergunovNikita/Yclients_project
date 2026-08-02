@@ -11,7 +11,7 @@ from datetime import date, datetime, time, timedelta
 from sqlalchemy import func
 
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
-from database import init_database
+from database import init_database, quote_identifier
 from models import (
     Account,
     Appointment,
@@ -114,14 +114,8 @@ WIPE_TABLES = [
 ]
 
 
-def quote_identifier(db, value: str) -> str:
-    if not value.replace("_", "").isalnum() or not value[0].isalpha():
-        raise ValueError(f"Unsafe SQL identifier: {value!r}")
-    return db.bind.dialect.identifier_preparer.quote(value)
-
-
 def maybe_wipe_data(db) -> None:
-    table_names = ", ".join(quote_identifier(db, table_name) for table_name in WIPE_TABLES)
+    table_names = ", ".join(quote_identifier(db.bind.dialect, table_name) for table_name in WIPE_TABLES)
     wipe_sql = f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE;"
     db.connection().exec_driver_sql(wipe_sql)
     db.commit()

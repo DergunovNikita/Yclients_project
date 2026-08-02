@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_deps import forbid_demo, get_dashboard_access, is_demo_request
+from auth_hierarchy import USER_ADMIN_ROLES
 from auth_scope import (
     AccessContext,
     can_view_financials,
@@ -205,7 +206,7 @@ def _require_sync_access(ctx: AccessContext) -> None:
 
 
 def _require_settings_admin(ctx: AccessContext) -> None:
-    if not (ctx.full_access or ctx.role in {'platform_admin', 'owner', 'branch_admin'}):
+    if not (ctx.full_access or ctx.role in USER_ADMIN_ROLES):
         raise HTTPException(status_code=403, detail='Settings require admin role')
 
 
@@ -289,9 +290,8 @@ def _hide_staff_leaderboard_financials(
     payload = deepcopy(report)
     tables = list(payload.get('tables') or [])
 
-    hidden_table_ids: set[str] = set()
+    hidden_table_ids = money_payload_keys(hidden_codes, 'leaderboard')
     if 'revenue' in hidden_codes:
-        hidden_table_ids.update({'revenue_barber', 'revenue_admin'})
         # The only card in this mixed report is the top barber revenue, derived
         # from the positive-revenue leaderboard; drop it with the revenue tables.
         payload['cards'] = []
@@ -299,10 +299,6 @@ def _hide_staff_leaderboard_financials(
         extra_table = next((table for table in tables if table.get('id') == 'extra_services'), None)
         if extra_table is not None:
             _remove_table_field(extra_table, 'sum', metric='sum')
-    if 'cosmo_sum' in hidden_codes:
-        hidden_table_ids.update({'cosmo_barber', 'cosmo_admin'})
-    if 'avg_check' in hidden_codes:
-        hidden_table_ids.update({'avg_check_plan_branch', 'avg_check_plan_staff'})
 
     payload['tables'] = [table for table in tables if table.get('id') not in hidden_table_ids]
     payload['raw'] = {}
@@ -399,7 +395,7 @@ async def dashboard_staff_directory_csv(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    if ctx.user_id is not None and ctx.role not in {'platform_admin', 'owner', 'branch_admin'}:
+    if ctx.user_id is not None and ctx.role not in USER_ADMIN_ROLES:
         raise HTTPException(status_code=403, detail='Staff directory export requires admin role')
 
     branch_ids, force_allowed = user_branch_ids(ctx)

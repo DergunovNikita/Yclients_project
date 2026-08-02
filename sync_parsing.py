@@ -4,6 +4,14 @@ from datetime import date, datetime, time
 from typing import Any
 
 
+def serialize_dt(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return value.isoformat()
+
+
 def parse_date(value: Any) -> date | None:
     if value in (None, '', '0000-00-00'):
         return None
