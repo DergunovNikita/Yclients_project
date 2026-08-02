@@ -743,6 +743,25 @@ def _ranking_table(
     return table
 
 
+def _without_empty_columns(
+    columns: list[tuple[str, str, str]],
+    rows: list[dict[str, Any]],
+    optional_keys: set[str],
+) -> list[tuple[str, str, str]]:
+    """Drop optional columns that carry no value in any row.
+
+    Personal-account top-ups do not exist in every tenant, and a permanently zero
+    column is just noise. Kept as soon as one row has a value, so a tenant that
+    does use them still sees that component of total revenue.
+    """
+    return [
+        column
+        for column in columns
+        if column[0] not in optional_keys
+        or any(float(row.get(column[0]) or 0) for row in rows)
+    ]
+
+
 def _appointment_conditions(
     start: date,
     end: date,
@@ -1581,7 +1600,7 @@ async def _year_over_year_payload(
         _table(
             'years',
             'Годовые агрегаты',
-            [
+            _without_empty_columns([
                 ('year', 'Год', NUMBER_FORMAT),
                 ('period_start', 'С', 'date'),
                 ('period_end', 'По', 'date'),
@@ -1601,13 +1620,13 @@ async def _year_over_year_payload(
                 ('extra_service_count', 'Доп. услуги', NUMBER_FORMAT),
                 ('opz_qty', 'ОПЗ', NUMBER_FORMAT),
                 ('opz_pct', 'ОПЗ %', PERCENT_FORMAT),
-            ],
+            ], year_rows, {'topup_revenue'}),
             year_rows,
         ),
         _table(
             'months',
             'Помесячные агрегаты',
-            [
+            _without_empty_columns([
                 ('year', 'Год', NUMBER_FORMAT),
                 ('month_label', 'Месяц', 'text'),
                 ('revenue', 'Выручка', MONEY_FORMAT),
@@ -1615,7 +1634,7 @@ async def _year_over_year_payload(
                 ('service_revenue', 'Услуги', MONEY_FORMAT),
                 ('goods_revenue', 'Товары', MONEY_FORMAT),
                 ('topup_revenue', 'Пополнения', MONEY_FORMAT),
-            ],
+            ], monthly_rows, {'topup_revenue'}),
             monthly_rows,
         ),
     ]

@@ -9,6 +9,7 @@ import {
   latestServiceManagementTimestamp,
   reportDataCacheKey,
   reportDataState,
+  chartTooltipValue,
   reportFilterVisibility,
   reportRefreshPresentation,
   reportScopedFilterAllowsLoad,
@@ -68,6 +69,19 @@ test('year-over-year filter metadata hides dates and null chart points stay unla
   assert.equal(shouldRenderReportDataLabel(''), false);
   assert.equal(shouldRenderReportDataLabel(0), true);
   assert.equal(shouldRenderReportDataLabel(1250), true);
+});
+
+test('chart tooltip reads the measured axis, not the category index', () => {
+  // Chart.js parses a vertical bar to {x: <label index>, y: <value>}. Reading x
+  // reported the category position as the value: 2025 (the 9th bar) showed "8 ₽".
+  assert.equal(chartTooltipValue({ x: 8, y: 93_700_000 }), 93_700_000);
+  assert.equal(chartTooltipValue({ x: 8, y: 93_700_000 }, 'x'), 93_700_000);
+  // Horizontal bars swap the roles.
+  assert.equal(chartTooltipValue({ x: 93_700_000, y: 8 }, 'y'), 93_700_000);
+  // Arc charts parse to a bare number.
+  assert.equal(chartTooltipValue(4200), 4200);
+  assert.equal(chartTooltipValue({ x: 3, y: 0 }), 0);
+  assert.equal(chartTooltipValue(null), null);
 });
 
 test('refreshing a cached report retains that report while the request is pending', () => {

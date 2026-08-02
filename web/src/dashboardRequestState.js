@@ -43,6 +43,17 @@ export function shouldRenderReportDataLabel(raw) {
   return raw !== null && raw !== undefined && raw !== '' && Number.isFinite(Number(raw));
 }
 
+export function chartTooltipValue(parsed, indexAxis = 'x') {
+  // Arc charts parse to a bare number.
+  if (typeof parsed === 'number') return parsed;
+  if (!parsed || typeof parsed !== 'object') return null;
+  // On a category chart one axis carries the label index rather than the
+  // measurement: vertical charts measure on y, horizontal bars on x. Reading the
+  // wrong one reports the category position (2025 -> 8) as the value.
+  if (indexAxis === 'y') return parsed.x;
+  return parsed.y !== undefined ? parsed.y : parsed.x;
+}
+
 export function reportRefreshPresentation(previousData) {
   return previousData
     ? { state: 'refreshing', retainedData: previousData }

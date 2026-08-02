@@ -1,7 +1,7 @@
 import Chart from 'chart.js/auto';
 
 import { formatValue } from './format.js';
-import { shouldRenderReportDataLabel } from '../dashboardRequestState.js';
+import { chartTooltipValue, shouldRenderReportDataLabel } from '../dashboardRequestState.js';
 
 const PALETTE = [
   '#0f766e',
@@ -142,10 +142,7 @@ export class ReportChartManager {
           callbacks: {
             label: (ctx) => {
               const dataset = spec.datasets?.[ctx.datasetIndex] || {};
-              const parsed = ctx.parsed;
-              const value = typeof parsed === 'number'
-                ? parsed
-                : parsed?.x !== undefined ? parsed.x : parsed?.y;
+              const value = chartTooltipValue(ctx.parsed, ctx.chart?.options?.indexAxis);
               return ` ${dataset.label}: ${formatValue(value, dataset.format || firstFormat)}`;
             },
           },

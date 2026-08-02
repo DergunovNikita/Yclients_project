@@ -602,6 +602,13 @@ async def test_year_over_year_charts_render_values_after_full_historical_sync(
     assert None not in appointments_series
     assert appointments_series == [1, 1, 1, 1]
 
+    # This tenant has no personal-account top-ups, so the permanently zero column
+    # is dropped rather than shown as a wall of nulls.
+    for table_id in ('years', 'months'):
+        table = next(item for item in data['tables'] if item['id'] == table_id)
+        assert 'topup_revenue' not in {column['key'] for column in table['columns']}
+        assert 'revenue' in {column['key'] for column in table['columns']}
+
     # Every chart must plot at least one real point; an all-None series reads as an empty chart.
     for chart_id, chart in charts.items():
         for dataset in chart['datasets']:
@@ -8356,6 +8363,10 @@ async def test_linked_masterless_topup_reconciles_staff_overview_plan_fact_and_y
     assert yoy['raw']['latest_year'] == 2025
     assert yoy_2025['topup_revenue'] == 250.0
     assert yoy_2025['revenue'] == 250.0
+    # A tenant that does use personal accounts keeps the column: it is a
+    # component of total revenue, so hiding it would leave Выручка unexplained.
+    years_table = next(table for table in yoy['tables'] if table['id'] == 'years')
+    assert 'topup_revenue' in {column['key'] for column in years_table['columns']}
 
 
 @pytest.mark.asyncio
