@@ -521,6 +521,9 @@ def seed_activity(
                             external_id=goods_tx_external_id,
                             source_type=source_type,
                             document_id=appointment.id,
+                            # Goods reports filter on date; without it every seeded
+                            # sale is invisible and the goods reports render empty.
+                            date=dt + timedelta(minutes=duration // 60),
                             type_id=1,
                             good_id=good.good_id,
                             storage_id=rng.choice(storage_ids),

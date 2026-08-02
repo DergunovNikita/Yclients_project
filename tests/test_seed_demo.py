@@ -228,6 +228,18 @@ def test_seed_demo_creates_embedded_tenant_without_touching_real_data():
         assert paid_service_rows
 
 
+def test_seed_demo_goods_transactions_carry_a_date():
+    """Goods reports filter on date; undated sales render every goods report empty."""
+    with sqlite_session_with_system() as db:
+        _, _, company_ids = provision_demo(db)
+
+        rows = db.execute(
+            select(GoodTransaction).where(GoodTransaction.company_id.in_(company_ids))
+        ).scalars().all()
+        assert rows, 'demo seeding produced no goods transactions'
+        assert all(row.date is not None for row in rows)
+
+
 def test_seed_demo_is_idempotent_for_account_user_branches_and_data():
     with sqlite_session_with_system() as db:
         first_account, first_user, first_company_ids = provision_demo(db)

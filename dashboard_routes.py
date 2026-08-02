@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_deps import forbid_demo, get_dashboard_access
+from auth_deps import forbid_demo, get_dashboard_access, is_demo_request
 from auth_scope import (
     AccessContext,
     can_view_financials,
@@ -51,6 +51,7 @@ from dashboard_service import (
     fetch_top_services,
 )
 from dashboard_reports import (
+    DEMO_UNAVAILABLE_REPORTS,
     REPORT_GRANULARITIES,
     ReportCalculationError,
     fetch_report_data,
@@ -609,9 +610,9 @@ async def dashboard_service_kpi_assignment_save(
 
 
 @router.get('/reports')
-async def dashboard_reports():
+async def dashboard_reports(is_demo: bool = Depends(is_demo_request)):
     """Full report catalog for the product reports SPA."""
-    return {'success': True, 'data': fetch_report_registry()}
+    return {'success': True, 'data': fetch_report_registry(is_demo)}
 
 
 @router.get('/reports/data')
@@ -627,8 +628,13 @@ async def dashboard_report_data(
     compare_staff_id: int | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
+    is_demo: bool = Depends(is_demo_request),
 ):
     start, end = _parse_range(start_date, end_date)
+    # The catalog already hides these for demo; block the direct URL too so a
+    # bookmark cannot surface a report the demo data can never populate.
+    if is_demo and report_id in DEMO_UNAVAILABLE_REPORTS:
+        raise HTTPException(status_code=404, detail='Report is not available in the demo tenant')
     if report_requires_financials(report_id):
         require_financial_access(ctx)
     scope = query_scope(ctx, company_id)

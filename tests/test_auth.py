@@ -2832,6 +2832,47 @@ async def test_demo_login_returns_is_demo_and_scoped_companies(auth_db):
 
 
 @pytest.mark.asyncio
+async def test_demo_tenant_hides_reports_its_data_cannot_populate(auth_db):
+    """Demo is seeded, not synced, so it has no SyncSourceState coverage at all.
+
+    year_over_year certifies whole years against that coverage and can therefore
+    only render every metric as unknown for demo — hide it instead of shipping a
+    permanently blank report in the showcase.
+    """
+    await _seed_demo_owner(auth_db)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        assert (await client.post('/auth/demo-login')).status_code == 200
+
+        catalog = await client.get('/dashboard/reports')
+        assert catalog.status_code == 200
+        demo_ids = {item['id'] for item in catalog.json()['data']}
+        assert 'year_over_year' not in demo_ids
+        # Hiding one report must not thin out the rest of the catalog.
+        assert 'revenue_dynamics' in demo_ids
+        assert len(demo_ids) >= 30
+
+        # A bookmarked URL must not bypass the catalog.
+        blocked = await client.get('/dashboard/reports/data', params={
+            'report_id': 'year_over_year',
+            'start_date': '2026-03-01',
+            'end_date': '2026-07-31',
+        })
+        assert blocked.status_code == 404
+
+    # Without a demo session the report stays in the catalog.
+    async with AsyncClient(transport=transport, base_url='http://test') as anon:
+        full = await anon.get('/dashboard/reports')
+        assert 'year_over_year' in {item['id'] for item in full.json()['data']}
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
 async def test_demo_login_returns_503_when_not_provisioned(auth_db):
     async def override_db():
         yield auth_db

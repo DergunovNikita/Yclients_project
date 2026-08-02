@@ -208,6 +208,27 @@ def require_roles(*roles: str):
     return _dep
 
 
+async def is_demo_request(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_async_db),
+) -> bool:
+    """Whether the caller is the shared read-only demo account.
+
+    Same soft token handling as ``forbid_demo``: callers without a valid demo JWT
+    (API key, sync token, anonymous) are not demo and keep full behaviour.
+    """
+    token = _extract_access_token(request, authorization)
+    if not token:
+        return False
+    try:
+        payload = decode_access_token(token)
+        user_id = int(payload.get('sub'))
+    except (jwt.PyJWTError, TypeError, ValueError):
+        return False
+    return bool(await db.scalar(select(PortalUser.is_demo).where(PortalUser.id == user_id)))
+
+
 async def forbid_demo(
     request: Request,
     authorization: str | None = Header(default=None),

@@ -488,8 +488,18 @@ def _description_for(report_id: str, status: str) -> str:
 REPORT_REGISTRY = _build_registry()
 
 
-def fetch_report_registry() -> list[dict[str, Any]]:
-    return [REPORT_REGISTRY[report_id].to_payload() for report_id in REPORT_ORDER]
+# The demo tenant is seeded, not synced: it holds a few months of activity and no
+# SyncSourceState coverage at all. year_over_year certifies whole years against
+# that coverage, so for demo it can only ever render every metric as unknown.
+DEMO_UNAVAILABLE_REPORTS = frozenset({'year_over_year'})
+
+
+def fetch_report_registry(is_demo: bool = False) -> list[dict[str, Any]]:
+    return [
+        REPORT_REGISTRY[report_id].to_payload()
+        for report_id in REPORT_ORDER
+        if not (is_demo and report_id in DEMO_UNAVAILABLE_REPORTS)
+    ]
 
 
 async def fetch_report_data(
