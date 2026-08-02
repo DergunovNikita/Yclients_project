@@ -50,13 +50,15 @@ async def sync_portal_user_staff(
     by_company = {row.company_id: row for row in linked}
     target_companies = set(company_ids)
 
+    next_staff_id: int | None = None
     for company_id in sorted(target_companies):
         row = by_company.get(company_id)
         if row is None:
-            new_id = await _next_staff_id(db)
+            if next_staff_id is None:
+                next_staff_id = await _next_staff_id(db)
             db.add(
                 Staff(
-                    id=new_id,
+                    id=next_staff_id,
                     name=name,
                     position=user.role,
                     company_id=company_id,
@@ -65,6 +67,7 @@ async def sync_portal_user_staff(
                     bookable=True,
                 )
             )
+            next_staff_id += 1
             await db.flush()
             continue
         if int(row.id) == int(user.id):

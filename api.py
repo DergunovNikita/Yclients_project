@@ -39,6 +39,7 @@ from config import (
 )
 from dashboard_routes import router as dashboard_router
 from auth_deps import forbid_demo
+from auth_hierarchy import USER_MANAGER_ROLES
 from auth_routes import router as auth_router
 from auth_scope import (
     AccessContext,
@@ -92,7 +93,7 @@ except Exception:
 
 MAX_PAGE_SIZE = 5000
 DEFAULT_PAGE_SIZE = 1000
-PII_CLIENT_ROLES = {'platform_admin', 'owner', 'branch_admin', 'manager'}
+PII_CLIENT_ROLES = USER_MANAGER_ROLES
 
 OPEN_PATHS = {"/health"}
 if not IS_PRODUCTION:
@@ -385,16 +386,20 @@ async def api_groups(
         count_company_filter.append(Company.id.in_(allowed))
     stmt = stmt.order_by(Group.id.asc())
     total, groups = await fetch_page(db, stmt, limit, offset)
-    data = []
-    for group in groups:
-        count_result = await db.execute(
-            select(func.count()).where(Company.group_id == group.id, *count_company_filter)
-        )
-        data.append({
+    counts_result = await db.execute(
+        select(Company.group_id, func.count())
+        .where(Company.group_id.in_([group.id for group in groups]), *count_company_filter)
+        .group_by(Company.group_id)
+    )
+    counts = dict(counts_result.all())
+    data = [
+        {
             "id": group.id,
             "title": group.title,
-            "companies_count": count_result.scalar_one(),
-        })
+            "companies_count": counts.get(group.id, 0),
+        }
+        for group in groups
+    ]
     return build_page_response(total, limit, offset, data)
 
 

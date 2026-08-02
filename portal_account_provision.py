@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import re
-import unicodedata
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -18,34 +17,6 @@ from auth_service import (
     set_user_branches,
 )
 from models import PortalBranch, PortalUser, Staff
-
-_CYRILLIC_TO_LATIN = {
-    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e', 'ж': 'zh', 'з': 'z',
-    'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r',
-    'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'h', 'ц': 'ts', 'ч': 'ch', 'ш': 'sh', 'щ': 'sch',
-    'ъ': '', 'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya',
-}
-
-
-def _transliterate(value: str) -> str:
-    chars = []
-    for char in value.lower():
-        if char in _CYRILLIC_TO_LATIN:
-            chars.append(_CYRILLIC_TO_LATIN[char])
-            continue
-        normalized = unicodedata.normalize('NFKD', char)
-        ascii_char = normalized.encode('ascii', 'ignore').decode('ascii')
-        chars.append(ascii_char.lower())
-    return ''.join(chars)
-
-
-def staff_login_email(staff: Staff) -> str:
-    """Build a unique login email for a staff member without a portal account."""
-    slug = _transliterate(staff.name or '')
-    slug = re.sub(r'[^a-z0-9]+', '.', slug).strip('.')
-    if not slug:
-        slug = 'worker'
-    return f'{slug}.{staff.id}@portal.local'
 
 
 @dataclass
@@ -125,7 +96,7 @@ async def provision_staff_account(
         id=staff.id,
         portal_account_id=int(portal_account_id),
         email=login_email,
-        password_hash=hash_password(bootstrap_password),
+        password_hash=await asyncio.to_thread(hash_password, bootstrap_password),
         full_name=staff.name,
         role=role,
         is_active=True,

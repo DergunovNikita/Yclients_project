@@ -191,7 +191,11 @@ async def get_dashboard_access(
     x_portal_account_id: int | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
 ) -> AccessContext:
-    ctx = await require_auth(request, authorization, x_api_key, x_portal_account_id, db)
+    # The app-wide require_api_key dependency already resolved (and cached) the context,
+    # so reuse it instead of decoding the token and re-querying the user a second time.
+    ctx = getattr(request.state, 'access', None) or await require_auth(
+        request, authorization, x_api_key, x_portal_account_id, db
+    )
     if ctx is not None:
         return ctx
     if not AUTH_REQUIRE_LOGIN:

@@ -161,11 +161,14 @@ def repair_demo_data(db, company_ids: list[int]) -> None:
     categories = (
         db.execute(select(ServiceCategory).where(ServiceCategory.company_id.in_(company_ids))).scalars().all()
     )
+    category_catalogs = {
+        (row.company_id, row.category_id): row
+        for row in db.execute(
+            select(ServiceCategoryCatalog).where(ServiceCategoryCatalog.company_id.in_(company_ids))
+        ).scalars()
+    }
     for category in categories:
-        catalog = db.get(
-            ServiceCategoryCatalog,
-            {'company_id': category.company_id, 'category_id': category.id},
-        )
+        catalog = category_catalogs.get((category.company_id, category.id))
         if catalog is None:
             db.add(
                 ServiceCategoryCatalog(
@@ -189,12 +192,15 @@ def repair_demo_data(db, company_ids: list[int]) -> None:
         if category.title
     }
     services = db.execute(select(Service).where(Service.company_id.in_(company_ids))).scalars().all()
+    service_catalogs = {
+        (row.company_id, row.service_id): row
+        for row in db.execute(
+            select(ServiceCatalog).where(ServiceCatalog.company_id.in_(company_ids))
+        ).scalars()
+    }
     for service in services:
         category_id = category_by_company_title.get((service.company_id, service.category_title))
-        catalog = db.get(
-            ServiceCatalog,
-            {'company_id': service.company_id, 'service_id': service.id},
-        )
+        catalog = service_catalogs.get((service.company_id, service.id))
         if catalog is None:
             db.add(
                 ServiceCatalog(

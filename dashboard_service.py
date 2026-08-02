@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Optional
 
-from sqlalchemy import String, and_, case, cast, delete, exists, extract, func, or_, select
+from sqlalchemy import String, and_, case, cast, delete, exists, extract, func, or_, select, tuple_
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -549,26 +549,6 @@ def _appt_revenue_filters(
     return and_(*parts)
 
 
-def _appt_all_filters(
-    start: date,
-    end: date,
-    company_id: Optional[int],
-    staff_id: Optional[int] = None,
-    allowed_company_ids: Optional[list[int]] = None,
-):
-    parts = [
-        Appointment.date >= start,
-        Appointment.date <= end,
-        business_appointment_condition(),
-    ]
-    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
-    if scope is not None:
-        parts.append(scope)
-    if staff_id is not None:
-        parts.append(Appointment.staff_id == staff_id)
-    return and_(*parts)
-
-
 def _goods_revenue_filters(
     start: date,
     end: date,
@@ -780,10 +760,9 @@ async def _average_check_block(
         Appointment.date <= dr.end,
         business_appointment_condition(),
     ]
-    if company_id is not None:
-        visit_filters.append(Appointment.company_id == company_id)
-    elif company_ids is not None:
-        visit_filters.append(Appointment.company_id.in_(company_ids))
+    scope = _company_scope_clause(Appointment.company_id, company_id, company_ids)
+    if scope is not None:
+        visit_filters.append(scope)
     if created_user_id is not None:
         visit_filters.append(Appointment.created_user_id == created_user_id)
     elif staff_id is not None:
@@ -811,10 +790,9 @@ async def _average_check_block(
         func.date(GoodTransaction.date) <= dr.end,
         _business_staff_id_condition(GoodTransaction.master_id),
     ]
-    if company_id is not None:
-        goods_filters.append(GoodTransaction.company_id == company_id)
-    elif company_ids is not None:
-        goods_filters.append(GoodTransaction.company_id.in_(company_ids))
+    scope = _company_scope_clause(GoodTransaction.company_id, company_id, company_ids)
+    if scope is not None:
+        goods_filters.append(scope)
     if staff_id is not None and created_user_id is None:
         goods_filters.append(GoodTransaction.master_id == staff_id)
     if factual_at is not None:
@@ -841,10 +819,9 @@ async def _average_check_block(
         Appointment.attendance == COMPLETED_ATTENDANCE,
         business_appointment_condition(),
     ]
-    if company_id is not None:
-        service_filters.append(Appointment.company_id == company_id)
-    elif company_ids is not None:
-        service_filters.append(Appointment.company_id.in_(company_ids))
+    scope = _company_scope_clause(Appointment.company_id, company_id, company_ids)
+    if scope is not None:
+        service_filters.append(scope)
     if created_user_id is not None:
         service_filters.append(Appointment.created_user_id == created_user_id)
     elif staff_id is not None:
@@ -871,10 +848,9 @@ async def _average_check_block(
     classified_revenue = {}
     direct_payment_filters = list(base_payment_filters)
     direct_payment_filters.append(_business_financial_master_condition(factual_at))
-    if company_id is not None:
-        direct_payment_filters.append(FinancialTransaction.company_id == company_id)
-    elif company_ids is not None:
-        direct_payment_filters.append(FinancialTransaction.company_id.in_(company_ids))
+    scope = _company_scope_clause(FinancialTransaction.company_id, company_id, company_ids)
+    if scope is not None:
+        direct_payment_filters.append(scope)
     for name, condition, staff_condition in (
         (
             'goods_revenue',
@@ -2235,25 +2211,19 @@ async def fetch_revenue_daily(
                 event_date = event.create_date.date()
                 opz_by_date[event_date] = opz_by_date.get(event_date, 0) + 1
 
-    by_date: dict[date, dict[str, float | int]] = {}
+    def _empty_day() -> dict[str, float | int]:
+        return {'service_revenue': 0.0, 'goods_revenue': 0.0, 'topup_revenue': 0.0, 'appointments': 0, 'opz_qty': 0}
+
+    by_date: dict[date, dict[str, float | int]] = defaultdict(_empty_day)
     for r in svc_rows:
-        day = _coerce_date(r.d)
-        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'topup_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
-        by_date[day]['service_revenue'] = float(r.revenue or 0)
+        by_date[_coerce_date(r.d)]['service_revenue'] = float(r.revenue or 0)
     for r in appt_rows:
-        day = _coerce_date(r.d)
-        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'topup_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
-        by_date[day]['appointments'] = int(r.appointments or 0)
+        by_date[_coerce_date(r.d)]['appointments'] = int(r.appointments or 0)
     for r in goods_rows:
-        day = _coerce_date(r.d)
-        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'topup_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
-        by_date[day]['goods_revenue'] = float(r.revenue or 0)
+        by_date[_coerce_date(r.d)]['goods_revenue'] = float(r.revenue or 0)
     for r in topup_rows:
-        day = _coerce_date(r.d)
-        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'topup_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
-        by_date[day]['topup_revenue'] = float(r.revenue or 0)
+        by_date[_coerce_date(r.d)]['topup_revenue'] = float(r.revenue or 0)
     for day, opz_qty in opz_by_date.items():
-        by_date.setdefault(day, {'service_revenue': 0.0, 'goods_revenue': 0.0, 'topup_revenue': 0.0, 'appointments': 0, 'opz_qty': 0})
         by_date[day]['opz_qty'] = opz_qty
 
     rows = []
@@ -2746,6 +2716,16 @@ async def _apply_service_kpi_assignment(
         assignment.updated_at = now
 
 
+async def _rows_by_service_key(db: AsyncSession, model, keys: list[tuple[int, int]]) -> dict[tuple[int, int], Any]:
+    """Load company_id/service_id-keyed rows for the given keys in one query."""
+    if not keys:
+        return {}
+    rows = await db.execute(
+        select(model).where(tuple_(model.company_id, model.service_id).in_(keys))
+    )
+    return {(int(row.company_id), int(row.service_id)): row for row in rows.scalars()}
+
+
 async def save_service_management(
     db: AsyncSession,
     *,
@@ -2814,20 +2794,13 @@ async def save_service_management(
                 )
 
         await db.flush()
+        keys = list(catalogs)
+        labels = await _rows_by_service_key(db, ServiceLabel, keys)
+        assignments = await _rows_by_service_key(db, ServiceKpiAssignment, keys)
         normalized_rows = []
-        for company_id, service_id in catalogs:
-            label = await db.scalar(
-                select(ServiceLabel).where(
-                    ServiceLabel.company_id == company_id,
-                    ServiceLabel.service_id == service_id,
-                )
-            )
-            assignment = await db.scalar(
-                select(ServiceKpiAssignment).where(
-                    ServiceKpiAssignment.company_id == company_id,
-                    ServiceKpiAssignment.service_id == service_id,
-                )
-            )
+        for company_id, service_id in keys:
+            label = labels.get((company_id, service_id))
+            assignment = assignments.get((company_id, service_id))
             normalized_rows.append({
                 'company_id': company_id,
                 'service_id': service_id,
@@ -5395,16 +5368,15 @@ async def save_manual_review_facts(
         raise ValueError(f'staff {invalid_staff_id} is not an active administrator in company {invalid_company_id}')
 
     now = datetime.now()
-    for (item_company_id, item_staff_id), value in normalized_items.items():
-        await db.execute(
-            delete(ManualFactMetric).where(
-                ManualFactMetric.period_start >= start,
-                ManualFactMetric.period_end <= end,
-                ManualFactMetric.company_id == item_company_id,
-                ManualFactMetric.staff_id == item_staff_id,
-                ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
-            )
+    await db.execute(
+        delete(ManualFactMetric).where(
+            ManualFactMetric.period_start >= start,
+            ManualFactMetric.period_end <= end,
+            tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(list(normalized_items)),
+            ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
         )
+    )
+    for (item_company_id, item_staff_id), value in normalized_items.items():
         if value is None:
             continue
         db.add(
@@ -5658,13 +5630,11 @@ async def fetch_plan_fact(
 async def branch_company_ids(db: AsyncSession) -> Optional[list[int]]:
     """If portal_branches has rows, return allowed company ids; else None (all companies)."""
     try:
-        cnt = await db.scalar(select(func.count()).select_from(PortalBranch))
+        rows = await db.execute(select(PortalBranch.company_id).order_by(PortalBranch.id.asc()))
     except (OperationalError, ProgrammingError, DBAPIError):
         return None
-    if not cnt:
-        return None
-    r = await db.execute(select(PortalBranch.company_id).order_by(PortalBranch.id.asc()))
-    return [row[0] for row in r.all()]
+    company_ids = [row[0] for row in rows.all()]
+    return company_ids or None
 
 
 async def fetch_staff_directory(
