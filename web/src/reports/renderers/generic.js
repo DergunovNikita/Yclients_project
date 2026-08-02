@@ -1,5 +1,5 @@
 import { escapeHtml, formatValue } from '../format.js';
-import { getLocale, t } from '../../i18n.js';
+import { intlLocale, t } from '../../i18n.js';
 import { sourceLabel } from '../registry.js';
 import { rankingRowsForMetric, tableHasRows } from '../ranking.js';
 
@@ -53,8 +53,7 @@ function renderCharts(charts = []) {
 }
 
 function rowsCountText(count) {
-  const locale = getLocale() === 'it' ? 'it-IT' : getLocale() === 'en' ? 'en-US' : 'ru-RU';
-  return t('reports.rowsCount', { count: count.toLocaleString(locale) });
+  return t('reports.rowsCount', { count: count.toLocaleString(intlLocale()) });
 }
 
 function renderTableRows(rows, columns) {

@@ -66,7 +66,7 @@ export function setLocale(locale) {
 
 const INTL_LOCALE = { ru: 'ru-RU', en: 'en-US', it: 'it-IT' };
 
-function intlLocale() {
+export function intlLocale() {
   return INTL_LOCALE[getLocale()] || INTL_LOCALE[DEFAULT_LOCALE];
 }
 

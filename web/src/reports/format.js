@@ -1,19 +1,6 @@
-import { getLocale } from '../i18n.js';
+import { intlLocale } from '../i18n.js';
 
-const INTL_LOCALE = { ru: 'ru-RU', en: 'en-US', it: 'it-IT' };
-
-function intlLocale() {
-  return INTL_LOCALE[getLocale()] || INTL_LOCALE.it;
-}
-
-export function escapeHtml(value) {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
+export { escapeHtml } from '../html.js';
 
 export function formatMoney(value) {
   if (value === null || value === undefined || value === '') return '—';

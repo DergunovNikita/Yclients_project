@@ -1,7 +1,8 @@
 import './auth.css';
 import './settings.css';
 import { authFetch, hasSessionHint, loadCurrentUser, logout, setToken } from './auth.js';
-import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
+import { escapeHtml } from './html.js';
+import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 if (!hasSessionHint()) {
   window.location.href = '/login.html';
@@ -38,15 +39,6 @@ const els = {
 const roleLabel = (role) => t(`roles.${role}`);
 
 let currentUser = null;
-
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
 
 function showError(el, message) {
   if (!el) return;
@@ -157,11 +149,9 @@ async function loadSessions() {
   }
 }
 
-const DATETIME_LOCALE = { ru: 'ru-RU', en: 'en-US', it: 'it-IT' };
-
 function formatDate(value) {
   if (!value) return '—';
-  return new Date(value).toLocaleString(DATETIME_LOCALE[getLocale()] || 'ru-RU');
+  return new Date(value).toLocaleString(intlLocale());
 }
 
 function credentialStatus(item) {

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'vite';
-import { buildCsv, csvCell, escapeHtml } from '../src/adminSecurity.js';
+import { buildCsv, csvCell } from '../src/adminSecurity.js';
+import { escapeHtml } from '../src/html.js';
 import { forbiddenBrowserAuthTokens, scanBrowserAuthTokens } from './browser-auth-scan.mjs';
 
 class MemoryStorage {

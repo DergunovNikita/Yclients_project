@@ -8,7 +8,8 @@ import {
   requireAuthRedirect,
   setSelectedPortalAccountId,
 } from './auth.js';
-import { buildCsv, escapeHtml } from './adminSecurity.js';
+import { buildCsv } from './adminSecurity.js';
+import { escapeHtml } from './html.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 document.documentElement.lang = getLocale();
@@ -125,50 +126,19 @@ function hideAlerts() {
   successEl.hidden = true;
 }
 
-function hideCreateError() {
-  createErrorEl.hidden = true;
+function hideFieldError(el) {
+  el.hidden = true;
 }
 
-function hideEditError() {
-  editErrorEl.hidden = true;
-}
-
-function hideEditStaffError() {
-  editStaffErrorEl.hidden = true;
-}
-
-function hideCreateStaffAccountError() {
-  createStaffAccountErrorEl.hidden = true;
+function showFieldError(el, message) {
+  el.textContent = message;
+  el.hidden = false;
 }
 
 function showError(message) {
   hideAlerts();
   errorEl.textContent = message;
   errorEl.hidden = false;
-}
-
-function showCreateError(message) {
-  hideCreateError();
-  createErrorEl.textContent = message;
-  createErrorEl.hidden = false;
-}
-
-function showEditError(message) {
-  hideEditError();
-  editErrorEl.textContent = message;
-  editErrorEl.hidden = false;
-}
-
-function showEditStaffError(message) {
-  hideEditStaffError();
-  editStaffErrorEl.textContent = message;
-  editStaffErrorEl.hidden = false;
-}
-
-function showCreateStaffAccountError(message) {
-  hideCreateStaffAccountError();
-  createStaffAccountErrorEl.textContent = message;
-  createStaffAccountErrorEl.hidden = false;
 }
 
 function showSuccess(message) {
@@ -340,7 +310,7 @@ async function reloadTenantScopedAdminData() {
 }
 
 function openCreateModal() {
-  hideCreateError();
+  hideFieldError(createErrorEl);
   createForm.reset();
   renderBranchOptions(createBranchSelect, createBranchDropdown);
   if (createRoleSelect.options.length) {
@@ -368,13 +338,13 @@ function closeCreateModal() {
   if (!isAnyModalOpen()) {
     document.body.classList.remove('admin-modal-open');
   }
-  hideCreateError();
+  hideFieldError(createErrorEl);
 }
 
 function openEditModal(user) {
   if (!user?.manageable || !user.is_portal_user) return;
   editingUserId = user.id;
-  hideEditError();
+  hideFieldError(editErrorEl);
   editEmail.value = user.email;
   editName.value = user.full_name || '';
   renderRoleOptions(editRoleSelect, editRoleDropdown, rolesForEdit(user));
@@ -392,13 +362,13 @@ function closeEditModal() {
   if (!isAnyModalOpen()) {
     document.body.classList.remove('admin-modal-open');
   }
-  hideEditError();
+  hideFieldError(editErrorEl);
 }
 
 function openEditStaffModal(staff) {
   if (!staff?.manageable || staff.is_portal_user) return;
   editingStaffId = staff.staff_id;
-  hideEditStaffError();
+  hideFieldError(editStaffErrorEl);
   editStaffName.value = staff.full_name || '';
   editStaffPosition.value = staff.position || '';
   renderBranchOptions(editStaffBranchSelect, editStaffBranchDropdown, staff.company_ids || [], false);
@@ -413,13 +383,13 @@ function closeEditStaffModal() {
   if (!isAnyModalOpen()) {
     document.body.classList.remove('admin-modal-open');
   }
-  hideEditStaffError();
+  hideFieldError(editStaffErrorEl);
 }
 
 function openCreateStaffAccountModal(staff) {
   if (!staff?.manageable || staff.is_portal_user) return;
   pendingStaffAccountId = staff.staff_id;
-  hideCreateStaffAccountError();
+  hideFieldError(createStaffAccountErrorEl);
   createStaffAccountForm.reset();
   createStaffAccountName.value = staff.full_name || '';
   createStaffAccountEmail.value = staff.can_create_account ? staff.email : '';
@@ -435,7 +405,7 @@ function closeCreateStaffAccountModal() {
   if (!isAnyModalOpen()) {
     document.body.classList.remove('admin-modal-open');
   }
-  hideCreateStaffAccountError();
+  hideFieldError(createStaffAccountErrorEl);
 }
 
 function openDeleteConfirm({ type, id, label, subjectType }) {
@@ -983,7 +953,7 @@ async function createStaffAccount(staffId, email = null) {
     await Promise.all([loadUsers(), loadInitialPasswords()]);
   } catch (error) {
     if (!createStaffAccountModal.hidden) {
-      showCreateStaffAccountError(error.message);
+      showFieldError(createStaffAccountErrorEl, error.message);
     } else {
       showError(error.message);
     }
@@ -1119,7 +1089,7 @@ document.addEventListener('click', (event) => {
 editStaffForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!editingStaffId) return;
-  hideEditStaffError();
+  hideFieldError(editStaffErrorEl);
   saveStaffBtn.disabled = true;
   saveStaffBtn.classList.add('is-loading');
   try {
@@ -1135,7 +1105,7 @@ editStaffForm.addEventListener('submit', async (event) => {
     showSuccess(t('admin.changesSaved'));
     await loadUsers();
   } catch (error) {
-    showEditStaffError(error.message);
+    showFieldError(editStaffErrorEl, error.message);
   } finally {
     saveStaffBtn.disabled = false;
     saveStaffBtn.classList.remove('is-loading');
@@ -1144,11 +1114,11 @@ editStaffForm.addEventListener('submit', async (event) => {
 
 createStaffAccountForm?.addEventListener('submit', async (event) => {
   event.preventDefault();
-  hideCreateStaffAccountError();
+  hideFieldError(createStaffAccountErrorEl);
   if (!pendingStaffAccountId) return;
   const email = createStaffAccountEmail.value.trim();
   if (!email) {
-    showCreateStaffAccountError(t('admin.realStaffEmailRequired'));
+    showFieldError(createStaffAccountErrorEl, t('admin.realStaffEmailRequired'));
     return;
   }
   await createStaffAccount(pendingStaffAccountId, email);
@@ -1157,7 +1127,7 @@ createStaffAccountForm?.addEventListener('submit', async (event) => {
 editForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!editingUserId) return;
-  hideEditError();
+  hideFieldError(editErrorEl);
   saveBtn.disabled = true;
   saveBtn.classList.add('is-loading');
   try {
@@ -1175,7 +1145,7 @@ editForm.addEventListener('submit', async (event) => {
     showSuccess(t('admin.changesSaved'));
     await loadUsers();
   } catch (error) {
-    showEditError(error.message);
+    showFieldError(editErrorEl, error.message);
   } finally {
     saveBtn.disabled = false;
     saveBtn.classList.remove('is-loading');
@@ -1296,7 +1266,7 @@ yclientsCredentialsBody?.addEventListener('click', async (event) => {
 
 createForm.addEventListener('submit', async (event) => {
   event.preventDefault();
-  hideCreateError();
+  hideFieldError(createErrorEl);
   createBtn.disabled = true;
   createBtn.classList.add('is-loading');
   try {
@@ -1318,7 +1288,7 @@ createForm.addEventListener('submit', async (event) => {
     showSuccess(t('admin.userCreated', { email: payload.data.email }));
     await Promise.all([loadUsers(), loadInitialPasswords()]);
   } catch (error) {
-    showCreateError(error.message);
+    showFieldError(createErrorEl, error.message);
   } finally {
     createBtn.disabled = false;
     createBtn.classList.remove('is-loading');

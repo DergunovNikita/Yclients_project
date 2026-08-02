@@ -7,12 +7,12 @@ import {
   reportRefreshPresentation,
   reportScopedFilterAllowsLoad,
   staffRefreshAllowsDataLoad,
-} from './api.js';
+} from '../dashboardApi.js';
 import { ReportChartManager } from './charts.js';
 import { defaultReportDates, escapeHtml, formatDate } from './format.js';
 import { GROUP_LABELS, STATUS_LABELS, sourceLabel } from './registry.js';
 import { renderReportData } from './renderers/generic.js';
-import { t } from '../i18n.js';
+import { intlLocale, t } from '../i18n.js';
 import { reportFilterVisibility } from '../dashboardRequestState.js';
 
 const FAVORITES_KEY = 'yclients_reports_favorites';
@@ -346,7 +346,7 @@ export function initReports({ clearError, showError, setApiState }) {
       <section class="reports-section">
         <div class="reports-section__head">
           <h3>${escapeHtml(GROUP_LABELS[group] || group)}</h3>
-          <span>${reports.length.toLocaleString('ru-RU')}</span>
+          <span>${reports.length.toLocaleString(intlLocale())}</span>
         </div>
         <div class="reports-grid">
           ${reports.map((report) => `

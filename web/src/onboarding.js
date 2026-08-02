@@ -1,6 +1,7 @@
 import './auth.css';
 import './onboarding.css';
 import { authFetch, hasSessionHint, loadCurrentUser } from './auth.js';
+import { escapeHtml } from './html.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 if (!hasSessionHint()) {
@@ -84,15 +85,6 @@ function renderBranches(companies) {
     )
     .join('');
   els.branchesSubmit.disabled = false;
-}
-
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
 }
 
 async function refreshState() {

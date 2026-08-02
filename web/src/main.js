@@ -28,8 +28,9 @@ import {
   staffRefreshAllowsDataLoad,
 } from './dashboardApi.js';
 
+import { escapeHtml } from './html.js';
 import { initReports } from './reports/index.js';
-import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
+import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 document.documentElement.lang = getLocale();
 applyTranslations();
@@ -266,10 +267,6 @@ function formatMetricValue(value, format) {
   return formatNumber(value);
 }
 
-function intlLocale() {
-  return ({ ru: 'ru-RU', en: 'en-US', it: 'it-IT' })[getLocale()] || 'ru-RU';
-}
-
 function formatInputNumber(value) {
   if (value === null || value === undefined || value === '') return '';
   const number = Number(value);
@@ -296,15 +293,6 @@ function formatMoscowDateTime(value) {
 function deltaClass(value) {
   if (value === null || value === undefined || value === 0) return '';
   return value > 0 ? 'up' : 'down';
-}
-
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
 }
 
 function setApiState(text, kind = 'warn') {
@@ -513,12 +501,6 @@ function formatInputDate(date) {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
-}
-
-function formatShortDate(value) {
-  const date = new Date(`${value}T00:00:00`);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
 }
 
 function overviewReportUrl(reportId) {
@@ -1579,6 +1561,7 @@ async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom 
   const request = beginViewRequest('planSettings');
   clearError();
   setPlanSettingsLoading(true);
+  const syncStatus = loadSyncStatus();
   try {
     const params = { month };
     if (copyFrom) params.copy_from = copyFrom;
@@ -1593,7 +1576,7 @@ async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom 
     setLoadedApiState(payload.data, {
       empty: !(payload.data?.branches?.length || payload.data?.staff?.length),
     });
-    await loadSyncStatus();
+    await syncStatus;
   } catch (error) {
     if (isSupersededRequest(error) || !request.isCurrent()) return;
     showError(error.message, { apiStatus: error.apiStatus, retry: () => loadPlanSettings({ month, copyFrom, dirty }) });
@@ -2295,6 +2278,8 @@ async function loadPlanFact() {
   clearError();
   setFilterLoading(filter, true);
 
+  // Sync status is independent of the view payload, so start it in parallel. It never rejects.
+  const syncStatus = loadSyncStatus();
   try {
     const payload = await fetchJson('/dashboard/widget/plan_fact', filterParams(filter), {
       retry: () => loadPlanFact(),
@@ -2305,7 +2290,7 @@ async function loadPlanFact() {
     viewsWithData.add('plan');
     clearError();
     setLoadedApiState(payload.data, { empty: !payload.data?.groups?.length });
-    await loadSyncStatus();
+    await syncStatus;
   } catch (error) {
     if (isSupersededRequest(error) || !request.isCurrent()) return;
     showError(error.message, { apiStatus: error.apiStatus, retry: () => loadPlanFact() });
@@ -2323,13 +2308,14 @@ async function loadReviewFacts() {
   clearError();
   setFilterLoading(filter, true);
 
+  const syncStatus = loadSyncStatus();
   try {
     await loadReviewFactEditor({ signal: request.signal });
     if (!request.isCurrent()) return;
     viewsWithData.add('reviewFacts');
     clearError();
     setLoadedApiState(null, { empty: reviewFactRows.length === 0 });
-    await loadSyncStatus();
+    await syncStatus;
   } catch (error) {
     if (isSupersededRequest(error) || !request.isCurrent()) return;
     showError(error.message, { apiStatus: error.apiStatus, retry: () => loadReviewFacts() });
@@ -2347,6 +2333,7 @@ async function loadDashboard() {
   clearError();
   setFilterLoading(filter, true);
 
+  const syncStatus = loadSyncStatus();
   try {
     const payload = await fetchJson('/dashboard/bundle', filterParams(filter), {
       retry: () => loadDashboard(),
@@ -2357,7 +2344,7 @@ async function loadDashboard() {
     viewsWithData.add('overview');
     clearError();
     setLoadedApiState(payload.data, { empty: !payload.data?.summary });
-    await loadSyncStatus();
+    await syncStatus;
   } catch (error) {
     if (isSupersededRequest(error) || !request.isCurrent()) return;
     showError(error.message, { apiStatus: error.apiStatus, retry: () => loadDashboard() });
