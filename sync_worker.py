@@ -49,14 +49,6 @@ def _parse_state_datetime(value: str | None) -> datetime | None:
         return None
 
 
-def _services_label_sync_due(db, now: datetime | None = None) -> bool:
-    state = db.get(SyncState, SERVICES_LABEL_SYNC_ATTEMPT_KEY)
-    return _services_label_sync_due_from_value(
-        getattr(state, 'value', None),
-        now,
-    )
-
-
 def _services_label_sync_due_from_value(value: str | None, now: datetime | None = None) -> bool:
     if SERVICES_LABEL_SYNC_INTERVAL_DAYS <= 0:
         return False

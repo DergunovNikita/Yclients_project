@@ -58,7 +58,6 @@ METRIC_COLUMN_ALIASES = {
     'reviews_qty': ('отзывы', 'отзывы план', 'кол-во отзывов', 'количество отзывов', 'reviews_qty'),
 }
 
-RETIRED_PLAN_METRIC_CODES: set[str] = set()
 PLAN_FACT_METRIC_CODES = {metric['code'] for metric in PLAN_FACT_METRICS}
 
 PERIOD_START_ALIASES = ('period_start', 'date_from', 'start_date', 'начало периода', 'с')
@@ -326,7 +325,7 @@ async def _save_plan_values(
     await db.execute(
         delete(PlanMetric).where(
             *_branch_or_staff_filter(period_start, period_end, company_id, staff_id),
-            PlanMetric.metric_code.in_(list(PLAN_FACT_METRIC_CODES | RETIRED_PLAN_METRIC_CODES)),
+            PlanMetric.metric_code.in_(list(PLAN_FACT_METRIC_CODES)),
         )
     )
 
@@ -407,7 +406,7 @@ async def _replace_plan_values(
                 PlanMetric.period_start == period_start,
                 PlanMetric.period_end == period_end,
                 PlanMetric.company_id == company_id,
-                PlanMetric.metric_code.in_(list(PLAN_FACT_METRIC_CODES | RETIRED_PLAN_METRIC_CODES)),
+                PlanMetric.metric_code.in_(list(PLAN_FACT_METRIC_CODES)),
             )
         )
 
