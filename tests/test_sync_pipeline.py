@@ -962,6 +962,57 @@ def test_sync_financial_transactions_persists_expense_article_and_source_coverag
         engine.dispose()
 
 
+def test_sync_financial_transactions_coerces_blank_numeric_fields():
+    """Historical YClients rows send '' for optional numeric fields.
+
+    Postgres rejects '' for an integer column, which aborted the whole financial
+    step of a full historical pass and left the branch with no financial rows at
+    all after the full-refresh purge had already deleted them.
+    """
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Client.__table__,
+            Staff.__table__,
+            FinancialTransaction.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.commit()
+
+        # Shape taken verbatim from the row that broke branch 85779 in production.
+        api = FakeFinancialTransactionsAPI([{
+            'id': 63998288,
+            'date': '2018-11-25 19:27:44',
+            'amount': -43881,
+            'document_id': '',
+            'expense': {'id': '', 'title': ''},
+            'account': {'id': 134378},
+            'record_id': '',
+            'visit_id': '',
+            'sold_item_id': '',
+        }])
+        assert sync_financial_transactions(
+            api, db, '1', start_date='2018-01-01', end_date='2018-12-31'
+        ) is True
+
+        transaction = db.get(FinancialTransaction, 63998288)
+        for field in ('expense_id', 'document_id', 'record_id', 'visit_id', 'sold_item_id'):
+            assert getattr(transaction, field) is None, field
+        assert transaction.account_id == 134378
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_sync_financial_transactions_empty_window_persists_source_coverage():
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(

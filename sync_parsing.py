@@ -76,3 +76,27 @@ def parse_datetime_end(value: Any) -> datetime | None:
     if parsed is None:
         return None
     return parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+
+def parse_int(value: Any) -> int | None:
+    """Coerce a YClients numeric field to int, treating blanks as absent.
+
+    Historical records return '' for optional numeric fields such as expense.id,
+    which Postgres rejects for an integer column.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        try:
+            return int(float(text))
+        except ValueError:
+            return None

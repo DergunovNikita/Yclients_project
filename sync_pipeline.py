@@ -32,7 +32,9 @@ from models import (
     AnalyticsOverall, AnalyticsDailyMetric, AnalyticsSourceMetric,
     AnalyticsStatusMetric, ZReport, ZReportPayment, SyncState, SyncSourceState,
 )
-from sync_parsing import parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_time
+from sync_parsing import (
+    parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_int, parse_time,
+)
 
 TRANSACTIONAL_STATE_KEY = 'transactions_last_success_date'
 HISTORICAL_COVERAGE_STATE_KEY = 'historical_source_coverage_v1'
@@ -1697,18 +1699,18 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                     **external_pk_kwargs(db, FinancialTransaction, tid),
                     external_id=tid,
                     source_type=SOURCE_YCLIENTS,
-                    document_id=t.get('document_id'),
-                    expense_id=expense.get('id') if isinstance(expense, dict) else None,
+                    document_id=parse_int(t.get('document_id')),
+                    expense_id=parse_int(expense.get('id')) if isinstance(expense, dict) else None,
                     expense_title=expense_title,
                     date=parse_datetime(t.get('date')),
                     amount=t.get('amount'),
                     comment=t.get('comment'),
-                    account_id=account.get('id') if isinstance(account, dict) else None,
+                    account_id=parse_int(account.get('id')) if isinstance(account, dict) else None,
                     client_id=internal_client_id,
                     master_id=internal_master_id,
-                    record_id=t.get('record_id'),
-                    visit_id=t.get('visit_id'),
-                    sold_item_id=t.get('sold_item_id'),
+                    record_id=parse_int(t.get('record_id')),
+                    visit_id=parse_int(t.get('visit_id')),
+                    sold_item_id=parse_int(t.get('sold_item_id')),
                     sold_item_type=t.get('sold_item_type'),
                     company_id=cid,
                 )
@@ -1717,18 +1719,18 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
             else:
                 obj.external_id = tid
                 obj.source_type = SOURCE_YCLIENTS
-                obj.document_id = t.get('document_id')
-                obj.expense_id = expense.get('id') if isinstance(expense, dict) else None
+                obj.document_id = parse_int(t.get('document_id'))
+                obj.expense_id = parse_int(expense.get('id')) if isinstance(expense, dict) else None
                 obj.expense_title = expense_title
                 obj.date = parse_datetime(t.get('date'))
                 obj.amount = t.get('amount')
                 obj.comment = t.get('comment')
-                obj.account_id = account.get('id') if isinstance(account, dict) else None
+                obj.account_id = parse_int(account.get('id')) if isinstance(account, dict) else None
                 obj.client_id = internal_client_id
                 obj.master_id = internal_master_id
-                obj.record_id = t.get('record_id')
-                obj.visit_id = t.get('visit_id')
-                obj.sold_item_id = t.get('sold_item_id')
+                obj.record_id = parse_int(t.get('record_id'))
+                obj.visit_id = parse_int(t.get('visit_id'))
+                obj.sold_item_id = parse_int(t.get('sold_item_id'))
                 obj.sold_item_type = t.get('sold_item_type')
                 obj.company_id = cid
 
