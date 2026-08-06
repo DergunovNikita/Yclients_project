@@ -12,7 +12,6 @@ from config import (
     TELEGRAM_CHAT_ID,
 )
 from database import init_database
-from setup_analytics import refresh_analytics_views
 from sync_control import SyncControlService
 from sync_jobs import SyncJobService
 from sync_logging import build_log_path, stream_run_output
@@ -104,27 +103,8 @@ def run_sync_job(
             )
             step_results = list(sync_result.get('step_results', []))
 
-            print('\n' + '=' * 60)
-            print('  Обновление аналитических SQL views')
-            print('=' * 60)
-            analytics_result = refresh_analytics_views(verbose=True)
-            step_results.append({
-                'name': 'SQL views refresh',
-                'key': 'SQL views refresh',
-                'success': bool(analytics_result.get('success')),
-                'elapsed': None,
-            })
-            progress_callback({
-                'status': 'success' if analytics_result.get('success') else 'failed',
-                'current_stage': 'SQL views refresh',
-                'stage_key': 'SQL views refresh',
-                'progress_pct': 95,
-                'message': 'SQL views refresh completed',
-                'step_results': step_results,
-            })
-
             warning_count = sum(1 for item in step_results if not item.get('success'))
-            finished_status = 'success' if sync_result.get('success') and analytics_result.get('success') else 'failed'
+            finished_status = 'success' if sync_result.get('success') else 'failed'
             finished_message = (
                 f"Sync completed with window {sync_result.get('window_start')}..{sync_result.get('window_end')}; "
                 f"warnings={warning_count}; companies={sync_result.get('companies_count', 0)}"

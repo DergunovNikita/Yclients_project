@@ -9,11 +9,11 @@
 
 ## Project Overview
 
-Мультитенантная ETL/BI система: YClients API → PostgreSQL → FastAPI portal/dashboard API → Vite MPA; аналитические views также используются опциональным Metabase.
+Мультитенантная ETL/BI система: YClients API → PostgreSQL → FastAPI portal/dashboard API → Vite MPA.
 
 ### Stack
 - **Python 3.12**, FastAPI, SQLAlchemy 2.0, Alembic, Pydantic 2
-- **PostgreSQL 16**, Docker Compose, Metabase
+- **PostgreSQL 16**, Docker Compose
 - **Зависимости**: pip + requirements.txt (не uv, не poetry)
 - **Тесты**: pytest + httpx (TestClient)
 
@@ -31,7 +31,6 @@ sync_parsing.py     — парсинг дат, нормализация данн
 models.py           — SQLAlchemy модели (public + system schema)
 database.py         — connection pooling, миграции
 config.py           — переменные окружения (.env) + prod-валидация
-setup_analytics.py  — SQL views для Metabase (20+ views)
 yclients_api.py     — HTTP-клиент YClients с retry/throttle
 seed_fake_data.py   — генератор синтетики; scripts/seed_demo.py — демо-стенд
 scripts/set_reporting_start.py — дата начала отчётности филиала (см. ниже)
@@ -76,17 +75,15 @@ api/ / web/api/     — варианты same-origin Vercel proxy к backend API
 ## Running
 
 ```bash
-docker compose up -d                    # postgres, api, worker, metabase
+docker compose up -d                    # postgres, api, worker
 docker compose run --rm migrate         # alembic migrations
 docker compose run --rm sync            # разовая синхронизация
-docker compose --profile tools run --rm analytics  # обновить views
 python -m scripts.seed_demo             # host: провижининг встроенного read-only demo tenant в основной БД
 cd web && npm run dev                   # frontend: http://127.0.0.1:5173
 ```
 
 - API: http://127.0.0.1:8000
 - Frontend: http://127.0.0.1:5173
-- Metabase: http://127.0.0.1:3000
 - PostgreSQL: 127.0.0.1:5432
 
 ## Database
@@ -123,8 +120,7 @@ cd web && npm run dev                   # frontend: http://127.0.0.1:5173
   противоречит отчёту. При добавлении нового запроса по фактам — добавить и её.
 - Значение выставляется скриптом `python -m scripts.set_reporting_start --list` (и затем `<id>=YYYY-MM-DD`);
   UI для правки нет, в `/dashboard/branches` поле отдаётся только на чтение.
-- **Известное ограничение**: views в `setup_analytics.py` (Metabase) и `/export/csv/*` отсечку не применяют,
-  поэтому для филиала с заданной датой Metabase покажет историю целиком, а портал — обрезанную.
+- **Известное ограничение**: `/export/csv/*` отсечку не применяет и отдаёт историю целиком.
 
 ## Testing
 
@@ -155,7 +151,7 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
 
 ### SQL Safety
 - Прикладные запросы используют SQLAlchemy ORM/Core и параметризованные выражения
-- Raw SQL допустим для инфраструктурных операций: views в `setup_analytics.py`, advisory locks, атомарный claim очереди и bootstrap/maintenance; user input нельзя интерполировать в SQL
+- Raw SQL допустим для инфраструктурных операций: advisory locks, атомарный claim очереди и bootstrap/maintenance; user input нельзя интерполировать в SQL
 - Параметры пагинации валидируются через FastAPI `Query(ge=, le=)`
 - `/export/csv/{table_name}` — table_name проверяется по whitelist моделей
 
@@ -183,7 +179,3 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
 3. Функция `sync_<entity>()` в `sync_pipeline.py`
 4. Вызов в `execute_sync()` с обработкой ошибок
 
-### Добавление новой аналитической view
-1. SQL view в `setup_analytics.py` → `refresh_analytics_views()`
-2. `CREATE OR REPLACE VIEW` паттерн
-3. Запуск: `docker compose --profile tools run --rm analytics`

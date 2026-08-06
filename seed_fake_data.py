@@ -33,7 +33,6 @@ from models import (
     Storage,
     Transaction,
 )
-from setup_analytics import refresh_analytics_views
 
 
 @dataclass
@@ -72,11 +71,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--staff-per-company", type=int, default=8, help="Staff members per company")
     parser.add_argument("--goods-per-company", type=int, default=30, help="Goods per company")
     parser.add_argument("--wipe", action="store_true", help="Delete existing business data before seeding")
-    parser.add_argument(
-        "--skip-refresh-views",
-        action="store_true",
-        help="Skip setup_analytics refresh after seed",
-    )
     args = parser.parse_args()
     if args.days < 7:
         parser.error("--days should be >= 7")
@@ -620,10 +614,6 @@ def main() -> int:
             appt_min=args.appointments_per_day_min,
             appt_max=args.appointments_per_day_max,
         )
-
-        if not args.skip_refresh_views:
-            print("Refreshing analytics views...")
-            refresh_analytics_views(verbose=True)
 
         print("Synthetic data generated successfully")
         return 0

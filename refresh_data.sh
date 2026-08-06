@@ -44,7 +44,6 @@ echo "==> Применяю миграции"
 "$DOCKER_BIN" compose run --rm migrate
 
 echo "==> Запускаю синхронизацию: mode=$MODE trigger=$TRIGGER initiator=$INITIATOR"
-# refresh_analytics_views вызывается внутри sync run, отдельный setup_analytics.py не нужен.
 "$DOCKER_BIN" compose run --rm sync \
   --mode "$MODE" \
   --trigger "$TRIGGER" \

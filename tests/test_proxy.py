@@ -59,11 +59,3 @@ def test_production_workflows_fail_closed():
     assert 'continue-on-error: true' not in security
     assert '--soft-fail' not in security
 
-
-def test_metabase_compose_database_matches_init_sql():
-    root = Path(__file__).resolve().parents[1]
-    compose = (root / 'docker-compose.yml').read_text()
-    init_sql = (root / 'docker/postgres/init/01_create_metabase_db.sql').read_text()
-
-    assert 'MB_DB_DBNAME: metabase_app' in compose
-    assert 'CREATE DATABASE metabase_app;' in init_sql

@@ -32,7 +32,6 @@ fi
 
 APP_REVISION="$remote_rev" docker compose build api worker migrate
 docker compose run --rm migrate
-docker compose --profile tools run --rm analytics
 docker compose up -d api worker
 
 if [ -f .env ]; then

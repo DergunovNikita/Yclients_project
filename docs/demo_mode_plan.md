@@ -33,7 +33,6 @@
 5. `PortalBranch(portal_account_id, company_id)` для каждого демо-`company_id`.
 6. `PortalUser(email='demo@portal.local', role='owner', is_demo=True, portal_account_id, is_active=True, email_verified_at=now)`, `password_hash=hash_password(generate_bootstrap_password())`.
 7. Идемпотентно: повторный запуск не плодит дубли (по email / label / уже связанным company_id).
-8. `refresh_analytics_views()` в конце.
 **Приёмка:** один демо-account, N branches, один демо-owner; повторный запуск не меняет счётчики; демо-компании `source_type='demo'`.
 **Зависимости:** A.
 

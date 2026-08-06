@@ -1,6 +1,6 @@
 # YClients BI System
 
-Мультитенантный аналитический сервис: синхронизирует данные YClients в PostgreSQL, отдаёт портал и продуктовые отчёты через FastAPI, обслуживает Vite-интерфейс и готовит аналитические `views` для опционального Metabase.
+Мультитенантный аналитический сервис: синхронизирует данные YClients в PostgreSQL, отдаёт портал и продуктовые отчёты через FastAPI и обслуживает Vite-интерфейс.
 
 ## Формулы среднего чека
 
@@ -10,8 +10,6 @@
 - По допуслугам: оплаченные допуслуги / количество оказанных допуслуг.
 
 Доход общего среднего чека относится к дате платежа, клиентская часть знаменателя — к дате визита. До подтверждённой синхронизации детализированных финансовых транзакций API возвращает `average_check.source_status = "partial"`.
-
-Для Metabase используется `v_average_check_components`: за выбранный период показатель считается как `SUM(revenue) / COUNT(DISTINCT denominator_key)`, исключая компонент `unclassified_income` из числителя.
 
 ## Контракты dashboard
 
@@ -29,11 +27,10 @@
 - `sync_worker.py` - worker, который обрабатывает queued sync jobs
 - `main.py` - ручной CLI-запуск синхронизации
 - `migrate.py` - применение Alembic миграций
-- `setup_analytics.py` - создание аналитических `views` в PostgreSQL
-- `dashboard_service.py` / `dashboard_routes.py` / `dashboard_reports.py` — агрегаты и отчёты продуктового дашборда (JSON, без Metabase)
+- `dashboard_service.py` / `dashboard_routes.py` / `dashboard_reports.py` — агрегаты и отчёты продуктового дашборда (JSON)
 - `web/` - Vite MPA: дашборд, отчёты, auth, onboarding, profile и admin
 - `api/` / `web/api/` - варианты same-origin proxy для Vercel deployment
-- `docker-compose.yml` - локальный запуск `api`, `worker`, PostgreSQL и Metabase
+- `docker-compose.yml` - локальный запуск `api`, `worker` и PostgreSQL
 - `sync.sh` - ручной запуск one-shot sync через Docker Compose
 
 ## Стек
@@ -44,7 +41,6 @@
 - Alembic
 - PostgreSQL
 - Docker Compose
-- Metabase (опционально, для внутренней BI; клиентский дашборд — через `web/` + `/dashboard/*`)
 
 ## Дашборд и импорт
 
@@ -79,13 +75,12 @@ docker compose run --rm migrate
 ### 3. Поднять сервисы
 
 ```bash
-docker compose up -d postgres api worker metabase
+docker compose up -d postgres api worker
 ```
 
 После запуска будут доступны:
 
 - API: `http://127.0.0.1:8000`
-- Metabase: `http://127.0.0.1:3000`
 
 ### 4. Запустить frontend
 
@@ -97,12 +92,6 @@ npm run dev
 ```
 
 Frontend будет доступен на `http://127.0.0.1:5173`. Зарегистрируйте владельца через `register.html`; при локальном `AUTH_CONSOLE_EMAIL=true` ссылка подтверждения появится в логах API. Затем onboarding сохранит credentials, предложит выбрать филиалы и поставит начальную синхронизацию в очередь.
-
-### 5. Пересоздать аналитические представления
-
-```bash
-docker compose run --rm analytics
-```
 
 ## Полезные команды
 

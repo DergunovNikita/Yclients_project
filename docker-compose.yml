@@ -28,7 +28,6 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
     volumes:
       - pg_data:/var/lib/postgresql/data
-      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
@@ -65,37 +64,12 @@ services:
     command: ["--mode", "incremental", "--trigger", "manual", "--initiator", "docker"]
     restart: "no"
 
-  analytics:
-    <<: *app-base
-    profiles: ["tools"]
-    entrypoint: ["/app/docker/entrypoint.sh", "setup-analytics"]
-    command: []
-    restart: "no"
-
   import-sheets:
     <<: *app-base
     profiles: ["tools"]
     entrypoint: ["/app/docker/entrypoint.sh", "import-sheets"]
     command: []
     restart: "no"
-
-  metabase:
-    image: metabase/metabase:latest
-    ports:
-      - "127.0.0.1:3000:3000"
-    environment:
-      MB_DB_TYPE: postgres
-      MB_DB_DBNAME: metabase_app
-      MB_DB_PORT: 5432
-      MB_DB_USER: ${DB_USER:-postgres}
-      MB_DB_PASS: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
-      MB_DB_HOST: postgres
-    volumes:
-      - metabase_data:/metabase-data
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
 
   nginx:
     image: nginx:alpine
@@ -110,8 +84,6 @@ services:
     depends_on:
       api:
         condition: service_healthy
-      metabase:
-        condition: service_started
     restart: unless-stopped
 
   certbot:
@@ -124,5 +96,4 @@ services:
 
 volumes:
   pg_data:
-  metabase_data:
   certbot_data:

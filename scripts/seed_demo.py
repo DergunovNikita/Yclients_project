@@ -38,7 +38,6 @@ from models import (  # noqa: E402
     Transaction,
 )
 from seed_fake_data import seed_activity, seed_companies  # noqa: E402
-from setup_analytics import refresh_analytics_views  # noqa: E402
 
 DEMO_EMAIL = 'demo@portal.local'
 DEMO_SOURCE_TYPE = 'demo'
@@ -55,7 +54,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--goods-per-company', type=int, default=30)
     parser.add_argument('--appointments-per-day-min', type=int, default=6)
     parser.add_argument('--appointments-per-day-max', type=int, default=16)
-    parser.add_argument('--skip-refresh-views', action='store_true', help='Skip analytics views refresh')
     args = parser.parse_args()
     if args.companies < 1:
         parser.error('--companies must be >= 1')
@@ -327,10 +325,6 @@ def main() -> int:
         user = ensure_demo_user(db, account.id)
         db.commit()
         print(f'Demo tenant ready: account_id={account.id}, user={user.email}, branches={len(company_ids)}')
-
-        if not args.skip_refresh_views:
-            print('Refreshing analytics views...')
-            refresh_analytics_views(verbose=True)
 
         print('Demo tenant provisioned successfully')
         return 0
