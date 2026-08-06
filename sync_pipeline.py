@@ -226,9 +226,21 @@ def full_sync_start_date(end_date: date) -> date:
     return min(SYNC_HISTORY_START_DATE, end_date)
 
 
-def historical_sync_start_date(end_date: date) -> date:
-    """Lower bound used when certifying the complete YClients history."""
-    return min(SYNC_HISTORY_START_DATE, end_date)
+def company_reporting_start(db, company_id: int) -> date | None:
+    company = db.get(Company, int(company_id))
+    return company.reporting_start_date if company is not None else None
+
+
+def historical_sync_start_date(end_date: date, reporting_start: date | None = None) -> date:
+    """Lower bound used when certifying the complete YClients history.
+
+    A branch with a configured reporting start contributes no facts before it, so
+    fetching earlier years would only reload rows every dashboard query discards.
+    Branches without one keep the global floor, which is what a freshly onboarded
+    tenant needs in order to discover its history in the first place.
+    """
+    floor = reporting_start if reporting_start is not None else SYNC_HISTORY_START_DATE
+    return min(floor, end_date)
 
 
 def has_complete_historical_source_coverage(
@@ -236,7 +248,10 @@ def has_complete_historical_source_coverage(
     company_id: int,
     through_date: date,
 ) -> bool:
-    history_start = historical_sync_start_date(through_date)
+    history_start = historical_sync_start_date(
+        through_date,
+        company_reporting_start(db, company_id),
+    )
     covered_sources = {
         state.source
         for state in (
@@ -305,8 +320,12 @@ def company_has_transactional_rows(db, company_id: int) -> bool:
 
 def resolve_company_sync_window(db, end_date: date, requested_mode: str, company_id: int):
     normalized_mode = (requested_mode or 'incremental').strip().lower()
+    history_start = historical_sync_start_date(
+        end_date,
+        company_reporting_start(db, company_id),
+    )
     if normalized_mode == 'full':
-        return historical_sync_start_date(end_date), 'full'
+        return history_start, 'full'
 
     scoped_key = transactional_state_key(company_id)
     scoped_checkpoint = get_sync_state_value(db, scoped_key)
@@ -321,7 +340,7 @@ def resolve_company_sync_window(db, end_date: date, requested_mode: str, company
         # One full pass is mandatory after introducing detailed source coverage.
         # Otherwise a legacy incremental checkpoint would only certify the recent
         # lookback window and every historical YoY value would remain unknown.
-        return historical_sync_start_date(end_date), 'full'
+        return history_start, 'full'
 
     if scoped_checkpoint:
         return resolve_transaction_window(db, end_date, scoped_key)
@@ -329,81 +348,68 @@ def resolve_company_sync_window(db, end_date: date, requested_mode: str, company
     if has_legacy_company:
         return resolve_transaction_window(db, end_date, TRANSACTIONAL_STATE_KEY)
 
-    return historical_sync_start_date(end_date), 'full'
+    return history_start, 'full'
+
+
+def purge_source_window(db, model, company_id: int, start_date: str, end_date: str) -> int:
+    """Drop one source's rows for a company inside the full-refresh window.
+
+    Must be called from inside the transaction that reloads the same source. Deleting
+    in a transaction of its own is what emptied the financial tables: the delete was
+    committed, the reload then aborted on an id overflow, and the branch was left with
+    no data at all.
+
+    Datetime bounds are used for date-only columns too; a date compares equal to the
+    start of its day, so the window semantics are unchanged.
+    """
+    query = db.query(model).filter(model.company_id == company_id)
+    lower = parse_datetime_start(start_date)
+    upper = parse_datetime_end(end_date)
+    if lower is not None:
+        query = query.filter(model.date >= lower)
+    if upper is not None:
+        query = query.filter(model.date <= upper)
+    return query.delete(synchronize_session=False)
+
+
+def purge_appointment_window(db, company_id: int, start_date: str, end_date: str) -> tuple[int, int]:
+    """Drop appointments in the window together with the service transactions under them."""
+    appointment_ids = [
+        row[0]
+        for row in (
+            db.query(Appointment.id)
+            .filter(
+                Appointment.company_id == company_id,
+                Appointment.date >= parse_datetime_start(start_date),
+                Appointment.date <= parse_datetime_end(end_date),
+            )
+            .all()
+        )
+    ]
+    deleted_transactions = (
+        bulk_delete_by_ids(db, Transaction, Transaction.appointment_id, appointment_ids)
+        if appointment_ids
+        else 0
+    )
+    deleted_appointments = purge_source_window(db, Appointment, company_id, start_date, end_date)
+    return deleted_appointments, deleted_transactions
 
 
 def purge_full_refresh_window(db, company_id: int, start_date: str, end_date: str, schedule_end_date: str):
-    start_bound = parse_date(start_date)
-    end_bound = parse_date(end_date)
-    schedule_end_bound = parse_date(schedule_end_date)
-    try:
-        appointment_ids = [
-            row[0]
-            for row in (
-                db.query(Appointment.id)
-                .filter(
-                    Appointment.company_id == company_id,
-                    Appointment.date >= start_bound,
-                    Appointment.date <= end_bound,
-                )
-                .all()
-            )
-        ]
-        deleted_transactions = 0
-        if appointment_ids:
-            deleted_transactions = bulk_delete_by_ids(db, Transaction, Transaction.appointment_id, appointment_ids)
+    """Invalidate coverage bookkeeping ahead of a full refresh.
 
-        deleted_appointments = (
-            db.query(Appointment)
-            .filter(
-                Appointment.company_id == company_id,
-                Appointment.date >= start_bound,
-                Appointment.date <= end_bound,
-            )
-            .delete(synchronize_session=False)
-        )
-        deleted_financial = (
-            db.query(FinancialTransaction)
-            .filter(
-                FinancialTransaction.company_id == company_id,
-                FinancialTransaction.date >= parse_datetime_start(start_date),
-                FinancialTransaction.date <= parse_datetime_end(end_date),
-            )
-            .delete(synchronize_session=False)
-        )
-        deleted_goods = (
-            db.query(GoodTransaction)
-            .filter(
-                GoodTransaction.company_id == company_id,
-                GoodTransaction.date >= parse_datetime_start(start_date),
-                GoodTransaction.date <= parse_datetime_end(end_date),
-            )
-            .delete(synchronize_session=False)
-        )
-        deleted_comments = (
-            db.query(Comment)
-            .filter(
-                Comment.company_id == company_id,
-                Comment.date >= parse_datetime_start(start_date),
-                Comment.date <= parse_datetime_end(end_date),
-            )
-            .delete(synchronize_session=False)
-        )
-        deleted_schedules = (
-            db.query(StaffSchedule)
-            .filter(
-                StaffSchedule.company_id == company_id,
-                StaffSchedule.date >= end_bound,
-                StaffSchedule.date <= schedule_end_bound,
-            )
-            .delete(synchronize_session=False)
-        )
+    Fact rows are deliberately left alone here. Each source drops its own window inside
+    the transaction that reloads it, so a source that fails to load keeps the data it
+    had. Invalidating coverage up front is safe in the other direction: if the reload
+    never lands, the branch simply stays in full mode until it does.
+    """
+    try:
         invalidate_sync_source_coverage(
             db,
             company_id,
             FULL_REFRESH_COVERAGE_SOURCES,
-            start_bound,
-            end_bound,
+            parse_date(start_date),
+            parse_date(end_date),
         )
         historical_state = db.get(
             SyncState,
@@ -412,15 +418,7 @@ def purge_full_refresh_window(db, company_id: int, start_date: str, end_date: st
         if historical_state is not None:
             db.delete(historical_state)
         db.commit()
-        print(
-            "  ✓ Full refresh cleanup: "
-            f"appointments={deleted_appointments}, "
-            f"transactions={deleted_transactions}, "
-            f"financial={deleted_financial}, "
-            f"goods={deleted_goods}, "
-            f"comments={deleted_comments}, "
-            f"schedules={deleted_schedules}"
-        )
+        print("  ✓ Full refresh: покрытие источников сброшено")
         return True
     except Exception as e:
         db.rollback()
@@ -1475,7 +1473,7 @@ def _commit_empty_source_coverage(
 
 def sync_records(api: YClientsAPI, db, company_id: str,
                  start_date: str = None, end_date: str = None,
-                 db_company_id: int | None = None):
+                 db_company_id: int | None = None, full_refresh: bool = False):
     print("\n── Записи (визиты) ──")
 
     records = api.get_records(company_id, start_date=start_date, end_date=end_date)
@@ -1492,6 +1490,9 @@ def sync_records(api: YClientsAPI, db, company_id: str,
 
     try:
         cid = _db_company_id(company_id, db_company_id)
+        if full_refresh:
+            purged, purged_tx = purge_appointment_window(db, cid, start_date, end_date)
+            print(f"  Full refresh: удалено записей {purged}, транзакций {purged_tx}")
         tx_count = 0
         record_ids = [r.get('id') for r in records if r.get('id') is not None]
         existing_records = load_existing_or_adopt_legacy_source_map(
@@ -1633,7 +1634,7 @@ def mark_sync_source_coverage(
 
 def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                                 start_date: str = None, end_date: str = None,
-                                db_company_id: int | None = None):
+                                db_company_id: int | None = None, full_refresh: bool = False):
     print("\n── Финансовые транзакции ──")
 
     txns = api.get_financial_transactions(company_id,
@@ -1651,6 +1652,9 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
     try:
         cid = _db_company_id(company_id, db_company_id)
         print(f"  Найдено: {len(txns)}")
+        if full_refresh:
+            purged = purge_source_window(db, FinancialTransaction, cid, start_date, end_date)
+            print(f"  Full refresh: удалено транзакций {purged}")
         existing_txns = load_existing_or_adopt_legacy_source_map(
             db,
             FinancialTransaction,
@@ -1744,7 +1748,7 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
 
 def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
                             start_date: str = None, end_date: str = None,
-                            db_company_id: int | None = None):
+                            db_company_id: int | None = None, full_refresh: bool = False):
     print("\n── Товарные транзакции ──")
 
     txns = api.get_goods_transactions(company_id,
@@ -1763,6 +1767,9 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
 
     try:
         cid = _db_company_id(company_id, db_company_id)
+        if full_refresh:
+            purged = purge_source_window(db, GoodTransaction, cid, start_date, end_date)
+            print(f"  Full refresh: удалено транзакций {purged}")
         existing_txns = load_existing_or_adopt_legacy_source_map(
             db,
             GoodTransaction,
@@ -1862,7 +1869,7 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
 
 def sync_comments(api: YClientsAPI, db, company_id: str,
                   start_date: str = None, end_date: str = None,
-                  db_company_id: int | None = None):
+                  db_company_id: int | None = None, full_refresh: bool = False):
     print("\n── Комментарии / отзывы ──")
 
     comments = api.get_comments(company_id,
@@ -1879,6 +1886,9 @@ def sync_comments(api: YClientsAPI, db, company_id: str,
 
     try:
         cid = _db_company_id(company_id, db_company_id)
+        if full_refresh:
+            purged = purge_source_window(db, Comment, cid, start_date, end_date)
+            print(f"  Full refresh: удалено комментариев {purged}")
         existing_comments = load_existing_or_adopt_legacy_source_map(
             db,
             Comment,
@@ -2555,6 +2565,9 @@ def execute_sync(
                         print(f"! Состояние инкрементальной синхронизации не обновлено [{company_label}]")
                         continue
 
+                # Each windowed source drops and reloads its own window in one
+                # transaction, so a source that fails keeps the data it already had.
+                refresh = {'full_refresh': company_sync_mode == 'full'}
                 company_steps = [
                     ("Категории услуг", sync_service_categories, {}),
                     ("Услуги", sync_services, {}),
@@ -2565,18 +2578,22 @@ def execute_sync(
                     ("Склады", sync_storages, {}),
                     ("Категории товаров", sync_good_categories, {}),
                     ("Товары", sync_goods, {}),
-                    ("Записи", sync_records, {'start_date': company_sd, 'end_date': schedule_end.isoformat()}),
+                    (
+                        "Записи",
+                        sync_records,
+                        {'start_date': company_sd, 'end_date': schedule_end.isoformat(), **refresh},
+                    ),
                     (
                         "Финансовые транзакции",
                         sync_financial_transactions,
-                        {'start_date': company_sd, 'end_date': ed},
+                        {'start_date': company_sd, 'end_date': ed, **refresh},
                     ),
                     (
                         "Товарные транзакции",
                         sync_goods_transactions,
-                        {'start_date': company_sd, 'end_date': ed},
+                        {'start_date': company_sd, 'end_date': ed, **refresh},
                     ),
-                    ("Комментарии", sync_comments, {'start_date': company_sd, 'end_date': ed}),
+                    ("Комментарии", sync_comments, {'start_date': company_sd, 'end_date': ed, **refresh}),
                     (
                         "Графики сотрудников",
                         sync_staff_schedules,

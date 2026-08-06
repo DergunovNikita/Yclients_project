@@ -29,6 +29,7 @@ from sync_pipeline import (
     execute_sync,
     full_sync_start_date,
     purge_full_refresh_window,
+    purge_source_window,
     sync_financial_transactions,
     sync_comments,
     sync_clients,
@@ -187,6 +188,44 @@ def test_full_sync_start_date_uses_history_start_when_sync_days_is_unlimited(mon
     monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
     monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
     assert full_sync_start_date(date(2026, 6, 28)) == date(2000, 1, 1)
+
+
+def test_historical_sync_start_date_falls_back_to_global_floor(monkeypatch):
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
+    assert sync_pipeline.historical_sync_start_date(date(2026, 8, 6)) == date(2000, 1, 1)
+
+
+def test_historical_sync_start_date_uses_branch_reporting_start(monkeypatch):
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
+    assert sync_pipeline.historical_sync_start_date(
+        date(2026, 8, 6), date(2022, 5, 1)
+    ) == date(2022, 5, 1)
+
+
+def test_full_window_starts_at_branch_reporting_start(monkeypatch):
+    """A branch that reports from 2022 must not re-fetch the history it discards."""
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
+    engine = create_engine('sqlite:///:memory:')
+    with engine.begin() as conn:
+        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
+    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__])
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Trimmed', group_id=1, reporting_start_date=date(2022, 5, 1)))
+        db.add(Company(id=2, title='Untrimmed', group_id=1))
+        db.commit()
+
+        assert sync_pipeline.resolve_company_sync_window(
+            db, date(2026, 8, 6), 'full', 1
+        ) == (date(2022, 5, 1), 'full')
+        assert sync_pipeline.resolve_company_sync_window(
+            db, date(2026, 8, 6), 'full', 2
+        ) == (date(2000, 1, 1), 'full')
+    finally:
+        db.close()
+        engine.dispose()
 
 
 TRANSACTIONAL_WINDOW_TABLES = [
@@ -1051,7 +1090,7 @@ def test_sync_financial_transactions_empty_window_persists_source_coverage():
         engine.dispose()
 
 
-def test_full_refresh_purge_keeps_goods_transactions_outside_requested_window():
+def test_purge_source_window_keeps_goods_transactions_outside_requested_window():
     engine = create_engine('sqlite:///:memory:')
     with engine.begin() as conn:
         conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
@@ -1081,13 +1120,181 @@ def test_full_refresh_purge_keeps_goods_transactions_outside_requested_window():
         ])
         db.commit()
 
-        assert purge_full_refresh_window(db, 1, '2025-01-10', '2025-01-10', '2025-01-10') is True
+        assert purge_source_window(db, GoodTransaction, 1, '2025-01-10', '2025-01-10') == 1
+        db.commit()
 
         remaining = db.query(GoodTransaction).order_by(GoodTransaction.id).all()
         assert [(row.id, row.cost) for row in remaining] == [(1, 10)]
     finally:
         db.close()
         engine.dispose()
+
+
+def test_full_refresh_purge_leaves_fact_rows_to_their_own_source():
+    """Coverage is invalidated up front, but no fact row is deleted outside a reload."""
+    engine = create_engine('sqlite:///:memory:')
+    with engine.begin() as conn:
+        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Appointment.__table__,
+            Transaction.__table__,
+            FinancialTransaction.__table__,
+            GoodTransaction.__table__,
+            Comment.__table__,
+            StaffSchedule.__table__,
+            SyncState.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add_all([
+            Appointment(id=1, company_id=1, date=date(2025, 1, 10), attendance=1),
+            FinancialTransaction(id=1, company_id=1, date=datetime(2025, 1, 10, 12), amount=100.0),
+            GoodTransaction(id=1, company_id=1, date=datetime(2025, 1, 10, 12), cost=20),
+            Comment(id=1, company_id=1, date=datetime(2025, 1, 10, 12), rating=5),
+        ])
+        db.commit()
+
+        assert purge_full_refresh_window(db, 1, '2025-01-01', '2025-01-31', '2025-01-31') is True
+
+        assert db.query(Appointment).count() == 1
+        assert db.query(FinancialTransaction).count() == 1
+        assert db.query(GoodTransaction).count() == 1
+        assert db.query(Comment).count() == 1
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_failed_reload_rolls_back_its_own_purge(monkeypatch):
+    """A source that cannot finish its reload keeps the rows it was about to replace.
+
+    This is the regression that emptied every branch's financial history: the purge
+    was committed on its own, then the reload aborted on an id past int4.
+    """
+    engine = create_engine('sqlite:///:memory:')
+    with engine.begin() as conn:
+        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Client.__table__,
+            Staff.__table__,
+            FinancialTransaction.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add(FinancialTransaction(
+            id=500,
+            external_id=500,
+            company_id=1,
+            date=datetime(2025, 1, 10, 12),
+            amount=100.0,
+        ))
+        db.commit()
+
+        def explode(*_args, **_kwargs):
+            raise RuntimeError('reload failed after the window was dropped')
+
+        monkeypatch.setattr(sync_pipeline, 'mark_sync_source_coverage', explode)
+
+        assert sync_financial_transactions(
+            FakeFinancialTransactionsAPI([
+                {'id': 501, 'date': '2025-01-11 12:00:00', 'amount': 200.0},
+            ]),
+            db,
+            '1',
+            start_date='2025-01-01',
+            end_date='2025-01-31',
+            full_refresh=True,
+        ) is False
+
+        surviving = db.query(FinancialTransaction).all()
+        assert [(row.id, row.amount) for row in surviving] == [(500, 100.0)]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_financial_transactions_accepts_ids_past_int4(tmp_path):
+    """document_id and friends outgrew int4 upstream; PostgreSQL rejects them as INTEGER."""
+    engine = create_engine('sqlite:///:memory:')
+    with engine.begin() as conn:
+        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Client.__table__,
+            Staff.__table__,
+            FinancialTransaction.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.commit()
+
+        assert sync_financial_transactions(
+            FakeFinancialTransactionsAPI([
+                {
+                    'id': 1629867000,
+                    'document_id': 2152046115,
+                    'record_id': 1888713429,
+                    'visit_id': 1646956011,
+                    'sold_item_id': 18878289,
+                    'date': '2026-08-05 17:30:00',
+                    'amount': 2700,
+                },
+            ]),
+            db,
+            '1',
+            start_date='2026-08-01',
+            end_date='2026-08-31',
+        ) is True
+
+        saved = db.query(FinancialTransaction).one()
+        assert saved.document_id == 2152046115
+        assert saved.record_id == 1888713429
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_bigint_columns_are_bigint_on_postgres():
+    """SQLite keeps INTEGER primary keys for rowid autoincrement; PostgreSQL must not."""
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    pg = postgresql.dialect()
+    assert 'BIGINT' in FinancialTransaction.__table__.c.id.type.compile(pg)
+    assert 'BIGINT' in FinancialTransaction.__table__.c.document_id.type.compile(pg)
+    assert 'BIGINT' in GoodTransaction.__table__.c.document_id.type.compile(pg)
+    assert 'BIGINT' in Appointment.__table__.c.id.type.compile(pg)
+    assert 'BIGINT' in Appointment.__table__.c.external_id.type.compile(pg)
+    assert 'BIGINT' in Comment.__table__.c.record_id.type.compile(pg)
+    assert 'BIGINT' in Transaction.__table__.c.appointment_id.type.compile(pg)
+
+    lite = sqlite.dialect()
+    assert Appointment.__table__.c.id.type.compile(lite) == 'INTEGER'
 
 
 def test_full_refresh_purge_invalidates_coverage_until_each_source_succeeds():

@@ -1,4 +1,5 @@
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     Date,
@@ -17,6 +18,12 @@ from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
 SYSTEM_SCHEMA = 'system'
+
+# YClients ids are global counters that already passed 2^31, so every id mirrored from
+# upstream is stored as BIGINT. SQLite only auto-increments a primary key typed exactly
+# INTEGER (its rowid alias), and its integers are 64-bit regardless, so the test engine
+# keeps INTEGER while PostgreSQL gets BIGINT.
+BigIntPK = BigInteger().with_variant(Integer, 'sqlite')
 
 
 class Group(Base):
@@ -355,8 +362,8 @@ class GoodCatalog(Base):
 class Appointment(Base):
     __tablename__ = 'appointments'
 
-    id = Column(Integer, primary_key=True)
-    external_id = Column(Integer, index=True)
+    id = Column(BigIntPK, primary_key=True)
+    external_id = Column(BigInteger, index=True)
     source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
     staff_id = Column(Integer, index=True)
@@ -380,8 +387,8 @@ class Appointment(Base):
 class Transaction(Base):
     __tablename__ = 'transactions'
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    appointment_id = Column(Integer, ForeignKey('appointments.id'), index=True)
+    id = Column(BigIntPK, primary_key=True, autoincrement=True)
+    appointment_id = Column(BigInteger, ForeignKey('appointments.id'), index=True)
     service_id = Column(Integer, index=True)
     service_title = Column(String)
     cost = Column(Float)
@@ -395,10 +402,10 @@ class Transaction(Base):
 class FinancialTransaction(Base):
     __tablename__ = 'financial_transactions'
 
-    id = Column(Integer, primary_key=True)
-    external_id = Column(Integer, index=True)
+    id = Column(BigIntPK, primary_key=True)
+    external_id = Column(BigInteger, index=True)
     source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
-    document_id = Column(Integer)
+    document_id = Column(BigInteger)
     expense_id = Column(Integer)
     expense_title = Column(String)
     date = Column(DateTime, index=True)
@@ -407,9 +414,9 @@ class FinancialTransaction(Base):
     account_id = Column(Integer, index=True)
     client_id = Column(Integer, index=True)
     master_id = Column(Integer, index=True)
-    record_id = Column(Integer, index=True)
-    visit_id = Column(Integer)
-    sold_item_id = Column(Integer)
+    record_id = Column(BigInteger, index=True)
+    visit_id = Column(BigInteger)
+    sold_item_id = Column(BigInteger)
     sold_item_type = Column(String)
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
 
@@ -433,12 +440,12 @@ class SyncSourceState(Base):
 class GoodTransaction(Base):
     __tablename__ = 'goods_transactions'
 
-    id = Column(Integer, primary_key=True)
-    external_id = Column(Integer, index=True)
+    id = Column(BigIntPK, primary_key=True)
+    external_id = Column(BigInteger, index=True)
     source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
-    document_id = Column(Integer)
+    document_id = Column(BigInteger)
     type_id = Column(Integer)
-    good_id = Column(Integer, index=True)
+    good_id = Column(BigInteger, index=True)
     good_title = Column(String)
     storage_id = Column(Integer, index=True)
     storage_title = Column(String)
@@ -459,8 +466,8 @@ class GoodTransaction(Base):
 class Comment(Base):
     __tablename__ = 'comments'
 
-    id = Column(Integer, primary_key=True)
-    external_id = Column(Integer, index=True)
+    id = Column(BigIntPK, primary_key=True)
+    external_id = Column(BigInteger, index=True)
     source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
     type = Column(String)
     master_id = Column(Integer, index=True)
@@ -469,7 +476,7 @@ class Comment(Base):
     rating = Column(Float)
     user_id = Column(Integer)
     user_name = Column(String)
-    record_id = Column(Integer, index=True)
+    record_id = Column(BigInteger, index=True)
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
 
     __table_args__ = (
