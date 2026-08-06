@@ -38,8 +38,10 @@ from dashboard_service import (
     fetch_plan_fact,
     fetch_revenue_daily,
     fetch_summary,
+    fetch_reporting_start_dates,
     fetch_top_services,
     fetch_year_over_year_facts,
+    reporting_start_clause,
 )
 from models import (
     AccountCatalog,
@@ -788,6 +790,7 @@ def _appointment_conditions(
         Appointment.date >= start,
         Appointment.date <= end,
         business_appointment_condition(),
+        reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
     if attended_only:
         conditions.append(Appointment.attendance == COMPLETED_ATTENDANCE)
@@ -887,6 +890,7 @@ async def _year_over_year_activity_bounds(
             ),
         ),
         business_appointment_condition(),
+        reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -914,6 +918,10 @@ async def _year_over_year_activity_bounds(
         _appointment_factual_at_condition(now),
         business_appointment_condition(),
         _physical_account_condition(),
+        # Both anchors, matching _service_paid_filters — the payment clause is what
+        # stops this bound from opening a year the branch predates.
+        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_start_clause(FinancialTransaction.company_id, payment_day),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -962,6 +970,7 @@ async def _year_over_year_activity_bounds(
         _business_financial_master_condition(now),
         _physical_account_condition(),
         direct_component,
+        reporting_start_clause(FinancialTransaction.company_id, payment_day),
     ]
     scope = _company_scope_clause(FinancialTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -984,18 +993,19 @@ async def _year_over_year_activity_bounds(
         )
     ).one()
 
+    goods_day = func.date(GoodTransaction.date)
     goods_conditions = [
         GoodTransaction.date.is_not(None),
         GoodTransaction.date <= now,
         GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
         _business_staff_id_condition(GoodTransaction.master_id),
+        reporting_start_clause(GoodTransaction.company_id, goods_day),
     ]
     scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
         goods_conditions.append(scope)
     if staff_id is not None:
         goods_conditions.append(GoodTransaction.master_id == staff_id)
-    goods_day = func.date(GoodTransaction.date)
     goods_bounds = (
         await db.execute(
             select(
@@ -1075,12 +1085,25 @@ def _year_over_year_missing_sources(
     period_end: date,
     required_sources: tuple[str, ...] = YOY_ANNUAL_SOURCES,
     appointment_dependencies: dict[int, tuple[date, date]] | None = None,
+    reporting_starts: dict[int, date] | None = None,
 ) -> list[str]:
     missing = set()
     for item_company_id in scope_company_ids:
+        # A branch contributes no facts before its reporting start, so demanding sync
+        # coverage from earlier would blank a year the branch simply predates — and a
+        # branch that did not exist yet has no coverage to demand at all.
+        # Unlike _source_coverage_status, which answers for a user-chosen range and calls
+        # a fully predating period uncertifiable, the years here are derived from already
+        # trimmed facts — a year every branch predates never reaches this function.
+        branch_start = (reporting_starts or {}).get(item_company_id)
+        if branch_start is not None and branch_start > period_end:
+            continue
+        branch_period_start = (
+            max(period_start, branch_start) if branch_start is not None else period_start
+        )
         for source in required_sources:
             state = state_by_key.get((item_company_id, source))
-            required_start = period_start
+            required_start = branch_period_start
             required_end = period_end
             if source == 'appointments_detail' and appointment_dependencies:
                 dependency = appointment_dependencies.get(item_company_id)
@@ -1198,6 +1221,7 @@ def _year_row_from_summary(
     revenue = summary.get('revenue', {})
     average_check = summary.get('average_check', {})
     visits = summary.get('visit_metrics', {})
+    appointments = int(revenue.get('appointments') or 0)
     return {
         'year': year,
         'period_start': period_start.isoformat(),
@@ -1206,13 +1230,14 @@ def _year_row_from_summary(
         'service_revenue': float(revenue.get('service_revenue') or 0),
         'goods_revenue': float(revenue.get('goods_revenue') or 0),
         'topup_revenue': float(revenue.get('topup_revenue') or 0),
-        'appointments': int(revenue.get('appointments') or 0),
+        'appointments': appointments,
         'service_count': float(revenue.get('service_count') or 0),
         'goods_count': float(revenue.get('goods_count') or 0),
         'extra_service_count': float(revenue.get('extra_service_count') or 0),
         'extra_service_revenue': float(revenue.get('extra_service_revenue') or 0),
         'unique_clients': int(visits.get('unique_clients') or 0),
-        'avg_check': float(average_check.get('total') or 0),
+        # No completed visits means no average check; a zero would draw a real bar.
+        'avg_check': float(average_check.get('total') or 0) if appointments else None,
         'visits_per_client': float(visits.get('visits_per_client') or 0),
         'opz_qty': float(visits.get('opz_qty') or 0),
         'opz_pct': float(visits.get('opz_pct') or 0),
@@ -1233,6 +1258,7 @@ def _monthly_yoy_rows(
     state_by_key: dict[tuple[int, str], SyncSourceState],
     scope_company_ids: list[int],
     appointment_dependencies: dict[int, dict[int, tuple[date, date]]] | None = None,
+    reporting_starts: dict[int, date] | None = None,
 ) -> list[dict[str, Any]]:
     months = list(range(1, 13))
     monthly = {
@@ -1268,6 +1294,7 @@ def _monthly_yoy_rows(
                 slice_end,
                 YOY_MONTHLY_SOURCES,
                 (appointment_dependencies or {}).get(month),
+                reporting_starts,
             )
             if in_activity_period
             else []
@@ -1275,6 +1302,13 @@ def _monthly_yoy_rows(
         appointments_known = 'appointments_detail' not in missing_sources
         financials_known = 'financial_transactions_detail' not in missing_sources
         revenue_known = appointments_known and financials_known
+        # Same formula as the annual row: revenue over completed visits. A month with
+        # no visits has no average check rather than a zero one.
+        avg_check = (
+            values['revenue'] / values['appointments']
+            if in_activity_period and revenue_known and values['appointments']
+            else None
+        )
         rows.append({
             'year': year,
             'month': month,
@@ -1284,6 +1318,7 @@ def _monthly_yoy_rows(
             'goods_revenue': values['goods_revenue'] if in_activity_period and revenue_known else None,
             'topup_revenue': values['topup_revenue'] if in_activity_period and revenue_known else None,
             'appointments': values['appointments'] if in_activity_period and appointments_known else None,
+            'avg_check': avg_check,
             'in_activity_period': in_activity_period,
             'source_status': 'ready' if in_activity_period and not missing_sources else 'partial',
             'missing_components': missing_sources,
@@ -1392,6 +1427,7 @@ async def _year_over_year_payload(
         latest_fact_year=activity_end.year,
     )
     state_by_key = await _year_over_year_source_states(db, scope_company_ids)
+    reporting_starts = await fetch_reporting_start_dates(db, scope_company_ids)
     fact_rows = await fetch_year_over_year_facts(
         db,
         activity_start,
@@ -1456,6 +1492,7 @@ async def _year_over_year_payload(
             period_start,
             period_end,
             appointment_dependencies=fact_rows['appointment_dependencies']['annual'].get(year),
+            reporting_starts=reporting_starts,
         )
         opz_missing = _year_over_year_missing_sources(
             state_by_key,
@@ -1464,6 +1501,7 @@ async def _year_over_year_payload(
             period_end,
             required_sources=('appointments_detail',),
             appointment_dependencies=opz_dependencies_by_year.get(year),
+            reporting_starts=reporting_starts,
         )
         year_row['missing_components'] = sorted({
             *year_row['missing_components'],
@@ -1492,6 +1530,7 @@ async def _year_over_year_payload(
             state_by_key,
             scope_company_ids,
             fact_rows['appointment_dependencies']['monthly'].get(year),
+            reporting_starts,
         )
 
     year_rows = _with_year_changes(year_rows)
@@ -1596,6 +1635,32 @@ async def _year_over_year_payload(
                 for year in sorted(monthly_by_year)
             ],
         ),
+        _chart(
+            'year_avg_check',
+            'Средний чек по годам',
+            'bar',
+            [str(row['year']) for row in year_rows],
+            [{
+                'label': 'Средний чек',
+                'data': [row['avg_check'] for row in year_rows],
+                'format': MONEY_FORMAT,
+            }],
+        ),
+        _chart(
+            'monthly_avg_check_yoy',
+            'Помесячный средний чек год к году',
+            'line',
+            months,
+            [
+                {
+                    'label': str(year),
+                    'data': [row['avg_check'] for row in monthly_by_year[year]],
+                    'format': MONEY_FORMAT,
+                    'fill': False,
+                }
+                for year in sorted(monthly_by_year)
+            ],
+        ),
     ]
     base['tables'] = [
         _table(
@@ -1632,6 +1697,7 @@ async def _year_over_year_payload(
                 ('month_label', 'Месяц', 'text'),
                 ('revenue', 'Выручка', MONEY_FORMAT),
                 ('appointments', 'Визиты', NUMBER_FORMAT),
+                ('avg_check', 'Средний чек', MONEY_FORMAT),
                 ('service_revenue', 'Услуги', MONEY_FORMAT),
                 ('goods_revenue', 'Товары', MONEY_FORMAT),
                 ('topup_revenue', 'Пополнения', MONEY_FORMAT),
@@ -2440,6 +2506,9 @@ async def _last_staff_by_client(
         Appointment.client_id.in_(client_ids),
         Appointment.attendance == COMPLETED_ATTENDANCE,
         _appointment_factual_at_condition(factual_at),
+        # This query has no date floor of its own, so it guards itself: today's callers
+        # only pass clients that already have a reportable visit, but nothing enforces it.
+        reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -2600,6 +2669,7 @@ async def _goods_payload(
         func.date(GoodTransaction.date) <= end,
         GoodTransaction.date <= factual_at,
         _business_staff_id_condition(GoodTransaction.master_id),
+        reporting_start_clause(GoodTransaction.company_id, func.date(GoodTransaction.date)),
     ]
     scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -3083,6 +3153,7 @@ async def _nps_payload(
     conditions = [
         func.date(Comment.date) >= start,
         func.date(Comment.date) <= end,
+        reporting_start_clause(Comment.company_id, func.date(Comment.date)),
     ]
     scope = _company_scope_clause(Comment.company_id, company_id, allowed_company_ids)
     if scope is not None:

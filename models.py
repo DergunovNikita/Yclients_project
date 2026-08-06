@@ -48,6 +48,9 @@ class Company(Base):
     locale = Column(String)
     currency = Column(String)
     timezone = Column(String)
+    # Upstream keeps records that predate the branch opening (test bookings, a previous
+    # location on the same YClients id). Reports must not treat them as branch history.
+    reporting_start_date = Column(Date)
 
     __table_args__ = (
         Index(

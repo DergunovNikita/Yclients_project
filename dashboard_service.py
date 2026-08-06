@@ -232,6 +232,7 @@ async def _local_appointments_breakdown(
         Appointment.date >= start,
         Appointment.date <= end,
         business_appointment_condition(),
+        reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
     if factual_at is not None:
         filters.append(_appointment_factual_at_condition(factual_at))
@@ -337,6 +338,17 @@ async def _fetch_appointments_breakdown(
             factual_at,
         )
 
+    # Upstream record stats know nothing about the reporting start, so a scope with a
+    # cutoff would show untrimmed record cards next to trimmed KPIs and charts. The local
+    # counts are not simply "upstream minus pre-cutoff rows" — they also drop waitlist and
+    # administrator records — so switching per period would put two periods of the same
+    # scope on different definitions and let a subset report more records than its
+    # superset. The choice is therefore made per scope, not per period.
+    if db is not None and await fetch_reporting_start_dates(db, company_ids):
+        return await _local_appointments_breakdown(
+            db, company_ids, start, end, staff_id, factual_at
+        )
+
     try:
         if db is None:
             counts = await yclients_analytics.fetch_record_stats(company_ids, start, end, staff_id)
@@ -347,7 +359,9 @@ async def _fetch_appointments_breakdown(
                 counts = await yclients_analytics.fetch_record_stats(company_ids, start, end, staff_id)
     except yclients_analytics.YClientsAnalyticsError:
         if db is not None:
-            return await _local_appointments_breakdown(db, company_ids, start, end, staff_id)
+            return await _local_appointments_breakdown(
+                db, company_ids, start, end, staff_id, factual_at
+            )
         return _unavailable_appointments_breakdown()
     return _ready_appointments_breakdown(counts)
 
@@ -478,6 +492,67 @@ def _company_scope_clause(column, company_id: Optional[int], allowed_company_ids
     return None
 
 
+def reporting_start_clause(company_column, day_expr):
+    """Drop facts dated before the branch's configured reporting start.
+
+    Branches without `reporting_start_date` keep their full upstream history. The
+    floor is per branch, so a multi-branch scope still cuts each branch at its own
+    opening instead of at the earliest one in the scope.
+    """
+    branch = aliased(Company)
+    # NOT EXISTS lets PostgreSQL plan an anti-join against the tiny companies table
+    # instead of re-running a scalar subquery for every fact row. Both a missing
+    # reporting start and a NULL fact date make the inner comparison NULL, so the
+    # row is kept rather than silently dropped. The IS NOT NULL test is redundant for
+    # correctness but lets the planner discard branches without a cutoff up front, so
+    # tenants that never configure one probe an empty anti-join.
+    return ~exists(
+        select(1)
+        .select_from(branch)
+        .where(
+            branch.id == company_column,
+            branch.reporting_start_date.is_not(None),
+            day_expr < branch.reporting_start_date,
+        )
+    )
+
+
+async def fetch_reporting_start_dates(
+    db: AsyncSession,
+    company_ids: list[int],
+) -> dict[int, date]:
+    """Configured reporting start per branch, omitting branches without one.
+
+    Cached on the session, which lives for one request: plan/fact asks per branch and
+    would otherwise pay a round trip each time for a table of a few rows.
+    """
+    if not company_ids:
+        return {}
+    cache: dict[int, date | None] = db.info.setdefault('reporting_start_dates', {})
+    unknown = [int(company_id) for company_id in company_ids if int(company_id) not in cache]
+    if unknown:
+        rows = (
+            await db.execute(
+                select(Company.id, Company.reporting_start_date).where(Company.id.in_(unknown))
+            )
+        ).all()
+        found = {
+            int(row.id): (
+                _coerce_date(row.reporting_start_date)
+                if row.reporting_start_date is not None
+                else None
+            )
+            for row in rows
+        }
+        # Cache the misses too, so branches without a cutoff stop being re-queried.
+        cache.update({company_id: found.get(company_id) for company_id in unknown})
+    return {
+        int(company_id): cache[int(company_id)]
+        for company_id in company_ids
+        if cache.get(int(company_id)) is not None
+    }
+
+
 def _factual_now() -> datetime:
     return datetime.now()
 
@@ -536,6 +611,7 @@ def _appt_revenue_filters(
         Appointment.date >= start,
         Appointment.date <= end,
         business_appointment_condition(),
+        reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -562,6 +638,7 @@ def _goods_revenue_filters(
         func.date(GoodTransaction.date) >= start,
         func.date(GoodTransaction.date) <= end,
         _business_staff_id_condition(GoodTransaction.master_id),
+        reporting_start_clause(GoodTransaction.company_id, func.date(GoodTransaction.date)),
     ]
     scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -589,6 +666,15 @@ def _service_paid_filters(
         func.date(FinancialTransaction.date) >= start,
         func.date(FinancialTransaction.date) <= end,
         business_appointment_condition(),
+        # A service fact belongs to the branch only if both its visit and its payment
+        # fall on or after the opening. The visit clause keeps the average-check
+        # numerator and denominator on the same side of the cutoff; the payment clause
+        # keeps revenue — which is bucketed by payment date — out of years the branch
+        # predates. Every path that sums service revenue must apply both.
+        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_start_clause(
+            FinancialTransaction.company_id, func.date(FinancialTransaction.date)
+        ),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -619,6 +705,9 @@ def _goods_paid_filters(
         func.date(FinancialTransaction.date) >= start,
         func.date(FinancialTransaction.date) <= end,
         _business_financial_master_condition(factual_at),
+        reporting_start_clause(
+            FinancialTransaction.company_id, func.date(FinancialTransaction.date)
+        ),
     ]
     scope = _company_scope_clause(FinancialTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -730,19 +819,39 @@ async def _source_coverage_status(
     )
     if not company_ids:
         return 'partial', ['personal_account_topups']
-    covered = await db.scalar(
-        select(func.count())
-        .select_from(SyncSourceState)
-        .where(
-            SyncSourceState.company_id.in_(company_ids),
-            SyncSourceState.source == PERSONAL_ACCOUNT_SOURCE,
-            SyncSourceState.period_start <= start,
-            SyncSourceState.period_end >= end,
-        )
-    )
-    if int(covered or 0) == len(company_ids):
-        return 'ready', []
-    return 'partial', ['personal_account_topups']
+    reporting_starts = await fetch_reporting_start_dates(db, company_ids)
+    covered_ranges = {
+        int(row.company_id): (_coerce_date(row.period_start), _coerce_date(row.period_end))
+        for row in (
+            await db.execute(
+                select(
+                    SyncSourceState.company_id,
+                    SyncSourceState.period_start,
+                    SyncSourceState.period_end,
+                ).where(
+                    SyncSourceState.company_id.in_(company_ids),
+                    SyncSourceState.source == PERSONAL_ACCOUNT_SOURCE,
+                )
+            )
+        ).all()
+    }
+    reportable = 0
+    for item_company_id in company_ids:
+        # A branch contributes no facts before its reporting start, so demanding sync
+        # coverage from earlier would degrade a period the branch simply predates.
+        branch_start = reporting_starts.get(item_company_id)
+        if branch_start is not None and branch_start > end:
+            continue
+        reportable += 1
+        required_start = max(start, branch_start) if branch_start is not None else start
+        covered = covered_ranges.get(item_company_id)
+        if covered is None or covered[0] > required_start or covered[1] < end:
+            return 'partial', ['personal_account_topups']
+    if not reportable:
+        # Every branch in scope opened after this period; there is nothing to certify,
+        # so do not present the resulting zeroes as factual.
+        return 'partial', ['personal_account_topups']
+    return 'ready', []
 
 
 async def _average_check_block(
@@ -759,6 +868,7 @@ async def _average_check_block(
         Appointment.date >= dr.start,
         Appointment.date <= dr.end,
         business_appointment_condition(),
+        reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, company_ids)
     if scope is not None:
@@ -789,6 +899,7 @@ async def _average_check_block(
         func.date(GoodTransaction.date) >= dr.start,
         func.date(GoodTransaction.date) <= dr.end,
         _business_staff_id_condition(GoodTransaction.master_id),
+        reporting_start_clause(GoodTransaction.company_id, func.date(GoodTransaction.date)),
     ]
     scope = _company_scope_clause(GoodTransaction.company_id, company_id, company_ids)
     if scope is not None:
@@ -809,6 +920,9 @@ async def _average_check_block(
         func.date(FinancialTransaction.date) >= dr.start,
         func.date(FinancialTransaction.date) <= dr.end,
         _physical_account_condition(),
+        reporting_start_clause(
+            FinancialTransaction.company_id, func.date(FinancialTransaction.date)
+        ),
     ]
     if factual_at is not None:
         base_payment_filters.append(FinancialTransaction.date <= factual_at)
@@ -818,6 +932,9 @@ async def _average_check_block(
         FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
         Appointment.attendance == COMPLETED_ATTENDANCE,
         business_appointment_condition(),
+        # Visit anchor on top of the payment anchor already in base_payment_filters,
+        # so this matches _service_paid_filters exactly.
+        reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, company_ids)
     if scope is not None:
@@ -964,6 +1081,7 @@ async def _client_visit_frequency_block(
         Appointment.date >= dr.start,
         Appointment.date <= dr.end,
         business_appointment_condition(),
+        reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -1038,6 +1156,7 @@ async def _client_recency_block(
         Appointment.attendance == COMPLETED_ATTENDANCE,
         Appointment.client_id.is_not(None),
         business_appointment_condition(),
+        reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
     if scope is not None:
         scope_filters.append(scope)
@@ -1800,6 +1919,7 @@ async def fetch_year_over_year_facts(
 
     payment_year = extract('year', FinancialTransaction.date)
     payment_month = extract('month', FinancialTransaction.date)
+    payment_day_expr = func.date(FinancialTransaction.date)
     service_filters = [
         _service_paid_filters(
             start,
@@ -1860,11 +1980,12 @@ async def fetch_year_over_year_facts(
         direct_component = or_(direct_component, _personal_account_condition())
     direct_filters = [
         FinancialTransaction.amount > 0,
-        func.date(FinancialTransaction.date) >= start,
-        func.date(FinancialTransaction.date) <= end,
+        payment_day_expr >= start,
+        payment_day_expr <= end,
         _physical_account_condition(),
         _business_financial_master_condition(factual_at),
         direct_component,
+        reporting_start_clause(FinancialTransaction.company_id, payment_day_expr),
     ]
     direct_scope = _company_scope_clause(
         FinancialTransaction.company_id, company_id, allowed_company_ids
@@ -1925,10 +2046,15 @@ async def fetch_year_over_year_facts(
     )
     dependency_filters = [
         FinancialTransaction.amount > 0,
-        func.date(FinancialTransaction.date) >= start,
-        func.date(FinancialTransaction.date) <= end,
+        payment_day_expr >= start,
+        payment_day_expr <= end,
         _physical_account_condition(),
         dependency_component,
+        # Both anchors, matching _service_paid_filters. Without the visit anchor a
+        # payment this report already excludes would still widen the appointment
+        # coverage this year demands, blanking the branch's opening year.
+        reporting_start_clause(FinancialTransaction.company_id, payment_day_expr),
+        reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
     dependency_scope = _company_scope_clause(
         FinancialTransaction.company_id, company_id, allowed_company_ids
@@ -2165,6 +2291,7 @@ async def fetch_revenue_daily(
             _physical_account_condition(),
             _business_financial_master_condition(factual_at),
             _personal_account_condition(),
+            reporting_start_clause(FinancialTransaction.company_id, payment_day),
         ]
         topup_scope = _company_scope_clause(
             FinancialTransaction.company_id, company_id, allowed_company_ids
@@ -2388,6 +2515,8 @@ async def fetch_dashboard_services(
             .where(
                 Transaction.company_id == ServiceCatalog.company_id,
                 Transaction.service_id == ServiceCatalog.service_id,
+                # No reporting-start cutoff on purpose: this decides whether a service is
+                # still worth showing in the catalog, not a metric shown beside trimmed ones.
                 Appointment.date >= active_since,
             )
         )
@@ -3323,6 +3452,11 @@ async def _opz_events(
         Appointment.client_id.in_(client_ids),
         Appointment.date.is_not(None),
         Appointment.date <= end,
+        # Anchoring a rebooking on a visit the branch does not report would count an
+        # OPZ event whose denominator visit is excluded, inflating opz_pct. Cutting the
+        # anchor is enough: a rebooking made before the reporting start can only anchor
+        # on an earlier visit, which this same clause already removes.
+        reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
     if factual_at is not None:
         visit_filters.append(_appointment_factual_at_condition(factual_at))
@@ -3624,6 +3758,7 @@ async def _admin_clients_by_finished_appointments(
         Appointment.date >= start,
         Appointment.date <= end,
         Appointment.attendance == COMPLETED_ATTENDANCE,
+        reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
     if barber_staff_ids:
         appointment_filters.append(Appointment.staff_id.in_(barber_staff_ids))
@@ -3830,6 +3965,9 @@ async def _staff_fact_components_by_branch(
                 FinancialTransaction.company_id == company_id,
                 _physical_account_condition(),
                 _business_financial_master_condition(factual_at),
+                reporting_start_clause(
+                    FinancialTransaction.company_id, func.date(FinancialTransaction.date)
+                ),
                 or_(
                     FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
                     _personal_account_condition(),
@@ -5705,4 +5843,16 @@ async def fetch_branches(
     if allowed is not None:
         stmt = stmt.where(Company.id.in_(allowed))
     rows = (await db.execute(stmt)).scalars().all()
-    return [{'id': c.id, 'title': c.title, 'group_id': c.group_id} for c in rows]
+    # reporting_start_date is read-only here, but without it a trimmed branch looks
+    # identical to an untrimmed one and the cutoff is only visible in the database.
+    return [
+        {
+            'id': c.id,
+            'title': c.title,
+            'group_id': c.group_id,
+            'reporting_start_date': (
+                c.reporting_start_date.isoformat() if c.reporting_start_date else None
+            ),
+        }
+        for c in rows
+    ]

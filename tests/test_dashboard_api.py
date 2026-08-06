@@ -602,6 +602,20 @@ async def test_year_over_year_charts_render_values_after_full_historical_sync(
     assert None not in appointments_series
     assert appointments_series == [1, 1, 1, 1]
 
+    avg_check_series = charts['year_avg_check']['datasets'][0]['data']
+    assert avg_check_series == [1000.0, 2000.0, 3000.0, 4000.0]
+
+    monthly_avg_check = {
+        dataset['label']: dataset['data']
+        for dataset in charts['monthly_avg_check_yoy']['datasets']
+    }
+    assert monthly_avg_check['2023'][4] == 1000.0
+    assert monthly_avg_check['2024'][5] == 2000.0
+    assert monthly_avg_check['2025'][6] == 3000.0
+    assert monthly_avg_check['2026'][1] == 4000.0
+    # A month without completed visits has no average check rather than a zero one.
+    assert monthly_avg_check['2025'][0] is None
+
     # This tenant has no personal-account top-ups, so the permanently zero column
     # is dropped rather than shown as a wall of nulls.
     for table_id in ('years', 'months'):
@@ -738,6 +752,850 @@ async def test_dashboard_year_over_year_empty_scope_returns_empty_actual_history
     assert data['raw']['latest_year'] is None
 
 
+def _yoy_source_states(company_id: int, period_start: date, period_end: date, synced_at: datetime):
+    return [
+        SyncSourceState(
+            company_id=company_id,
+            source=source,
+            period_start=period_start,
+            period_end=period_end,
+            synced_at=synced_at,
+        )
+        for source in (
+            'appointments_detail',
+            'financial_transactions_detail',
+            'goods_transactions_detail',
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reporting_start_keeps_overview_and_year_over_year_in_agreement(
+    async_session,
+    monkeypatch,
+):
+    """The report claims one formula with Обзор and План/факт, so the cutoff must reach both.
+
+    A cutoff applied only inside the year-over-year report would make the opening year
+    contradict the main dashboard by whatever the pre-opening records sum to.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1, reporting_start_date=date(2025, 5, 1)),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 4, 30), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, date=date(2025, 6, 10), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2025, 4, 30, 12), amount=800.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=2, date=datetime(2025, 6, 10, 12), amount=700.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
+    ])
+    async_session.add_all(
+        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+    )
+    await async_session.commit()
+
+    summary = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+    year_2025 = next(row for row in report['raw']['years'] if row['year'] == 2025)
+
+    assert summary['revenue']['total'] == 700.0
+    assert summary['revenue']['appointments'] == 1
+    assert year_2025['revenue'] == summary['revenue']['total']
+    assert year_2025['appointments'] == summary['revenue']['appointments']
+    assert year_2025['avg_check'] == summary['average_check']['total']
+
+
+@pytest.mark.asyncio
+async def test_reporting_start_keeps_topup_kpi_and_trend_chart_in_agreement(
+    async_session,
+    monkeypatch,
+):
+    """The revenue KPI and the trend chart under it come from different queries.
+
+    Both are returned in one payload, so a cutoff missing from either one renders a
+    headline number that contradicts the chart directly beneath it.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1, reporting_start_date=date(2025, 5, 1)),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        AccountCatalog(
+            company_id=1,
+            account_id=7,
+            title='Личный счет клиента',
+            updated_at=datetime(2025, 1, 1),
+        ),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2025, 4, 30, 12), amount=5000.0, account_id=7, master_id=1, sold_item_id=1, sold_item_type='account_replenishment', company_id=1),
+        FinancialTransaction(id=2, date=datetime(2025, 6, 10, 12), amount=1000.0, account_id=7, master_id=1, sold_item_id=2, sold_item_type='account_replenishment', company_id=1),
+    ])
+    await async_session.commit()
+
+    summary = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    daily = await dashboard_service.fetch_revenue_daily(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+    )
+
+    assert summary['revenue']['topup_revenue'] == 1000.0
+    assert summary['revenue']['total'] == 1000.0
+    assert sum(float(row.get('revenue') or 0) for row in daily) == summary['revenue']['total']
+
+
+@pytest.mark.asyncio
+async def test_reporting_start_cuts_service_revenue_paid_across_the_boundary(
+    async_session,
+    monkeypatch,
+):
+    """A service fact needs both its visit and its payment on or after the opening.
+
+    Revenue is bucketed by payment date but the average check is divided by visits, so
+    the two anchors have to agree or the paths that sum service revenue diverge.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1, reporting_start_date=date(2025, 5, 1)),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        # Visit before the opening, settled after it — only the visit anchor drops this.
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 4, 20), attendance=1),
+        # Visit after the opening, prepaid before it — only the payment anchor drops this.
+        Appointment(id=2, company_id=1, staff_id=1, date=date(2025, 6, 10), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, date=date(2025, 7, 10), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2025, 5, 20, 12), amount=300.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=2, date=datetime(2025, 3, 15, 12), amount=500.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=3, date=datetime(2025, 7, 10, 12), amount=700.0, record_id=3, sold_item_type='service', master_id=1, company_id=1),
+    ])
+    async_session.add_all(
+        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+    )
+    await async_session.commit()
+
+    summary = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    daily = await dashboard_service.fetch_revenue_daily(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+    )
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+
+    # Both boundary rows are dropped; only the fully post-opening 700 survives.
+    assert summary['revenue']['total'] == 700.0
+    assert sum(float(row.get('revenue') or 0) for row in daily) == 700.0
+    # Visits follow the same rule, so the average check divides 700 by one visit.
+    assert summary['revenue']['appointments'] == 2
+    assert summary['average_check']['services'] == 350.0
+    assert report['raw']['activity_start'] == '2025-06-10'
+    assert [row['year'] for row in report['raw']['years']] == [2025, 2026]
+    year_2025 = report['raw']['years'][0]
+    assert year_2025['revenue'] == summary['revenue']['total']
+    assert year_2025['source_status'] == 'ready'
+
+
+@pytest.mark.asyncio
+async def test_reporting_start_keeps_coverage_status_consistent_across_reports(
+    async_session,
+    monkeypatch,
+):
+    """A branch synced only from its opening must not read as degraded coverage.
+
+    The year-over-year and Overview coverage checks are separate; if only one of them
+    respects the cutoff, the same year is trustworthy in one report and partial in the other.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1, reporting_start_date=date(2025, 5, 1)),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add(
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 6, 10), attendance=1)
+    )
+    await async_session.flush()
+    async_session.add(FinancialTransaction(
+        id=1,
+        date=datetime(2025, 6, 10, 12),
+        amount=700.0,
+        record_id=1,
+        sold_item_type='service',
+        master_id=1,
+        company_id=1,
+    ))
+    # Synced only from the opening date, never from before it.
+    async_session.add(SyncSourceState(
+        company_id=1,
+        source=dashboard_service.PERSONAL_ACCOUNT_SOURCE,
+        period_start=date(2025, 5, 1),
+        period_end=report_now.date(),
+        synced_at=report_now,
+    ))
+    await async_session.commit()
+
+    summary = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+
+    assert summary['average_check']['source_status'] == 'ready'
+    assert summary['average_check']['missing_components'] == []
+
+    # A period the branch entirely predates is not certified either.
+    assert await dashboard_service._source_coverage_status(
+        async_session, date(2024, 1, 1), date(2024, 12, 31), 1, None,
+    ) == ('partial', ['personal_account_topups'])
+
+    # The clamp must not degenerate into "always ready": a gap that starts after the
+    # reporting start is still a gap.
+    state = (await async_session.execute(
+        select(SyncSourceState).where(SyncSourceState.company_id == 1)
+    )).scalars().one()
+    state.period_start = date(2025, 8, 1)
+    await async_session.commit()
+    assert await dashboard_service._source_coverage_status(
+        async_session, date(2025, 1, 1), date(2025, 12, 31), 1, None,
+    ) == ('partial', ['personal_account_topups'])
+
+
+@pytest.mark.asyncio
+async def test_reporting_start_keeps_pre_opening_direct_revenue_out_of_years_and_bounds(
+    async_session,
+    monkeypatch,
+):
+    """Goods and top-up revenue carry no visit, so they are cut on their payment date.
+
+    They are also what the report derives its own start from, so a missed cutoff here
+    both invents whole pre-opening years and fills them with revenue.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Old branch', group_id=1),
+        Company(id=2, title='New branch', group_id=1, reporting_start_date=date(2025, 5, 1)),
+        Staff(id=1, name='Master 1', position='Барбер', company_id=1),
+        Staff(id=2, name='Master 2', position='Барбер', company_id=2),
+        AccountCatalog(company_id=2, account_id=7, title='Личный счет клиента', updated_at=datetime(2025, 1, 1)),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2024, 2, 1), attendance=1),
+        Appointment(id=2, company_id=2, staff_id=2, date=date(2025, 6, 10), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2024, 2, 1, 12), amount=100.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=3, date=datetime(2025, 6, 10, 12), amount=700.0, record_id=2, sold_item_type='service', master_id=2, company_id=2),
+        # The older branch keeps 2024 in the report, so these pre-opening direct payments
+        # of the newer branch fall inside a reported year and only the cutoff removes them.
+        FinancialTransaction(id=4, date=datetime(2025, 3, 1, 12), amount=900.0, account_id=7, master_id=2, sold_item_id=4, sold_item_type='account_replenishment', company_id=2),
+        FinancialTransaction(id=5, date=datetime(2025, 4, 1, 12), amount=600.0, master_id=2, sold_item_id=5, sold_item_type='goods_transaction', company_id=2),
+    ])
+    async_session.add(
+        GoodTransaction(id=1, company_id=2, master_id=2, type_id=1, document_id=1, date=datetime(2025, 4, 1, 12), amount=3.0, cost=300.0)
+    )
+    for company_id in (1, 2):
+        async_session.add_all(
+            _yoy_source_states(company_id, date(2023, 1, 1), report_now.date(), report_now)
+        )
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1, 2],
+    )
+
+    # The scope opens with the older branch, not with the newer branch's pre-opening money.
+    assert report['raw']['activity_start'] == '2024-02-01'
+    assert sum(row['revenue'] or 0 for row in report['raw']['years']) == 800.0
+    year_2025 = next(row for row in report['raw']['years'] if row['year'] == 2025)
+    assert year_2025['revenue'] == 700.0
+    assert year_2025['topup_revenue'] == 0.0
+    assert year_2025['goods_revenue'] == 0.0
+    assert year_2025['goods_count'] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_reporting_start_certifies_the_opening_year_of_a_branch_synced_from_it(
+    async_session,
+    monkeypatch,
+):
+    """A branch synced from exactly its opening must have its opening year certified.
+
+    The year is only partly covered by sync, and a payment settled after the opening for
+    a pre-opening visit must not widen the appointment coverage the year demands.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1, reporting_start_date=date(2025, 5, 1)),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 4, 20), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, date=date(2025, 6, 10), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2025, 7, 5, 12), amount=400.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=2, date=datetime(2025, 6, 10, 12), amount=700.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
+    ])
+    # Synced from the opening date only — never from the start of 2025.
+    async_session.add_all(
+        _yoy_source_states(1, date(2025, 5, 1), report_now.date(), report_now)
+    )
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+    year_2025 = next(row for row in report['raw']['years'] if row['year'] == 2025)
+
+    assert year_2025['source_status'] == 'ready'
+    assert year_2025['missing_components'] == []
+    assert year_2025['revenue'] == 700.0
+    assert year_2025['appointments'] == 1
+
+    # Pin the dependency query itself: the coverage clamp above would otherwise hide a
+    # dependency window that still reaches behind the reporting start.
+    facts = await dashboard_service.fetch_year_over_year_facts(
+        async_session,
+        date(2023, 1, 1),
+        report_now.date(),
+        company_id=1,
+        factual_at=report_now,
+    )
+    dependency = facts['appointment_dependencies']['annual'].get(2025, {}).get(1)
+    assert dependency is None or dependency[0] >= date(2025, 5, 1)
+
+
+@pytest.mark.asyncio
+async def test_reporting_start_clamps_coverage_for_a_branch_opened_mid_year(
+    async_session,
+    monkeypatch,
+):
+    """A branch opening inside a reported year is only asked for coverage from its opening.
+
+    The year's period start comes from the older branch, so without a per-branch clamp
+    the newer branch would look under-synced and blank the year for the whole tenant.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Old branch', group_id=1),
+        Company(id=2, title='New branch', group_id=1, reporting_start_date=date(2025, 6, 1)),
+        Staff(id=1, name='Master 1', position='Барбер', company_id=1),
+        Staff(id=2, name='Master 2', position='Барбер', company_id=2),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 2, 4), attendance=1),
+        Appointment(id=2, company_id=2, staff_id=2, date=date(2025, 7, 4), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2025, 2, 4, 12), amount=100.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=2, date=datetime(2025, 7, 4, 12), amount=300.0, record_id=2, sold_item_type='service', master_id=2, company_id=2),
+    ])
+    async_session.add_all(_yoy_source_states(1, date(2025, 1, 1), report_now.date(), report_now))
+    # Branch 2 synced from its opening, which is inside the reported year.
+    async_session.add_all(_yoy_source_states(2, date(2025, 6, 1), report_now.date(), report_now))
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1, 2],
+    )
+    year_2025 = next(row for row in report['raw']['years'] if row['year'] == 2025)
+
+    assert year_2025['source_status'] == 'ready'
+    assert year_2025['missing_components'] == []
+    assert year_2025['revenue'] == 400.0
+    assert year_2025['appointments'] == 2
+
+
+@pytest.mark.asyncio
+async def test_reporting_start_trims_breakdown_cards_client_blocks_and_staff_facts(
+    async_session,
+    monkeypatch,
+):
+    """Cards and blocks rendered beside the trimmed KPIs must be trimmed as well.
+
+    The record-count cards, the client blocks and the per-staff plan/fact revenue each
+    come from their own query, so any one of them missing the cutoff shows a number that
+    contradicts the panel next to it.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1, reporting_start_date=date(2025, 5, 1)),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Client(id=1, name='Before', company_id=1),
+        Client(id=2, name='After', company_id=1),
+        AccountCatalog(company_id=1, account_id=7, title='Личный счет клиента', updated_at=datetime(2025, 1, 1)),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 4, 20), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2025, 6, 10), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2025, 4, 20, 12), amount=900.0, account_id=7, master_id=1, sold_item_id=1, sold_item_type='account_replenishment', company_id=1),
+        FinancialTransaction(id=2, date=datetime(2025, 6, 10, 12), amount=300.0, account_id=7, master_id=1, sold_item_id=2, sold_item_type='account_replenishment', company_id=1),
+        FinancialTransaction(id=3, date=datetime(2025, 4, 20, 14), amount=800.0, master_id=1, sold_item_id=3, sold_item_type='goods_transaction', company_id=1),
+        FinancialTransaction(id=4, date=datetime(2025, 6, 10, 14), amount=200.0, master_id=1, sold_item_id=4, sold_item_type='goods_transaction', company_id=1),
+        Comment(id=1, company_id=1, master_id=1, date=datetime(2025, 4, 20, 13), rating=5.0, text='before'),
+        Comment(id=2, company_id=1, master_id=1, date=datetime(2025, 6, 10, 13), rating=4.0, text='after'),
+    ])
+    async_session.add_all([
+        GoodTransaction(id=1, company_id=1, master_id=1, type_id=1, document_id=1, date=datetime(2025, 4, 20, 15), amount=2.0, cost=200.0),
+        GoodTransaction(id=2, company_id=1, master_id=1, type_id=1, document_id=2, date=datetime(2025, 6, 10, 15), amount=1.0, cost=100.0),
+    ])
+    await async_session.commit()
+
+    # Upstream would happily return untrimmed counts; a period reaching behind the
+    # cutoff must not use them.
+    async def untrimmed_record_stats(*args, **kwargs):
+        return {'total': 2, 'cancelled': 0, 'completed': 2, 'incomplete': 0}
+
+    monkeypatch.setattr(
+        dashboard_service.yclients_analytics, 'fetch_record_stats', untrimmed_record_stats
+    )
+    breakdown = await dashboard_service.fetch_appointments_breakdown(
+        async_session, date(2025, 1, 1), date(2025, 12, 31), company_id=1, factual_at=report_now,
+    )
+    assert breakdown['completed'] == 1
+    assert breakdown['total'] == 1
+    # Once a scope has a cutoff every period of that scope counts the same way, so a
+    # subset period can never report more records than the period containing it.
+    subset = await dashboard_service.fetch_appointments_breakdown(
+        async_session, date(2025, 6, 1), date(2025, 12, 31), company_id=1, factual_at=report_now,
+    )
+    assert subset['total'] <= breakdown['total']
+    assert subset['completed'] <= breakdown['completed']
+
+    summary = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    assert summary['visit_metrics']['unique_clients'] == 1
+    assert summary['revenue']['topup_revenue'] == 300.0
+    assert summary['revenue']['goods_revenue'] == 200.0
+    assert summary['average_check']['goods_checks'] == 1
+    # The client blocks are separate queries from the visit KPI above.
+    assert summary['visit_metrics']['client_visit_frequency']['total_clients'] == 1
+    # A client whose only visit predates the opening is not a new client of this branch.
+    assert summary['visit_metrics']['new_clients'] == 1
+
+    operations = await dashboard_reports.fetch_report_data(
+        async_session,
+        'bookings_dynamics',
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        allowed_company_ids=[1],
+    )
+    assert sum(row['records'] for row in operations['raw']['by_staff']) == 1
+    assert sum(row['records'] for row in operations['raw']['by_period']) == 1
+
+    staff_facts = await dashboard_service._staff_fact_components_by_branch(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        1,
+        [1],
+        {1: 'barber'},
+        {1: None},
+        {},
+        {},
+        {},
+        [],
+        factual_at=report_now,
+    )
+    # Plan/fact must not credit a barber with revenue the branch does not report:
+    # the 200 goods sale plus the 300 top-up, never the pre-opening 800 and 900.
+    assert staff_facts[1]['revenue'] == 500.0
+
+    nps = await dashboard_reports.fetch_report_data(
+        async_session,
+        'nps_dashboard',
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        allowed_company_ids=[1],
+    )
+    reviews = next(card for card in nps['cards'] if card['label'] == 'Отзывы YClients')
+    assert reviews['value'] == 1
+
+    # Churn counts lost clients from the same trimmed visit history, so a client whose
+    # only visit predates the opening is not a client of this branch at all.
+    churn = await dashboard_reports.fetch_report_data(
+        async_session,
+        'losses_by_staff',
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        allowed_company_ids=[1],
+    )
+    assert sum(row['clients'] for row in churn['raw']['staff']) == 1
+
+    # Goods revenue reaches plan/fact through its own helper, and admin attribution
+    # counts finished appointments directly — both must see the trimmed history.
+    goods_total = await dashboard_service._goods_paid_revenue_total(
+        async_session,
+        dashboard_service.DateRange(date(2025, 1, 1), date(2025, 12, 31)),
+        1,
+        factual_at=report_now,
+    )
+    assert goods_total == 200.0
+    admin_clients = await dashboard_service._admin_clients_by_finished_appointments(
+        async_session, date(2025, 1, 1), date(2025, 12, 31), 1, [1], {1: None},
+        factual_at=report_now,
+    )
+    assert sum(admin_clients.values()) == 1
+
+
+@pytest.mark.asyncio
+async def test_reporting_start_excludes_pre_opening_goods_and_opz(
+    async_session,
+    monkeypatch,
+):
+    """Goods sales and OPZ rebooking anchors respect the cutoff too.
+
+    OPZ counts a rebooking against the visit that anchors it; anchoring on an excluded
+    visit would inflate opz_pct, whose denominator is the trimmed visit count.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1, reporting_start_date=date(2025, 5, 1)),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Client(id=1, name='Cut off', company_id=1),
+        Client(id=2, name='Counted', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        # An OPZ event needs the rebooking created on the visit day or the day after.
+        # Client 1's anchor visit sits before the cutoff, so the rebooking loses its
+        # anchor; client 2 is the control that proves the fixture can produce an event.
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 4, 30), attendance=1, create_date=datetime(2025, 4, 1, 10)),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=1, date=date(2025, 7, 1), attendance=1, create_date=datetime(2025, 5, 1, 10)),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=2, date=date(2025, 6, 10), attendance=1, create_date=datetime(2025, 6, 1, 10)),
+        Appointment(id=4, company_id=1, staff_id=1, client_id=2, date=date(2025, 8, 1), attendance=1, create_date=datetime(2025, 6, 11, 10)),
+    ])
+    async_session.add_all([
+        GoodTransaction(id=1, company_id=1, master_id=1, type_id=1, document_id=1, date=datetime(2025, 4, 20, 12), amount=3.0, cost=300.0),
+        GoodTransaction(id=2, company_id=1, master_id=1, type_id=1, document_id=2, date=datetime(2025, 6, 20, 12), amount=2.0, cost=200.0),
+    ])
+    async_session.add_all(
+        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+    )
+    await async_session.commit()
+
+    goods_facts = await dashboard_service.fetch_year_over_year_facts(
+        async_session,
+        date(2023, 1, 1),
+        report_now.date(),
+        company_id=1,
+        factual_at=report_now,
+    )
+    assert goods_facts['annual'][2025]['goods_count'] == 2.0
+
+    opz_facts = await dashboard_service.fetch_opz_year_facts(
+        async_session,
+        date(2023, 1, 1),
+        report_now.date(),
+        company_id=1,
+        staff_id=None,
+        factual_at=report_now,
+    )
+    # Only client 2's rebooking survives; client 1's anchor visit is before the cutoff.
+    assert opz_facts['counts'] == {2025: 1.0}
+    assert opz_facts['appointment_dependencies'][2025][1] == (date(2025, 6, 10), date(2025, 8, 1))
+
+    goods_report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'goods_dynamics',
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        allowed_company_ids=[1],
+    )
+    units = next(card for card in goods_report['cards'] if card['label'] == 'Единиц продано')
+    assert units['value'] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_reporting_start_does_not_blank_years_a_branch_predates(
+    async_session,
+    monkeypatch,
+):
+    """A later-opened branch must not drag earlier years of the whole tenant to partial.
+
+    The branch contributes no facts before its reporting start, so demanding sync
+    coverage from before it would blank a year it simply did not exist for.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Old branch', group_id=1),
+        Company(id=2, title='New branch', group_id=1, reporting_start_date=date(2025, 1, 1)),
+        Staff(id=1, name='Master 1', position='Барбер', company_id=1),
+        Staff(id=2, name='Master 2', position='Барбер', company_id=2),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2024, 3, 4), attendance=1),
+        Appointment(id=2, company_id=2, staff_id=2, date=date(2025, 3, 4), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2024, 3, 4, 12), amount=100.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=2, date=datetime(2025, 3, 4, 12), amount=300.0, record_id=2, sold_item_type='service', master_id=2, company_id=2),
+    ])
+    async_session.add_all(_yoy_source_states(1, date(2024, 1, 1), report_now.date(), report_now))
+    # Branch 2 opened in 2025 and is deliberately left with no sync state at all: a year
+    # the branch did not exist for must not be read as missing coverage.
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1, 2],
+    )
+    years = {row['year']: row for row in report['raw']['years']}
+
+    assert years[2024]['source_status'] == 'ready'
+    assert years[2024]['missing_components'] == []
+    assert years[2024]['revenue'] == 100.0
+    assert years[2024]['appointments'] == 1
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_reporting_start_trims_pre_opening_history(
+    async_session,
+    monkeypatch,
+):
+    """A branch carrying upstream records from before it opened starts at its opening.
+
+    Upstream keeps bookings from a previous location on the same YClients id, so
+    without the cutoff the report would open years before the branch existed.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1, reporting_start_date=date(2025, 5, 1)),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2023, 3, 4), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, date=date(2025, 4, 30), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, date=date(2025, 6, 10), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2023, 3, 4, 12), amount=900.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=2, date=datetime(2025, 4, 30, 12), amount=800.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=3, date=datetime(2025, 6, 10, 12), amount=700.0, record_id=3, sold_item_type='service', master_id=1, company_id=1),
+    ])
+    async_session.add_all(
+        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+    )
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+
+    assert report['raw']['activity_start'] == '2025-06-10'
+    assert [row['year'] for row in report['raw']['years']] == [2025, 2026]
+    year_2025 = report['raw']['years'][0]
+    assert year_2025['revenue'] == 700.0
+    assert year_2025['appointments'] == 1
+    assert year_2025['avg_check'] == 700.0
+
+    months_2025 = {
+        row['month']: row
+        for row in report['raw']['months']
+        if row['year'] == 2025
+    }
+    assert months_2025[4]['revenue'] is None
+    assert months_2025[6]['revenue'] == 700.0
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_reporting_start_cuts_each_branch_separately(
+    async_session,
+    monkeypatch,
+):
+    """In a multi-branch scope every branch is cut at its own opening, not the earliest one."""
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Old branch', group_id=1, reporting_start_date=date(2024, 1, 1)),
+        Company(id=2, title='New branch', group_id=1, reporting_start_date=date(2025, 1, 1)),
+        Staff(id=1, name='Master 1', position='Барбер', company_id=1),
+        Staff(id=2, name='Master 2', position='Барбер', company_id=2),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2024, 3, 4), attendance=1),
+        Appointment(id=2, company_id=2, staff_id=2, date=date(2024, 3, 4), attendance=1),
+        Appointment(id=3, company_id=2, staff_id=2, date=date(2025, 3, 4), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2024, 3, 4, 12), amount=100.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=2, date=datetime(2024, 3, 4, 12), amount=500.0, record_id=2, sold_item_type='service', master_id=2, company_id=2),
+        FinancialTransaction(id=3, date=datetime(2025, 3, 4, 12), amount=300.0, record_id=3, sold_item_type='service', master_id=2, company_id=2),
+    ])
+    for company_id in (1, 2):
+        async_session.add_all(
+            _yoy_source_states(company_id, date(2024, 1, 1), report_now.date(), report_now)
+        )
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1, 2],
+    )
+
+    years = {row['year']: row for row in report['raw']['years']}
+    assert report['raw']['activity_start'] == '2024-03-04'
+    # Branch 2 opened in 2025, so its 2024 payment stays out of the shared 2024 row.
+    assert years[2024]['revenue'] == 100.0
+    assert years[2024]['appointments'] == 1
+    assert years[2025]['revenue'] == 300.0
+    assert years[2025]['appointments'] == 1
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_without_reporting_start_keeps_full_history(
+    async_session,
+    monkeypatch,
+):
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add(
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2023, 3, 4), attendance=1)
+    )
+    await async_session.flush()
+    async_session.add(FinancialTransaction(
+        id=1,
+        date=datetime(2023, 3, 4, 12),
+        amount=900.0,
+        record_id=1,
+        sold_item_type='service',
+        master_id=1,
+        company_id=1,
+    ))
+    async_session.add_all(
+        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+    )
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+
+    assert report['raw']['activity_start'] == '2023-03-04'
+    assert report['raw']['years'][0]['year'] == 2023
+    assert report['raw']['years'][0]['revenue'] == 900.0
+
+
 @pytest.mark.asyncio
 async def test_year_over_year_history_can_start_with_direct_revenue_only(
     async_session,
@@ -791,6 +1649,9 @@ async def test_year_over_year_history_can_start_with_direct_revenue_only(
     assert report['raw']['years'][0]['revenue'] == 250.0
     assert report['raw']['years'][0]['goods_revenue'] == 250.0
     assert report['raw']['years'][0]['appointments'] == 0
+    # No completed visits means no average check, matching the monthly rows and leaving
+    # the average-check chart without a misleading zero bar.
+    assert report['raw']['years'][0]['avg_check'] is None
 
 
 @pytest.mark.asyncio

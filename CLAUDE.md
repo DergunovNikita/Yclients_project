@@ -34,6 +34,7 @@ config.py           — переменные окружения (.env) + prod-в
 setup_analytics.py  — SQL views для Metabase (20+ views)
 yclients_api.py     — HTTP-клиент YClients с retry/throttle
 seed_fake_data.py   — генератор синтетики; scripts/seed_demo.py — демо-стенд
+scripts/set_reporting_start.py — дата начала отчётности филиала (см. ниже)
 
 # Портал (личные кабинеты, multi-tenant)
 auth_routes.py      — эндпоинты аутентификации + администрирование пользователей
@@ -110,6 +111,20 @@ cd web && npm run dev                   # frontend: http://127.0.0.1:5173
 - **Multi-tenant портал**: `PortalAccount` = тенант, `PortalUser` с ролями (`platform_admin`, `owner`, `branch_admin`, `manager`, `viewer`); доступ скоупится по филиалам (`company_ids`). Аутентификация email+пароль (не OAuth)
 - **API auth**: JWT-сессии в httpOnly-cookie (+ Bearer), refresh-токены с ротацией, CSRF для cookie-запросов. Альтернатива — глобальный `X-API-Key` (full-access) и `X-Sync-Token` для `/sync/*`. Скоуп/роли через `require_auth`/`get_dashboard_access`; демо-аккаунт read-only через `forbid_demo`
 - **Prod fail-closed**: в production `config` требует сильные `AUTH_JWT_SECRET`/`SYNC_API_TOKEN`, `AUTH_COOKIE_SECURE=true` и выключенную публичную регистрацию; `AUTH_REQUIRE_LOGIN=false` допустим только при заданном сильном `API_KEY`
+
+### Дата начала отчётности филиала
+`companies.reporting_start_date` (nullable) отсекает факты, которые старше открытия филиала —
+в YClients остаются тестовые записи и история предыдущей точки на том же id. Правило одно:
+факт принадлежит филиалу, только если его дата не раньше этой. Реализация — `reporting_start_clause()`
+в `dashboard_service.py`; выручка по услугам режется **по двум якорям** (визит и оплата), чтобы
+числитель и знаменатель среднего чека остались по одну сторону отсечки.
+
+- Клауза обязана стоять на **каждом** пути, считающем одни и те же цифры, иначе Обзор
+  противоречит отчёту. При добавлении нового запроса по фактам — добавить и её.
+- Значение выставляется скриптом `python -m scripts.set_reporting_start --list` (и затем `<id>=YYYY-MM-DD`);
+  UI для правки нет, в `/dashboard/branches` поле отдаётся только на чтение.
+- **Известное ограничение**: views в `setup_analytics.py` (Metabase) и `/export/csv/*` отсечку не применяют,
+  поэтому для филиала с заданной датой Metabase покажет историю целиком, а портал — обрезанную.
 
 ## Testing
 
