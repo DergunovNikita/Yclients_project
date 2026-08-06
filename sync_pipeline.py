@@ -1545,6 +1545,10 @@ def sync_records(api: YClientsAPI, db, company_id: str,
                     comment=r.get('comment'),
                 )
                 db.add(obj)
+                # A long paginated fetch can return the same record twice when upstream
+                # rows shift between pages. Without this the second copy looks new and
+                # collides on uq_appointments_company_source_external.
+                existing_records[record_id] = obj
             else:
                 obj.staff_id = staff_id
                 obj.client_id = client_id
@@ -1923,6 +1927,7 @@ def sync_comments(api: YClientsAPI, db, company_id: str,
                     company_id=cid,
                 )
                 db.add(obj)
+                existing_comments[cmt_id] = obj
             else:
                 obj.external_id = cmt_id
                 obj.source_type = SOURCE_YCLIENTS

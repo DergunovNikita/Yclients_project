@@ -1280,6 +1280,85 @@ def test_sync_financial_transactions_accepts_ids_past_int4(tmp_path):
         engine.dispose()
 
 
+def test_sync_records_tolerates_a_record_repeated_across_pages():
+    """A long paginated fetch can return the same record twice as upstream rows shift."""
+    engine = create_engine('sqlite:///:memory:')
+    with engine.begin() as conn:
+        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Client.__table__,
+            Staff.__table__,
+            Appointment.__table__,
+            Transaction.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.commit()
+
+        duplicated = {'id': 108295673, 'date': '2019-05-18', 'attendance': 1, 'services': []}
+        assert sync_records(
+            FakeRecordsAPI([duplicated, dict(duplicated)]),
+            db,
+            '1',
+            start_date='2019-01-01',
+            end_date='2019-12-31',
+            full_refresh=True,
+        ) is True
+
+        saved = db.query(Appointment).all()
+        assert [row.external_id for row in saved] == [108295673]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_comments_tolerates_a_comment_repeated_across_pages():
+    engine = create_engine('sqlite:///:memory:')
+    with engine.begin() as conn:
+        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Staff.__table__,
+            Comment.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.commit()
+
+        duplicated = {'id': 50317470, 'date': '2026-07-26 11:13:28', 'rating': 5}
+        assert sync_comments(
+            FakeCommentsAPI([duplicated, dict(duplicated)]),
+            db,
+            '1',
+            start_date='2026-07-01',
+            end_date='2026-07-31',
+            full_refresh=True,
+        ) is True
+
+        saved = db.query(Comment).all()
+        assert [row.external_id for row in saved] == [50317470]
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_bigint_columns_are_bigint_on_postgres():
     """SQLite keeps INTEGER primary keys for rowid autoincrement; PostgreSQL must not."""
     from sqlalchemy.dialects import postgresql, sqlite
