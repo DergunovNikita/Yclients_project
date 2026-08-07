@@ -23,6 +23,7 @@ from models import (
     Company,
     FinancialTransaction,
     GoodCatalog,
+    GoodCategoryCatalog,
     GoodTransaction,
     ManualFactMetric,
     PlanBranchSetting,
@@ -62,6 +63,7 @@ PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
 PERSONAL_ACCOUNT_TYPES = ('client_account', 'personal_account', 'account_replenishment')
 PERSONAL_ACCOUNT_EXPENSE_MARKERS = ('пополн', 'личн', 'депозит')
 NON_CASH_ACCOUNT_MARKERS = ('бонус', 'скид', 'лояльн', 'сертификат')
+NON_COSMETICS_GOODS_MARKERS = ('сертификат', 'абонемент', 'налог')
 
 WAX_TITLE_PARTS = ('воск',)
 CAMOUFLAGE_TITLE_PARTS = ('камуфляж',)
@@ -648,6 +650,52 @@ def _goods_revenue_filters(
     if factual_at is not None:
         parts.append(GoodTransaction.date <= factual_at)
     return and_(*parts)
+
+
+def _title_contains_marker(column):
+    """Cyrillic-safe substring match: SQLite's lower() only folds ASCII."""
+    title = func.coalesce(column, '')
+    return or_(*[
+        or_(
+            title.like(f'%{marker}%'),
+            title.like(f'%{marker.capitalize()}%'),
+        )
+        for marker in NON_COSMETICS_GOODS_MARKERS
+    ])
+
+
+def cosmetics_goods_clause():
+    """Keep only cosmetics among goods sales.
+
+    Certificates and passes are sold through the same stock movements as shampoo, so
+    they inflate «Космо» while being neither cosmetics nor a barber's product sale.
+    They stay in revenue and in the average check — only the cosmetics metrics drop them.
+    The catalog carries them in a dedicated category, but it does not cover every sold
+    item, so the transaction title is checked as well. Unknown goods count as cosmetics:
+    an incomplete catalog must not silently erase a barber's sales.
+    """
+    non_cosmetics_category = (
+        select(1)
+        .select_from(GoodCatalog)
+        .join(
+            GoodCategoryCatalog,
+            and_(
+                GoodCategoryCatalog.company_id == GoodCatalog.company_id,
+                GoodCategoryCatalog.category_id == GoodCatalog.category_id,
+            ),
+        )
+        .where(
+            GoodCatalog.company_id == GoodTransaction.company_id,
+            GoodCatalog.good_id == GoodTransaction.good_id,
+            _title_contains_marker(GoodCategoryCatalog.title),
+        )
+        .correlate(GoodTransaction)
+        .exists()
+    )
+    return and_(
+        ~_title_contains_marker(GoodTransaction.good_title),
+        ~non_cosmetics_category,
+    )
 
 
 def _service_paid_filters(
@@ -3395,7 +3443,8 @@ async def _goods_sales_metrics(
         .where(
             _goods_revenue_filters(
                 start, end, company_id, staff_id, factual_at=factual_at
-            )
+            ),
+            cosmetics_goods_clause(),
         )
     )
     row = (await db.execute(stmt)).one()
@@ -4002,7 +4051,8 @@ async def _staff_fact_components_by_branch(
             .where(
                 _goods_revenue_filters(
                     start, end, company_id, factual_at=factual_at
-                )
+                ),
+                cosmetics_goods_clause(),
             )
             .group_by(GoodTransaction.master_id)
         )
@@ -4292,6 +4342,30 @@ def _metric_cells(
 
 def _has_plan_values(plan_values: dict[str, float]) -> bool:
     return bool(plan_values)
+
+
+def _has_fact_values(fact_values: dict[str, float]) -> bool:
+    return any(float(value or 0.0) != 0.0 for value in fact_values.values())
+
+
+def _is_visible_staff_row(
+    plan_values: dict[str, float],
+    fact_values: dict[str, float],
+    category: str,
+) -> bool:
+    """Show everyone who worked, plus everyone who was planned.
+
+    A month without plans is not a month without employees: hiding staff whose plan is
+    missing turned an unfilled plan into vanished barbers. A plan with zero clients is
+    the explicit «does not work here this month» switch and still hides the row.
+    Administrators stay listed regardless — they are the anchors event attribution
+    distributes across, so an empty period must not drop them from the table.
+    """
+    return is_visible_staff_plan(plan_values) and (
+        _has_plan_values(plan_values)
+        or _has_fact_values(fact_values)
+        or category == 'administrator'
+    )
 
 
 def _metric_sets_payload() -> dict[str, list[dict[str, str]]]:
@@ -4674,16 +4748,15 @@ async def _staff_plan_groups_for_branch(
     plan_end: date,
     branch_id: int,
     staff_id: Optional[int] = None,
-    include_all_when_branch_planned: bool = False,
     include_all_staff: bool = False,
     company_title: str | None = None,
     opz_events: list[OpzEvent] | None = None,
     factual_at: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
     factual_at = factual_at or _factual_now()
-    # Calculate administrator attribution against the same complete staff scope
-    # used by the branch view. Applying staff_id before attribution assigns every
-    # unclaimed event to the only remaining administrator and changes their fact.
+    # Categories, attribution and facts are calculated for the whole branch, and only
+    # the rendered rows are filtered afterwards. Narrowing the staff scope earlier
+    # assigns every unclaimed event to the remaining administrators and changes facts.
     staff_rows = await _fetch_company_staff(db, branch_id)
     staff_ids = [int(row.id) for row in staff_rows]
     plans_by_staff, categories_by_staff = await _plan_metric_components_by_staff(
@@ -4693,28 +4766,6 @@ async def _staff_plan_groups_for_branch(
         branch_id,
         staff_ids,
     )
-    has_staff_plans = any(_has_plan_values(plans_by_staff.get(int(staff.id), {})) for staff in staff_rows)
-    if include_all_staff:
-        staff_rows = list(staff_rows)
-    elif has_staff_plans or not include_all_when_branch_planned:
-        staff_rows = [
-            staff for staff in staff_rows
-            if is_visible_staff_plan(plans_by_staff.get(int(staff.id), {}))
-            and (
-                _has_plan_values(plans_by_staff.get(int(staff.id), {}))
-                or _staff_category(
-                    staff,
-                    categories_by_staff.get(int(staff.id)),
-                    plans_by_staff.get(int(staff.id), {}),
-                ) == 'administrator'
-            )
-        ]
-    else:
-        staff_rows = [
-            staff for staff in staff_rows
-            if is_visible_staff_plan(plans_by_staff.get(int(staff.id), {}))
-        ]
-    staff_ids = [int(row.id) for row in staff_rows]
     categories_by_staff_id: dict[int, str] = {}
     for staff in staff_rows:
         sid = int(staff.id)
@@ -4774,6 +4825,16 @@ async def _staff_plan_groups_for_branch(
         opz_events,
         factual_at,
     )
+
+    if not include_all_staff:
+        staff_rows = [
+            staff for staff in staff_rows
+            if _is_visible_staff_row(
+                plans_by_staff.get(int(staff.id), {}),
+                facts_by_staff.get(int(staff.id), {}),
+                categories_by_staff_id[int(staff.id)],
+            )
+        ]
 
     groups: list[dict[str, Any]] = []
     for staff in staff_rows:
@@ -5618,7 +5679,6 @@ async def fetch_plan_fact(
             plan_end,
             branch_id,
             staff_id,
-            include_all_when_branch_planned=_has_plan_values(plans_by_company.get(branch_id, {})),
             include_all_staff=include_all_staff_in_leaderboards,
             company_title=branch['title'],
             opz_events=branch_opz_events,
@@ -5688,7 +5748,6 @@ async def fetch_plan_fact(
             plan_end,
             branch_id,
             None,
-            include_all_when_branch_planned=_has_plan_values(plans_by_company.get(branch_id, {})),
             include_all_staff=include_all_staff_in_leaderboards,
             company_title=next(
                 (branch['title'] for branch in branches if int(branch['id']) == branch_id),

@@ -1528,6 +1528,8 @@ def test_sync_staff_marks_missing_staff_as_fired():
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add(Staff(id=1, name='Existing', company_id=1, fired=0))
         db.add(Staff(id=2, name='Stale', company_id=1, fired=0))
+        # Portal-created row: absent from YClients by design, fired flag owned by the portal.
+        db.add(Staff(id=900, name='Portal Manager', company_id=1, fired=0, portal_user_id=42))
         db.commit()
 
         api = FakeYClientsAPI([
@@ -1547,6 +1549,7 @@ def test_sync_staff_marks_missing_staff_as_fired():
         assert active.email == 'existing.worker@example.com'
         assert active.fired == 0
         assert stale.fired == 1
+        assert db.get(Staff, 900).fired == 0
     finally:
         db.close()
         engine.dispose()

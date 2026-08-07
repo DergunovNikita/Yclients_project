@@ -3006,3 +3006,39 @@ def test_access_context_money_metric_helpers():
     assert can_view_money_metric(partial, 'revenue') is False
     assert can_view_financials(partial) is False
     assert hidden_money_codes(partial) == ALL_MONEY_CODES - {'avg_check'}
+
+
+@pytest.mark.asyncio
+async def test_portal_staff_sync_keeps_yclients_row_of_out_of_scope_branch(auth_db):
+    """Branch scoping must not fire the CRM record the portal account was made from."""
+    from portal_staff_sync import sync_portal_user_staff
+
+    user = PortalUser(
+        id=9101,
+        portal_account_id=1,
+        email='worker9101@example.com',
+        password_hash=hash_password('Worker12345!'),
+        full_name='Worker',
+        role='manager',
+        is_active=True,
+        email_verified_at=datetime.utcnow(),
+        created_at=datetime.utcnow(),
+    )
+    auth_db.add(user)
+    auth_db.add_all([
+        # CRM record the account was provisioned from: staff id == portal user id.
+        Staff(id=9101, name='Worker', position='Администратор', company_id=1,
+              fired=0, bookable=True, portal_user_id=9101, external_id=9101),
+        # Mirror row created by the portal for a branch that is being dropped.
+        Staff(id=9102, name='Worker', position='manager', company_id=2,
+              fired=0, bookable=True, portal_user_id=9101),
+    ])
+    await auth_db.commit()
+
+    await sync_portal_user_staff(auth_db, user, [])
+    await auth_db.commit()
+
+    rows = (
+        await auth_db.execute(select(Staff).where(Staff.portal_user_id == 9101).order_by(Staff.id))
+    ).scalars().all()
+    assert [(row.id, row.fired) for row in rows] == [(9101, 0), (9102, 1)]

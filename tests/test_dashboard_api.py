@@ -34,6 +34,7 @@ from models import (
     Company,
     FinancialTransaction,
     GoodCatalog,
+    GoodCategoryCatalog,
     GoodTransaction,
     Group,
     ManualFactMetric,
@@ -7331,12 +7332,16 @@ async def test_plan_fact_excludes_fired_staff(async_session):
 
 
 @pytest.mark.asyncio
-async def test_plan_fact_lists_active_staff_when_branch_has_only_branch_plan(async_session):
+async def test_plan_fact_lists_staff_with_facts_when_staff_plans_are_missing(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
-    async_session.add(Staff(id=1, name='Active', position='Барбер', company_id=1, fired=0))
+    async_session.add(Staff(id=1, name='Worked', position='Барбер', company_id=1, fired=0))
     async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
-    async_session.add(Staff(id=3, name='Fired', position='Барбер', company_id=1, fired=1))
+    async_session.add(Staff(id=3, name='Idle', position='Барбер', company_id=1, fired=0))
+    async_session.add(Staff(id=4, name='Fired', position='Барбер', company_id=1, fired=1))
+    async_session.add(
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 1, 10), attendance=1)
+    )
     now = datetime(2025, 1, 1)
     async_session.add(
         PlanMetric(
@@ -7364,9 +7369,10 @@ async def test_plan_fact_lists_active_staff_when_branch_has_only_branch_plan(asy
 
     assert r.status_code == 200
     groups = r.json()['data']['groups']
-    assert [group['title'] for group in groups] == ['Admin', 'Active']
+    assert [group['title'] for group in groups] == ['Admin', 'Worked']
     barber_cells = {cell['code']: cell for cell in groups[1]['metrics']}
     assert barber_cells['revenue']['plan'] is None
+    assert barber_cells['clients']['fact'] == 1.0
 
 
 @pytest.mark.asyncio
@@ -9389,3 +9395,58 @@ async def test_yoy_admin_scope_matches_plan_fact_creator_attribution(
     assert yoy_2025['topup_revenue'] == 250.0
     assert yoy_2025['appointments'] == 1
     assert yoy_2025['avg_check'] == 750.0
+
+
+@pytest.mark.asyncio
+async def test_cosmetics_metrics_drop_certificates_but_goods_revenue_keeps_them(async_session):
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        GoodCategoryCatalog(
+            company_id=1, category_id=1, title='Основные товары',
+            updated_at=datetime(2025, 1, 1),
+        ),
+        GoodCategoryCatalog(
+            company_id=1, category_id=2, title='Сертификаты Сеть',
+            updated_at=datetime(2025, 1, 1),
+        ),
+        GoodCatalog(
+            company_id=1, good_id=10, title='Помада', category_id=1,
+            updated_at=datetime(2025, 1, 1),
+        ),
+        # Sold as a plain title; only the catalog category marks it as a certificate.
+        GoodCatalog(
+            company_id=1, good_id=20, title='на сумму 5000', category_id=2,
+            updated_at=datetime(2025, 1, 1),
+        ),
+        GoodTransaction(
+            id=1, company_id=1, master_id=1, type_id=1, document_id=1,
+            good_id=10, good_title='Помада', amount=-2.0, cost=600.0,
+            date=datetime(2025, 1, 10, 12),
+        ),
+        GoodTransaction(
+            id=2, company_id=1, master_id=1, type_id=1, document_id=2,
+            good_id=20, good_title='на сумму 5000', amount=-1.0, cost=5000.0,
+            date=datetime(2025, 1, 11, 12),
+        ),
+        # Not in the catalog at all — recognised by its title only.
+        GoodTransaction(
+            id=3, company_id=1, master_id=1, type_id=1, document_id=3,
+            good_id=30, good_title='Подарочный сертификат на комплекс',
+            amount=-1.0, cost=1400.0, date=datetime(2025, 1, 12, 12),
+        ),
+    ])
+    await async_session.commit()
+
+    cosmo = await dashboard_service._goods_sales_metrics(
+        async_session, date(2025, 1, 1), date(2025, 1, 31), 1,
+        factual_at=datetime(2025, 2, 1),
+    )
+    goods_count = await dashboard_service._goods_sold_count(
+        async_session, dashboard_service.DateRange(date(2025, 1, 1), date(2025, 1, 31)), 1,
+        factual_at=datetime(2025, 2, 1),
+    )
+
+    assert cosmo == {'cosmo_qty': 2.0, 'cosmo_sum': 600.0}
+    assert goods_count == 4.0

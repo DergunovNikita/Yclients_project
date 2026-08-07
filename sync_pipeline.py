@@ -4,6 +4,7 @@ Production ETL pipeline for syncing YClients data into PostgreSQL.
 import time
 from datetime import date, timedelta, datetime
 from typing import Iterable
+from sqlalchemy import or_
 from config import (
     DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD,
     SYNC_DAYS, SCHEDULE_DAYS, ANALYTICS_DAYS, DB_BATCH_SIZE,
@@ -1052,7 +1053,13 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
             if obj.id is not None and not fired:
                 active_staff_ids.add(int(obj.id))
 
-        stale_query = db.query(Staff).filter(Staff.company_id == cid)
+        # Portal-created rows never appear in the YClients list, so firing every
+        # unlisted row made portal managers vanish from «Работник» after each sync.
+        # Their `fired` belongs to the portal, exactly as this branch owns the CRM rows.
+        stale_query = db.query(Staff).filter(
+            Staff.company_id == cid,
+            or_(Staff.portal_user_id.is_(None), Staff.portal_user_id == Staff.id),
+        )
         if active_staff_ids:
             stale_query = stale_query.filter(~Staff.id.in_(active_staff_ids))
         stale_query.update({Staff.fired: 1}, synchronize_session=False)

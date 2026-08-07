@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import PortalUser, Staff
@@ -27,6 +27,17 @@ async def _next_staff_id(db: AsyncSession) -> int:
     return int(current_max or 0) + 1
 
 
+def _portal_owned_staff_clause(portal_user_id: int):
+    """Rows this module created — the only ones whose `fired` the portal may change.
+
+    A portal account provisioned from a real employee reuses the staff id as the portal
+    user id (portal_account_provision.provision_staff_account), so that row is the CRM
+    record and YClients owns its `fired`. Firing it because the account is scoped to
+    other branches made a working employee disappear from the «Работник» filter.
+    """
+    return and_(Staff.portal_user_id == portal_user_id, Staff.id != portal_user_id)
+
+
 async def sync_portal_user_staff(
     db: AsyncSession,
     user: PortalUser,
@@ -41,7 +52,7 @@ async def sync_portal_user_staff(
         if linked:
             await db.execute(
                 update(Staff)
-                .where(Staff.portal_user_id == user.id)
+                .where(_portal_owned_staff_clause(user.id))
                 .values(fired=1)
             )
         return
@@ -71,8 +82,7 @@ async def sync_portal_user_staff(
             await db.flush()
             continue
         if int(row.id) == int(user.id):
-            # Provisioned YClients staff: keep synced name/position from CRM.
-            row.fired = 0
+            # Provisioned YClients staff: name, position and `fired` stay owned by the CRM.
             row.bookable = True
             continue
         row.name = name
@@ -81,14 +91,14 @@ async def sync_portal_user_staff(
         row.bookable = True
 
     for company_id, row in by_company.items():
-        if company_id not in target_companies:
+        if company_id not in target_companies and int(row.id) != int(user.id):
             row.fired = 1
 
 
 async def deactivate_portal_user_staff(db: AsyncSession, portal_user_id: int) -> None:
     await db.execute(
         update(Staff)
-        .where(Staff.portal_user_id == portal_user_id)
+        .where(_portal_owned_staff_clause(portal_user_id))
         .values(fired=1)
     )
 
