@@ -444,6 +444,8 @@
     "administrator": "Administrator",
     "reviewsFact": "Reviews actual",
     "reviewFactNonNegative": "Reviews actual must be a non-negative number",
+    "reviewFactMonthHint": "The value covers the whole month and shows up in Plan/actual for any period inside it.",
+    "reviewFactInactive": "no longer an administrator",
     "daysCount": "{count} days",
     "appointmentsCount": "{count} appointments",
     "noExactData": "No exact data",

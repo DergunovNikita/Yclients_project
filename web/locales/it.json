@@ -444,6 +444,8 @@
     "administrator": "Amministratore",
     "reviewsFact": "Recensioni consuntivo",
     "reviewFactNonNegative": "Il consuntivo recensioni deve essere un numero non negativo",
+    "reviewFactMonthHint": "Il valore vale per tutto il mese e compare in Piano/consuntivo per qualsiasi periodo al suo interno.",
+    "reviewFactInactive": "non è più amministratore",
     "daysCount": "{count} giorni",
     "appointmentsCount": "{count} appuntamenti",
     "noExactData": "Nessun dato preciso",

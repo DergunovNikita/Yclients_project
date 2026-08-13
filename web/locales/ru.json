@@ -444,6 +444,8 @@
     "administrator": "Администратор",
     "reviewsFact": "Отзывы факт",
     "reviewFactNonNegative": "Отзывы факт должны быть неотрицательным числом",
+    "reviewFactMonthHint": "Значение относится ко всему месяцу и попадает в План/факт за любой период внутри него.",
+    "reviewFactInactive": "уже не администратор",
     "daysCount": "{count} дней",
     "appointmentsCount": "{count} записей",
     "noExactData": "Нет точных данных",

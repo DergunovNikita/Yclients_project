@@ -4218,6 +4218,48 @@ async def _plan_metric_components_by_staff(
     }, categories
 
 
+async def _manual_review_fact_values(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    staff_ids_by_company: dict[int, list[int]],
+) -> dict[tuple[int, int], float]:
+    """Manual review facts of every calendar month the period touches.
+
+    Reviews are entered per month, so a month is taken as a whole as soon as the period
+    overlaps it: the plan for reviews is monthly too (`_resolve_plan_period`), and a
+    month-to-date dashboard must not show a zero fact against a full-month plan.
+    """
+    pairs = [
+        (company_id, staff_id)
+        for company_id, staff_ids in staff_ids_by_company.items()
+        for staff_id in staff_ids
+    ]
+    if not pairs:
+        return {}
+    window_start, window_end = _month_window(start, end)
+    stmt = (
+        select(
+            ManualFactMetric.company_id,
+            ManualFactMetric.staff_id,
+            func.coalesce(func.sum(ManualFactMetric.value), 0.0).label('value'),
+        )
+        .where(
+            ManualFactMetric.period_start >= window_start,
+            ManualFactMetric.period_end <= window_end,
+            tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(pairs),
+            ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
+            reporting_start_clause(ManualFactMetric.company_id, ManualFactMetric.period_end),
+        )
+        .group_by(ManualFactMetric.company_id, ManualFactMetric.staff_id)
+    )
+    rows = (await db.execute(stmt)).all()
+    return {
+        (int(row.company_id), int(row.staff_id)): float(row.value or 0.0)
+        for row in rows
+    }
+
+
 async def _manual_review_fact_values_by_staff(
     db: AsyncSession,
     start: date,
@@ -4225,49 +4267,22 @@ async def _manual_review_fact_values_by_staff(
     company_id: int,
     staff_ids: list[int],
 ) -> dict[int, float]:
-    if not staff_ids:
-        return {}
-    stmt = (
-        select(
-            ManualFactMetric.staff_id,
-            func.coalesce(func.sum(ManualFactMetric.value), 0.0).label('value'),
-        )
-        .where(
-            ManualFactMetric.period_start >= start,
-            ManualFactMetric.period_end <= end,
-            ManualFactMetric.company_id == company_id,
-            ManualFactMetric.staff_id.in_(staff_ids),
-            ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
-        )
-        .group_by(ManualFactMetric.staff_id)
-    )
-    rows = (await db.execute(stmt)).all()
-    return {int(row.staff_id): float(row.value or 0.0) for row in rows}
+    values = await _manual_review_fact_values(db, start, end, {company_id: staff_ids})
+    return {staff_id: value for (_, staff_id), value in values.items()}
 
 
 async def _manual_review_fact_values_by_company(
     db: AsyncSession,
     start: date,
     end: date,
-    company_ids: list[int],
+    staff_ids_by_company: dict[int, list[int]],
 ) -> dict[int, float]:
-    if not company_ids:
-        return {}
-    stmt = (
-        select(
-            ManualFactMetric.company_id,
-            func.coalesce(func.sum(ManualFactMetric.value), 0.0).label('value'),
-        )
-        .where(
-            ManualFactMetric.period_start >= start,
-            ManualFactMetric.period_end <= end,
-            ManualFactMetric.company_id.in_(company_ids),
-            ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
-        )
-        .group_by(ManualFactMetric.company_id)
-    )
-    rows = (await db.execute(stmt)).all()
-    return {int(row.company_id): float(row.value or 0.0) for row in rows}
+    """Branch totals summed over the same administrators the staff rows are built from."""
+    totals: dict[int, float] = {company_id: 0.0 for company_id in staff_ids_by_company}
+    values = await _manual_review_fact_values(db, start, end, staff_ids_by_company)
+    for (company_id, _), value in values.items():
+        totals[company_id] = totals.get(company_id, 0.0) + value
+    return totals
 
 
 async def _resolve_plan_period(
@@ -4719,6 +4734,54 @@ def _staff_category(staff_row: Any, plan_category: str | None, plan_values: dict
     return 'barber' if plan_values else 'unknown'
 
 
+async def _admin_staff_ids_by_company(
+    db: AsyncSession,
+    plan_start: date,
+    plan_end: date,
+    company_ids: list[int],
+) -> dict[int, list[int]]:
+    """Administrators as Plan/fact sees them — the plan category wins over the position.
+
+    Manual review facts are entered, summed per branch and shown per staff member through
+    this one set, so the branch total always equals the sum of its staff rows.
+    """
+    if not company_ids:
+        return {}
+    staff_rows = (
+        await db.execute(
+            select(Staff.id, Staff.name, Staff.position, Staff.company_id)
+            .where(Staff.company_id.in_(company_ids), Staff.fired == 0)
+        )
+    ).all()
+    plan_rows = (
+        await db.execute(
+            select(PlanMetric.staff_id, PlanMetric.staff_category)
+            .where(
+                PlanMetric.period_start == plan_start,
+                PlanMetric.period_end == plan_end,
+                PlanMetric.company_id.in_(company_ids),
+                PlanMetric.staff_id.is_not(None),
+                PlanMetric.metric_code.in_({metric['code'] for metric in PLAN_FACT_METRICS}),
+            )
+            .distinct()
+        )
+    ).all()
+    plan_category_by_staff = {
+        int(row.staff_id): row.staff_category
+        for row in plan_rows
+        if row.staff_category in STAFF_CATEGORY_METRIC_CODES
+    }
+
+    out: dict[int, list[int]] = {int(company_id): [] for company_id in company_ids}
+    for row in staff_rows:
+        if _is_waitlist_staff_name(row.name) or _is_admin_placeholder_staff_name(row.name):
+            continue
+        if _staff_category(row, plan_category_by_staff.get(int(row.id))) != 'administrator':
+            continue
+        out.setdefault(int(row.company_id), []).append(int(row.id))
+    return {company_id: sorted(staff_ids) for company_id, staff_ids in out.items()}
+
+
 async def _fetch_company_staff(
     db: AsyncSession,
     company_id: int,
@@ -4923,6 +4986,14 @@ def _plan_month_range(month: str) -> tuple[date, date]:
 
 def _month_value(period_start: date) -> str:
     return f'{period_start.year:04d}-{period_start.month:02d}'
+
+
+def _month_window(start: date, end: date) -> tuple[date, date]:
+    """Widen a period to the full months it touches."""
+    return (
+        date(start.year, start.month, 1),
+        date(end.year, end.month, monthrange(end.year, end.month)[1]),
+    )
 
 
 def _parse_setting_number(value: Any, field: str, *, percent: bool = False) -> float | None:
@@ -5387,104 +5458,103 @@ async def save_plan_settings(
     )
 
 
-def _is_manual_review_admin_row(row: Any) -> bool:
-    name = getattr(row, 'name', None) or getattr(row, 'staff_name', None)
-    return (
-        normalize_staff_category(getattr(row, 'position', None)) == 'administrator'
-        and not _is_waitlist_staff_name(name)
-        and not _is_admin_placeholder_staff_name(name)
-    )
+async def _stored_manual_review_facts(
+    db: AsyncSession,
+    month_start: date,
+    month_end: date,
+    company_ids: list[int],
+) -> dict[tuple[int, int], list[ManualFactMetric]]:
+    """Stored rows of one month, without the reporting-start cut.
 
-
-def _manual_review_payload_row(
-    row: Any,
-    values_by_staff: dict[tuple[int, int], list[ManualFactMetric]],
-) -> dict[str, Any]:
-    company_id = int(row.company_id)
-    staff_id = int(row.staff_id)
-    items = values_by_staff.get((company_id, staff_id), [])
-    total_value = sum(float(item.value or 0.0) for item in items)
-    updated_at_values = [item.updated_at for item in items if item.updated_at is not None]
-
-    return {
-        'company_id': company_id,
-        'company_title': row.company_title,
-        'staff_id': staff_id,
-        'staff_name': row.staff_name,
-        'position': row.position,
-        'value': _round_half_up_int(total_value or 0.0),
-        'updated_at': max(updated_at_values).isoformat() if updated_at_values else None,
-    }
+    The editor shows everything that is stored, including values the dashboard refuses to
+    count: a value nobody can see is also a value nobody can correct.
+    """
+    if not company_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(ManualFactMetric).where(
+                ManualFactMetric.period_start >= month_start,
+                ManualFactMetric.period_end <= month_end,
+                ManualFactMetric.company_id.in_(company_ids),
+                ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
+            )
+        )
+    ).scalars().all()
+    out: dict[tuple[int, int], list[ManualFactMetric]] = {}
+    for item in rows:
+        out.setdefault((int(item.company_id), int(item.staff_id)), []).append(item)
+    return out
 
 
 async def fetch_manual_review_facts(
     db: AsyncSession,
-    start: date,
-    end: date,
+    month: str,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
 ) -> dict[str, Any]:
+    month_start, month_end = _plan_month_range(month)
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
     if company_id is not None:
         branches = [branch for branch in branches if int(branch['id']) == company_id]
     company_ids = [int(branch['id']) for branch in branches]
-    if not company_ids:
-        return {
-            'period': {'start': start.isoformat(), 'end': end.isoformat()},
-            'metric_code': REVIEWS_QTY_CODE,
-            'total_value': 0.0,
-            'rows': [],
-        }
-
-    stmt = (
-        select(
-            Staff.id.label('staff_id'),
-            Staff.name.label('staff_name'),
-            Staff.position,
-            Staff.company_id,
-            Company.title.label('company_title'),
-        )
-        .select_from(Staff)
-        .join(Company, Company.id == Staff.company_id)
-        .where(
-            Staff.company_id.in_(company_ids),
-            Staff.fired == 0,
-        )
-        .order_by(Company.title.asc(), Staff.name.asc(), Staff.id.asc())
-    )
-    if staff_id is not None:
-        stmt = stmt.where(Staff.id == int(staff_id))
-
-    rows = [
-        row for row in (await db.execute(stmt)).all()
-        if _is_manual_review_admin_row(row)
-    ]
-    staff_ids = [int(row.staff_id) for row in rows]
-    values_by_staff: dict[tuple[int, int], list[ManualFactMetric]] = {}
-    if staff_ids:
-        manual_rows = (
-            await db.execute(
-                select(ManualFactMetric).where(
-                    ManualFactMetric.period_start >= start,
-                    ManualFactMetric.period_end <= end,
-                    ManualFactMetric.company_id.in_(company_ids),
-                    ManualFactMetric.staff_id.in_(staff_ids),
-                    ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
-                )
-            )
-        ).scalars().all()
-        for item in manual_rows:
-            values_by_staff.setdefault(
-                (int(item.company_id), int(item.staff_id)),
-                [],
-            ).append(item)
-
-    payload_rows = [_manual_review_payload_row(row, values_by_staff) for row in rows]
-    return {
-        'period': {'start': start.isoformat(), 'end': end.isoformat()},
+    empty_payload = {
+        'month': _month_value(month_start),
+        'period': {'start': month_start.isoformat(), 'end': month_end.isoformat()},
         'metric_code': REVIEWS_QTY_CODE,
+        'total_value': 0.0,
+        'rows': [],
+    }
+    if not company_ids:
+        return empty_payload
+
+    admin_ids_by_company = await _admin_staff_ids_by_company(db, month_start, month_end, company_ids)
+    stored = await _stored_manual_review_facts(db, month_start, month_end, company_ids)
+    keys = {
+        (company, staff)
+        for company, staff_ids in admin_ids_by_company.items()
+        for staff in staff_ids
+    } | set(stored)
+    if staff_id is not None:
+        keys = {key for key in keys if key[1] == int(staff_id)}
+    if not keys:
+        return empty_payload
+
+    titles = {int(branch['id']): branch['title'] for branch in branches}
+    staff_info = {
+        int(row.id): row
+        for row in (
+            await db.execute(
+                select(Staff.id, Staff.name, Staff.position)
+                .where(Staff.id.in_(sorted({staff for _, staff in keys})))
+            )
+        ).all()
+    }
+
+    payload_rows = []
+    for company, staff in keys:
+        info = staff_info.get(staff)
+        if info is None:
+            continue
+        items = stored.get((company, staff), [])
+        updated_at_values = [item.updated_at for item in items if item.updated_at is not None]
+        payload_rows.append({
+            'company_id': company,
+            'company_title': titles.get(company),
+            'staff_id': staff,
+            'staff_name': info.name,
+            'position': info.position,
+            'is_active': staff in admin_ids_by_company.get(company, []),
+            'value': _round_half_up_int(sum(float(item.value or 0.0) for item in items)),
+            'updated_at': max(updated_at_values).isoformat() if updated_at_values else None,
+        })
+    payload_rows.sort(
+        key=lambda row: (row['company_title'] or '', row['staff_name'] or '', row['staff_id'])
+    )
+    return {
+        **empty_payload,
         'total_value': _round_half_up_int(sum(float(row['value'] or 0.0) for row in payload_rows)),
         'rows': payload_rows,
     }
@@ -5492,14 +5562,14 @@ async def fetch_manual_review_facts(
 
 async def save_manual_review_facts(
     db: AsyncSession,
-    start: date,
-    end: date,
+    month: str,
     company_id: Optional[int],
     staff_id: Optional[int],
     items: list[dict[str, Any]],
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
 ) -> dict[str, Any]:
+    month_start, month_end = _plan_month_range(month)
     scoped_company_id = int(company_id) if company_id is not None else None
     scoped_staff_id = int(staff_id) if staff_id is not None else None
     normalized_items: dict[tuple[int, int], float | None] = {}
@@ -5529,8 +5599,7 @@ async def save_manual_review_facts(
     if not normalized_items:
         return await fetch_manual_review_facts(
             db,
-            start,
-            end,
+            month,
             scoped_company_id,
             scoped_staff_id,
             allowed_company_ids=allowed_company_ids,
@@ -5540,28 +5609,24 @@ async def save_manual_review_facts(
     allowed = (allowed_company_ids or []) if force_allowed else (
         allowed_company_ids if allowed_company_ids is not None else await branch_company_ids(db)
     )
+    item_company_ids = sorted({company for company, _ in normalized_items})
     if allowed is not None:
-        invalid_company_ids = sorted({company_id for company_id, _ in normalized_items} - set(allowed))
+        invalid_company_ids = sorted(set(item_company_ids) - set(allowed))
         if invalid_company_ids:
             raise ValueError(f'company is not allowed: {invalid_company_ids[0]}')
 
-    staff_ids = sorted({staff_id for _, staff_id in normalized_items})
-    staff_rows = (
-        await db.execute(
-            select(Staff.id, Staff.name, Staff.position, Staff.company_id, Staff.fired)
-            .where(
-                Staff.id.in_(staff_ids),
-                Staff.fired == 0,
-            )
-        )
-    ).all()
+    admin_ids_by_company = await _admin_staff_ids_by_company(
+        db, month_start, month_end, item_company_ids
+    )
+    stored = await _stored_manual_review_facts(db, month_start, month_end, item_company_ids)
+    # Staff who already have a value stay editable even after they stop being administrators —
+    # otherwise their value would keep counting in the branch total with no way to clear it.
     valid_staff_keys = {
-        (int(row.company_id), int(row.id))
-        for row in staff_rows
-        if _is_manual_review_admin_row(row)
-    }
-    item_staff_keys = set(normalized_items)
-    invalid_keys = sorted(item_staff_keys - valid_staff_keys)
+        (company, staff)
+        for company, staff_ids in admin_ids_by_company.items()
+        for staff in staff_ids
+    } | set(stored)
+    invalid_keys = sorted(set(normalized_items) - valid_staff_keys)
     if invalid_keys:
         invalid_company_id, invalid_staff_id = invalid_keys[0]
         raise ValueError(f'staff {invalid_staff_id} is not an active administrator in company {invalid_company_id}')
@@ -5569,8 +5634,8 @@ async def save_manual_review_facts(
     now = datetime.now()
     await db.execute(
         delete(ManualFactMetric).where(
-            ManualFactMetric.period_start >= start,
-            ManualFactMetric.period_end <= end,
+            ManualFactMetric.period_start >= month_start,
+            ManualFactMetric.period_end <= month_end,
             tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(list(normalized_items)),
             ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
         )
@@ -5580,12 +5645,12 @@ async def save_manual_review_facts(
             continue
         db.add(
             ManualFactMetric(
-                period_start=start,
-                period_end=end,
+                period_start=month_start,
+                period_end=month_end,
                 company_id=item_company_id,
                 staff_id=item_staff_id,
                 metric_code=REVIEWS_QTY_CODE,
-                value=value,
+                value=_round_half_up_int(value),
                 source='dashboard',
                 updated_at=now,
             )
@@ -5594,8 +5659,7 @@ async def save_manual_review_facts(
     await db.commit()
     return await fetch_manual_review_facts(
         db,
-        start,
-        end,
+        month,
         scoped_company_id,
         scoped_staff_id,
         allowed_company_ids=allowed_company_ids,
@@ -5669,7 +5733,10 @@ async def fetch_plan_fact(
             opz_override=float(len(branch_opz_events)),
             factual_at=factual_at,
         )
-        branch_review_facts = await _manual_review_fact_values_by_company(db, start, end, [branch_id])
+        branch_admin_ids = await _admin_staff_ids_by_company(db, plan_start, plan_end, [branch_id])
+        branch_review_facts = await _manual_review_fact_values_by_company(
+            db, start, end, branch_admin_ids
+        )
         branch_fact[REVIEWS_QTY_CODE] = branch_review_facts.get(branch_id, 0.0)
         groups = await _staff_plan_groups_for_branch(
             db,
@@ -5737,7 +5804,10 @@ async def fetch_plan_fact(
             opz_override=float(len(opz_events_by_company[branch_id])),
             factual_at=factual_at,
         )
-    review_facts_by_company = await _manual_review_fact_values_by_company(db, start, end, company_ids)
+    admin_ids_by_company = await _admin_staff_ids_by_company(db, plan_start, plan_end, company_ids)
+    review_facts_by_company = await _manual_review_fact_values_by_company(
+        db, start, end, admin_ids_by_company
+    )
     for branch_id in company_ids:
         facts_by_company.setdefault(branch_id, {})[REVIEWS_QTY_CODE] = review_facts_by_company.get(branch_id, 0.0)
         staff_groups_by_company[branch_id] = await _staff_plan_groups_for_branch(

@@ -88,8 +88,7 @@ class ManualReviewFactItem(BaseModel):
 
 
 class ManualReviewFactsPayload(BaseModel):
-    start_date: date
-    end_date: date
+    month: str
     company_id: int | None = None
     staff_id: int | None = None
     items: list[ManualReviewFactItem]
@@ -885,15 +884,13 @@ async def dashboard_plan_settings_save(
 
 @router.get('/plan/reviews_fact')
 async def dashboard_plan_reviews_fact(
-    start_date: date = Query(...),
-    end_date: date = Query(...),
+    month: str = Query(..., description='Reviews fact month in YYYY-MM format'),
     company_id: int | None = Query(None),
     staff_id: int | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     _require_settings_admin(ctx)
-    start, end = _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
     await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
@@ -901,8 +898,7 @@ async def dashboard_plan_reviews_fact(
     try:
         data = await fetch_manual_review_facts(
             db,
-            start,
-            end,
+            month,
             scope['company_id'],
             staff_id,
             allowed_company_ids=branch_ids,
@@ -920,15 +916,13 @@ async def dashboard_plan_reviews_fact_save(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     _require_settings_admin(ctx)
-    start, end = _parse_range(payload.start_date, payload.end_date)
     scope = query_scope(ctx, payload.company_id)
     payload_staff_id = effective_staff_id(ctx, payload.staff_id)
     branch_ids, force_allowed = user_branch_ids(ctx)
     try:
         data = await save_manual_review_facts(
             db,
-            start,
-            end,
+            payload.month,
             scope['company_id'],
             payload_staff_id,
             [item.model_dump() for item in payload.items],

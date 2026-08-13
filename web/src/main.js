@@ -128,8 +128,6 @@ const filterEls = {
   },
   reviewFacts: {
     month: document.getElementById('review-fact-month'),
-    start: document.getElementById('review-fact-start'),
-    end: document.getElementById('review-fact-end'),
     branch: document.getElementById('review-fact-branch'),
     staff: document.getElementById('review-fact-staff'),
     load: document.getElementById('review-fact-load'),
@@ -422,11 +420,9 @@ function defaultDates(filter) {
   filter.start.value = formatInputDate(start);
 }
 
-function setReviewFactDefaultDates() {
+function setReviewFactDefaultMonth() {
   const now = new Date(pageOpenedAt);
-  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  filterEls.reviewFacts.month.value = month;
-  setReviewFactMonthRange(month);
+  filterEls.reviewFacts.month.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
 
 function overviewPresetRange(preset) {
@@ -463,37 +459,6 @@ function previousMonthValue(month) {
   const [year, monthNumber] = String(month || currentMonthValue()).split('-').map(Number);
   const date = new Date(year, monthNumber - 2, 1);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-}
-
-function setReviewFactMonthRange(monthValue) {
-  const [year, monthNumber] = String(monthValue || '').split('-').map(Number);
-  if (!year || !monthNumber) return;
-  const start = new Date(year, monthNumber - 1, 1);
-  const end = new Date(year, monthNumber, 0);
-  filterEls.reviewFacts.start.value = formatInputDate(start);
-  filterEls.reviewFacts.end.value = formatInputDate(end);
-}
-
-function syncReviewFactMonthFromDates() {
-  const filter = filterEls.reviewFacts;
-  if (!filter.start.value || !filter.end.value) {
-    filter.month.value = '';
-    return;
-  }
-  const start = new Date(`${filter.start.value}T00:00:00`);
-  const end = new Date(`${filter.end.value}T00:00:00`);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
-    filter.month.value = '';
-    return;
-  }
-  const fullMonthStart = new Date(start.getFullYear(), start.getMonth(), 1);
-  const fullMonthEnd = new Date(start.getFullYear(), start.getMonth() + 1, 0);
-  filter.month.value = (
-    start.getTime() === fullMonthStart.getTime()
-    && end.getTime() === fullMonthEnd.getTime()
-  )
-    ? `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}`
-    : '';
 }
 
 function formatInputDate(date) {
@@ -1983,10 +1948,13 @@ function renderReviewFactEditor(data) {
         <tbody>
           ${reviewFactRows
             .map((row) => {
+              const inactiveMark = row.is_active === false
+                ? ` <span class="meta">· ${escapeHtml(t('dash.reviewFactInactive'))}</span>`
+                : '';
               return `
                 <tr>
                   <td>${escapeHtml(row.company_title || t('dash.branchFallbackWithId', { id: row.company_id }))}</td>
-                  <td>${escapeHtml(row.staff_name)}</td>
+                  <td>${escapeHtml(row.staff_name)}${inactiveMark}</td>
                   <td class="number">
                     <input
                       type="number"
@@ -2008,9 +1976,17 @@ function renderReviewFactEditor(data) {
   `;
 }
 
-async function loadReviewFactEditor({ signal = null } = {}) {
+function reviewFactParams() {
   const filter = filterEls.reviewFacts;
-  const payload = await fetchJson('/dashboard/plan/reviews_fact', filterParams(filter), {
+  return {
+    month: filter.month.value,
+    company_id: filter.branch.value,
+    staff_id: filter.staff.value,
+  };
+}
+
+async function loadReviewFactEditor({ signal = null } = {}) {
+  const payload = await fetchJson('/dashboard/plan/reviews_fact', reviewFactParams(), {
     retry: () => loadReviewFacts(),
     signal,
   });
@@ -2040,8 +2016,7 @@ function reviewFactPayload() {
   });
 
   return {
-    start_date: filter.start.value,
-    end_date: filter.end.value,
+    month: filter.month.value,
     company_id: filter.branch.value ? Number(filter.branch.value) : null,
     staff_id: filter.staff.value ? Number(filter.staff.value) : null,
     items,
@@ -2533,8 +2508,8 @@ async function startSession() {
 
 async function init() {
   reportsController = initReports({ clearError, showError, setApiState });
-  Object.values(filterEls).forEach((filter) => defaultDates(filter));
-  setReviewFactDefaultDates();
+  [filterEls.overview, filterEls.plan].forEach((filter) => defaultDates(filter));
+  setReviewFactDefaultMonth();
   els.overviewPresetButtons.forEach((button) => {
     button.classList.toggle('active', button.dataset.overviewPreset === 'month');
   });
@@ -2580,12 +2555,7 @@ filterEls.plan.branch.addEventListener('change', async () => {
 });
 filterEls.plan.staff.addEventListener('change', () => loadPlanFact());
 filterEls.reviewFacts.load.addEventListener('click', () => loadReviewFacts());
-filterEls.reviewFacts.month.addEventListener('change', async () => {
-  setReviewFactMonthRange(filterEls.reviewFacts.month.value);
-  await loadReviewFacts();
-});
-filterEls.reviewFacts.start.addEventListener('change', syncReviewFactMonthFromDates);
-filterEls.reviewFacts.end.addEventListener('change', syncReviewFactMonthFromDates);
+filterEls.reviewFacts.month.addEventListener('change', () => loadReviewFacts());
 filterEls.reviewFacts.branch.addEventListener('change', async () => {
   await refreshStaffForBranch(filterEls.reviewFacts, loadReviewFacts);
 });
