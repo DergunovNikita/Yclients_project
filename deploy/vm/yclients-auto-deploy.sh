@@ -23,8 +23,17 @@ git fetch --quiet origin "$BRANCH"
 local_rev="$(git rev-parse HEAD)"
 remote_rev="$(git rev-parse "origin/$BRANCH")"
 
+# The timer fires every 5 minutes. Rebuilding on every tick regardless of whether
+# anything changed grew the build cache to 12.78GB and restarted api/worker ~288
+# times a day. CI reaches this script through `systemctl start`, and at that point
+# the VM has not pulled yet, so a real deploy still passes the check below.
+if [ "$local_rev" = "$remote_rev" ] && [ "${FORCE_DEPLOY:-false}" != "true" ]; then
+  echo "Repository already at $local_rev; nothing to deploy"
+  exit 0
+fi
+
 if [ "$local_rev" = "$remote_rev" ]; then
-  echo "Repository already at $local_rev; rebuilding and restarting services"
+  echo "FORCE_DEPLOY is set; rebuilding $local_rev"
 else
   echo "Deploying $local_rev -> $remote_rev"
   git reset --hard "origin/$BRANCH"
