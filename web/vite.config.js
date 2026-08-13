@@ -1,10 +1,13 @@
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { defineConfig, loadEnv } from 'vite';
 
 const rootDir = fileURLToPath(new URL('.', import.meta.url));
-const repoRoot = resolve(dirname(rootDir), '..');
+// One level up from `web/` is the repository root. Resolving it via dirname()
+// first landed a level too high, so loadEnv read a directory outside the repo
+// and the dev proxy silently ran without API_KEY.
+const repoRoot = resolve(rootDir, '..');
 
 export default defineConfig(({ mode }) => {
   const rootEnv = loadEnv(mode, repoRoot, '');
