@@ -41,7 +41,7 @@ function passThroughReauth(url, options, requestFn) {
 
 async function loadDashboardApi() {
   globalThis.localStorage = new MemoryStorage();
-  localStorage.setItem('portal_account_id', '42');
+  globalThis.sessionStorage = new MemoryStorage();
   Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
     value: { language: 'en-US', languages: ['en-US'] },
@@ -70,6 +70,13 @@ async function loadDashboardApi() {
       'import.meta.env.VITE_API_KEY': JSON.stringify(''),
     },
   });
+  globalThis.fetch = async () => jsonResponse({
+    success: true,
+    data: { id: 1, email: 'platform@example.com', role: 'platform_admin', company_ids: [] },
+  });
+  const auth = await server.ssrLoadModule('/src/auth.js');
+  await auth.loadCurrentUser();
+  auth.setSelectedPortalAccountId('42');
   const api = await server.ssrLoadModule('/src/dashboardApi.js');
   return { api, server };
 }
@@ -270,6 +277,7 @@ test('shared dashboard API handles transport, errors, retries and mutations', as
 
 test('renderReportData hides flagged empty tops but keeps ranking data in a non-default metric', async (t) => {
   globalThis.localStorage = new MemoryStorage();
+  globalThis.sessionStorage = new MemoryStorage();
   const server = await createServer({
     appType: 'custom',
     logLevel: 'silent',

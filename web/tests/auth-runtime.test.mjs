@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createServer } from 'vite';
 import { buildCsv, csvCell } from '../src/adminSecurity.js';
@@ -31,25 +32,95 @@ class MemoryStorage {
   }
 }
 
-async function loadAuthModule() {
-  globalThis.localStorage = new MemoryStorage();
-  Object.defineProperty(globalThis, 'navigator', {
-    configurable: true,
-    value: { language: 'en-US', languages: ['en-US'] },
-  });
-  globalThis.window = {
-    location: {
-      href: '',
-      origin: 'https://app.example',
-      pathname: '/',
-      search: '',
-      hash: '',
+class MemoryLockManager {
+  constructor() {
+    this.busy = false;
+    this.queue = [];
+  }
+
+  request(_name, options, callback) {
+    const requestOptions = typeof options === 'function' ? {} : options;
+    const requestCallback = typeof options === 'function' ? options : callback;
+    if (requestOptions.ifAvailable && this.busy) {
+      return Promise.resolve(requestCallback(null));
+    }
+    return new Promise((resolve, reject) => {
+      const run = async () => {
+        this.busy = true;
+        try {
+          resolve(await requestCallback({ name: 'portal-auth-refresh' }));
+        } catch (error) {
+          reject(error);
+        } finally {
+          this.busy = false;
+          this.queue.shift()?.();
+        }
+      };
+      if (this.busy) this.queue.push(run);
+      else run();
+    });
+  }
+}
+
+function fakeEventTarget(properties = {}) {
+  const listeners = new Map();
+  return {
+    ...properties,
+    addEventListener(type, listener) {
+      const items = listeners.get(type) || [];
+      items.push(listener);
+      listeners.set(type, items);
+    },
+    removeEventListener(type, listener) {
+      listeners.set(type, (listeners.get(type) || []).filter((item) => item !== listener));
+    },
+    dispatchEvent(event) {
+      (listeners.get(event.type) || []).forEach((listener) => listener(event));
+      return true;
     },
   };
-  globalThis.document = {
-    cookie: 'portal_csrf=csrf-runtime-token',
-    documentElement: { lang: 'en' },
-  };
+}
+
+async function loadAuthModule({
+  localValues = {},
+  pathname = '/',
+  reuseGlobals = false,
+  locks = undefined,
+} = {}) {
+  if (!reuseGlobals) {
+    globalThis.localStorage = new MemoryStorage();
+    globalThis.sessionStorage = new MemoryStorage();
+    Object.entries(localValues).forEach(([key, value]) => localStorage.setItem(key, value));
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { language: 'en-US', languages: ['en-US'], locks },
+    });
+    globalThis.window = fakeEventTarget({
+      location: {
+        href: '',
+        origin: 'https://app.example',
+        pathname,
+        search: '',
+        hash: '',
+        reloadCalls: 0,
+        reload() {
+          this.reloadCalls += 1;
+        },
+      },
+    });
+    globalThis.document = fakeEventTarget({
+      cookie: 'portal_csrf=csrf-runtime-token',
+      documentElement: { lang: 'en' },
+      visibilityState: 'visible',
+      body: {
+        cleared: false,
+        replaceChildren() {
+          this.cleared = true;
+        },
+        setAttribute() {},
+      },
+    });
+  }
 
   const server = await createServer({
     appType: 'custom',
@@ -95,6 +166,28 @@ class FakeElement {
 test('browser source has no bearer-token construction patterns', async () => {
   const webRoot = new URL('..', import.meta.url);
   assert.deepEqual(await scanBrowserAuthTokens(webRoot), []);
+});
+
+test('every protected page and report flow uses the shared session coordinator', async () => {
+  const webRoot = new URL('..', import.meta.url);
+  const protectedEntries = new Map([
+    ['src/main.js', 'loadCurrentUserQuietly'],
+    ['src/admin.js', "authFetch('/auth/me')"],
+    ['src/profile.js', "authFetch('/auth/me')"],
+    ['src/settings.js', 'loadCurrentUser'],
+    ['src/onboarding.js', 'loadCurrentUser'],
+  ]);
+  for (const [path, sessionLoader] of protectedEntries) {
+    const source = await readFile(new URL(path, webRoot), 'utf8');
+    assert.match(source, /from ['"]\.\/auth\.js['"]/);
+    assert.ok(source.includes(sessionLoader), `${path} must initialize the current session identity`);
+  }
+
+  const reportsSource = await readFile(new URL('src/reports/index.js', webRoot), 'utf8');
+  const dashboardApiSource = await readFile(new URL('src/dashboardApi.js', webRoot), 'utf8');
+  assert.match(reportsSource, /from ['"]\.\.\/dashboardApi\.js['"]/);
+  assert.match(dashboardApiSource, /requestWithReauth/);
+  assert.match(dashboardApiSource, /from ['"]\.\/auth\.js['"]/);
 });
 
 test('browser auth token detector catches split-string construction', () => {
@@ -151,18 +244,103 @@ test('admin CSV export quotes cells and prefixes spreadsheet formulas', () => {
   assert.equal(csv, '"Email","Name"\r\n"\'=evil@example.com","<Admin>"');
 });
 
-test('authHeaders never returns browser bearer credentials', async (t) => {
-  const { auth, server } = await loadAuthModule();
+test('portal tenant selection is tab-scoped and only platform admins send it', async (t) => {
+  const { auth, server } = await loadAuthModule({ localValues: { portal_account_id: 'legacy-tenant' } });
   t.after(() => server.close());
 
-  localStorage.setItem('portal_account_id', '42');
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    success: true,
+    data: { id: 7, email: 'platform@example.com', role: 'platform_admin', company_ids: [] },
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  await auth.loadCurrentUser();
+  auth.setSelectedPortalAccountId('42');
   localStorage.setItem('portal_access_token', 'legacy-token');
   const headers = auth.authHeaders({ Accept: 'application/json' });
 
   assert.equal(headers.Accept, 'application/json');
   assert.equal(headers['X-Portal-Account-Id'], '42');
   assert.equal(headers.Authorization, undefined);
+  assert.equal(sessionStorage.getItem('portal_account_id'), '42');
+  assert.equal(localStorage.getItem('portal_account_id'), null);
   assert.equal(localStorage.getItem('portal_access_token'), null);
+});
+
+test('non-platform sessions never send a stale platform tenant header', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  sessionStorage.setItem('portal_account_id', '42');
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    success: true,
+    data: { id: 8, email: 'manager@example.com', role: 'manager', company_ids: [1] },
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  await auth.loadCurrentUser();
+
+  const headers = auth.authHeaders();
+
+  assert.equal(headers['X-Portal-Account-Id'], undefined);
+  assert.equal(sessionStorage.getItem('portal_account_id'), null);
+});
+
+test('only session endpoints can replace the cached reauthentication email', async (t) => {
+  const { auth, server } = await loadAuthModule({ pathname: '/login.html' });
+  t.after(() => server.close());
+
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith('/auth/login')) {
+      return new Response(JSON.stringify({
+        success: true,
+        data: { user: { id: 1, email: 'owner@example.com', role: 'owner', company_ids: [1] } },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({
+      success: true,
+      data: { id: 55, email: 'created.viewer@example.com', role: 'viewer' },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  await auth.authFetch('/auth/login', { method: 'POST', body: '{}' });
+  await auth.authFetch('/auth/admin/users', { method: 'POST', body: '{}' });
+
+  assert.equal(localStorage.getItem('portal_user_email'), 'owner@example.com');
+});
+
+test('session identity changes clear sensitive UI before reloading the page', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  let role = 'owner';
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    success: true,
+    data: { id: role === 'owner' ? 1 : 2, email: `${role}@example.com`, role, company_ids: [1] },
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  await auth.loadCurrentUser();
+  role = 'manager';
+
+  await auth.revalidateSessionIdentity({ force: true });
+
+  assert.equal(document.body.cleared, true);
+  assert.equal(window.location.reloadCalls, 1);
+});
+
+test('a login event from another page clears this page before synchronizing cookies', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    success: true,
+    data: { id: 1, email: 'owner@example.com', role: 'owner', company_ids: [1] },
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  await auth.loadCurrentUser();
+
+  window.dispatchEvent({
+    type: 'storage',
+    key: 'portal_auth_event',
+    newValue: JSON.stringify({ id: 'other-page', type: 'session-changed' }),
+  });
+
+  assert.equal(document.body.cleared, true);
+  assert.equal(window.location.reloadCalls, 1);
 });
 
 test('authFetch uses cookie credentials and CSRF for mutating browser requests', async (t) => {
@@ -225,7 +403,24 @@ test('login redirect preserves only same-origin return_to paths', async (t) => {
   assert.equal(auth.loginPathWithReturnTo(), '/login.html?return_to=%2F%3Fcompany_id%3D7%23plan-fact');
   assert.equal(auth.loginPathWithReturnTo('/login.html', '/reports?id=1'), '/login.html?return_to=%2Freports%3Fid%3D1');
   assert.equal(auth.loginPathWithReturnTo('/login.html', 'https://evil.example'), '/login.html?return_to=%2F');
-  assert.equal(auth.loginPathWithReturnTo('/login.html', '//evil.example'), '/login.html?return_to=%2F');
+});
+
+test('return_to normalizer accepts only root-relative paths', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  const cases = [
+    ['', '/'],
+    ['   ', '/'],
+    ['reports?id=1', '/'],
+    ['/reports?id=1#revenue', '/reports?id=1#revenue'],
+    ['HtTpS://evil.example', '/'],
+    ['javascript:alert(1)', '/'],
+    ['//evil.example', '/'],
+  ];
+  for (const [returnTo, expected] of cases) {
+    assert.equal(auth.safeReturnTo(returnTo), expected);
+  }
 });
 
 test('startup auth failures are distinguished from transient errors', async (t) => {
@@ -341,6 +536,144 @@ test('requestWithReauth refreshes once and retries the original request', async 
   ]);
 });
 
+test('two page runtimes coordinate refresh and rotate cookies only once', async (t) => {
+  const locks = new MemoryLockManager();
+  const firstModule = await loadAuthModule({ locks });
+  const secondModule = await loadAuthModule({ reuseGlobals: true });
+  t.after(() => Promise.all([firstModule.server.close(), secondModule.server.close()]));
+
+  let refreshed = false;
+  let refreshCalls = 0;
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /\/auth\/refresh$/);
+    refreshCalls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    refreshed = true;
+    return new Response(JSON.stringify({
+      success: true,
+      data: { user: { id: 1, email: 'owner@example.com', role: 'owner', company_ids: [1] } },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  const requestCalls = [0, 0];
+  const requestFn = (index) => async () => {
+    requestCalls[index] += 1;
+    return new Response('{}', { status: refreshed ? 200 : 401 });
+  };
+
+  const [firstResponse, secondResponse] = await Promise.all([
+    firstModule.auth.requestWithReauth('/dashboard/bundle', {}, requestFn(0)),
+    secondModule.auth.requestWithReauth('/dashboard/bundle', {}, requestFn(1)),
+  ]);
+
+  assert.equal(firstResponse.status, 200);
+  assert.equal(secondResponse.status, 200);
+  assert.equal(refreshCalls, 1);
+  assert.deepEqual(requestCalls, [2, 2]);
+});
+
+test('password reauthentication never holds the cross-page refresh lock', async (t) => {
+  const locks = new MemoryLockManager();
+  const firstModule = await loadAuthModule({ locks });
+  const secondModule = await loadAuthModule({ reuseGlobals: true });
+  t.after(() => Promise.all([firstModule.server.close(), secondModule.server.close()]));
+
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: 'expired' }), {
+    status: 401,
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  const promptStarted = [];
+  const promptResolvers = [];
+  const reauthFn = (index) => () => new Promise((resolve) => {
+    promptResolvers[index] = resolve;
+    promptStarted[index]();
+  });
+  const firstPromptStarted = new Promise((resolve) => { promptStarted[0] = resolve; });
+  const secondPromptStarted = new Promise((resolve) => { promptStarted[1] = resolve; });
+  const authenticated = [false, false];
+  const requestFn = (index) => async () => new Response('{}', { status: authenticated[index] ? 200 : 401 });
+
+  const firstRequest = firstModule.auth.requestWithReauth(
+    '/dashboard/bundle',
+    {},
+    requestFn(0),
+    async () => {
+      await reauthFn(0)();
+      authenticated[0] = true;
+    },
+  );
+  await firstPromptStarted;
+  const secondRequest = secondModule.auth.requestWithReauth(
+    '/dashboard/bundle',
+    {},
+    requestFn(1),
+    async () => {
+      await reauthFn(1)();
+      authenticated[1] = true;
+    },
+  );
+
+  await secondPromptStarted;
+  promptResolvers[0]();
+  promptResolvers[1]();
+  const [firstResponse, secondResponse] = await Promise.all([firstRequest, secondRequest]);
+
+  assert.equal(firstResponse.status, 200);
+  assert.equal(secondResponse.status, 200);
+});
+
+test('parallel pages wait for a winning refresh response when Web Locks are unavailable', async (t) => {
+  const firstModule = await loadAuthModule();
+  const secondModule = await loadAuthModule({ reuseGlobals: true });
+  t.after(() => Promise.all([firstModule.server.close(), secondModule.server.close()]));
+
+  const setLocalItem = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (key, value) => {
+    setLocalItem(key, value);
+    if (key === 'portal_auth_event') {
+      queueMicrotask(() => window.dispatchEvent({ type: 'storage', key, newValue: value }));
+    }
+  };
+  let refreshCalls = 0;
+  let refreshed = false;
+  globalThis.fetch = async () => {
+    refreshCalls += 1;
+    if (refreshCalls === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      refreshed = true;
+      return new Response(JSON.stringify({
+        success: true,
+        data: { user: { id: 1, email: 'owner@example.com', role: 'owner', company_ids: [1] } },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return new Response(JSON.stringify({ detail: 'already rotated' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  let reauthCalls = 0;
+  const requestCalls = [0, 0];
+  const requestFn = (index) => async () => {
+    requestCalls[index] += 1;
+    return new Response('{}', { status: refreshed ? 200 : 401 });
+  };
+  const reauthFn = async () => { reauthCalls += 1; };
+
+  const [firstResponse, secondResponse] = await Promise.all([
+    firstModule.auth.requestWithReauth('/dashboard/bundle', {}, requestFn(0), reauthFn),
+    secondModule.auth.requestWithReauth('/dashboard/bundle', {}, requestFn(1), reauthFn),
+  ]);
+
+  assert.equal(firstResponse.status, 200);
+  assert.equal(secondResponse.status, 200);
+  assert.equal(refreshCalls, 2);
+  assert.equal(reauthCalls, 0);
+  assert.deepEqual(requestCalls.toSorted(), [2, 3]);
+});
+
 test('requestWithReauth can skip password prompt for quiet session checks', async (t) => {
   const { auth, server } = await loadAuthModule();
   t.after(() => server.close());
@@ -363,5 +696,5 @@ test('requestWithReauth can skip password prompt for quiet session checks', asyn
 
   assert.equal(response.status, 401);
   assert.equal(refreshCalls, 1);
-  assert.equal(requestCalls, 1);
+  assert.equal(requestCalls, 3);
 });

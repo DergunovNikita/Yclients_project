@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import csv
-import hmac
 import io
 import logging
 import time as perf_time
@@ -81,6 +80,7 @@ from models import (
 from sync_jobs import SyncJobService
 from sync_orchestrator import get_sync_status
 from sync_parsing import parse_date, parse_datetime_end, parse_datetime_start
+from sync_security import validate_sync_token
 
 init_async_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
 
@@ -244,9 +244,7 @@ app.include_router(dashboard_router, prefix='/dashboard', tags=['dashboard'])
 
 
 def require_sync_token(x_sync_token: str | None = Header(default=None)):
-    configured_token = (SYNC_API_TOKEN or '').strip()
-    if not configured_token or not hmac.compare_digest(x_sync_token or '', configured_token):
-        raise HTTPException(status_code=401, detail="Invalid sync token")
+    validate_sync_token(x_sync_token, SYNC_API_TOKEN)
 
 
 def serialize_value(value: Any) -> Any:

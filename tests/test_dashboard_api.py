@@ -3586,8 +3586,19 @@ async def test_platform_admin_dashboard_bundle_requires_selected_tenant(async_se
     }
 
 
+@pytest.mark.parametrize(
+    'path',
+    [
+        '/dashboard/widget/summary',
+        '/dashboard/widget/revenue_daily',
+        '/dashboard/widget/top_services',
+        '/dashboard/widget/extra_services',
+        '/dashboard/widget/plan_fact',
+        '/dashboard/bundle',
+    ],
+)
 @pytest.mark.asyncio
-async def test_dashboard_summary_and_bundle_reject_foreign_staff_scope(async_session, monkeypatch):
+async def test_dashboard_widgets_reject_foreign_staff_scope(async_session, monkeypatch, path):
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
     async_session.add(Group(id=1, title='Group'))
     async_session.add_all([
@@ -3600,21 +3611,20 @@ async def test_dashboard_summary_and_bundle_reject_foreign_staff_scope(async_ses
         PortalUser(
             id=910,
             portal_account_id=1,
-            email='manager-dashboard-scope@example.com',
-            password_hash=hash_password('Manager12345!'),
-            role='manager',
+            email='owner-dashboard-scope@example.com',
+            password_hash=hash_password('Owner12345!'),
+            role='owner',
             is_active=True,
             email_verified_at=datetime.utcnow(),
             created_at=datetime.utcnow(),
         ),
-        PortalUserBranch(user_id=910, company_id=1),
     ])
     await async_session.commit()
 
     async def override_db():
         yield async_session
 
-    token = create_access_token(910, 'manager')
+    token = create_access_token(910, 'owner')
     headers = {'Authorization': f'Bearer {token}'}
     params = {
         'start_date': '2025-01-01',
@@ -3625,16 +3635,13 @@ async def test_dashboard_summary_and_bundle_reject_foreign_staff_scope(async_ses
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        summary = await client.get('/dashboard/widget/summary', params=params, headers=headers)
-        bundle = await client.get('/dashboard/bundle', params=params, headers=headers)
+        response = await client.get(path, params=params, headers=headers)
 
     app.dependency_overrides.clear()
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
 
-    assert summary.status_code == 400
-    assert summary.json()['detail'] == 'unknown staff_id'
-    assert bundle.status_code == 400
-    assert bundle.json()['detail'] == 'unknown staff_id'
+    assert response.status_code == 400
+    assert response.json()['detail'] == 'unknown staff_id'
 
 
 @pytest.mark.asyncio

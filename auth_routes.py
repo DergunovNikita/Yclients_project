@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime
+from typing import NoReturn
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field
@@ -767,6 +768,25 @@ async def _audit_credential_action_failure(
     )
 
 
+async def _raise_credential_create_failure(
+    db: AsyncSession,
+    actor: PortalUser,
+    portal_account_id: int,
+    exc: Exception,
+) -> NoReturn:
+    error_type = 'HTTPException' if isinstance(exc, HTTPException) else exc.__class__.__name__
+    await _audit_credential_action_failure(
+        db,
+        actor=actor,
+        action='yclients_credentials.create_failed',
+        portal_account_id=portal_account_id,
+        error_type=error_type,
+    )
+    await db.commit()
+    status_code = exc.status_code if isinstance(exc, HTTPException) else 500
+    raise HTTPException(status_code=status_code, detail=CREDENTIAL_TEST_FAILED_DETAIL) from exc
+
+
 def _credential_failure_audit_tenant_id(actor: PortalUser) -> int | None:
     if actor.role == 'platform_admin':
         return None
@@ -1132,26 +1152,8 @@ async def admin_create_yclients_credentials(
     portal_account_id = await _validated_credential_account_id(db, actor, x_portal_account_id or body.portal_account_id)
     try:
         _test_source_credentials(source_type, body.partner_token, body.login, body.password)
-    except HTTPException as exc:
-        await _audit_credential_action_failure(
-            db,
-            actor=actor,
-            action='yclients_credentials.create_failed',
-            portal_account_id=portal_account_id,
-            error_type='HTTPException',
-        )
-        await db.commit()
-        raise HTTPException(status_code=exc.status_code, detail=CREDENTIAL_TEST_FAILED_DETAIL) from exc
     except Exception as exc:
-        await _audit_credential_action_failure(
-            db,
-            actor=actor,
-            action='yclients_credentials.create_failed',
-            portal_account_id=portal_account_id,
-            error_type=exc.__class__.__name__,
-        )
-        await db.commit()
-        raise HTTPException(status_code=500, detail=CREDENTIAL_TEST_FAILED_DETAIL) from exc
+        await _raise_credential_create_failure(db, actor, portal_account_id, exc)
     company_ids = list(body.company_ids)
     if not company_ids:
         try:
@@ -1163,26 +1165,8 @@ async def admin_create_yclients_credentials(
                 body.password,
                 source_type,
             )
-        except HTTPException as exc:
-            await _audit_credential_action_failure(
-                db,
-                actor=actor,
-                action='yclients_credentials.create_failed',
-                portal_account_id=portal_account_id,
-                error_type='HTTPException',
-            )
-            await db.commit()
-            raise HTTPException(status_code=exc.status_code, detail=CREDENTIAL_TEST_FAILED_DETAIL) from exc
         except Exception as exc:
-            await _audit_credential_action_failure(
-                db,
-                actor=actor,
-                action='yclients_credentials.create_failed',
-                portal_account_id=portal_account_id,
-                error_type=exc.__class__.__name__,
-            )
-            await db.commit()
-            raise HTTPException(status_code=500, detail=CREDENTIAL_TEST_FAILED_DETAIL) from exc
+            await _raise_credential_create_failure(db, actor, portal_account_id, exc)
     await _validate_credential_companies(db, portal_account_id, company_ids)
     try:
         credential = new_credential(

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from fastapi import HTTPException, Request, Response, status
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import (
@@ -150,13 +150,28 @@ async def rotate_session(
     now = datetime.utcnow()
     user_agent = request.headers.get('user-agent', '')
 
-    refresh.token_hash = _hash_token(raw_rotated_refresh)
-    refresh.expires_at = now + timedelta(days=AUTH_REFRESH_TOKEN_EXPIRE_DAYS)
-    refresh.last_used_at = now
-    refresh.user_agent = user_agent[:500] if user_agent else None
-    refresh.device_label = parse_device_label(user_agent)
-    refresh.ip_hash = _hash_ip(extract_client_ip(request))
-    await db.flush()
+    rotated_hash = _hash_token(raw_rotated_refresh)
+    rotate_result = await db.execute(
+        update(PortalRefreshToken)
+        .where(
+            PortalRefreshToken.id == refresh.id,
+            PortalRefreshToken.token_hash == _hash_token(raw_refresh),
+            PortalRefreshToken.revoked_at.is_(None),
+            PortalRefreshToken.expires_at > now,
+        )
+        .values(
+            token_hash=rotated_hash,
+            expires_at=now + timedelta(days=AUTH_REFRESH_TOKEN_EXPIRE_DAYS),
+            last_used_at=now,
+            user_agent=user_agent[:500] if user_agent else None,
+            device_label=parse_device_label(user_agent),
+            ip_hash=_hash_ip(extract_client_ip(request)),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if rotate_result.rowcount != 1:
+        raise HTTPException(status_code=401, detail='Invalid refresh token')
+    await db.refresh(refresh)
     await _maintain_user_sessions(db, user.id, now, enforce_limit=not user.is_demo)
 
     issued = IssuedSession(

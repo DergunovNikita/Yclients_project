@@ -6,8 +6,11 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from models import Base, PortalAccount, YClientsCredential
+from models import Base, PortalAccount, YClientsCredential, YClientsCredentialCompany
 from yclients_credentials import (
+    load_active_credentials_sync,
+    load_credentials_for_companies_async,
+    load_credentials_for_companies_sync,
     mark_credential_failure_async,
     mark_credential_failure_sync,
     mark_credential_success_async,
@@ -28,6 +31,7 @@ def _sync_credential_session():
     Base.metadata.create_all(engine, tables=[
         PortalAccount.__table__,
         YClientsCredential.__table__,
+        YClientsCredentialCompany.__table__,
     ])
     session_local = sessionmaker(bind=engine)
     session = session_local()
@@ -53,6 +57,60 @@ def _credential(**overrides) -> YClientsCredential:
     }
     values.update(overrides)
     return YClientsCredential(**values)
+
+
+@pytest.mark.parametrize('loader_name', ['active', 'companies'])
+def test_sync_credential_loaders_persist_sanitized_decrypt_failures(monkeypatch, loader_name):
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD', '')
+    seeded_at = datetime(2026, 1, 1, 10, 0, 0)
+    with _sync_credential_session() as session:
+        session.add(PortalAccount(id=1, label='Tenant', created_at=seeded_at))
+        session.add(_credential(id=1, created_at=seeded_at, updated_at=seeded_at))
+        session.add(YClientsCredentialCompany(credential_id=1, company_id=1))
+        session.commit()
+
+        result = (
+            load_active_credentials_sync(session)
+            if loader_name == 'active'
+            else load_credentials_for_companies_sync(session, [1])
+        )
+
+        assert result == ([] if loader_name == 'active' else {})
+        session.rollback()
+        session.expire_all()
+        saved = session.get(YClientsCredential, 1)
+        assert saved.needs_reauth is True
+        assert saved.last_error == 'Decrypt failed: InvalidToken'
+        assert saved.last_error_at > seeded_at
+        assert saved.updated_at >= saved.last_error_at
+
+
+@pytest.mark.asyncio
+async def test_async_credential_loader_leaves_decrypt_failure_commit_to_caller(async_session, monkeypatch):
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD', '')
+    seeded_at = datetime(2026, 1, 1, 10, 0, 0)
+    credential = _credential(id=1, created_at=seeded_at, updated_at=seeded_at)
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=seeded_at))
+    async_session.add(credential)
+    async_session.add(YClientsCredentialCompany(credential_id=1, company_id=1))
+    await async_session.commit()
+
+    result = await load_credentials_for_companies_async(async_session, [1])
+
+    assert result == {}
+    assert credential.needs_reauth is True
+    assert credential.last_error == 'Decrypt failed: InvalidToken'
+    assert credential.last_error_at > seeded_at
+    assert credential.updated_at >= credential.last_error_at
+
+    await async_session.rollback()
+    await async_session.refresh(credential)
+    assert credential.needs_reauth is False
+    assert credential.last_error is None
+    assert credential.last_error_at is None
+    assert credential.updated_at == seeded_at
 
 
 def test_mark_credential_success_sync_clears_error_state():

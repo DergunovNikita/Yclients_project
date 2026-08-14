@@ -130,6 +130,13 @@ def decrypted_credential(
     )
 
 
+def _record_decrypt_failure(credential: YClientsCredential, exc: Exception) -> None:
+    credential.needs_reauth = True
+    credential.last_error_at = datetime.utcnow()
+    credential.last_error = f'Decrypt failed: {exc.__class__.__name__}'
+    credential.updated_at = datetime.utcnow()
+
+
 def load_active_credentials_sync(
     db: Session,
     portal_account_id: int | None = None,
@@ -157,10 +164,7 @@ def load_active_credentials_sync(
         try:
             values.append(decrypted_credential(credential, companies_by_credential.get(int(credential.id), [])))
         except Exception as exc:
-            credential.needs_reauth = True
-            credential.last_error_at = datetime.utcnow()
-            credential.last_error = f'Decrypt failed: {exc.__class__.__name__}'
-            credential.updated_at = datetime.utcnow()
+            _record_decrypt_failure(credential, exc)
     db.commit()
     return values
 
@@ -205,10 +209,7 @@ async def load_credentials_for_companies_async(
         try:
             result[int(company_id)] = decrypted_credential(credential, [int(company_id)])
         except Exception as exc:
-            credential.needs_reauth = True
-            credential.last_error_at = datetime.utcnow()
-            credential.last_error = f'Decrypt failed: {exc.__class__.__name__}'
-            credential.updated_at = datetime.utcnow()
+            _record_decrypt_failure(credential, exc)
     return result
 
 
@@ -241,10 +242,7 @@ def load_credentials_for_companies_sync(
         try:
             result[int(company_id)] = decrypted_credential(credential, [int(company_id)])
         except Exception as exc:
-            credential.needs_reauth = True
-            credential.last_error_at = datetime.utcnow()
-            credential.last_error = f'Decrypt failed: {exc.__class__.__name__}'
-            credential.updated_at = datetime.utcnow()
+            _record_decrypt_failure(credential, exc)
     db.commit()
     return result
 

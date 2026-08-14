@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import csv
 import io
 from copy import deepcopy
@@ -72,6 +71,7 @@ from portal_audit import log_portal_audit
 from plan_import import import_plan_sheet_from_config
 from sync_jobs import SyncJobService
 from sync_orchestrator import get_sync_status
+from sync_security import validate_sync_token
 
 router = APIRouter()
 
@@ -194,9 +194,7 @@ def _parse_range(start: date, end: date) -> tuple[date, date]:
 
 
 def _require_sync_token(x_sync_token: str | None) -> None:
-    configured_token = (SYNC_API_TOKEN or '').strip()
-    if not configured_token or not hmac.compare_digest(x_sync_token or '', configured_token):
-        raise HTTPException(status_code=401, detail='Invalid sync token')
+    validate_sync_token(x_sync_token, SYNC_API_TOKEN)
 
 
 def _require_sync_access(ctx: AccessContext) -> None:
@@ -331,6 +329,23 @@ async def _validate_dashboard_scope(
         staff_exists = await db.scalar(select(Staff.id).where(*conditions).limit(1))
         if staff_exists is None:
             raise HTTPException(status_code=400, detail=f'unknown {field_name}')
+
+
+async def _validated_widget_scope(
+    db: AsyncSession,
+    ctx: AccessContext,
+    company_id: int | None,
+    staff_id: int | None,
+) -> tuple[dict[str, Any], int | None]:
+    scope = query_scope(ctx, company_id)
+    scoped_staff_id = effective_staff_id(ctx, staff_id)
+    await _validate_dashboard_scope(
+        db,
+        scope['company_id'],
+        scoped_staff_id,
+        allowed_company_ids=scope['branch_ids'],
+    )
+    return scope, scoped_staff_id
 
 
 async def _default_portal_account_id(db: AsyncSession) -> int:
@@ -697,9 +712,7 @@ async def dashboard_widget_summary(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
-    scope = query_scope(ctx, company_id)
-    staff_id = effective_staff_id(ctx, staff_id)
-    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
+    scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
     factual_at = datetime.now()
     summary = await fetch_summary(
         db,
@@ -730,9 +743,7 @@ async def dashboard_widget_revenue_daily(
 ):
     require_financial_access(ctx)
     start, end = _parse_range(start_date, end_date)
-    scope = query_scope(ctx, company_id)
-    staff_id = effective_staff_id(ctx, staff_id)
-    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
+    scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
     return {
         'success': True,
         'data': await fetch_revenue_daily(
@@ -758,9 +769,7 @@ async def dashboard_widget_top_services(
 ):
     require_financial_access(ctx)
     start, end = _parse_range(start_date, end_date)
-    scope = query_scope(ctx, company_id)
-    staff_id = effective_staff_id(ctx, staff_id)
-    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
+    scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
     return {
         'success': True,
         'data': await fetch_top_services(
@@ -787,9 +796,7 @@ async def dashboard_widget_extra_services(
 ):
     require_financial_access(ctx)
     start, end = _parse_range(start_date, end_date)
-    scope = query_scope(ctx, company_id)
-    staff_id = effective_staff_id(ctx, staff_id)
-    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
+    scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
     return {
         'success': True,
         'data': await fetch_extra_services(
@@ -814,9 +821,7 @@ async def dashboard_widget_plan_fact(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
-    scope = query_scope(ctx, company_id)
-    staff_id = effective_staff_id(ctx, staff_id)
-    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
+    scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
     branch_ids, force_allowed = user_branch_ids(ctx)
     plan_fact = await fetch_plan_fact(
         db,
@@ -1038,9 +1043,7 @@ async def dashboard_bundle(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
-    scope = query_scope(ctx, company_id)
-    staff_id = effective_staff_id(ctx, staff_id)
-    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
+    scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
     factual_at = datetime.now()
     summary = await fetch_summary(
         db,

@@ -1,5 +1,5 @@
 import './auth.css';
-import { authFetch, isTransientAuthError, setSelectedPortalAccountId, wait } from './auth.js';
+import { authFetch, isTransientAuthError, safeReturnTo, setSelectedPortalAccountId, wait } from './auth.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 document.documentElement.lang = getLocale();
@@ -15,14 +15,6 @@ const errorEl = document.getElementById('error');
 const submitBtn = document.getElementById('submit');
 const passwordInput = document.getElementById('password');
 const togglePasswordBtn = document.getElementById('toggle-password');
-
-function safeReturnTo(value) {
-  const raw = String(value || '').trim();
-  if (!raw || raw.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(raw)) {
-    return '/';
-  }
-  return raw.startsWith('/') ? raw : '/';
-}
 
 function loginDestination() {
   return safeReturnTo(new URLSearchParams(window.location.search).get('return_to'));

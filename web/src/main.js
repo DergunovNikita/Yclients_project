@@ -29,6 +29,11 @@ import {
 } from './dashboardApi.js';
 
 import { escapeHtml } from './html.js';
+import {
+  BRANCH_PLAN_SETTING_FIELDS,
+  STAFF_PLAN_SETTING_FIELDS_BY_CATEGORY,
+  buildPlanSettingsPayload,
+} from './planSettings.js';
 import { initReports } from './reports/index.js';
 import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
 
@@ -189,6 +194,11 @@ const viewRequestScopes = {
   branches: createLatestRequestScope(),
 };
 const viewsWithData = new Set();
+
+window.addEventListener('portal:session-transition', () => {
+  Object.values(viewRequestScopes).forEach((scope) => scope.abort());
+  reportsController?.clear();
+});
 
 const ADMIN_HIDDEN_METRIC_CODES = new Set(['revenue', 'avg_check_total']);
 const SETTINGS_ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
@@ -1352,15 +1362,7 @@ function renderPlanSettingsBranches(rows) {
     els.planSettingsBranches.innerHTML = `<div class="empty compact">${t('dash.noBranches')}</div>`;
     return;
   }
-  const fields = [
-    ['wax_pct', t('dash.waxPct')],
-    ['head_care_pct', t('dash.headCarePct')],
-    ['face_care_pct', t('dash.faceCarePct')],
-    ['camouflage_pct', t('dash.camouflagePct')],
-    ['cosmo_pct', t('dash.cosmoPct')],
-    ['opz_pct', t('dash.opzPct')],
-    ['cosmo_price', t('dash.cosmoPrice')],
-  ];
+  const fields = BRANCH_PLAN_SETTING_FIELDS.map((field) => [field, planSettingFieldLabel(field)]);
   els.planSettingsBranchMeta.textContent = t('dash.branchesMeta', { count: rows.length });
   els.planSettingsBranches.innerHTML = `
     <div class="table-scroll plan-settings-scroll">
@@ -1430,14 +1432,13 @@ function renderPlanSettingsStaff(rows) {
   els.planSettingsStaffMeta.textContent = t('dash.planSettingsStaffMeta', { barbers: barbers.length, admins: admins.length });
   els.planSettingsStaff.innerHTML = [
     renderPlanSettingsStaffSection(t('dash.barbers'), barbers, [
-      ['clients', t('dash.clientsCount')],
-      ['avg_check_total', t('dash.averageCheckShort')],
+      ...STAFF_PLAN_SETTING_FIELDS_BY_CATEGORY.barber.map((field) => [field, planSettingFieldLabel(field)]),
     ]),
-    renderPlanSettingsStaffSection(t('dash.administrators'), admins, [
-      ['clients', t('dash.clientsCount')],
-      ['reviews_qty', t('dash.reviews')],
-      ['cosmo_qty', t('dash.cosmoQty')],
-    ]),
+    renderPlanSettingsStaffSection(
+      t('dash.administrators'),
+      admins,
+      STAFF_PLAN_SETTING_FIELDS_BY_CATEGORY.administrator.map((field) => [field, planSettingFieldLabel(field)]),
+    ),
   ].join('') || `<div class="empty compact">${t('dash.noActiveStaff')}</div>`;
 }
 
@@ -1454,31 +1455,31 @@ function planSettingsInputValue(selector) {
   return value === '' ? null : value;
 }
 
-function collectPlanSettingsPayload() {
-  const branches = (planSettingsData?.branches || []).map((row) => ({
-    company_id: Number(row.company_id),
-    wax_pct: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="wax_pct"]`),
-    head_care_pct: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="head_care_pct"]`),
-    face_care_pct: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="face_care_pct"]`),
-    camouflage_pct: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="camouflage_pct"]`),
-    cosmo_pct: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="cosmo_pct"]`),
-    opz_pct: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="opz_pct"]`),
-    cosmo_price: planSettingsInputValue(`input[data-plan-branch][data-company-id="${row.company_id}"][data-field="cosmo_price"]`),
-  }));
-  const staff = (planSettingsData?.staff || []).map((row) => ({
-    company_id: Number(row.company_id),
-    staff_id: Number(row.staff_id),
-    staff_category: row.staff_category,
-    clients: planSettingsInputValue(`input[data-plan-staff][data-staff-id="${row.staff_id}"][data-field="clients"]`),
-    avg_check_total: planSettingsInputValue(`input[data-plan-staff][data-staff-id="${row.staff_id}"][data-field="avg_check_total"]`),
-    reviews_qty: planSettingsInputValue(`input[data-plan-staff][data-staff-id="${row.staff_id}"][data-field="reviews_qty"]`),
-    cosmo_qty: planSettingsInputValue(`input[data-plan-staff][data-staff-id="${row.staff_id}"][data-field="cosmo_qty"]`),
-  }));
-  return {
-    month: els.planSettingsMonth.value,
-    branches,
-    staff,
+function planSettingFieldLabel(field) {
+  const translationKeys = {
+    wax_pct: 'dash.waxPct',
+    head_care_pct: 'dash.headCarePct',
+    face_care_pct: 'dash.faceCarePct',
+    camouflage_pct: 'dash.camouflagePct',
+    cosmo_pct: 'dash.cosmoPct',
+    opz_pct: 'dash.opzPct',
+    cosmo_price: 'dash.cosmoPrice',
+    clients: 'dash.clientsCount',
+    avg_check_total: 'dash.averageCheckShort',
+    reviews_qty: 'dash.reviews',
+    cosmo_qty: 'dash.cosmoQty',
   };
+  return t(translationKeys[field]);
+}
+
+function collectPlanSettingsPayload() {
+  const readValue = (scope, row, field) => {
+    const idSelector = scope === 'branch'
+      ? `[data-company-id="${row.company_id}"]`
+      : `[data-staff-id="${row.staff_id}"]`;
+    return planSettingsInputValue(`input[data-plan-${scope}]${idSelector}[data-field="${field}"]`);
+  };
+  return buildPlanSettingsPayload(planSettingsData, els.planSettingsMonth.value, readValue);
 }
 
 function updatePlanSettingsDirtyFromForm() {

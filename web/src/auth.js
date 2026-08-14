@@ -4,16 +4,205 @@ const PORTAL_ACCOUNT_KEY = 'portal_account_id';
 const USER_EMAIL_KEY = 'portal_user_email';
 const CSRF_COOKIE_NAME = 'portal_csrf';
 const CSRF_HEADER_NAME = 'X-CSRF-Token';
+const AUTH_EVENT_KEY = 'portal_auth_event';
+const AUTH_CHANNEL_NAME = 'portal-auth-session';
+const REFRESH_LOCK_NAME = 'portal-auth-refresh';
+const SESSION_PROBE_INTERVAL_MS = 1000;
+const PEER_REFRESH_WAIT_MS = 750;
+const REAUTH_REQUIRED = Symbol('reauth-required');
 const apiBase = import.meta.env.VITE_API_BASE || '';
 let refreshInFlight = null;
 let reauthInFlight = null;
+let activeSessionUser = null;
+let activeSessionFingerprint = '';
+let authChannel = null;
+let coordinationStarted = false;
+let sessionProbeInFlight = null;
+let lastSessionProbeAt = 0;
+let sessionTransitionStarted = false;
+let peerRefreshVersion = 0;
+const peerRefreshWaiters = new Set();
+
+function localStore() {
+  return typeof localStorage === 'undefined' ? null : localStorage;
+}
+
+function tabStore() {
+  return typeof sessionStorage === 'undefined' ? null : sessionStorage;
+}
+
+function normalizedPath(path) {
+  try {
+    return new URL(String(path), typeof window === 'undefined' ? 'https://app.invalid' : window.location.origin).pathname;
+  } catch {
+    return String(path).split('?', 1)[0];
+  }
+}
+
+function sessionUserFromPayload(path, payload) {
+  const requestPath = normalizedPath(path);
+  if (['/auth/login', '/auth/demo-login', '/auth/refresh'].includes(requestPath)) {
+    return payload?.data?.user || null;
+  }
+  if (requestPath === '/auth/me') {
+    return payload?.data?.email ? payload.data : null;
+  }
+  return null;
+}
+
+function sessionFingerprint(user) {
+  const companyIds = [...(user?.company_ids || [])].map(Number).sort((left, right) => left - right);
+  return JSON.stringify({
+    id: Number(user?.id),
+    role: String(user?.role || ''),
+    portalAccountId: user?.portal_account_id == null ? null : Number(user.portal_account_id),
+    companyIds,
+    isDemo: Boolean(user?.is_demo),
+  });
+}
+
+function sessionTransitionError() {
+  const error = new Error('Session identity changed');
+  error.name = 'SessionTransitionError';
+  return error;
+}
+
+function clearSensitivePage() {
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof Event === 'function') {
+    window.dispatchEvent(new Event('portal:session-transition'));
+  }
+  if (typeof document !== 'undefined' && typeof document.body?.replaceChildren === 'function') {
+    document.body.replaceChildren();
+    document.body.setAttribute?.('aria-busy', 'true');
+  }
+}
+
+function beginSessionTransition(destination = 'reload', loginPath = '/login.html') {
+  if (sessionTransitionStarted || typeof window === 'undefined') return;
+  sessionTransitionStarted = true;
+  clearSensitivePage();
+  if (destination === 'login') {
+    window.location.href = loginPathWithReturnTo(loginPath);
+  } else if (typeof window.location.reload === 'function') {
+    window.location.reload();
+  } else {
+    window.location.href = currentReturnTo();
+  }
+}
+
+function publishAuthEvent(type) {
+  const event = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    type,
+  };
+  authChannel?.postMessage(event);
+  const storage = localStore();
+  if (!storage) return;
+  try {
+    storage.setItem(AUTH_EVENT_KEY, JSON.stringify(event));
+    storage.removeItem(AUTH_EVENT_KEY);
+  } catch {
+    /* BroadcastChannel remains the primary coordination path. */
+  }
+}
+
+function handleAuthEvent(event) {
+  const type = event?.type;
+  if (type === 'session-changed') {
+    beginSessionTransition('reload');
+  } else if (type === 'session-ended') {
+    beginSessionTransition('login');
+  } else if (type === 'session-refreshed') {
+    peerRefreshVersion += 1;
+    peerRefreshWaiters.forEach((resolve) => resolve(true));
+    peerRefreshWaiters.clear();
+  }
+}
+
+function waitForPeerRefresh(versionBeforeAttempt) {
+  if (peerRefreshVersion !== versionBeforeAttempt) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (refreshed) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      peerRefreshWaiters.delete(finish);
+      resolve(refreshed);
+    };
+    const timeoutId = setTimeout(() => finish(false), PEER_REFRESH_WAIT_MS);
+    peerRefreshWaiters.add(finish);
+    if (peerRefreshVersion !== versionBeforeAttempt) finish(true);
+  });
+}
+
+function ensureSessionCoordination() {
+  if (coordinationStarted || typeof window === 'undefined') return;
+  coordinationStarted = true;
+
+  if (typeof window.BroadcastChannel === 'function') {
+    authChannel = new window.BroadcastChannel(AUTH_CHANNEL_NAME);
+    authChannel.addEventListener('message', (event) => handleAuthEvent(event.data));
+  }
+  window.addEventListener?.('storage', (event) => {
+    if (event.key !== AUTH_EVENT_KEY || !event.newValue) return;
+    try {
+      handleAuthEvent(JSON.parse(event.newValue));
+    } catch {
+      /* Ignore malformed cross-tab events. */
+    }
+  });
+  window.addEventListener?.('focus', () => {
+    void revalidateSessionIdentity();
+  });
+  window.addEventListener?.('pageshow', (event) => {
+    if (event.persisted) void revalidateSessionIdentity({ force: true });
+  });
+  if (typeof document === 'undefined') return;
+  document.addEventListener?.('visibilitychange', () => {
+    if (document.visibilityState === 'visible') void revalidateSessionIdentity();
+  });
+}
+
+function isLoginPage() {
+  return typeof window !== 'undefined' && window.location.pathname.endsWith('/login.html');
+}
+
+function rememberSessionPayload(path, payload, { allowIdentityChange = false } = {}) {
+  const user = sessionUserFromPayload(path, payload);
+  if (!user) return;
+
+  const nextFingerprint = sessionFingerprint(user);
+  if (activeSessionFingerprint && activeSessionFingerprint !== nextFingerprint && !allowIdentityChange) {
+    publishAuthEvent('session-changed');
+    beginSessionTransition('reload');
+    throw sessionTransitionError();
+  }
+
+  activeSessionUser = user;
+  activeSessionFingerprint = nextFingerprint;
+  lastSessionProbeAt = Date.now();
+  if (user.role !== 'platform_admin') {
+    tabStore()?.removeItem(PORTAL_ACCOUNT_KEY);
+  }
+  if (user.email) {
+    localStore()?.setItem(USER_EMAIL_KEY, String(user.email));
+  }
+
+  const requestPath = normalizedPath(path);
+  if (requestPath === '/auth/login' || requestPath === '/auth/demo-login') {
+    publishAuthEvent('session-changed');
+  } else if (requestPath === '/auth/refresh') {
+    publishAuthEvent('session-refreshed');
+  }
+}
 
 function currentReturnTo() {
   if (typeof window === 'undefined') return '/';
   return `${window.location.pathname}${window.location.search}${window.location.hash}` || '/';
 }
 
-function safeReturnTo(value) {
+export function safeReturnTo(value) {
   const raw = String(value || '').trim();
   if (!raw || raw.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(raw)) {
     return '/';
@@ -32,23 +221,28 @@ export function redirectToLogin(loginPath = '/login.html') {
 }
 
 function clearLegacyAccessToken() {
-  for (let index = localStorage.length - 1; index >= 0; index -= 1) {
-    const key = localStorage.key(index);
+  const storage = localStore();
+  if (!storage) return;
+  for (let index = storage.length - 1; index >= 0; index -= 1) {
+    const key = storage.key(index);
     const parts = key ? key.split('_') : [];
     if (parts.length === 3 && parts[0] === 'portal' && parts[1] === 'access' && parts[2] === 'token') {
-      localStorage.removeItem(key);
+      storage.removeItem(key);
     }
   }
 }
 
-function clearLocalAuthState({ clearPortalAccount = true } = {}) {
+function clearLocalAuthState({ clearPortalAccount = true, clearEmail = false } = {}) {
   clearLegacyAccessToken();
+  localStore()?.removeItem(PORTAL_ACCOUNT_KEY);
   if (clearPortalAccount) {
-    localStorage.removeItem(PORTAL_ACCOUNT_KEY);
+    tabStore()?.removeItem(PORTAL_ACCOUNT_KEY);
   }
+  if (clearEmail) localStore()?.removeItem(USER_EMAIL_KEY);
 }
 
 clearLocalAuthState({ clearPortalAccount: false });
+ensureSessionCoordination();
 
 export function resolveApiPath(path) {
   if (!apiBase) {
@@ -58,29 +252,26 @@ export function resolveApiPath(path) {
 }
 
 export function setToken() {
-  clearLocalAuthState();
-}
-
-function rememberUser(payload) {
-  const user = payload?.data?.user || (payload?.data?.email ? payload.data : null);
-  if (user?.email) {
-    localStorage.setItem(USER_EMAIL_KEY, String(user.email));
-  }
+  activeSessionUser = null;
+  activeSessionFingerprint = '';
+  clearLocalAuthState({ clearEmail: true });
+  publishAuthEvent('session-ended');
+  clearSensitivePage();
 }
 
 function cachedUserEmail() {
-  return localStorage.getItem(USER_EMAIL_KEY) || '';
+  return localStore()?.getItem(USER_EMAIL_KEY) || '';
 }
 
 export function getSelectedPortalAccountId() {
-  return localStorage.getItem(PORTAL_ACCOUNT_KEY) || '';
+  return tabStore()?.getItem(PORTAL_ACCOUNT_KEY) || '';
 }
 
 export function setSelectedPortalAccountId(portalAccountId) {
   if (portalAccountId) {
-    localStorage.setItem(PORTAL_ACCOUNT_KEY, String(portalAccountId));
+    tabStore()?.setItem(PORTAL_ACCOUNT_KEY, String(portalAccountId));
   } else {
-    localStorage.removeItem(PORTAL_ACCOUNT_KEY);
+    tabStore()?.removeItem(PORTAL_ACCOUNT_KEY);
   }
 }
 
@@ -88,7 +279,7 @@ export function authHeaders(extra = {}) {
   const headers = { ...extra };
   clearLegacyAccessToken();
   const portalAccountId = getSelectedPortalAccountId();
-  if (portalAccountId) {
+  if (portalAccountId && activeSessionUser?.role === 'platform_admin') {
     headers['X-Portal-Account-Id'] = portalAccountId;
   }
   return headers;
@@ -196,6 +387,28 @@ export function wait(ms) {
   });
 }
 
+export async function revalidateSessionIdentity({ force = false } = {}) {
+  if (sessionTransitionStarted) return false;
+  if (!hasSessionHint()) {
+    if (activeSessionUser) beginSessionTransition('login');
+    return false;
+  }
+  if (!force && Date.now() - lastSessionProbeAt < SESSION_PROBE_INTERVAL_MS) return true;
+  if (sessionProbeInFlight) return sessionProbeInFlight;
+
+  sessionProbeInFlight = authFetch('/auth/me', { __skipReauth: true })
+    .then(() => true)
+    .catch((error) => {
+      if (error?.name === 'SessionTransitionError') return false;
+      if (isAuthFailure(error)) beginSessionTransition('login');
+      return false;
+    })
+    .finally(() => {
+      sessionProbeInFlight = null;
+    });
+  return sessionProbeInFlight;
+}
+
 async function refreshSession() {
   if (!refreshInFlight) {
     refreshInFlight = fetch(resolveApiPath('/auth/refresh'), {
@@ -211,7 +424,7 @@ async function refreshSession() {
     throw new Error(t('authErrors.authenticationRequired'));
   }
   const payload = await parsePayload(response);
-  rememberUser(payload);
+  rememberSessionPayload('/auth/refresh', payload);
   return payload;
 }
 
@@ -332,10 +545,15 @@ async function promptReauth() {
           nextError.status = response.status;
           throw nextError;
         }
-        rememberUser(payload);
+        rememberSessionPayload('/auth/login', payload);
         cleanup();
         resolve(payload);
       } catch (error) {
+        if (error?.name === 'SessionTransitionError') {
+          cleanup();
+          reject(error);
+          return;
+        }
         errorEl.textContent = error.message;
         errorEl.hidden = false;
         submitBtn.disabled = false;
@@ -360,18 +578,75 @@ async function doFetch(path, options = {}) {
   });
 }
 
-export async function requestWithReauth(path, options = {}, requestFn = doFetch) {
+async function withRefreshLock(callback) {
+  const locks = typeof navigator === 'undefined' ? null : navigator.locks;
+  if (typeof locks?.request !== 'function') {
+    return callback({ coordinated: false, waitedForAnotherPage: false });
+  }
+
+  let acquiredImmediately = false;
+  let callbackStarted = false;
+  let immediateResult;
+  try {
+    await locks.request(REFRESH_LOCK_NAME, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
+      if (!lock) return;
+      acquiredImmediately = true;
+      callbackStarted = true;
+      immediateResult = await callback({ coordinated: true, waitedForAnotherPage: false });
+    });
+  } catch (error) {
+    if (callbackStarted) throw error;
+    return callback({ coordinated: false, waitedForAnotherPage: false });
+  }
+  if (acquiredImmediately) return immediateResult;
+
+  callbackStarted = false;
+  try {
+    return await locks.request(REFRESH_LOCK_NAME, { mode: 'exclusive' }, () => {
+      callbackStarted = true;
+      return callback({ coordinated: true, waitedForAnotherPage: true });
+    });
+  } catch (error) {
+    if (callbackStarted) throw error;
+    return callback({ coordinated: false, waitedForAnotherPage: false });
+  }
+}
+
+export async function requestWithReauth(path, options = {}, requestFn = doFetch, reauthFn = promptReauth) {
   let response = await requestFn(path, options);
   if (response.status === 401 && !options.__retried && !path.startsWith('/auth/refresh') && !isPublicAuthPath(path)) {
-    try {
-      await refreshSession();
-    } catch {
-      if (options.__skipReauth) {
-        return response;
+    const lockResult = await withRefreshLock(async ({ coordinated, waitedForAnotherPage }) => {
+      let unauthorizedResponse = response;
+      const refreshVersionBeforeAttempt = peerRefreshVersion;
+      if (waitedForAnotherPage) {
+        const peerRetry = await requestFn(path, { ...options, __retried: true });
+        if (peerRetry.status !== 401) return peerRetry;
+        unauthorizedResponse = peerRetry;
       }
-      await promptReauth();
+      try {
+        await refreshSession();
+      } catch (error) {
+        if (error?.name === 'SessionTransitionError') throw error;
+        if (!coordinated) {
+          const peerRetry = await requestFn(path, { ...options, __retried: true });
+          if (peerRetry.status !== 401) return peerRetry;
+          unauthorizedResponse = peerRetry;
+          await waitForPeerRefresh(refreshVersionBeforeAttempt);
+          const settledPeerRetry = await requestFn(path, { ...options, __retried: true });
+          if (settledPeerRetry.status !== 401) return settledPeerRetry;
+          unauthorizedResponse = settledPeerRetry;
+        }
+        if (options.__skipReauth) return unauthorizedResponse;
+        return { response: unauthorizedResponse, type: REAUTH_REQUIRED };
+      }
+      return requestFn(path, { ...options, __retried: true });
+    });
+    if (lockResult?.type === REAUTH_REQUIRED) {
+      await reauthFn();
+      response = await requestFn(path, { ...options, __retried: true });
+    } else {
+      response = lockResult;
     }
-    response = await requestFn(path, { ...options, __retried: true });
   }
   return response;
 }
@@ -384,7 +659,10 @@ export async function authFetch(path, options = {}) {
     error.status = response.status;
     throw error;
   }
-  rememberUser(payload);
+  const requestPath = normalizedPath(path);
+  rememberSessionPayload(path, payload, {
+    allowIdentityChange: requestPath === '/auth/demo-login' || (requestPath === '/auth/login' && isLoginPage()),
+  });
   return payload;
 }
 
@@ -406,7 +684,11 @@ export async function logout(loginPath = '/login.html') {
   } catch {
     /* local cleanup and redirect still happen */
   }
-  clearLocalAuthState();
+  activeSessionUser = null;
+  activeSessionFingerprint = '';
+  clearLocalAuthState({ clearEmail: true });
+  publishAuthEvent('session-ended');
+  clearSensitivePage();
   window.location.href = loginPath;
 }
 

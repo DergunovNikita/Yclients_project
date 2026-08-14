@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException, Request
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
@@ -158,6 +159,53 @@ async def test_refresh_keeps_cookie_session_without_returning_access_token(auth_
     assert any(f'{ACCESS_COOKIE_NAME}=' in item and 'HttpOnly' in item for item in set_cookie_headers)
     assert any(f'{REFRESH_COOKIE_NAME}=' in item and 'HttpOnly' in item for item in set_cookie_headers)
     assert any(f'{AUTH_CSRF_COOKIE_NAME}=' in item and 'HttpOnly' not in item for item in set_cookie_headers)
+
+
+@pytest.mark.asyncio
+async def test_refresh_rotation_rejects_a_token_preloaded_before_a_competing_rotation(auth_db, monkeypatch):
+    raw_refresh = 'preloaded-refresh-token'
+    refresh_record = PortalRefreshToken(
+        user_id=1,
+        token_hash=auth_sessions._hash_token(raw_refresh),
+        expires_at=datetime.utcnow() + timedelta(days=7),
+        last_used_at=datetime.utcnow(),
+        created_at=datetime.utcnow(),
+    )
+    auth_db.add(refresh_record)
+    await auth_db.commit()
+
+    async def load_preloaded_refresh(_db, _raw_refresh):
+        return refresh_record
+
+    monkeypatch.setattr(auth_sessions, '_load_active_refresh', load_preloaded_refresh)
+    request = Request({
+        'type': 'http',
+        'headers': [],
+        'client': ('127.0.0.1', 12345),
+        'scheme': 'https',
+        'server': ('test', 443),
+    })
+    _, rotated = await auth_sessions.rotate_session(
+        auth_db,
+        raw_refresh,
+        request,
+        access_token_fn=lambda _user, _session_id: 'access-token',
+    )
+    await auth_db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_sessions.rotate_session(
+            auth_db,
+            raw_refresh,
+            request,
+            access_token_fn=lambda _user, _session_id: 'access-token',
+        )
+
+    assert exc_info.value.status_code == 401
+    stored_hash = await auth_db.scalar(
+        select(PortalRefreshToken.token_hash).where(PortalRefreshToken.id == refresh_record.id)
+    )
+    assert stored_hash == auth_sessions._hash_token(rotated.refresh_token)
 
 
 @pytest.mark.asyncio
@@ -1946,6 +1994,73 @@ async def test_manager_cannot_create_or_update_users(auth_db, monkeypatch):
         assert listed.status_code == 403
 
     app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize('phase', ['credential_test', 'company_discovery'])
+@pytest.mark.parametrize(('failure_kind', 'expected_status'), [('http', 429), ('unexpected', 500)])
+@pytest.mark.asyncio
+async def test_create_yclients_credential_failures_are_sanitized_and_audited(
+    auth_db,
+    monkeypatch,
+    phase,
+    failure_kind,
+    expected_status,
+):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    secret = 'credential-create-secret'
+    failure = (
+        HTTPException(status_code=429, detail=f'upstream rejected {secret}')
+        if failure_kind == 'http'
+        else RuntimeError(f'unexpected failure with {secret}')
+    )
+
+    if phase == 'credential_test':
+        def fail_credential_test(*_args, **_kwargs):
+            raise failure
+
+        monkeypatch.setattr(auth_routes, '_test_source_credentials', fail_credential_test)
+        company_ids = [1]
+    else:
+        monkeypatch.setattr(auth_routes, '_test_source_credentials', lambda *_args, **_kwargs: None)
+
+        async def fail_company_discovery(*_args, **_kwargs):
+            raise failure
+
+        monkeypatch.setattr(auth_routes, '_sync_credential_companies_from_yclients', fail_company_discovery)
+        company_ids = []
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/auth/admin/yclients-credentials',
+            headers={'Authorization': f"Bearer {create_access_token(1, 'owner')}"},
+            json={
+                'title': 'Credential that fails safely',
+                'partner_token': secret,
+                'login': 'login',
+                'password': 'password',
+                'company_ids': company_ids,
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == expected_status
+    assert response.json()['detail'] == 'Data source authentication failed'
+    assert secret not in response.text
+    assert await auth_db.scalar(select(func.count()).select_from(YClientsCredential)) == 0
+    audits = list((await auth_db.scalars(
+        select(PortalAuditEvent).where(PortalAuditEvent.action == 'yclients_credentials.create_failed')
+    )).all())
+    assert len(audits) == 1
+    assert audits[0].portal_account_id == 1
+    assert audits[0].metadata_json == {
+        'success': False,
+        'error_type': 'HTTPException' if failure_kind == 'http' else 'RuntimeError',
+    }
 
 
 @pytest.mark.asyncio
