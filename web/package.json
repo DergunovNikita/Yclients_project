@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "test:auth": "node --test tests/auth-runtime.test.mjs tests/proxy-runtime.test.mjs",
-    "test:dashboard": "node --test tests/dashboard-request-state.test.mjs tests/dashboard-api.test.mjs tests/plan-settings.test.mjs",
+    "test:dashboard": "node --test tests/dashboard-request-state.test.mjs tests/dashboard-api.test.mjs tests/plan-settings.test.mjs tests/plan-metric-visibility.test.mjs",
     "scan:auth-tokens": "node tests/browser-auth-scan.mjs .",
     "scan:auth-build": "node tests/browser-auth-scan.mjs dist",
     "preview": "vite preview"

@@ -211,6 +211,10 @@
       background: #ffffff;
     }
 
+    .plan-toolbar {
+      grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) minmax(190px, 1.3fr) minmax(190px, 1.3fr) auto auto;
+    }
+
     .tabs {
       display: flex;
       gap: 8px;
@@ -309,6 +313,117 @@
 
     .toolbar .custom-select__search {
       font-size: 12px;
+    }
+
+    .plan-column-picker {
+      position: relative;
+    }
+
+    .plan-column-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      white-space: nowrap;
+    }
+
+    .plan-column-toggle:focus-visible,
+    .plan-column-menu button:focus-visible,
+    .plan-column-option:focus-within {
+      outline: 3px solid rgb(15 118 110 / 24%);
+      outline-offset: 2px;
+    }
+
+    .plan-column-count {
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: #e6fffb;
+      color: #0f766e;
+      font-size: 11px;
+    }
+
+    .plan-column-menu {
+      position: absolute;
+      z-index: 20;
+      top: calc(100% + 8px);
+      right: 0;
+      width: min(320px, calc(100vw - 52px));
+      padding: 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: 0 14px 32px rgb(15 23 42 / 16%);
+      color: #172033;
+      text-transform: none;
+    }
+
+    .plan-column-menu-title {
+      margin-bottom: 10px;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .plan-column-actions {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .toolbar .plan-column-menu button {
+      min-height: 32px;
+      padding: 5px 8px;
+      grid-column: auto;
+      font-size: 12px;
+    }
+
+    .plan-column-list {
+      display: grid;
+      max-height: 290px;
+      overflow-y: auto;
+      border-top: 1px solid #e2e8f0;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    .plan-column-option {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      gap: 9px;
+      padding: 8px 4px;
+      color: #334155;
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: none;
+      cursor: pointer;
+    }
+
+    .plan-column-option + .plan-column-option {
+      border-top: 1px solid #f1f5f9;
+    }
+
+    .plan-column-option:hover {
+      background: #f8fafc;
+    }
+
+    .plan-column-option input {
+      width: 16px;
+      min-height: 16px;
+      margin: 0;
+      padding: 0;
+      accent-color: #0f766e;
+    }
+
+    .plan-column-option input:disabled + span {
+      color: #94a3b8;
+    }
+
+    .plan-column-hint {
+      margin: 9px 0 0;
+      color: #64748b;
+      font-size: 11px;
+      font-weight: 500;
+      line-height: 1.4;
+      text-transform: none;
     }
 
     button {
@@ -1264,6 +1379,12 @@
       margin-bottom: 0;
     }
 
+    @media (max-width: 1100px) {
+      .plan-toolbar {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+    }
+
     @media (max-width: 900px) {
       .topbar {
         flex-direction: column;
@@ -1288,6 +1409,14 @@
 
       .toolbar button {
         grid-column: 1 / -1;
+      }
+
+      .plan-column-picker {
+        grid-column: 1 / -1;
+      }
+
+      .plan-column-toggle {
+        width: 100%;
       }
 
       .kpi {
@@ -1519,7 +1648,7 @@
     </section>
 
     <section class="view" id="plan-view" data-view="plan">
-      <section class="toolbar" data-i18n-attr="aria-label:dash.ariaPlanFactFilters" aria-label="Filtri piano/consuntivo">
+      <section class="toolbar plan-toolbar" data-i18n-attr="aria-label:dash.ariaPlanFactFilters" aria-label="Filtri piano/consuntivo">
         <label>
           <span data-i18n="dash.from">Da</span>
           <input type="date" id="plan-start" />
@@ -1541,6 +1670,41 @@
           </select>
         </label>
         <button type="button" id="plan-load" data-i18n="dash.refresh">Aggiorna</button>
+        <div class="plan-column-picker" id="plan-column-picker">
+          <button
+            type="button"
+            class="secondary plan-column-toggle"
+            id="plan-column-toggle"
+            aria-controls="plan-column-menu"
+            aria-expanded="false"
+            disabled
+          >
+            <span data-i18n="dash.columns">Colonne</span>
+            <span class="plan-column-count" id="plan-column-count" hidden></span>
+          </button>
+          <div
+            class="plan-column-menu"
+            id="plan-column-menu"
+            role="group"
+            data-i18n-attr="aria-label:dash.columnsMenuAria"
+            aria-label="Selezione colonne"
+            hidden
+          >
+            <div class="plan-column-menu-title" data-i18n="dash.visibleMetrics">Indicatori visibili</div>
+            <div class="plan-column-actions">
+              <button type="button" class="secondary" id="plan-columns-hide-money" data-i18n="dash.hideMoney">
+                Nascondi importi
+              </button>
+              <button type="button" class="secondary" id="plan-columns-show-all" data-i18n="dash.showAll">
+                Mostra tutto
+              </button>
+            </div>
+            <div class="plan-column-list" id="plan-column-list"></div>
+            <p class="plan-column-hint" data-i18n="dash.columnsSessionHint">
+              La selezione verrà reimpostata al ricaricamento della scheda.
+            </p>
+          </div>
+        </div>
       </section>
 
       <div class="plan-insights" id="plan-insights"></div>

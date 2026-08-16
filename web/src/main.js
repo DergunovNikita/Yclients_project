@@ -34,6 +34,12 @@ import {
   STAFF_PLAN_SETTING_FIELDS_BY_CATEGORY,
   buildPlanSettingsPayload,
 } from './planSettings.js';
+import {
+  filterPlanFactForDisplay,
+  hideMoneyPlanMetrics,
+  normalizeHiddenPlanMetricCodes,
+  setPlanMetricHidden,
+} from './planMetricVisibility.js';
 import { initReports } from './reports/index.js';
 import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
 
@@ -65,6 +71,13 @@ const els = {
   tableMeta: document.getElementById('table-meta'),
   planInsights: document.getElementById('plan-insights'),
   planFactTable: document.getElementById('plan-fact-table'),
+  planColumnPicker: document.getElementById('plan-column-picker'),
+  planColumnToggle: document.getElementById('plan-column-toggle'),
+  planColumnMenu: document.getElementById('plan-column-menu'),
+  planColumnList: document.getElementById('plan-column-list'),
+  planColumnCount: document.getElementById('plan-column-count'),
+  planColumnsHideMoney: document.getElementById('plan-columns-hide-money'),
+  planColumnsShowAll: document.getElementById('plan-columns-show-all'),
   reviewFactEditor: document.getElementById('review-fact-editor'),
   reviewFactMeta: document.getElementById('review-fact-meta'),
   reviewFactSave: document.getElementById('review-fact-save'),
@@ -183,6 +196,8 @@ let serviceManagementMutationPending = false;
 let reportsController = null;
 let selectedTenant = null;
 let retryCurrentView = null;
+let currentPlanFactPayload = null;
+let hiddenPlanMetricCodes = new Set();
 const loadedStaffFilters = new WeakSet();
 const staffRequestScopes = new WeakMap();
 const viewRequestScopes = {
@@ -198,6 +213,10 @@ const viewsWithData = new Set();
 window.addEventListener('portal:session-transition', () => {
   Object.values(viewRequestScopes).forEach((scope) => scope.abort());
   reportsController?.clear();
+  currentPlanFactPayload = null;
+  hiddenPlanMetricCodes = new Set();
+  setPlanColumnPickerOpen(false);
+  renderPlanColumnPicker();
 });
 
 const ADMIN_HIDDEN_METRIC_CODES = new Set(['revenue', 'avg_check_total']);
@@ -1006,6 +1025,73 @@ function renderExtraServicesTable(services) {
   `;
 }
 
+function planMetricOptions() {
+  return currentPlanFactPayload?.metrics || [];
+}
+
+function setPlanColumnPickerOpen(open, { restoreFocus = false } = {}) {
+  if (!els.planColumnMenu || !els.planColumnToggle) return;
+  const nextOpen = Boolean(open && !els.planColumnToggle.disabled);
+  els.planColumnMenu.hidden = !nextOpen;
+  els.planColumnToggle.setAttribute('aria-expanded', String(nextOpen));
+  if (!nextOpen && restoreFocus) els.planColumnToggle.focus();
+}
+
+function updatePlanColumnPickerState() {
+  const metrics = planMetricOptions();
+  hiddenPlanMetricCodes = normalizeHiddenPlanMetricCodes(metrics, hiddenPlanMetricCodes);
+  const hiddenCount = hiddenPlanMetricCodes.size;
+  const visibleCount = metrics.length - hiddenCount;
+
+  els.planColumnToggle.disabled = metrics.length === 0;
+  els.planColumnToggle.setAttribute(
+    'aria-label',
+    t('dash.columnsButtonAria', { count: hiddenCount }),
+  );
+  els.planColumnCount.textContent = t('dash.columnsHiddenCount', { count: hiddenCount });
+  els.planColumnCount.hidden = hiddenCount === 0;
+
+  els.planColumnList.querySelectorAll('[data-plan-metric-code]').forEach((input) => {
+    const hidden = hiddenPlanMetricCodes.has(input.dataset.planMetricCode);
+    input.checked = !hidden;
+    input.disabled = !hidden && visibleCount <= 1;
+  });
+
+  const hideMoneyResult = hideMoneyPlanMetrics(metrics, hiddenPlanMetricCodes);
+  els.planColumnsHideMoney.disabled = hideMoneyResult.size === hiddenPlanMetricCodes.size
+    && [...hideMoneyResult].every((code) => hiddenPlanMetricCodes.has(code));
+  els.planColumnsShowAll.disabled = hiddenCount === 0;
+  if (!metrics.length) setPlanColumnPickerOpen(false);
+}
+
+function renderPlanColumnPicker() {
+  const metrics = planMetricOptions();
+  hiddenPlanMetricCodes = normalizeHiddenPlanMetricCodes(metrics, hiddenPlanMetricCodes);
+  els.planColumnList.innerHTML = metrics
+    .map((metric) => `
+      <label class="plan-column-option">
+        <input
+          type="checkbox"
+          data-plan-metric-code="${escapeHtml(metric.code)}"
+          ${hiddenPlanMetricCodes.has(metric.code) ? '' : 'checked'}
+        />
+        <span>${escapeHtml(metric.label)}</span>
+      </label>
+    `)
+    .join('');
+  updatePlanColumnPickerState();
+}
+
+function renderCurrentPlanFact() {
+  renderPlanFact(filterPlanFactForDisplay(currentPlanFactPayload, hiddenPlanMetricCodes));
+}
+
+function applyPlanMetricVisibility(nextHiddenCodes) {
+  hiddenPlanMetricCodes = nextHiddenCodes;
+  renderCurrentPlanFact();
+  updatePlanColumnPickerState();
+}
+
 function renderPlanTable(groups, metrics) {
   const rowTypes = [
     ['plan', t('dash.plan')],
@@ -1216,8 +1302,8 @@ function renderPlanInsights(planFact) {
   }
 
   // The goods KPI chart repeats the count chart's wax/camouflage/care metrics,
-  // so only show it in the network/branch view where per-staff charts are absent.
-  if (goodsKpis.length && !hasSelectedStaffCharts) {
+  // so only show it in the network/branch view, never for a selected employee.
+  if (goodsKpis.length && !selectedStaffPlan) {
     panels.push(`
       <div class="panel wide">
         <div class="panel-title">
@@ -2262,7 +2348,9 @@ async function loadPlanFact() {
       signal: request.signal,
     });
     if (!request.isCurrent()) return;
-    renderPlanFact(payload.data);
+    currentPlanFactPayload = payload.data;
+    renderPlanColumnPicker();
+    renderCurrentPlanFact();
     viewsWithData.add('plan');
     clearError();
     setLoadedApiState(payload.data, { empty: !payload.data?.groups?.length });
@@ -2555,6 +2643,35 @@ filterEls.plan.branch.addEventListener('change', async () => {
   await refreshStaffForBranch(filterEls.plan, loadPlanFact);
 });
 filterEls.plan.staff.addEventListener('change', () => loadPlanFact());
+els.planColumnToggle.addEventListener('click', () => {
+  setPlanColumnPickerOpen(els.planColumnMenu.hidden);
+});
+els.planColumnList.addEventListener('change', (event) => {
+  const input = event.target.closest('[data-plan-metric-code]');
+  if (!input) return;
+  applyPlanMetricVisibility(
+    setPlanMetricHidden(
+      planMetricOptions(),
+      hiddenPlanMetricCodes,
+      input.dataset.planMetricCode,
+      !input.checked,
+    ),
+  );
+});
+els.planColumnsHideMoney.addEventListener('click', () => {
+  applyPlanMetricVisibility(hideMoneyPlanMetrics(planMetricOptions(), hiddenPlanMetricCodes));
+});
+els.planColumnsShowAll.addEventListener('click', () => {
+  applyPlanMetricVisibility(new Set());
+});
+document.addEventListener('click', (event) => {
+  if (!els.planColumnPicker.contains(event.target)) setPlanColumnPickerOpen(false);
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !els.planColumnMenu.hidden) {
+    setPlanColumnPickerOpen(false, { restoreFocus: true });
+  }
+});
 filterEls.reviewFacts.load.addEventListener('click', () => loadReviewFacts());
 filterEls.reviewFacts.month.addEventListener('change', () => loadReviewFacts());
 filterEls.reviewFacts.branch.addEventListener('change', async () => {

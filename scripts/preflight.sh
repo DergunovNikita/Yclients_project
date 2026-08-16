@@ -86,7 +86,7 @@ if command -v gitleaks >/dev/null 2>&1; then
     fail "gitleaks flagged potential secrets"
   fi
 else
-  warn "gitleaks not installed — see CLAUDE.md for install hint"
+  warn "gitleaks not installed — see AGENTS.md for install hint"
 fi
 
 if [[ $status -eq 0 ]]; then
