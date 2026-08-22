@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
 
 from sync_parsing import parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_time
 
@@ -11,6 +11,16 @@ def test_parse_date_accepts_iso_values():
 def test_parse_datetime_accepts_timestamp_values():
     assert parse_datetime('2026-03-28 11:22:33') == datetime(2026, 3, 28, 11, 22, 33)
     assert parse_datetime('2026-03-28') == datetime(2026, 3, 28, 0, 0, 0)
+
+
+def test_parse_datetime_normalizes_aware_values_to_utc_without_host_timezone():
+    source_timezone = timezone(timedelta(hours=3))
+
+    assert parse_datetime(datetime(2026, 3, 28, 11, 22, tzinfo=source_timezone)) == datetime(
+        2026, 3, 28, 8, 22
+    )
+    assert parse_datetime('2026-03-28T11:22:00+03:00') == datetime(2026, 3, 28, 8, 22)
+    assert parse_datetime('2026-03-28T08:22:00Z') == datetime(2026, 3, 28, 8, 22)
 
 
 def test_parse_time_accepts_hh_mm_and_hh_mm_ss():

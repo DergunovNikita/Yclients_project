@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, time
 from contextlib import contextmanager
 
 import pytest
@@ -146,6 +146,12 @@ SYNC_STEP_FUNCTIONS = (
     'sync_analytics_sources_and_statuses',
     'sync_z_report',
 )
+
+
+def test_company_timezone_prefers_valid_source_and_defaults_to_moscow():
+    assert sync_pipeline._company_timezone({'timezone': 'Europe/Rome'}, 'Europe/Moscow') == 'Europe/Rome'
+    assert sync_pipeline._company_timezone({}, None) == 'Europe/Moscow'
+    assert sync_pipeline._company_timezone({'timezone': 'invalid'}, 'Europe/Rome') == 'Europe/Rome'
 
 
 def patch_execute_sync_dependencies(monkeypatch, db, credential, *, purge_result=True):
@@ -1495,7 +1501,13 @@ def test_sync_staff_schedules_uses_internal_staff_id_for_tenant_scoped_staff():
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(
         engine,
-        tables=[Group.__table__, Company.__table__, Staff.__table__, StaffSchedule.__table__],
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Staff.__table__,
+            StaffSchedule.__table__,
+            SyncSourceState.__table__,
+        ],
     )
     Session = sessionmaker(bind=engine)
     db = Session()
@@ -1509,10 +1521,181 @@ def test_sync_staff_schedules_uses_internal_staff_id_for_tenant_scoped_staff():
             {'staff_id': 7, 'date': '2025-01-10', 'slots': [{'from': '09:00', 'to': '10:00'}]},
         ])
 
-        assert sync_pipeline.sync_staff_schedules(api, db, '1') is True
+        assert sync_pipeline.sync_staff_schedules(
+            api,
+            db,
+            '1',
+            start_date='2025-01-10',
+            end_date='2025-01-10',
+        ) is True
 
         schedule = db.query(StaffSchedule).one()
         assert schedule.staff_id == 100
+        coverage = db.get(
+            SyncSourceState,
+            {'company_id': 1, 'source': sync_pipeline.STAFF_SCHEDULE_SOURCE},
+        )
+        assert (coverage.period_start, coverage.period_end) == (
+            date(2025, 1, 10),
+            date(2025, 1, 10),
+        )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_staff_schedules_deduplicates_slots_and_clears_empty_window():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Staff.__table__,
+            StaffSchedule.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add(Staff(id=100, external_id=7, source_type='yclients', name='Admin', company_id=1))
+        db.commit()
+
+        duplicated = {
+            'staff_id': 7,
+            'date': '2025-01-10',
+            'slots': [
+                {'from': '09:00', 'to': '18:00'},
+                {'from': '09:00', 'to': '18:00'},
+            ],
+        }
+        assert sync_pipeline.sync_staff_schedules(
+            FakeSchedulesAPI([duplicated, dict(duplicated)]),
+            db,
+            '1',
+            start_date='2025-01-01',
+            end_date='2025-01-31',
+        ) is True
+        assert db.query(StaffSchedule).count() == 1
+
+        assert sync_pipeline.sync_staff_schedules(
+            FakeSchedulesAPI([]),
+            db,
+            '1',
+            start_date='2025-01-01',
+            end_date='2025-01-31',
+        ) is True
+        assert db.query(StaffSchedule).count() == 0
+        coverage = db.get(
+            SyncSourceState,
+            {'company_id': 1, 'source': sync_pipeline.STAFF_SCHEDULE_SOURCE},
+        )
+        assert (coverage.period_start, coverage.period_end) == (
+            date(2025, 1, 1),
+            date(2025, 1, 31),
+        )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_staff_schedules_preserves_data_when_source_is_unavailable():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Staff.__table__,
+            StaffSchedule.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add(Staff(id=100, external_id=7, source_type='yclients', name='Admin', company_id=1))
+        db.add(
+            StaffSchedule(
+                staff_id=100,
+                date=date(2025, 1, 10),
+                slot_from=time(9),
+                slot_to=time(18),
+                company_id=1,
+            )
+        )
+        db.commit()
+
+        assert sync_pipeline.sync_staff_schedules(
+            FakeSchedulesAPI(None),
+            db,
+            '1',
+            start_date='2025-01-01',
+            end_date='2025-01-31',
+        ) is False
+        assert db.query(StaffSchedule).count() == 1
+        assert db.query(SyncSourceState).count() == 0
+    finally:
+        db.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    'payload',
+    [
+        [{'staff_id': 999, 'date': '2025-01-10', 'slots': [{'from': '09:00', 'to': '18:00'}]}],
+        [{'staff_id': 7, 'date': '2025-01-10', 'slots': [{'from': 'bad', 'to': '18:00'}]}],
+    ],
+)
+def test_sync_staff_schedules_rejects_unusable_snapshot_before_replacement(payload):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Staff.__table__,
+            StaffSchedule.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add(Staff(id=100, external_id=7, source_type='yclients', name='Admin', company_id=1))
+        db.add(
+            StaffSchedule(
+                staff_id=100,
+                date=date(2025, 1, 10),
+                slot_from=time(10),
+                slot_to=time(22),
+                company_id=1,
+            )
+        )
+        db.commit()
+
+        assert sync_pipeline.sync_staff_schedules(
+            FakeSchedulesAPI(payload),
+            db,
+            '1',
+            start_date='2025-01-01',
+            end_date='2025-01-31',
+        ) is False
+
+        schedule = db.query(StaffSchedule).one()
+        assert (schedule.staff_id, schedule.slot_from, schedule.slot_to) == (
+            100,
+            time(10),
+            time(22),
+        )
+        assert db.query(SyncSourceState).count() == 0
     finally:
         db.close()
         engine.dispose()
@@ -1651,6 +1834,119 @@ def test_sync_services_fills_category_from_category_filtered_services():
         row = db.get(ServiceCatalog, {'company_id': 1, 'service_id': 10})
         assert row.category_id == 100
         assert row.category_title == 'Уход'
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_services_preserves_catalog_when_snapshot_is_incomplete():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Service.__table__,
+            ServiceCatalog.__table__,
+            ServiceCategoryCatalog.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add(Service(id=10, title='Care', company_id=1))
+        db.add(ServiceCategoryCatalog(
+            company_id=1,
+            category_id=100,
+            title='Care category',
+            updated_at=datetime(2025, 1, 1),
+        ))
+        db.add(ServiceCatalog(
+            company_id=1,
+            service_id=10,
+            title='Care',
+            category_id=100,
+            category_title='Care category',
+            is_active=True,
+            updated_at=datetime(2025, 1, 1),
+        ))
+        db.commit()
+
+        assert sync_services(
+            FakeServicesAPI(
+                [{'id': 10, 'title': 'Care'}],
+                services_by_category={100: None},
+            ),
+            db,
+            '1',
+        ) is False
+        assert sync_services(FakeServicesAPI([{'title': 'Missing id'}]), db, '1') is False
+
+        catalog = db.get(ServiceCatalog, {'company_id': 1, 'service_id': 10})
+        assert catalog.is_active is True
+        assert (catalog.category_id, catalog.category_title) == (100, 'Care category')
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_services_marks_only_current_yclients_catalog_rows_active():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[Group.__table__, Company.__table__, Service.__table__, ServiceCatalog.__table__],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon 1', group_id=1))
+        db.add_all([
+            Service(id=10, title='Old title', company_id=1),
+            Service(id=20, title='Archived', company_id=1),
+            ServiceCatalog(
+                company_id=1,
+                service_id=10,
+                title='Old title',
+                is_active=True,
+                updated_at=datetime(2025, 1, 1),
+            ),
+            ServiceCatalog(
+                company_id=1,
+                service_id=20,
+                title='Archived',
+                is_active=True,
+                updated_at=datetime(2025, 1, 1),
+            ),
+        ])
+        db.commit()
+
+        assert sync_services(
+            FakeServicesAPI([{
+                'id': 10,
+                'title': 'Current title',
+                'category': {'id': 1, 'title': 'Current'},
+            }]),
+            db,
+            '1',
+        ) is True
+
+        current = db.get(ServiceCatalog, {'company_id': 1, 'service_id': 10})
+        archived = db.get(ServiceCatalog, {'company_id': 1, 'service_id': 20})
+        assert current.title == 'Current title'
+        assert current.is_active is True
+        assert archived.is_active is False
+
+        assert sync_services(FakeServicesAPI(None), db, '1') is False
+        db.refresh(current)
+        assert current.is_active is True
+
+        assert sync_services(FakeServicesAPI([]), db, '1') is True
+        db.refresh(current)
+        assert current.is_active is False
+        assert archived.is_active is False
     finally:
         db.close()
         engine.dispose()

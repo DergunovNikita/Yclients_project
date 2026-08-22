@@ -4,6 +4,7 @@ Production ETL pipeline for syncing YClients data into PostgreSQL.
 import time
 from datetime import date, timedelta, datetime
 from typing import Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import or_
 from config import (
     DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD,
@@ -43,11 +44,26 @@ FULL_REFRESH_CLEANUP_STEP = 'Full refresh cleanup'
 PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
 APPOINTMENTS_SOURCE = 'appointments_detail'
 GOODS_TRANSACTIONS_SOURCE = 'goods_transactions_detail'
+STAFF_SCHEDULE_SOURCE = 'staff_schedules'
+DEFAULT_BRANCH_TIMEZONE = 'Europe/Moscow'
 FULL_REFRESH_COVERAGE_SOURCES = (
     APPOINTMENTS_SOURCE,
     PERSONAL_ACCOUNT_SOURCE,
     GOODS_TRANSACTIONS_SOURCE,
 )
+
+
+def _company_timezone(company_data: dict, current: str | None = None) -> str:
+    for value in (company_data.get('timezone'), current, DEFAULT_BRANCH_TIMEZONE):
+        candidate = str(value or '').strip()
+        if not candidate:
+            continue
+        try:
+            ZoneInfo(candidate)
+        except ZoneInfoNotFoundError:
+            continue
+        return candidate
+    return DEFAULT_BRANCH_TIMEZONE
 
 
 def _valid_staff_email(value) -> str | None:
@@ -701,6 +717,7 @@ def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int | Non
                             company.portal_account_id = portal_account_id
                             company.external_id = company_id
                             company.source_type = SOURCE_YCLIENTS
+                            company.timezone = _company_timezone(company_data, company.timezone)
                         else:
                             company_kwargs = {
                                 'title': company_data.get('title', ''),
@@ -708,6 +725,7 @@ def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int | Non
                                 'portal_account_id': portal_account_id,
                                 'external_id': company_id,
                                 'source_type': SOURCE_YCLIENTS,
+                                'timezone': _company_timezone(company_data),
                             }
                             if portal_account_id is None:
                                 company_kwargs['id'] = company_id
@@ -718,6 +736,7 @@ def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int | Non
                         company.group_id = group.id
                         company.portal_account_id = company.portal_account_id or portal_account_id
                         company.external_id = company.external_id or company_id
+                        company.timezone = _company_timezone(company_data, company.timezone)
 
         db.commit()
         print("  ✓ Сети и компании сохранены")
@@ -814,8 +833,8 @@ def sync_services(api: YClientsAPI, db, company_id: str, db_company_id: int | No
     print("\n── Услуги ──")
 
     services = api.get_services(company_id)
-    if not services:
-        print("  Нет данных")
+    if services is None:
+        print("  Источник недоступен")
         return False
 
     print(f"  Найдено: {len(services)}")
@@ -823,17 +842,33 @@ def sync_services(api: YClientsAPI, db, company_id: str, db_company_id: int | No
     try:
         cid = _db_company_id(company_id, db_company_id)
         now = datetime.now()
+        if any(
+            not isinstance(service, dict)
+            or service.get('id') is None
+            or (
+                service.get('category')
+                and not isinstance(service.get('category'), dict)
+            )
+            for service in services
+        ):
+            raise ValueError('invalid services snapshot')
         category_by_service_id = {}
-        if not any(service.get('category') for service in services):
+        if services and not any(service.get('category') for service in services):
             category_rows = db.query(ServiceCategoryCatalog).filter(
                 ServiceCategoryCatalog.company_id == cid,
             ).all()
             for category in category_rows:
-                category_services = api.get_services(company_id, category_id=category.category_id) or []
+                category_services = api.get_services(company_id, category_id=category.category_id)
+                if category_services is None:
+                    raise ValueError('service category snapshot is unavailable')
+                if any(
+                    not isinstance(category_service, dict)
+                    or category_service.get('id') is None
+                    for category_service in category_services
+                ):
+                    raise ValueError('invalid service category snapshot')
                 for category_service in category_services:
                     category_service_id = category_service.get('id')
-                    if category_service_id is None:
-                        continue
                     category_by_service_id[category_service_id] = {
                         'id': category.category_id,
                         'title': category.title,
@@ -851,6 +886,12 @@ def sync_services(api: YClientsAPI, db, company_id: str, db_company_id: int | No
             cid,
             (service.get('id') for service in services),
             ServiceCatalog.service_id,
+        )
+        # A successful company-level response is the current YClients snapshot. Keep
+        # historical catalog rows for old transactions, but hide anything not seen now.
+        db.query(ServiceCatalog).filter(ServiceCatalog.company_id == cid).update(
+            {ServiceCatalog.is_active: False},
+            synchronize_session='fetch',
         )
         for service_data in services:
             service_id = service_data.get('id')
@@ -875,6 +916,7 @@ def sync_services(api: YClientsAPI, db, company_id: str, db_company_id: int | No
                     duration=service_data.get('duration'),
                     category_id=category_id,
                     category_title=category_title,
+                    is_active=True,
                     updated_at=now,
                 )
                 db.add(catalog_obj)
@@ -885,6 +927,7 @@ def sync_services(api: YClientsAPI, db, company_id: str, db_company_id: int | No
                 catalog_obj.duration = service_data.get('duration')
                 catalog_obj.category_id = category_id
                 catalog_obj.category_title = category_title
+                catalog_obj.is_active = True
                 catalog_obj.updated_at = now
 
             obj = existing_services.get(service_id)
@@ -1970,8 +2013,8 @@ def sync_staff_schedules(api: YClientsAPI, db, company_id: str,
     schedules = api.get_staff_schedule(company_id,
                                        start_date=start_date,
                                        end_date=end_date)
-    if not schedules:
-        print("  Нет данных")
+    if schedules is None:
+        print("  Источник недоступен")
         return False
 
     print(f"  Найдено записей расписания: {len(schedules)}")
@@ -1981,33 +2024,77 @@ def sync_staff_schedules(api: YClientsAPI, db, company_id: str,
         staff_map = _load_staff_map(
             db,
             cid,
-            (entry.get('staff_id') for entry in schedules),
+            (
+                entry.get('staff_id')
+                for entry in schedules
+                if isinstance(entry, dict)
+            ),
         )
+        parsed_start = parse_date(start_date)
+        parsed_end = parse_date(end_date)
+        if start_date and parsed_start is None:
+            raise ValueError('invalid staff schedule window start')
+        if end_date and parsed_end is None:
+            raise ValueError('invalid staff schedule window end')
+
+        parsed_slots: list[tuple[int, date, object, object]] = []
+        seen_slots: set[tuple[int, date, object, object]] = set()
+        for entry in schedules:
+            if not isinstance(entry, dict):
+                raise ValueError('invalid staff schedule entry')
+            staff_id = _internal_staff_id(staff_map, entry.get('staff_id'))
+            schedule_date = parse_date(entry.get('date'))
+            slots = entry.get('slots')
+            if staff_id is None or schedule_date is None:
+                raise ValueError('staff schedule entry cannot be mapped')
+            if parsed_start is not None and schedule_date < parsed_start:
+                raise ValueError('staff schedule entry is outside the requested window')
+            if parsed_end is not None and schedule_date > parsed_end:
+                raise ValueError('staff schedule entry is outside the requested window')
+            if slots is None:
+                slots = []
+            if not isinstance(slots, list):
+                raise ValueError('invalid staff schedule slots')
+            for slot in slots:
+                if not isinstance(slot, dict):
+                    raise ValueError('invalid staff schedule slot')
+                slot_from = parse_time(slot.get('from'))
+                slot_to = parse_time(slot.get('to'))
+                if slot_from is None or slot_to is None:
+                    raise ValueError('invalid staff schedule slot time')
+                slot_key = (staff_id, schedule_date, slot_from, slot_to)
+                if slot_key in seen_slots:
+                    continue
+                seen_slots.add(slot_key)
+                parsed_slots.append(slot_key)
+
         delete_query = db.query(StaffSchedule).filter(StaffSchedule.company_id == cid)
-        if start_date:
-            delete_query = delete_query.filter(StaffSchedule.date >= parse_date(start_date))
-        if end_date:
-            delete_query = delete_query.filter(StaffSchedule.date <= parse_date(end_date))
+        if parsed_start is not None:
+            delete_query = delete_query.filter(StaffSchedule.date >= parsed_start)
+        if parsed_end is not None:
+            delete_query = delete_query.filter(StaffSchedule.date <= parsed_end)
         deleted_slots = delete_query.delete(synchronize_session=False)
 
-        slot_count = 0
-        for entry in schedules:
-            staff_id = _internal_staff_id(staff_map, entry.get('staff_id'))
-            schedule_date = entry.get('date')
-            slots = entry.get('slots') or []
-            for slot in slots:
-                obj = StaffSchedule(
+        for staff_id, schedule_date, slot_from, slot_to in parsed_slots:
+            db.add(
+                StaffSchedule(
                     staff_id=staff_id,
-                    date=parse_date(schedule_date),
-                    slot_from=parse_time(slot.get('from')),
-                    slot_to=parse_time(slot.get('to')),
+                    date=schedule_date,
+                    slot_from=slot_from,
+                    slot_to=slot_to,
                     company_id=cid,
                 )
-                db.add(obj)
-                slot_count += 1
+            )
 
+        mark_sync_source_coverage(
+            db,
+            cid,
+            STAFF_SCHEDULE_SOURCE,
+            start_date,
+            end_date,
+        )
         db.commit()
-        print(f"  ✓ Графики сохранены ({slot_count} слотов), удалено старых: {deleted_slots}")
+        print(f"  ✓ Графики сохранены ({len(parsed_slots)} слотов), удалено старых: {deleted_slots}")
         return True
 
     except Exception as e:

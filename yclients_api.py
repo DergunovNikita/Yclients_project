@@ -171,6 +171,23 @@ class YClientsAPI:
 
         return all_items
 
+    @staticmethod
+    def _list_response_data(result: Optional[dict], endpoint: str) -> Optional[List[Dict]]:
+        """Validate a list response before callers replace stored snapshots."""
+        if result is None:
+            return None
+        if result.get('success') is not True:
+            print(f"✗ YClients endpoint {endpoint} returned success!=true")
+            return None
+        if 'data' not in result:
+            print(f"✗ YClients endpoint {endpoint} returned no data field")
+            return None
+        data = result.get('data')
+        if not isinstance(data, list):
+            print(f"✗ YClients endpoint {endpoint} returned non-list data")
+            return None
+        return data
+
     # ------------------------------------------------------------------
     # Сети и компании
     # ------------------------------------------------------------------
@@ -208,7 +225,7 @@ class YClientsAPI:
             params['category_id'] = category_id
 
         result = self._get(url, params or None)
-        return result.get('data', []) if result else None
+        return self._list_response_data(result, url)
 
     # ------------------------------------------------------------------
     # Должности
@@ -372,7 +389,7 @@ class YClientsAPI:
 
         result = self._get(f'{self.base_url}/company/{company_id}/staff/schedule',
                            params=params)
-        return result.get('data', []) if result else None
+        return self._list_response_data(result, f'company/{company_id}/staff/schedule')
 
     # ------------------------------------------------------------------
     # Аналитика: основные показатели

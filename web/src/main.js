@@ -33,6 +33,7 @@ import {
   BRANCH_PLAN_SETTING_FIELDS,
   STAFF_PLAN_SETTING_FIELDS_BY_CATEGORY,
   buildPlanSettingsPayload,
+  isScheduleAttributionDiagnostic,
 } from './planSettings.js';
 import {
   filterPlanFactForDisplay,
@@ -391,7 +392,8 @@ function beginViewRequest(view) {
 
 function setLoadedApiState(data, { empty = false } = {}) {
   const appointmentsStatus = data?.summary?.appointments_breakdown?.source_status;
-  if (data?.source_status === 'partial' || appointmentsStatus === 'unavailable') {
+  const summaryStatus = data?.summary?.source_status;
+  if (data?.source_status === 'partial' || summaryStatus === 'partial' || appointmentsStatus === 'unavailable') {
     setApiStatus('partial');
   } else {
     setApiStatus(empty ? 'empty' : 'ready');
@@ -1369,14 +1371,31 @@ function renderPlanDiagnostics(diagnostics) {
     <div class="plan-diagnostics">
       ${diagnostics
         .map((item) => {
-          const details = [
-            t('dash.diagnosticBarbers', { count: formatNumber(item.barber_clients_fact) }),
-            t('dash.diagnosticAdmins', { count: formatNumber(item.administrator_clients_fact) }),
-            t('dash.diagnosticUnassigned', { count: formatNumber(item.unassigned_records_count) }),
-          ];
+          const scheduleCoverage = isScheduleAttributionDiagnostic(item.code);
+          const details = scheduleCoverage
+            ? [
+                t('dash.diagnosticRequiredPeriod', {
+                  start: item.required_start,
+                  end: item.required_end,
+                }),
+                item.covered_start && item.covered_end
+                  ? t('dash.diagnosticCoveredPeriod', {
+                      start: item.covered_start,
+                      end: item.covered_end,
+                    })
+                  : t('dash.diagnosticNoCoverage'),
+              ]
+            : [
+                t('dash.diagnosticBarbers', { count: formatNumber(item.barber_clients_fact) }),
+                t('dash.diagnosticAdmins', { count: formatNumber(item.administrator_clients_fact) }),
+                t('dash.diagnosticUnassigned', { count: formatNumber(item.unassigned_records_count) }),
+              ];
+          const message = scheduleCoverage
+            ? t('dash.scheduleCoverageWarning', { branch: item.company_title || '' })
+            : item.message || t('dash.dataCheck');
           return `
             <div class="diagnostic warning">
-              <strong>${escapeHtml(item.message || t('dash.dataCheck'))}</strong>
+              <strong>${escapeHtml(message)}</strong>
               <span>${escapeHtml(details.join(' · '))}</span>
             </div>
           `;
@@ -1554,6 +1573,8 @@ function planSettingFieldLabel(field) {
     avg_check_total: 'dash.averageCheckShort',
     reviews_qty: 'dash.reviews',
     cosmo_qty: 'dash.cosmoQty',
+    extra_services_qty: 'dash.extraServicesQty',
+    extra_services_pct: 'dash.extraServicesPct',
   };
   return t(translationKeys[field]);
 }

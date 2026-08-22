@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import csv
-import io
 from copy import deepcopy
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,7 +24,6 @@ from auth_scope import (
     require_tenant_context,
     user_branch_ids,
 )
-from config import SYNC_API_TOKEN
 from dashboard_service import (
     fetch_branches,
     fetch_extra_services,
@@ -37,6 +33,7 @@ from dashboard_service import (
     fetch_revenue_daily,
     fetch_dashboard_services,
     fetch_service_kpi_groups,
+    fetch_staff_service_attribution_status,
     save_service_label,
     save_service_management,
     create_service_kpi_group,
@@ -46,7 +43,6 @@ from dashboard_service import (
     save_plan_settings,
     save_manual_review_facts,
     fetch_staff,
-    fetch_staff_directory,
     fetch_summary,
     fetch_top_services,
 )
@@ -68,10 +64,8 @@ from plan_config import (
     money_payload_keys,
 )
 from portal_audit import log_portal_audit
-from plan_import import import_plan_sheet_from_config
 from sync_jobs import SyncJobService
 from sync_orchestrator import get_sync_status
-from sync_security import validate_sync_token
 
 router = APIRouter()
 
@@ -113,6 +107,8 @@ class PlanSettingsStaffPayload(BaseModel):
     avg_check_total: Any = None
     reviews_qty: Any = None
     cosmo_qty: Any = None
+    extra_services_qty: Any = None
+    extra_services_pct: Any = None
 
 
 class PlanSettingsPayload(BaseModel):
@@ -191,15 +187,6 @@ def _parse_range(start: date, end: date) -> tuple[date, date]:
     if start > end:
         raise HTTPException(status_code=400, detail='start_date must be <= end_date')
     return start, end
-
-
-def _require_sync_token(x_sync_token: str | None) -> None:
-    validate_sync_token(x_sync_token, SYNC_API_TOKEN)
-
-
-def _require_sync_access(ctx: AccessContext) -> None:
-    if ctx.user_id is not None and ctx.role != 'platform_admin':
-        raise HTTPException(status_code=403, detail='Sync operations require platform_admin role')
 
 
 def _require_settings_admin(ctx: AccessContext) -> None:
@@ -401,44 +388,6 @@ async def dashboard_staff(
             force_allowed=scope['force_allowed'],
         ),
     }
-
-
-@router.get('/staff_directory.csv')
-async def dashboard_staff_directory_csv(
-    include_fired: bool = Query(False, description='Include fired/stale staff when true'),
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
-    if ctx.user_id is not None and ctx.role not in USER_ADMIN_ROLES:
-        raise HTTPException(status_code=403, detail='Staff directory export requires admin role')
-
-    branch_ids, force_allowed = user_branch_ids(ctx)
-    rows = await fetch_staff_directory(
-        db,
-        include_fired,
-        allowed_company_ids=branch_ids,
-        force_allowed=force_allowed,
-    )
-    columns = [
-        'company_id',
-        'company_title',
-        'staff_id',
-        'staff_name',
-        'position',
-        'user_id',
-        'fired',
-        'working',
-        'bookable',
-    ]
-    buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=columns)
-    writer.writeheader()
-    writer.writerows(rows)
-    return Response(
-        buffer.getvalue(),
-        media_type='text/csv; charset=utf-8',
-        headers={'Content-Disposition': 'inline; filename=staff_directory.csv'},
-    )
 
 
 @router.get('/services')
@@ -713,7 +662,7 @@ async def dashboard_widget_summary(
 ):
     start, end = _parse_range(start_date, end_date)
     scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
-    factual_at = datetime.now()
+    factual_at = datetime.now(UTC).replace(tzinfo=None)
     summary = await fetch_summary(
         db,
         start,
@@ -770,17 +719,29 @@ async def dashboard_widget_top_services(
     require_financial_access(ctx)
     start, end = _parse_range(start_date, end_date)
     scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
+    factual_at = datetime.now(UTC).replace(tzinfo=None)
+    rows = await fetch_top_services(
+        db,
+        start,
+        end,
+        scope['company_id'],
+        limit,
+        staff_id,
+        allowed_company_ids=scope['allowed_company_ids'],
+        factual_at=factual_at,
+    )
+    attribution = await fetch_staff_service_attribution_status(
+        db,
+        start,
+        end,
+        staff_id,
+        scope['allowed_company_ids'],
+        factual_at,
+    )
     return {
         'success': True,
-        'data': await fetch_top_services(
-            db,
-            start,
-            end,
-            scope['company_id'],
-            limit,
-            staff_id,
-            allowed_company_ids=scope['allowed_company_ids'],
-        ),
+        'data': rows,
+        **attribution,
     }
 
 
@@ -797,17 +758,29 @@ async def dashboard_widget_extra_services(
     require_financial_access(ctx)
     start, end = _parse_range(start_date, end_date)
     scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
+    factual_at = datetime.now(UTC).replace(tzinfo=None)
+    rows = await fetch_extra_services(
+        db,
+        start,
+        end,
+        scope['company_id'],
+        limit,
+        staff_id,
+        allowed_company_ids=scope['allowed_company_ids'],
+        factual_at=factual_at,
+    )
+    attribution = await fetch_staff_service_attribution_status(
+        db,
+        start,
+        end,
+        staff_id,
+        scope['allowed_company_ids'],
+        factual_at,
+    )
     return {
         'success': True,
-        'data': await fetch_extra_services(
-            db,
-            start,
-            end,
-            scope['company_id'],
-            limit,
-            staff_id,
-            allowed_company_ids=scope['allowed_company_ids'],
-        ),
+        'data': rows,
+        **attribution,
     }
 
 
@@ -1022,17 +995,6 @@ async def dashboard_metric_visibility_save(
     return {'success': True, 'data': {'role': payload.role, 'visible_codes': visible_codes}}
 
 
-@router.post('/plan/sync', dependencies=[Depends(forbid_demo)])
-async def dashboard_plan_sync(
-    x_sync_token: str | None = Header(default=None),
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
-    _require_sync_token(x_sync_token)
-    _require_sync_access(ctx)
-    return {'success': True, 'data': await import_plan_sheet_from_config(db)}
-
-
 @router.get('/bundle')
 async def dashboard_bundle(
     start_date: date = Query(...),
@@ -1044,7 +1006,7 @@ async def dashboard_bundle(
 ):
     start, end = _parse_range(start_date, end_date)
     scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
-    factual_at = datetime.now()
+    factual_at = datetime.now(UTC).replace(tzinfo=None)
     summary = await fetch_summary(
         db,
         start,
@@ -1070,6 +1032,8 @@ async def dashboard_bundle(
         return {
             'success': True,
             'data': {
+                'source_status': summary.get('source_status', 'ready'),
+                'missing_sources': summary.get('missing_sources', []),
                 'summary': _hide_summary_financials(summary, hidden),
                 'revenue_daily': daily,
                 'top_services': [],
@@ -1102,6 +1066,8 @@ async def dashboard_bundle(
     return {
         'success': True,
         'data': {
+            'source_status': summary.get('source_status', 'ready'),
+            'missing_sources': summary.get('missing_sources', []),
             'summary': summary,
             'revenue_daily': daily,
             'top_services': services,

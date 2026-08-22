@@ -81,3 +81,37 @@ def test_transactional_paginated_endpoints_return_none_on_auth_failure(method_na
     api.authenticate = lambda: False
 
     assert getattr(api, method_name)('1') is None
+
+
+@pytest.mark.parametrize(
+    ('method_name', 'payload'),
+    [
+        ('get_services', {'success': False, 'data': []}),
+        ('get_services', {'data': []}),
+        ('get_services', {'success': True}),
+        ('get_services', {'success': True, 'data': {'id': 1}}),
+        ('get_staff_schedule', {'success': False, 'data': []}),
+        ('get_staff_schedule', {'data': []}),
+        ('get_staff_schedule', {'success': True}),
+        ('get_staff_schedule', {'success': True, 'data': {'staff_id': 1}}),
+    ],
+)
+def test_snapshot_endpoints_reject_logical_and_malformed_responses(method_name, payload):
+    api = YClientsAPI('token', 'login', 'password')
+    api.user_token = 'authenticated'
+    api._get = lambda *_args, **_kwargs: payload
+
+    method = getattr(api, method_name)
+    args = ('1', '2025-01-01', '2025-01-31') if method_name == 'get_staff_schedule' else ('1',)
+    assert method(*args) is None
+
+
+@pytest.mark.parametrize('method_name', ['get_services', 'get_staff_schedule'])
+def test_snapshot_endpoints_preserve_successful_empty_lists(method_name):
+    api = YClientsAPI('token', 'login', 'password')
+    api.user_token = 'authenticated'
+    api._get = lambda *_args, **_kwargs: {'success': True, 'data': []}
+
+    method = getattr(api, method_name)
+    args = ('1', '2025-01-01', '2025-01-31') if method_name == 'get_staff_schedule' else ('1',)
+    assert method(*args) == []

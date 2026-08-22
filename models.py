@@ -124,6 +124,7 @@ class ServiceCatalog(Base):
     duration = Column(Integer)
     category_id = Column(Integer)
     category_title = Column(String, index=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default='true', index=True)
     updated_at = Column(DateTime, nullable=False)
 
     __table_args__ = (
@@ -133,14 +134,14 @@ class ServiceCatalog(Base):
 
 
 class ServiceLabel(Base):
-    """Manual service labels maintained outside YClients, e.g. dashboard flags from Sheets."""
+    """Branch-scoped service labels maintained from the dashboard."""
 
     __tablename__ = 'service_labels'
 
     service_id = Column(Integer, ForeignKey('services.id'), primary_key=True)
     company_id = Column(Integer, ForeignKey('companies.id'), primary_key=True, index=True)
     is_extra = Column(Boolean, nullable=False, default=False)
-    source = Column(String, default='google_sheet')
+    source = Column(String, default='dashboard')
     updated_at = Column(DateTime, nullable=False)
 
 
@@ -494,6 +495,17 @@ class StaffSchedule(Base):
     slot_to = Column(Time)
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
 
+    __table_args__ = (
+        Index(
+            'ix_staff_schedules_company_staff_date_slots',
+            'company_id',
+            'staff_id',
+            'date',
+            'slot_from',
+            'slot_to',
+        ),
+    )
+
 
 class AnalyticsOverall(Base):
     __tablename__ = 'analytics_overall'
@@ -697,6 +709,8 @@ class PlanStaffInput(Base):
     avg_check_total = Column(Float)
     reviews_qty = Column(Float)
     cosmo_qty = Column(Float)
+    extra_services_qty = Column(Float)
+    extra_services_pct = Column(Float)
     updated_at = Column(DateTime, nullable=False)
 
     __table_args__ = (

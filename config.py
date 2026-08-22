@@ -145,7 +145,6 @@ SYNC_AUTO_ENQUEUE_ENABLED = _get_bool('SYNC_AUTO_ENQUEUE_ENABLED', True)
 SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES = _get_int('SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
 # A 'running' job older than this is treated as orphaned (worker died mid-sync) and reaped.
 SYNC_STALE_JOB_MINUTES = _get_int('SYNC_STALE_JOB_MINUTES', 120)
-SERVICES_LABEL_SYNC_INTERVAL_DAYS = _get_int('SERVICES_LABEL_SYNC_INTERVAL_DAYS', 7)
 
 # ============================================================================
 # API runtime
@@ -164,19 +163,6 @@ DASHBOARD_CORS_ALLOW_HEADERS = (
     'X-Portal-Account-Id',
     'X-API-Key',
 )
-
-# Published Google Sheets CSV URL with branch plan values for /dashboard/widget/plan_fact.
-PLAN_SHEET_CSV_URL = os.getenv('PLAN_SHEET_CSV_URL', '')
-# Service-account fallback for the plan sheet when PLAN_SHEET_CSV_URL is empty or private.
-PLAN_SHEET_ID = os.getenv('PLAN_SHEET_ID', '')
-PLAN_SHEET_NAME = os.getenv('PLAN_SHEET_NAME', 'plan')
-# Optional published CSV URL for the services labels sheet. If empty, the importer
-# tries to read sheet=services from the same spreadsheet as PLAN_SHEET_CSV_URL.
-SERVICES_SHEET_CSV_URL = os.getenv('SERVICES_SHEET_CSV_URL', '')
-GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv('GOOGLE_SERVICE_ACCOUNT_FILE', '')
-GOOGLE_SERVICE_ACCOUNT_JSON_B64 = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON_B64', '')
-SERVICES_SHEET_ID = os.getenv('SERVICES_SHEET_ID', '')
-SERVICES_SHEET_NAME = os.getenv('SERVICES_SHEET_NAME', 'services')
 
 # ============================================================================
 # Уведомления

@@ -126,10 +126,3 @@ jobs:
           echo "This job does not wait for it — a green deploy does not mean the sync finished."
           echo "Follow on the VM: tail -f ${project_dir}/${log_path}"
           REMOTE
-
-      - name: Post-deploy Google Sheets import
-        if: env.VM_HOST != '' && env.VM_USER != '' && env.VM_SSH_KEY != '' && env.VM_PROJECT_DIR != ''
-        continue-on-error: true
-        run: |
-          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" "$VM_USER@$VM_HOST" \
-            "cd \"$VM_PROJECT_DIR\" && docker compose --profile tools run --rm import-sheets"

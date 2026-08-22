@@ -10,12 +10,22 @@ export const BRANCH_PLAN_SETTING_FIELDS = [
 
 export const STAFF_PLAN_SETTING_FIELDS_BY_CATEGORY = {
   barber: ['clients', 'avg_check_total'],
-  administrator: ['clients', 'reviews_qty', 'cosmo_qty'],
+  administrator: [
+    'clients',
+    'reviews_qty',
+    'cosmo_qty',
+    'extra_services_qty',
+    'extra_services_pct',
+  ],
 };
 
 export const STAFF_PLAN_SETTING_FIELDS = [
   ...new Set(Object.values(STAFF_PLAN_SETTING_FIELDS_BY_CATEGORY).flat()),
 ];
+
+export function isScheduleAttributionDiagnostic(code) {
+  return code === 'staff_schedule_coverage' || code === 'appointment_timestamp_coverage';
+}
 
 function valuesFor(fields, scope, row, readValue) {
   return Object.fromEntries(fields.map((field) => [field, readValue(scope, row, field)]));

@@ -1,5 +1,4 @@
 import argparse
-import asyncio
 import time
 from datetime import datetime, timedelta
 
@@ -11,26 +10,16 @@ from config import (
     DB_USER,
     SYNC_AUTO_ENQUEUE_ENABLED,
     SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES,
-    SERVICES_LABEL_SYNC_INTERVAL_DAYS,
     SYNC_STALE_JOB_MINUTES,
     SYNC_WORKER_POLL_INTERVAL,
 )
-from database import build_async_database_url, init_database
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from models import SyncJob, SyncState, YClientsCredential
-from plan_import import import_services_sheet_from_config
+from database import init_database
+from models import SyncJob, YClientsCredential
 from sync_control import SyncControlService
 from sync_jobs import SyncJobService
 from sync_orchestrator import run_sync_job
 
 
-SERVICES_LABEL_SYNC_ATTEMPT_KEY = 'services_labels_last_attempt_at'
-SERVICES_LABEL_SYNC_SUCCESS_KEY = 'services_labels_last_success_at'
-SERVICES_LABEL_SYNC_STATUS_KEY = 'services_labels_last_status'
-SERVICES_LABEL_SYNC_IMPORTED_KEY = 'services_labels_last_imported'
-SERVICES_LABEL_SYNC_PROCESSED_KEY = 'services_labels_last_processed'
-SERVICES_LABEL_SYNC_SKIPPED_KEY = 'services_labels_last_skipped'
-SERVICES_LABEL_SYNC_ERROR_KEY = 'services_labels_last_error'
 AUTO_SYNC_INITIATOR = 'auto-worker'
 
 
@@ -47,63 +36,6 @@ def _parse_state_datetime(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
-
-
-def _services_label_sync_due_from_value(value: str | None, now: datetime | None = None) -> bool:
-    if SERVICES_LABEL_SYNC_INTERVAL_DAYS <= 0:
-        return False
-    now = now or datetime.now()
-    last_attempt_at = _parse_state_datetime(value)
-    if last_attempt_at is None:
-        return True
-    return now - last_attempt_at >= timedelta(days=SERVICES_LABEL_SYNC_INTERVAL_DAYS)
-
-
-async def _import_services_labels_async() -> dict:
-    engine = create_async_engine(
-        build_async_database_url(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD),
-        pool_pre_ping=True,
-    )
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    try:
-        async with session_factory() as session:
-            return await import_services_sheet_from_config(session)
-    finally:
-        await engine.dispose()
-
-
-def run_services_label_sync_if_due(db, now: datetime | None = None) -> dict:
-    now = now or datetime.now()
-    state = db.get(SyncState, SERVICES_LABEL_SYNC_ATTEMPT_KEY)
-    if not _services_label_sync_due_from_value(getattr(state, 'value', None), now):
-        return {'status': 'skipped', 'reason': 'not_due'}
-
-    control = SyncControlService()
-    control.set_state(db, SERVICES_LABEL_SYNC_ATTEMPT_KEY, now)
-    try:
-        result = asyncio.run(_import_services_labels_async())
-    except Exception as exc:
-        control.set_state(db, SERVICES_LABEL_SYNC_STATUS_KEY, 'failed')
-        control.set_state(db, SERVICES_LABEL_SYNC_ERROR_KEY, str(exc))
-        print(f'! Weekly services labels sync failed: {exc}')
-        return {'status': 'failed', 'error': str(exc)}
-
-    skipped = result.get('skipped') or []
-    imported = int(result.get('imported') or 0)
-    processed = int(result.get('processed') or 0)
-    status = 'success' if processed > 0 and not skipped else 'warning'
-    control.set_state(db, SERVICES_LABEL_SYNC_STATUS_KEY, status)
-    control.set_state(db, SERVICES_LABEL_SYNC_IMPORTED_KEY, str(imported))
-    control.set_state(db, SERVICES_LABEL_SYNC_PROCESSED_KEY, str(processed))
-    control.set_state(db, SERVICES_LABEL_SYNC_SKIPPED_KEY, str(len(skipped)))
-    control.set_state(db, SERVICES_LABEL_SYNC_ERROR_KEY, '; '.join(skipped[:5]) if skipped else None)
-    if status == 'success':
-        control.set_state(db, SERVICES_LABEL_SYNC_SUCCESS_KEY, now)
-    print(
-        '✓ Weekly services labels sync '
-        f'{status}: imported={imported}; processed={processed}; skipped={len(skipped)}'
-    )
-    return {'status': status, 'result': result}
 
 
 def _job_activity_at(job: SyncJob) -> datetime | None:

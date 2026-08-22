@@ -5,6 +5,7 @@ import {
   BRANCH_PLAN_SETTING_FIELDS,
   STAFF_PLAN_SETTING_FIELDS,
   buildPlanSettingsPayload,
+  isScheduleAttributionDiagnostic,
 } from '../src/planSettings.js';
 
 test('plan settings payload preserves the editable field contract', () => {
@@ -22,6 +23,8 @@ test('plan settings payload preserves the editable field contract', () => {
     ['staff:12:clients', '30'],
     ['staff:12:reviews_qty', '8'],
     ['staff:12:cosmo_qty', '4'],
+    ['staff:12:extra_services_qty', '12'],
+    ['staff:12:extra_services_pct', '40'],
   ]);
   const readValue = (scope, row, field) => (
     values.get(`${scope}:${scope === 'branch' ? row.company_id : row.staff_id}:${field}`) ?? null
@@ -55,6 +58,8 @@ test('plan settings payload preserves the editable field contract', () => {
         avg_check_total: '3000',
         reviews_qty: null,
         cosmo_qty: null,
+        extra_services_qty: null,
+        extra_services_pct: null,
       },
       {
         company_id: 7,
@@ -64,7 +69,15 @@ test('plan settings payload preserves the editable field contract', () => {
         avg_check_total: null,
         reviews_qty: '8',
         cosmo_qty: '4',
+        extra_services_qty: '12',
+        extra_services_pct: '40',
       },
     ],
   });
+});
+
+test('schedule attribution diagnostics share the coverage renderer', () => {
+  assert.equal(isScheduleAttributionDiagnostic('staff_schedule_coverage'), true);
+  assert.equal(isScheduleAttributionDiagnostic('appointment_timestamp_coverage'), true);
+  assert.equal(isScheduleAttributionDiagnostic('admin_barber_clients_mismatch'), false);
 });

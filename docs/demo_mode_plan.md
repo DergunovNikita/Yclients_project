@@ -54,7 +54,7 @@
 - `forbid_demo(user=Depends(get_current_user))` → `403 'Demo is read-only'` если `user.is_demo`.
 - Навесить на все мутации:
   - `api.py`: `POST /sync/trigger` (+ прочие sync-контролы, если есть).
-  - `dashboard_routes.py`: `POST /services/kpi_groups`, `/plan/settings`, `/plan/reviews_fact`, `/plan/sync`.
+  - `dashboard_routes.py`: `POST /services/kpi_groups`, `/plan/settings`, `/plan/reviews_fact`.
   - `onboarding_routes.py`: `POST /credentials`, `/branches`.
   - `auth_routes.py`: `change-password`, `logout-all`, все `admin/*`, `yclients-credentials/*`.
 - GET-дашборды НЕ трогаем.

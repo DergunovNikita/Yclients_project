@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
 from typing import Any
 
 
@@ -33,7 +33,11 @@ def parse_datetime(value: Any) -> datetime | None:
     if value in (None, '', '0000-00-00 00:00:00'):
         return None
     if isinstance(value, datetime):
-        return value.replace(tzinfo=None)
+        return (
+            value.astimezone(UTC).replace(tzinfo=None)
+            if value.tzinfo is not None
+            else value
+        )
     if isinstance(value, date):
         return datetime.combine(value, time.min)
     text = str(value).strip()
@@ -43,7 +47,7 @@ def parse_datetime(value: Any) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(normalized)
         if parsed.tzinfo is not None:
-            return parsed.astimezone().replace(tzinfo=None)
+            return parsed.astimezone(UTC).replace(tzinfo=None)
         return parsed
     except ValueError:
         pass

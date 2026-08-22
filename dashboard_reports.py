@@ -6,7 +6,7 @@ import traceback
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select
@@ -39,6 +39,7 @@ from dashboard_service import (
     fetch_revenue_daily,
     fetch_summary,
     fetch_reporting_start_dates,
+    fetch_staff_service_attribution_status,
     fetch_top_services,
     fetch_year_over_year_facts,
     reporting_start_clause,
@@ -62,7 +63,7 @@ DECIMAL_FORMAT = 'decimal'
 
 
 def _report_now() -> datetime:
-    return datetime.now()
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 YOY_ANNUAL_SOURCES = (
@@ -1154,6 +1155,9 @@ def _mask_unknown_year_metrics(
 
     if not goods_known:
         row['goods_count'] = None
+    if 'staff_schedules' in missing:
+        row['extra_service_count'] = None
+        row['extra_service_revenue'] = None
 
 
 def _year_periods(
@@ -1449,17 +1453,50 @@ async def _year_over_year_payload(
         completed = int(annual.get('appointments') or 0)
         unique_clients = int(annual.get('unique_clients') or 0)
         revenue = float(annual.get('revenue') or 0)
+        attribution = await fetch_staff_service_attribution_status(
+            db,
+            period_start,
+            period_end,
+            staff_id,
+            scope_company_ids,
+            report_now,
+        )
+        attribution_missing = list(attribution.get('missing_sources') or [])
+        if attribution.get('mode') == 'administrator_schedule':
+            if attribution.get('source_status') == 'ready':
+                attributed_extra_rows = await fetch_extra_services(
+                    db,
+                    period_start,
+                    period_end,
+                    company_id,
+                    None,
+                    staff_id,
+                    allowed_company_ids=scope_company_ids,
+                    factual_at=report_now,
+                )
+                extra_service_count: float | None = sum(
+                    float(row.get('sold') or 0) for row in attributed_extra_rows
+                )
+                extra_service_revenue: float | None = sum(
+                    float(row.get('revenue') or 0) for row in attributed_extra_rows
+                )
+            else:
+                extra_service_count = None
+                extra_service_revenue = None
+        else:
+            extra_service_count = float(annual.get('extra_service_count') or 0)
+            extra_service_revenue = float(annual.get('extra_service_revenue') or 0)
         summary = {
             'revenue': {
                 'total': revenue,
                 'service_revenue': float(annual.get('service_revenue') or 0),
                 'goods_revenue': float(annual.get('goods_revenue') or 0),
                 'topup_revenue': float(annual.get('topup_revenue') or 0),
-                'extra_service_revenue': float(annual.get('extra_service_revenue') or 0),
+                'extra_service_revenue': extra_service_revenue,
                 'appointments': completed,
                 'service_count': float(annual.get('service_count') or 0),
                 'goods_count': float(annual.get('goods_count') or 0),
-                'extra_service_count': float(annual.get('extra_service_count') or 0),
+                'extra_service_count': extra_service_count,
             },
             'average_check': {
                 'total': revenue / completed if completed else 0.0,
@@ -1507,10 +1544,11 @@ async def _year_over_year_payload(
             *year_row['missing_components'],
             *technical_missing,
             *opz_missing,
+            *attribution_missing,
         })
         if year_row['missing_components']:
             year_row['source_status'] = 'partial'
-        _mask_unknown_year_metrics(year_row, technical_missing)
+        _mask_unknown_year_metrics(year_row, [*technical_missing, *attribution_missing])
         if 'appointments_detail' in opz_missing:
             year_row['opz_qty'] = None
             year_row['opz_pct'] = None
@@ -1764,7 +1802,12 @@ async def _financial_payload(
     avg = summary.get('average_check', {})
     visits = summary.get('visit_metrics', {})
     base['average_check_source_status'] = avg.get('source_status')
-    base['missing_sources'] = list(avg.get('missing_components') or [])
+    base['missing_sources'] = sorted({
+        *(avg.get('missing_components') or []),
+        *(summary.get('missing_sources') or []),
+    })
+    if summary.get('source_status') == 'partial':
+        base['source_status'] = 'partial'
     base['notes'].append({
         'kind': 'formula',
         'title': 'Средний чек общий',
@@ -1887,8 +1930,20 @@ async def _services_payload(
         factual_at=factual_at,
     )
     revenue = summary.get('revenue', {})
-    total_revenue = float(revenue.get('service_revenue') or 0)
-    total_sold = float(revenue.get('service_count') or 0)
+    attribution = summary.get('service_attribution', {})
+    administrator_scope = attribution.get('mode') == 'administrator_schedule'
+    if administrator_scope:
+        total_revenue = sum(float(row.get('revenue') or 0) for row in all_services)
+        total_sold = sum(float(row.get('sold') or 0) for row in all_services)
+    else:
+        total_revenue = float(revenue.get('service_revenue') or 0)
+        total_sold = float(revenue.get('service_count') or 0)
+    if attribution.get('source_status') == 'partial':
+        base['source_status'] = 'partial'
+        base['missing_sources'] = sorted({
+            *base.get('missing_sources', []),
+            *summary.get('missing_sources', []),
+        })
     services = all_services[:25]
     extra = all_extra[:25]
     base['cards'] = [
@@ -1920,7 +1975,12 @@ async def _services_payload(
         _services_table('services', 'Услуги', services),
         _services_table('extra_services', 'Дополнительные услуги', extra),
     ]
-    base['raw'] = {'services': services, 'extra_services': extra, 'granularity': granularity}
+    base['raw'] = {
+        'services': services,
+        'extra_services': extra,
+        'granularity': granularity,
+        'service_attribution': attribution,
+    }
     return base
 
 
@@ -3010,18 +3070,29 @@ async def _leaderboard_payload_impl(
         f'duration_ms={round((time.perf_counter() - stage_started) * 1000)}'
     )
     boards = plan.get('staff_leaderboards', {})
-    if boards.get('_partial_reasons'):
+    partial_reasons = set(boards.get('_partial_reasons') or [])
+    if partial_reasons:
         base['source_status'] = 'partial'
-        base['notes'].append({
-            'kind': 'warning',
-            'title': 'Часть рейтинга временно недоступна',
-            'text': 'Не удалось рассчитать суммы допуслуг. Количество и проценты показаны полностью.',
-        })
+        if 'extra_service_revenue' in partial_reasons:
+            base['notes'].append({
+                'kind': 'warning',
+                'title': 'Часть рейтинга временно недоступна',
+                'text': 'Не удалось рассчитать суммы допуслуг. Количество и проценты показаны полностью.',
+            })
+        if 'staff_schedules' in partial_reasons:
+            base['notes'].append({
+                'kind': 'warning',
+                'title': 'Не все графики администраторов загружены',
+                'text': (
+                    'Администраторы без полного покрытия выбранного периода исключены '
+                    'из рейтинга допуслуг.'
+                ),
+            })
 
     staff_col = ('staff', 'Сотрудник', 'text')
     branch_col = ('company_title', 'Барбершоп', 'text')
     qty_col = ('qty', 'Кол-во, шт', NUMBER_FORMAT)
-    extra_share_col = ('share_pct', 'Доля всех 4 KPI, %', PERCENT_FORMAT)
+    extra_share_col = ('share_pct', 'Доля доп. услуг по метке, %', PERCENT_FORMAT)
     cosmo_share_col = ('share_pct', 'Доля продаж косметики, %', PERCENT_FORMAT)
 
     revenue_barber = boards.get('revenue_barber', boards.get('revenue_top', []))
@@ -3055,7 +3126,7 @@ async def _leaderboard_payload_impl(
     base['tables'] = [
         _ranking_table(
             'extra_services',
-            'Топ по доп. услугам · воск, камуфляж, уход за лицом и головой',
+            'Топ по услугам с меткой «Доп. услуга»',
             [staff_col, branch_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), ('pct', 'Доп. услуги, %', PERCENT_FORMAT), extra_share_col],
             boards.get('extra_services_rankings', {}),
             'pct',

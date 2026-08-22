@@ -64,13 +64,6 @@ services:
     command: ["--mode", "incremental", "--trigger", "manual", "--initiator", "docker"]
     restart: "no"
 
-  import-sheets:
-    <<: *app-base
-    profiles: ["tools"]
-    entrypoint: ["/app/docker/entrypoint.sh", "import-sheets"]
-    command: []
-    restart: "no"
-
   nginx:
     image: nginx:alpine
     profiles: ["prod"]

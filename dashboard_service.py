@@ -10,8 +10,23 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import String, and_, case, cast, delete, exists, extract, func, or_, select, tuple_
+from sqlalchemy import Date as SQLDate
+from sqlalchemy import (
+    String,
+    Time as SQLTime,
+    and_,
+    case,
+    cast,
+    delete,
+    exists,
+    extract,
+    func,
+    or_,
+    select,
+    tuple_,
+)
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -58,8 +73,10 @@ WAITLIST_STAFF_NAME = 'лист ожидания'
 ADMIN_PLACEHOLDER_STAFF_PREFIX = 'администратор'
 PLAN_SETTINGS_SOURCE = 'dashboard_plan_settings'
 GOODS_KPI_CODES = ('wax_qty', 'camouflage_qty', 'face_care_qty', 'head_care_qty')
+DEFAULT_BRANCH_TIMEZONE = 'Europe/Moscow'
 COMPLETED_ATTENDANCE = 1
 PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
+STAFF_SCHEDULE_SOURCE = 'staff_schedules'
 PERSONAL_ACCOUNT_TYPES = ('client_account', 'personal_account', 'account_replenishment')
 PERSONAL_ACCOUNT_EXPENSE_MARKERS = ('пополн', 'личн', 'депозит')
 NON_CASH_ACCOUNT_MARKERS = ('бонус', 'скид', 'лояльн', 'сертификат')
@@ -111,6 +128,8 @@ STAFF_INPUT_FIELDS = (
     'avg_check_total',
     'reviews_qty',
     'cosmo_qty',
+    'extra_services_qty',
+    'extra_services_pct',
 )
 
 
@@ -144,16 +163,38 @@ class OpzEvent:
     company_id: int
     client_id: int
     create_date: datetime
+    event_date: date
     appointment_date: date
     last_visit_date: date
     barber_staff_id: Optional[int]
     created_user_id: Optional[int]
 
 
+@dataclass(frozen=True)
+class AdministratorServiceScope:
+    is_administrator: bool
+    company_id: Optional[int] = None
+    source_status: str = 'ready'
+    missing_sources: tuple[str, ...] = ()
+    appointment_condition: Any = None
+    appointment_ids: frozenset[int] = frozenset()
+    appointment_count: int = 0
+    unique_client_count: int = 0
+
+
 def _pct_change(current: float, previous: float) -> Optional[float]:
     if previous == 0:
         return None if current == 0 else 100.0
     return round(100.0 * (current - previous) / previous, 2)
+
+
+def _optional_pct_change(
+    current: Optional[float],
+    previous: Optional[float],
+) -> Optional[float]:
+    if current is None or previous is None:
+        return None
+    return _pct_change(current, previous)
 
 
 def _safe_div(numerator: float, denominator: float) -> float:
@@ -556,19 +597,23 @@ async def fetch_reporting_start_dates(
 
 
 def _factual_now() -> datetime:
-    return datetime.now()
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _appointment_factual_at_condition(factual_at: datetime):
-    factual_date = factual_at.date()
+    factual_date = (
+        factual_at.replace(tzinfo=UTC)
+        .astimezone(ZoneInfo(DEFAULT_BRANCH_TIMEZONE))
+        .date()
+    )
     return or_(
-        Appointment.date < factual_date,
         and_(
-            Appointment.date == factual_date,
-            or_(
-                Appointment.datetime.is_(None),
-                Appointment.datetime <= factual_at,
-            ),
+            Appointment.datetime.is_not(None),
+            Appointment.datetime <= factual_at,
+        ),
+        and_(
+            Appointment.datetime.is_(None),
+            Appointment.date <= factual_date,
         ),
     )
 
@@ -1347,23 +1392,19 @@ def _derive_metric_values(
     ):
         out['opz_pct'] = 100.0 * out.get('opz_qty', 0.0) / clients if clients else 0.0
 
+    if 'extra_services_qty' not in out and any(code in out for code in GOODS_KPI_CODES):
+        out['extra_services_qty'] = sum(out.get(code, 0.0) for code in GOODS_KPI_CODES)
+
     if (not prefer_explicit or 'extra_services_pct' not in out) and (
         include_zero_derived
-        or (
-            'clients' in out
-            and any(
-                code in out
-                for code in ('wax_qty', 'camouflage_qty', 'face_care_qty', 'head_care_qty')
-            )
-        )
+        or ('extra_services_qty' in out and 'clients' in out)
     ):
-        extra_qty = (
-            out.get('wax_qty', 0.0)
-            + out.get('camouflage_qty', 0.0)
-            + out.get('face_care_qty', 0.0)
-            + out.get('head_care_qty', 0.0)
+        denominator = out.get('extra_services_denominator', clients)
+        out['extra_services_pct'] = (
+            100.0 * out.get('extra_services_qty', 0.0) / denominator
+            if denominator
+            else 0.0
         )
-        out['extra_services_pct'] = 100.0 * extra_qty / clients if clients else 0.0
 
     return out
 
@@ -1459,6 +1500,7 @@ async def _revenue_block(
     include_goods: bool = True,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
+    extra_appointment_condition: Any = None,
 ) -> dict[str, Any]:
     cond = _appt_revenue_filters(
         dr.start,
@@ -1469,19 +1511,25 @@ async def _revenue_block(
         allowed_company_ids=allowed_company_ids,
         factual_at=factual_at,
     )
+    extra_condition = ServiceLabel.is_extra.is_(True)
+    if extra_appointment_condition is not None:
+        extra_condition = and_(
+            extra_condition,
+            extra_appointment_condition,
+        )
     extra_appt = case(
-        (ServiceLabel.is_extra.is_(True), Appointment.id),
+        (extra_condition, Appointment.id),
         else_=None,
     )
     extra_client = case(
-        (ServiceLabel.is_extra.is_(True), Appointment.client_id),
+        (extra_condition, Appointment.client_id),
         else_=None,
     )
     service_count = func.coalesce(func.sum(func.coalesce(Transaction.amount, 0)), 0)
     extra_service_count = func.coalesce(
         func.sum(
             case(
-                (ServiceLabel.is_extra.is_(True), func.coalesce(Transaction.amount, 0)),
+                (extra_condition, func.coalesce(Transaction.amount, 0)),
                 else_=0,
             )
         ),
@@ -1507,7 +1555,7 @@ async def _revenue_block(
             func.coalesce(
                 func.sum(
                     case(
-                        (ServiceLabel.is_extra.is_(True), FinancialTransaction.amount),
+                        (extra_condition, FinancialTransaction.amount),
                         else_=0.0,
                     )
                 ),
@@ -1588,6 +1636,22 @@ async def fetch_summary(
         db, company_id, staff_id, allowed_company_ids
     )
     effective_company_ids = appointment_company_ids
+    current_service_scope = await _administrator_service_scope(
+        db,
+        start,
+        end,
+        staff_id,
+        effective_company_ids,
+        factual_at,
+    )
+    previous_service_scope = await _administrator_service_scope(
+        db,
+        prev_dr.start,
+        prev_dr.end,
+        staff_id,
+        effective_company_ids,
+        factual_at,
+    )
     appointments_task = (
         asyncio.create_task(
             _fetch_appointments_breakdown(
@@ -1619,6 +1683,40 @@ async def fetch_summary(
         allowed_company_ids=effective_company_ids,
         factual_at=factual_at,
     )
+    if current_service_scope.is_administrator:
+        attributed_current = await _revenue_block(
+            db,
+            current_dr,
+            current_service_scope.company_id,
+            include_goods=False,
+            allowed_company_ids=effective_company_ids,
+            factual_at=factual_at,
+            extra_appointment_condition=current_service_scope.appointment_condition,
+        )
+        for field in (
+            'extra_service_revenue',
+            'extra_service_count',
+            'extra_service_appointments',
+            'extra_service_clients',
+        ):
+            cur[field] = attributed_current[field]
+    if previous_service_scope.is_administrator:
+        attributed_previous = await _revenue_block(
+            db,
+            prev_dr,
+            previous_service_scope.company_id,
+            include_goods=False,
+            allowed_company_ids=effective_company_ids,
+            factual_at=factual_at,
+            extra_appointment_condition=previous_service_scope.appointment_condition,
+        )
+        for field in (
+            'extra_service_revenue',
+            'extra_service_count',
+            'extra_service_appointments',
+            'extra_service_clients',
+        ):
+            prev[field] = attributed_previous[field]
     cur_opz_qty = await _opz_count_scope(
         db,
         start,
@@ -1718,33 +1816,79 @@ async def fetch_summary(
     prev_avg_services = _safe_div(prev['service_revenue'], prev_appointments)
     cur_avg_goods = _safe_div(cur['goods_revenue'], float(cur['goods_count'] or 0))
     prev_avg_goods = _safe_div(prev['goods_revenue'], float(prev['goods_count'] or 0))
-    cur_avg_extra_services = _safe_div(
-        cur['extra_service_revenue'],
-        float(cur['extra_service_count'] or 0),
+    current_extra_ready = current_service_scope.source_status == 'ready'
+    previous_extra_ready = previous_service_scope.source_status == 'ready'
+    cur_extra_service_revenue = (
+        float(cur['extra_service_revenue']) if current_extra_ready else None
     )
-    prev_avg_extra_services = _safe_div(
-        prev['extra_service_revenue'],
-        float(prev['extra_service_count'] or 0),
+    prev_extra_service_revenue = (
+        float(prev['extra_service_revenue']) if previous_extra_ready else None
     )
-    cur_extra_services_per_appointment_pct = 100.0 * _safe_div(
-        float(cur['extra_service_count'] or 0),
-        cur_appointments,
+    cur_extra_service_count = (
+        float(cur['extra_service_count']) if current_extra_ready else None
     )
-    prev_extra_services_per_appointment_pct = 100.0 * _safe_div(
-        float(prev['extra_service_count'] or 0),
-        prev_appointments,
+    prev_extra_service_count = (
+        float(prev['extra_service_count']) if previous_extra_ready else None
+    )
+    cur_extra_denominator = (
+        float(current_service_scope.appointment_count)
+        if current_service_scope.is_administrator
+        else cur_appointments
+    )
+    prev_extra_denominator = (
+        float(previous_service_scope.appointment_count)
+        if previous_service_scope.is_administrator
+        else prev_appointments
+    )
+    cur_avg_extra_services = (
+        _safe_div(cur_extra_service_revenue, cur_extra_service_count)
+        if cur_extra_service_revenue is not None and cur_extra_service_count is not None
+        else None
+    )
+    prev_avg_extra_services = (
+        _safe_div(prev_extra_service_revenue, prev_extra_service_count)
+        if prev_extra_service_revenue is not None and prev_extra_service_count is not None
+        else None
+    )
+    cur_extra_services_per_appointment_pct = (
+        100.0 * _safe_div(cur_extra_service_count, cur_extra_denominator)
+        if cur_extra_service_count is not None
+        else None
+    )
+    prev_extra_services_per_appointment_pct = (
+        100.0 * _safe_div(prev_extra_service_count, prev_extra_denominator)
+        if prev_extra_service_count is not None
+        else None
     )
     cur_unique_clients = float(cur['unique_clients'] or 0)
     prev_unique_clients = float(prev['unique_clients'] or 0)
     cur_visits_per_client = _safe_div(cur_appointments, cur_unique_clients)
     prev_visits_per_client = _safe_div(prev_appointments, prev_unique_clients)
-    cur_extra_service_clients_pct = 100.0 * _safe_div(
-        float(cur['extra_service_clients'] or 0),
-        cur_unique_clients,
+    cur_extra_service_clients = (
+        float(cur['extra_service_clients']) if current_extra_ready else None
     )
-    prev_extra_service_clients_pct = 100.0 * _safe_div(
-        float(prev['extra_service_clients'] or 0),
-        prev_unique_clients,
+    prev_extra_service_clients = (
+        float(prev['extra_service_clients']) if previous_extra_ready else None
+    )
+    cur_extra_client_denominator = (
+        float(current_service_scope.unique_client_count)
+        if current_service_scope.is_administrator
+        else cur_unique_clients
+    )
+    prev_extra_client_denominator = (
+        float(previous_service_scope.unique_client_count)
+        if previous_service_scope.is_administrator
+        else prev_unique_clients
+    )
+    cur_extra_service_clients_pct = (
+        100.0 * _safe_div(cur_extra_service_clients, cur_extra_client_denominator)
+        if cur_extra_service_clients is not None
+        else None
+    )
+    prev_extra_service_clients_pct = (
+        100.0 * _safe_div(prev_extra_service_clients, prev_extra_client_denominator)
+        if prev_extra_service_clients is not None
+        else None
     )
     cur_opz_pct = 100.0 * _safe_div(cur_opz_qty, float(cur['appointments'] or 0))
     prev_opz_pct = 100.0 * _safe_div(prev_opz_qty, float(prev['appointments'] or 0))
@@ -1752,12 +1896,22 @@ async def fetch_summary(
     return {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
         'previous_period': {'start': prev_dr.start.isoformat(), 'end': prev_dr.end.isoformat()},
+        'source_status': current_service_scope.source_status,
+        'missing_sources': list(current_service_scope.missing_sources),
+        'service_attribution': {
+            'mode': (
+                'administrator_schedule'
+                if current_service_scope.is_administrator
+                else 'master'
+            ),
+            'source_status': current_service_scope.source_status,
+        },
         'revenue': {
             'total': cur_rev,
             'service_revenue': cur['service_revenue'],
             'goods_revenue': cur['goods_revenue'],
             'topup_revenue': cur['topup_revenue'],
-            'extra_service_revenue': cur['extra_service_revenue'],
+            'extra_service_revenue': cur_extra_service_revenue,
             'change_pct': _pct_change(cur_rev, prev_rev),
             'service_revenue_change_pct': _pct_change(
                 float(cur['service_revenue']), float(prev['service_revenue'])
@@ -1768,8 +1922,9 @@ async def fetch_summary(
             'topup_revenue_change_pct': _pct_change(
                 float(cur['topup_revenue']), float(prev['topup_revenue'])
             ),
-            'extra_service_revenue_change_pct': _pct_change(
-                float(cur['extra_service_revenue']), float(prev['extra_service_revenue'])
+            'extra_service_revenue_change_pct': _optional_pct_change(
+                cur_extra_service_revenue,
+                prev_extra_service_revenue,
             ),
             'service_count': cur['service_count'],
             'service_count_change_pct': _pct_change(
@@ -1779,22 +1934,26 @@ async def fetch_summary(
             'goods_count_change_pct': _pct_change(
                 float(cur['goods_count']), float(prev['goods_count'])
             ),
-            'extra_service_count': cur['extra_service_count'],
-            'extra_service_count_change_pct': _pct_change(
-                float(cur['extra_service_count']), float(prev['extra_service_count'])
+            'extra_service_count': cur_extra_service_count,
+            'extra_service_count_change_pct': _optional_pct_change(
+                cur_extra_service_count,
+                prev_extra_service_count,
             ),
             'appointments': int(cur_appointments),
             'appointments_change_pct': _pct_change(
                 cur_appointments, prev_appointments
             ),
-            'extra_service_appointments': cur['extra_service_appointments'],
+            'extra_service_appointments': (
+                cur['extra_service_appointments'] if current_extra_ready else None
+            ),
             'unique_clients': cur['unique_clients'],
             'unique_clients_change_pct': _pct_change(
                 float(cur['unique_clients']), float(prev['unique_clients'])
             ),
-            'extra_service_clients': cur['extra_service_clients'],
-            'extra_service_clients_change_pct': _pct_change(
-                float(cur['extra_service_clients']), float(prev['extra_service_clients'])
+            'extra_service_clients': cur_extra_service_clients,
+            'extra_service_clients_change_pct': _optional_pct_change(
+                cur_extra_service_clients,
+                prev_extra_service_clients,
             ),
         },
         'visit_metrics': {
@@ -1803,7 +1962,7 @@ async def fetch_summary(
             'opz_pct': cur_opz_pct,
             'opz_pct_change_pct': _pct_change(cur_opz_pct, prev_opz_pct),
             'extra_services_per_appointment_pct': cur_extra_services_per_appointment_pct,
-            'extra_services_per_appointment_pct_change_pct': _pct_change(
+            'extra_services_per_appointment_pct_change_pct': _optional_pct_change(
                 cur_extra_services_per_appointment_pct,
                 prev_extra_services_per_appointment_pct,
             ),
@@ -1817,9 +1976,9 @@ async def fetch_summary(
                 cur_visits_per_client,
                 prev_visits_per_client,
             ),
-            'extra_service_clients': cur['extra_service_clients'],
+            'extra_service_clients': cur_extra_service_clients,
             'extra_service_clients_pct': cur_extra_service_clients_pct,
-            'extra_service_clients_pct_change_pct': _pct_change(
+            'extra_service_clients_pct_change_pct': _optional_pct_change(
                 cur_extra_service_clients_pct,
                 prev_extra_service_clients_pct,
             ),
@@ -1854,12 +2013,14 @@ async def fetch_summary(
             'total_change_pct': _pct_change(cur_avg_total, prev_avg_total),
             'services_change_pct': _pct_change(cur_avg_services, prev_avg_services),
             'goods_change_pct': _pct_change(cur_avg_goods, prev_avg_goods),
-            'extra_services_change_pct': _pct_change(
+            'extra_services_change_pct': _optional_pct_change(
                 cur_avg_extra_services,
                 prev_avg_extra_services,
             ),
             'appointments': int(cur_appointments),
-            'extra_service_appointments': cur['extra_service_appointments'],
+            'extra_service_appointments': (
+                cur['extra_service_appointments'] if current_extra_ready else None
+            ),
             'specialized_formulas': {
                 'services': 'service_revenue / completed_appointments',
                 'goods': 'goods_revenue / goods_units',
@@ -2383,8 +2544,7 @@ async def fetch_revenue_daily(
             if staff_id is not None:
                 events = [event for event in events if event.barber_staff_id == staff_id]
             for event in events:
-                event_date = event.create_date.date()
-                opz_by_date[event_date] = opz_by_date.get(event_date, 0) + 1
+                opz_by_date[event.event_date] = opz_by_date.get(event.event_date, 0) + 1
 
     def _empty_day() -> dict[str, float | int]:
         return {'service_revenue': 0.0, 'goods_revenue': 0.0, 'topup_revenue': 0.0, 'appointments': 0, 'opz_qty': 0}
@@ -2512,6 +2672,7 @@ async def fetch_dashboard_services(
             ServiceCatalog.duration,
             ServiceCatalog.category_id,
             ServiceCatalog.category_title,
+            ServiceCatalog.is_active,
             ServiceCatalog.updated_at,
             ServiceLabel.is_extra,
             ServiceLabel.source.label('label_source'),
@@ -2528,7 +2689,7 @@ async def fetch_dashboard_services(
         .outerjoin(ServiceKpiAssignment, assignment_join)
         .outerjoin(ServiceKpiGroup, ServiceKpiGroup.id == ServiceKpiAssignment.group_id)
     )
-    filters = []
+    filters = [ServiceCatalog.is_active.is_(True)]
     if company_id is not None:
         filters.append(ServiceCatalog.company_id == company_id)
     elif allowed_company_ids is not None:
@@ -2547,28 +2708,6 @@ async def fetch_dashboard_services(
         filters.append(or_(ServiceLabel.service_id.is_(None), ServiceLabel.is_extra.is_(False)))
     if kpi_group_id is not None:
         filters.append(ServiceKpiAssignment.group_id == kpi_group_id)
-    latest_appointment_date = await db.scalar(select(func.max(Appointment.date)))
-    if latest_appointment_date is not None:
-        active_since = latest_appointment_date - timedelta(days=365)
-        active_service = exists(
-            select(1)
-            .select_from(Transaction)
-            .join(
-                Appointment,
-                and_(
-                    Appointment.id == Transaction.appointment_id,
-                    Appointment.company_id == Transaction.company_id,
-                ),
-            )
-            .where(
-                Transaction.company_id == ServiceCatalog.company_id,
-                Transaction.service_id == ServiceCatalog.service_id,
-                # No reporting-start cutoff on purpose: this decides whether a service is
-                # still worth showing in the catalog, not a metric shown beside trimmed ones.
-                Appointment.date >= active_since,
-            )
-        )
-        filters.append(active_service)
     if filters:
         stmt = stmt.where(*filters)
     stmt = stmt.order_by(Company.title.asc(), ServiceCatalog.category_title.asc(), ServiceCatalog.title.asc())
@@ -2584,6 +2723,7 @@ async def fetch_dashboard_services(
                 'duration': row.duration,
                 'category_id': row.category_id,
                 'category_title': _service_display_category(row.category_title, row.title),
+                'is_active': bool(row.is_active),
                 'updated_at': _iso_datetime(row.updated_at),
                 'is_extra': bool(row.is_extra) if row.is_extra is not None else False,
                 'label_source': row.label_source,
@@ -3012,6 +3152,20 @@ async def fetch_top_services(
     allowed_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
+    administrator_scope = await _administrator_service_scope(
+        db,
+        start,
+        end,
+        staff_id,
+        allowed_company_ids,
+        factual_at,
+    )
+    effective_staff_id = None if administrator_scope.is_administrator else staff_id
+    administrator_filter = (
+        administrator_scope.appointment_condition
+        if administrator_scope.is_administrator
+        else None
+    )
     title_expr = func.trim(func.coalesce(func.nullif(Transaction.service_title, ''), ServiceCatalog.title, ''))
     group_key = _service_group_key(title_expr, Transaction.service_id)
     count_stmt = (
@@ -3031,10 +3185,11 @@ async def fetch_top_services(
                 start,
                 end,
                 company_id,
-                staff_id,
+                effective_staff_id,
                 allowed_company_ids=allowed_company_ids,
                 factual_at=factual_at,
             ),
+            *([administrator_filter] if administrator_filter is not None else []),
         )
         .group_by(group_key)
     )
@@ -3087,10 +3242,11 @@ async def fetch_top_services(
                 start,
                 end,
                 company_id,
-                staff_id,
+                effective_staff_id,
                 allowed_company_ids=allowed_company_ids,
                 factual_at=factual_at,
             ),
+            *([administrator_filter] if administrator_filter is not None else []),
             _physical_account_condition(),
         )
         .group_by(paid_group_key)
@@ -3212,6 +3368,20 @@ async def fetch_extra_services(
     allowed_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
+    administrator_scope = await _administrator_service_scope(
+        db,
+        start,
+        end,
+        staff_id,
+        allowed_company_ids,
+        factual_at,
+    )
+    effective_staff_id = None if administrator_scope.is_administrator else staff_id
+    administrator_filter = (
+        administrator_scope.appointment_condition
+        if administrator_scope.is_administrator
+        else None
+    )
     title_expr = func.trim(func.coalesce(func.nullif(Transaction.service_title, ''), ServiceCatalog.title, ''))
     group_key = _service_group_key(title_expr, Transaction.service_id)
     count_stmt = (
@@ -3232,10 +3402,11 @@ async def fetch_extra_services(
                 start,
                 end,
                 company_id,
-                staff_id,
+                effective_staff_id,
                 allowed_company_ids=allowed_company_ids,
                 factual_at=factual_at,
             ),
+            *([administrator_filter] if administrator_filter is not None else []),
             ServiceLabel.is_extra.is_(True),
         )
         .group_by(group_key)
@@ -3285,10 +3456,11 @@ async def fetch_extra_services(
                 start,
                 end,
                 company_id,
-                staff_id,
+                effective_staff_id,
                 allowed_company_ids=allowed_company_ids,
                 factual_at=factual_at,
             ),
+            *([administrator_filter] if administrator_filter is not None else []),
             ServiceLabel.is_extra.is_(True),
             _physical_account_condition(),
         )
@@ -3326,10 +3498,20 @@ async def _service_group_counts(
             _service_qty_sum(title_expr, CAMOUFLAGE_TITLE_PARTS).label('camouflage_qty'),
             _service_qty_sum(title_expr, FACE_CARE_TITLE_PARTS).label('face_care_qty'),
             _service_qty_sum(title_expr, HEAD_CARE_TITLE_PARTS).label('head_care_qty'),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (ServiceLabel.is_extra.is_(True), func.coalesce(Transaction.amount, 0)),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label('extra_services_qty'),
         )
         .select_from(Transaction)
         .join(Appointment, Appointment.id == Transaction.appointment_id)
         .outerjoin(ServiceCatalog, _transaction_service_catalog_join())
+        .outerjoin(ServiceLabel, _transaction_service_label_join())
         .where(
             _appt_revenue_filters(
                 start, end, company_id, staff_id, factual_at=factual_at
@@ -3342,6 +3524,7 @@ async def _service_group_counts(
         'camouflage_qty': float(row.camouflage_qty or 0),
         'face_care_qty': float(row.face_care_qty or 0),
         'head_care_qty': float(row.head_care_qty or 0),
+        'extra_services_qty': float(row.extra_services_qty or 0),
     }
 
 
@@ -3352,30 +3535,12 @@ async def _extra_service_revenue_by_staff(
     company_ids: list[int] | None,
     factual_at: Optional[datetime] = None,
 ) -> dict[int, float] | None:
-    """Paid revenue of the extra-service categories (wax/camouflage/face/head), per visit master.
+    """Paid revenue of dashboard-labeled extra services, per visit master.
 
     Grouped by ``Appointment.staff_id`` to match how the plan/fact quantities are attributed.
     """
     if company_ids is not None and not company_ids:
         return {}
-    tx_titles = (
-        select(
-            Transaction.appointment_id.label('record_id'),
-            Transaction.service_id.label('service_id'),
-            func.min(func.nullif(Transaction.service_title, '')).label('service_title'),
-        )
-        .group_by(Transaction.appointment_id, Transaction.service_id)
-        .subquery()
-    )
-    title_expr = func.lower(
-        func.coalesce(tx_titles.c.service_title, func.nullif(ServiceCatalog.title, ''), '')
-    )
-    extra_match = or_(
-        _title_matches(title_expr, WAX_TITLE_PARTS),
-        _title_matches(title_expr, CAMOUFLAGE_TITLE_PARTS),
-        _title_matches(title_expr, FACE_CARE_TITLE_PARTS),
-        _title_matches(title_expr, HEAD_CARE_TITLE_PARTS),
-    )
     stmt = (
         select(
             Appointment.staff_id.label('staff_id'),
@@ -3383,14 +3548,7 @@ async def _extra_service_revenue_by_staff(
         )
         .select_from(FinancialTransaction)
         .join(Appointment, financial_appointment_match_condition())
-        .outerjoin(
-            tx_titles,
-            and_(
-                tx_titles.c.record_id == FinancialTransaction.record_id,
-                tx_titles.c.service_id == FinancialTransaction.sold_item_id,
-            ),
-        )
-        .outerjoin(ServiceCatalog, _financial_service_catalog_join())
+        .join(ServiceLabel, _financial_service_label_join())
         .outerjoin(
             AccountCatalog,
             and_(
@@ -3408,7 +3566,7 @@ async def _extra_service_revenue_by_staff(
                 factual_at=factual_at,
             ),
             _physical_account_condition(),
-            extra_match,
+            ServiceLabel.is_extra.is_(True),
             Appointment.staff_id.is_not(None),
         )
         .group_by(Appointment.staff_id)
@@ -3463,9 +3621,21 @@ async def _opz_events(
     *,
     deduplicate_by_year: bool = False,
     factual_at: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
 ) -> list[OpzEvent]:
-    create_start = datetime.combine(start, time.min)
-    create_end = datetime.combine(end + timedelta(days=1), time.min)
+    if timezone_name is None:
+        timezone_name = (await _company_timezone_names(db, [company_id])).get(company_id)
+    timezone = _branch_timezone(timezone_name)
+    create_start = (
+        datetime.combine(start, time.min, tzinfo=timezone)
+        .astimezone(UTC)
+        .replace(tzinfo=None)
+    )
+    create_end = (
+        datetime.combine(end + timedelta(days=1), time.min, tzinfo=timezone)
+        .astimezone(UTC)
+        .replace(tzinfo=None)
+    )
     candidate_filters = [
         Appointment.company_id == company_id,
         Appointment.client_id.is_not(None),
@@ -3528,7 +3698,10 @@ async def _opz_events(
     events: list[OpzEvent] = []
     booked_clients: set[tuple[int, ...]] = set()
     for candidate in candidates:
-        create_day = candidate.create_date.date()
+        local_create_moment = _local_event_moment(candidate.create_date, timezone)
+        if local_create_moment is None:
+            continue
+        create_day = local_create_moment.date()
         last_visits = [
             visit
             for visit in visits_by_client.get((candidate.company_id, candidate.client_id), [])
@@ -3561,6 +3734,7 @@ async def _opz_events(
                 company_id=int(candidate.company_id),
                 client_id=int(candidate.client_id),
                 create_date=candidate.create_date,
+                event_date=create_day,
                 appointment_date=_coerce_date(candidate.date),
                 last_visit_date=last_visit_date,
                 barber_staff_id=int(last_visit.staff_id) if last_visit.staff_id is not None else None,
@@ -3573,6 +3747,23 @@ async def _opz_events(
         )
 
     return events
+
+
+async def _company_timezone_names(
+    db: AsyncSession,
+    company_ids: list[int],
+) -> dict[int, str | None]:
+    cache: dict[int, str | None] = db.info.setdefault('company_timezone_names', {})
+    missing = sorted({int(company_id) for company_id in company_ids} - cache.keys())
+    if missing:
+        rows = (
+            await db.execute(
+                select(Company.id, Company.timezone).where(Company.id.in_(missing))
+            )
+        ).all()
+        loaded = {int(row.id): row.timezone for row in rows}
+        cache.update({company_id: loaded.get(company_id) for company_id in missing})
+    return {int(company_id): cache.get(int(company_id)) for company_id in company_ids}
 
 
 async def _opz_count(
@@ -3640,6 +3831,7 @@ async def fetch_opz_year_facts(
         int, dict[int, tuple[date, date]]
     ] = defaultdict(dict)
     latest_date: date | None = None
+    timezone_names = await _company_timezone_names(db, company_ids)
     for item_company_id in company_ids:
         events = await _opz_events(
             db,
@@ -3648,6 +3840,7 @@ async def fetch_opz_year_facts(
             item_company_id,
             deduplicate_by_year=True,
             factual_at=factual_at,
+            timezone_name=timezone_names.get(item_company_id),
         )
         for event in events:
             if (
@@ -3661,7 +3854,7 @@ async def fetch_opz_year_facts(
                 and event.barber_staff_id != staff_id
             ):
                 continue
-            event_year = event.create_date.year
+            event_year = event.event_date.year
             counts[event_year] += 1.0
             dependency_start = min(event.last_visit_date, event.appointment_date)
             dependency_end = max(event.last_visit_date, event.appointment_date)
@@ -3670,8 +3863,11 @@ async def fetch_opz_year_facts(
                 min(current[0], dependency_start) if current else dependency_start,
                 max(current[1], dependency_end) if current else dependency_end,
             )
-            event_date = event.create_date.date()
-            latest_date = max(latest_date, event_date) if latest_date is not None else event_date
+            latest_date = (
+                max(latest_date, event.event_date)
+                if latest_date is not None
+                else event.event_date
+            )
     return {
         'counts': dict(counts),
         'latest_date': latest_date,
@@ -3703,6 +3899,8 @@ async def _admin_event_counts(
         for staff_id, user_id in user_id_by_staff.items()
         if staff_id in counts and user_id is not None
     }
+    timezone_name = await db.scalar(select(Company.timezone).where(Company.id == company_id))
+    timezone = _branch_timezone(timezone_name)
 
     schedule_rows = (
         await db.execute(
@@ -3715,8 +3913,8 @@ async def _admin_event_counts(
             .where(
                 StaffSchedule.staff_id.in_(ordered_staff_ids),
                 StaffSchedule.company_id == company_id,
-                StaffSchedule.date >= start,
-                StaffSchedule.date <= end,
+                StaffSchedule.date >= start - timedelta(days=1),
+                StaffSchedule.date <= end + timedelta(days=1),
             )
             .order_by(StaffSchedule.date.asc(), StaffSchedule.slot_from.asc(), StaffSchedule.staff_id.asc())
         )
@@ -3726,18 +3924,35 @@ async def _admin_event_counts(
         schedules_by_date.setdefault(_coerce_date(row.date), []).append(row)
 
     for event in sorted(events, key=lambda item: (item.event_date, item.event_moment or datetime.min, item.event_id)):
+        local_moment = _local_event_moment(event.event_moment, timezone)
+        local_date = local_moment.date() if local_moment is not None else event.event_date
         creator_staff_id = (
             user_to_staff.get(int(event.created_user_id))
             if event.created_user_id is not None
             else None
         )
+        candidate_schedules = list(schedules_by_date.get(local_date, []))
+        if local_moment is not None:
+            candidate_schedules = [
+                *schedules_by_date.get(local_date - timedelta(days=1), []),
+                *candidate_schedules,
+            ]
         scheduled_staff_ids = {
             int(schedule.staff_id)
-            for schedule in schedules_by_date.get(event.event_date, [])
-            if _schedule_slot_covers_datetime(
-                schedule.slot_from,
-                schedule.slot_to,
-                event.event_moment,
+            for schedule in candidate_schedules
+            if (
+                _schedule_slot_covers_local_moment(
+                    _coerce_date(schedule.date),
+                    schedule.slot_from,
+                    schedule.slot_to,
+                    local_moment,
+                )
+                if local_moment is not None
+                else _schedule_slot_covers_datetime(
+                    schedule.slot_from,
+                    schedule.slot_to,
+                    event.event_moment,
+                )
             )
         }
         if creator_staff_id in scheduled_staff_ids:
@@ -3751,6 +3966,915 @@ async def _admin_event_counts(
         counts[assigned_staff_id] += 1
 
     return counts
+
+
+def _branch_timezone(value: str | None) -> ZoneInfo:
+    try:
+        return ZoneInfo(value or DEFAULT_BRANCH_TIMEZONE)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo(DEFAULT_BRANCH_TIMEZONE)
+
+
+def _local_event_moment(value: Any, timezone: ZoneInfo) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        try:
+            value = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        except ValueError:
+            return None
+    source = value.replace(tzinfo=UTC) if value.tzinfo is None else value
+    return source.astimezone(timezone).replace(tzinfo=None)
+
+
+def _schedule_slot_covers_local_moment(
+    schedule_date: date,
+    slot_from: Any,
+    slot_to: Any,
+    local_moment: datetime,
+) -> bool:
+    start_time = _coerce_time(slot_from)
+    end_time = _coerce_time(slot_to)
+    if start_time is None or end_time is None:
+        return False
+    start_moment = datetime.combine(schedule_date, start_time)
+    end_day = schedule_date + timedelta(days=1) if end_time <= start_time else schedule_date
+    end_moment = datetime.combine(end_day, end_time)
+    return start_moment <= local_moment < end_moment
+
+
+def _scheduled_staff_ids_by_appointment(
+    appointment_rows: list[Any],
+    schedule_rows: list[Any],
+    timezone: ZoneInfo,
+    start: date,
+    end: date,
+) -> dict[int, set[int]]:
+    unique_slots = {
+        (
+            int(row.staff_id),
+            _coerce_date(row.date),
+            _coerce_time(row.slot_from),
+            _coerce_time(row.slot_to),
+        )
+        for row in schedule_rows
+    }
+    slots_by_date: dict[date, list[tuple[int, date, time | None, time | None]]] = {}
+    for staff_id, schedule_date, slot_from, slot_to in unique_slots:
+        slots_by_date.setdefault(schedule_date, []).append(
+            (staff_id, schedule_date, slot_from, slot_to)
+        )
+
+    result: dict[int, set[int]] = {}
+    for appointment in appointment_rows:
+        local_moment = _local_event_moment(appointment.datetime, timezone)
+        if local_moment is None or not start <= local_moment.date() <= end:
+            continue
+        local_date = local_moment.date()
+        candidate_slots = [
+            *slots_by_date.get(local_date - timedelta(days=1), []),
+            *slots_by_date.get(local_date, []),
+        ]
+        covered_staff_ids = {
+            staff_id
+            for staff_id, schedule_date, slot_from, slot_to in candidate_slots
+            if _schedule_slot_covers_local_moment(
+                schedule_date,
+                slot_from,
+                slot_to,
+                local_moment,
+            )
+        }
+        if covered_staff_ids:
+            result[int(appointment.id)] = covered_staff_ids
+    return result
+
+
+def _month_slices(start: date, end: date) -> list[tuple[date, date]]:
+    slices = []
+    cursor = date(start.year, start.month, 1)
+    while cursor <= end:
+        month_end = date(cursor.year, cursor.month, monthrange(cursor.year, cursor.month)[1])
+        slices.append((max(start, cursor), min(end, month_end)))
+        cursor = month_end + timedelta(days=1)
+    return slices
+
+
+def _date_period_condition(column: Any, periods: list[tuple[date, date]]) -> Any:
+    return or_(*[
+        and_(column >= period_start, column <= period_end)
+        for period_start, period_end in periods
+    ])
+
+
+def _staff_role_segments(
+    start: date,
+    end: date,
+    role_periods_by_staff: dict[
+        int,
+        tuple[list[tuple[date, date]], list[tuple[date, date]]],
+    ],
+) -> list[tuple[date, date, dict[int, str]]]:
+    """Merge adjacent months whose complete staff-role map is identical."""
+    segments: list[tuple[date, date, dict[int, str]]] = []
+    for slice_start, slice_end in _month_slices(start, end):
+        categories = {
+            staff_id: (
+                'administrator'
+                if any(
+                    period_start <= slice_end and period_end >= slice_start
+                    for period_start, period_end in periods[0]
+                )
+                else 'barber'
+            )
+            for staff_id, periods in role_periods_by_staff.items()
+        }
+        if segments and segments[-1][2] == categories:
+            segments[-1] = (segments[-1][0], slice_end, categories)
+        else:
+            segments.append((slice_start, slice_end, categories))
+    return segments
+
+
+def _merge_date_periods(periods: list[tuple[date, date]]) -> list[tuple[date, date]]:
+    merged: list[tuple[date, date]] = []
+    for period_start, period_end in sorted(periods):
+        if merged and period_start <= merged[-1][1] + timedelta(days=1):
+            merged[-1] = (merged[-1][0], max(merged[-1][1], period_end))
+        else:
+            merged.append((period_start, period_end))
+    return merged
+
+
+async def _administrator_role_periods_for_branch(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+) -> list[tuple[date, date]]:
+    periods_by_company = await _administrator_role_periods_by_company(
+        db,
+        start,
+        end,
+        [company_id],
+    )
+    return _merge_date_periods([
+        period
+        for periods in periods_by_company.get(company_id, {}).values()
+        for period in periods
+    ])
+
+
+async def _administrator_role_periods_by_company(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_ids: list[int],
+) -> dict[int, dict[int, list[tuple[date, date]]]]:
+    plan_start, plan_end = _month_window(start, end)
+    staff_rows = (
+        await db.execute(
+            select(Staff.id, Staff.name, Staff.position, Staff.company_id).where(
+                Staff.company_id.in_(company_ids),
+                _period_relevant_staff_clause(
+                    start,
+                    end,
+                    plan_start,
+                    plan_end,
+                ),
+            )
+        )
+    ).all()
+    rows_by_company: dict[int, list[Any]] = defaultdict(list)
+    for row in staff_rows:
+        if _is_waitlist_staff_name(row.name) or _is_admin_placeholder_staff_name(row.name):
+            continue
+        rows_by_company[int(row.company_id)].append(row)
+
+    result: dict[int, dict[int, list[tuple[date, date]]]] = {
+        int(company_id): {} for company_id in company_ids
+    }
+    for company_id in company_ids:
+        company_staff = rows_by_company.get(int(company_id), [])
+        role_periods = await _staff_role_periods_by_staff(
+            db,
+            start,
+            end,
+            int(company_id),
+            {int(row.id): row.position for row in company_staff},
+        )
+        result[int(company_id)] = {
+            staff_id: admin_periods
+            for staff_id, (admin_periods, _) in role_periods.items()
+            if admin_periods
+        }
+    return result
+
+
+async def _staff_role_periods(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+    staff_id: int,
+    current_position: Optional[str],
+) -> tuple[list[tuple[date, date]], list[tuple[date, date]]]:
+    periods = await _staff_role_periods_by_staff(
+        db,
+        start,
+        end,
+        company_id,
+        {int(staff_id): current_position},
+    )
+    return periods[int(staff_id)]
+
+
+async def _staff_role_periods_by_staff(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+    current_positions: dict[int, Optional[str]],
+) -> dict[int, tuple[list[tuple[date, date]], list[tuple[date, date]]]]:
+    """Resolve monthly administrator/master periods for several staff in two queries."""
+    staff_ids = sorted({int(staff_id) for staff_id in current_positions})
+    if not staff_ids:
+        return {}
+    plan_start, plan_end = _month_window(start, end)
+    input_rows = (
+        await db.execute(
+            select(
+                PlanStaffInput.staff_id,
+                PlanStaffInput.period_start,
+                PlanStaffInput.period_end,
+                PlanStaffInput.staff_category,
+                PlanStaffInput.updated_at,
+            ).where(
+                PlanStaffInput.staff_id.in_(staff_ids),
+                PlanStaffInput.company_id == company_id,
+                PlanStaffInput.period_start <= plan_end,
+                PlanStaffInput.period_end >= plan_start,
+            )
+        )
+    ).all()
+    metric_rows = (
+        await db.execute(
+            select(
+                PlanMetric.staff_id,
+                PlanMetric.period_start,
+                PlanMetric.period_end,
+                PlanMetric.staff_category,
+                PlanMetric.updated_at,
+            ).where(
+                PlanMetric.staff_id.in_(staff_ids),
+                PlanMetric.company_id == company_id,
+                PlanMetric.period_start <= plan_end,
+                PlanMetric.period_end >= plan_start,
+                PlanMetric.staff_category.in_(STAFF_CATEGORY_METRIC_CODES),
+            )
+        )
+    ).all()
+    input_by_staff: dict[int, list[Any]] = defaultdict(list)
+    metric_by_staff: dict[int, list[Any]] = defaultdict(list)
+    for row in input_rows:
+        input_by_staff[int(row.staff_id)].append(row)
+    for row in metric_rows:
+        metric_by_staff[int(row.staff_id)].append(row)
+
+    resolved = {}
+    for staff_id in staff_ids:
+        fallback = normalize_staff_category(current_positions.get(staff_id)) or 'barber'
+        categorized: list[tuple[date, date, str]] = []
+        for slice_start, slice_end in _month_slices(start, end):
+            input_candidates = [
+                row for row in input_by_staff.get(staff_id, [])
+                if row.period_start <= slice_end and row.period_end >= slice_start
+                and row.staff_category in STAFF_CATEGORY_METRIC_CODES
+            ]
+            metric_candidates = [
+                row for row in metric_by_staff.get(staff_id, [])
+                if row.period_start <= slice_end and row.period_end >= slice_start
+            ]
+            candidates = metric_candidates or input_candidates
+            selected = max(
+                candidates,
+                key=lambda row: row.updated_at or datetime.min,
+                default=None,
+            )
+            category = selected.staff_category if selected is not None else fallback
+            if categorized and categorized[-1][2] == category:
+                categorized[-1] = (categorized[-1][0], slice_end, category)
+            else:
+                categorized.append((slice_start, slice_end, category))
+        resolved[staff_id] = (
+            [
+                (period_start, period_end)
+                for period_start, period_end, category in categorized
+                if category == 'administrator'
+            ],
+            [
+                (period_start, period_end)
+                for period_start, period_end, category in categorized
+                if category != 'administrator'
+            ],
+        )
+    return resolved
+
+
+def _postgres_schedule_slot_condition(
+    schedule: Any,
+    appointment_company_id: Any,
+    appointment_datetime: Any,
+    timezone_name: str,
+) -> Any:
+    local_moment = func.timezone(
+        timezone_name,
+        func.timezone('UTC', appointment_datetime),
+    )
+    local_date = cast(local_moment, SQLDate)
+    local_time = cast(local_moment, SQLTime)
+    same_day = schedule.date == local_date
+    regular_shift = and_(
+        schedule.slot_to > schedule.slot_from,
+        same_day,
+        local_time >= schedule.slot_from,
+        local_time < schedule.slot_to,
+    )
+    overnight_shift = and_(
+        schedule.slot_to <= schedule.slot_from,
+        or_(
+            and_(same_day, local_time >= schedule.slot_from),
+            and_(schedule.date == local_date - 1, local_time < schedule.slot_to),
+        ),
+    )
+    return and_(
+        schedule.company_id == appointment_company_id,
+        schedule.slot_from.is_not(None),
+        schedule.slot_to.is_not(None),
+        or_(regular_shift, overnight_shift),
+    )
+
+
+def _postgres_administrator_schedule_condition(
+    staff_id: int,
+    timezone_name: str,
+) -> Any:
+    return exists(
+        select(1).where(
+            _postgres_schedule_slot_condition(
+                StaffSchedule,
+                Appointment.company_id,
+                Appointment.datetime,
+                timezone_name,
+            ),
+            StaffSchedule.staff_id == staff_id,
+        )
+    )
+
+
+async def _administrator_service_scope(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    staff_id: Optional[int],
+    allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
+) -> AdministratorServiceScope:
+    """Resolve each selected-staff month using its historical role."""
+    if staff_id is None:
+        return AdministratorServiceScope(is_administrator=False)
+
+    factual_at = factual_at or _factual_now()
+    cache: dict[tuple[Any, ...], AdministratorServiceScope] = db.info.setdefault(
+        'administrator_service_scopes',
+        {},
+    )
+    key = (
+        start,
+        end,
+        int(staff_id),
+        tuple(sorted(allowed_company_ids)) if allowed_company_ids is not None else None,
+        factual_at,
+    )
+    if key in cache:
+        return cache[key]
+
+    staff = (
+        await db.execute(
+            select(Staff.company_id, Staff.position).where(Staff.id == staff_id)
+        )
+    ).one_or_none()
+    if staff is None or (
+        allowed_company_ids is not None
+        and int(staff.company_id) not in {int(value) for value in allowed_company_ids}
+    ):
+        result = AdministratorServiceScope(is_administrator=False)
+        cache[key] = result
+        return result
+
+    company_id = int(staff.company_id)
+    admin_periods, master_periods = await _staff_role_periods(
+        db,
+        start,
+        end,
+        company_id,
+        int(staff_id),
+        staff.position,
+    )
+    if not admin_periods:
+        result = AdministratorServiceScope(is_administrator=False)
+        cache[key] = result
+        return result
+
+    coverage_rows = [
+        await _staff_schedule_coverage_info(
+            db,
+            period_start,
+            period_end,
+            company_id,
+            factual_at=factual_at,
+        )
+        for period_start, period_end in admin_periods
+    ]
+    missing_sources = tuple(sorted({
+        source
+        for coverage in coverage_rows
+        for source in coverage.get('missing_sources', [])
+    }))
+    if any(not coverage['ready'] for coverage in coverage_rows):
+        result = AdministratorServiceScope(
+            is_administrator=True,
+            company_id=company_id,
+            source_status='partial',
+            missing_sources=missing_sources,
+            appointment_condition=Appointment.id.in_([]),
+        )
+        cache[key] = result
+        return result
+
+    timezone_name = await db.scalar(
+        select(Company.timezone).where(Company.id == company_id)
+    ) or DEFAULT_BRANCH_TIMEZONE
+    base_filters = _appt_revenue_filters(
+        start,
+        end,
+        company_id,
+        allowed_company_ids=[company_id],
+        factual_at=factual_at,
+    )
+    admin_date_filter = _date_period_condition(Appointment.date, admin_periods)
+    master_filter = (
+        and_(
+            _date_period_condition(Appointment.date, master_periods),
+            Appointment.staff_id == staff_id,
+        )
+        if master_periods
+        else None
+    )
+
+    dialect_name = db.get_bind().dialect.name
+    if dialect_name == 'postgresql':
+        schedule_filter = _postgres_administrator_schedule_condition(
+            int(staff_id),
+            _branch_timezone(timezone_name).key,
+        )
+        appointment_condition = or_(
+            and_(admin_date_filter, schedule_filter),
+            *([master_filter] if master_filter is not None else []),
+        )
+        counts = (
+            await db.execute(
+                select(
+                    func.count(func.distinct(Appointment.id)).label('appointments'),
+                    func.count(func.distinct(Appointment.client_id)).label('clients'),
+                ).where(base_filters, appointment_condition)
+            )
+        ).one()
+        result = AdministratorServiceScope(
+            is_administrator=True,
+            company_id=company_id,
+            appointment_condition=appointment_condition,
+            appointment_count=int(counts.appointments or 0),
+            unique_client_count=int(counts.clients or 0),
+        )
+        cache[key] = result
+        return result
+
+    appointment_rows = (
+        await db.execute(
+            select(
+                Appointment.id,
+                Appointment.date,
+                Appointment.datetime,
+                Appointment.staff_id,
+                Appointment.client_id,
+            ).where(base_filters)
+        )
+    ).all()
+    schedule_rows = (
+        await db.execute(
+            select(
+                StaffSchedule.staff_id,
+                StaffSchedule.date,
+                StaffSchedule.slot_from,
+                StaffSchedule.slot_to,
+            ).where(
+                StaffSchedule.company_id == company_id,
+                StaffSchedule.staff_id == staff_id,
+                StaffSchedule.date >= min(period[0] for period in admin_periods) - timedelta(days=1),
+                StaffSchedule.date <= max(period[1] for period in admin_periods),
+            )
+        )
+    ).all()
+    scheduled = _scheduled_staff_ids_by_appointment(
+        appointment_rows,
+        schedule_rows,
+        _branch_timezone(timezone_name),
+        start,
+        end,
+    )
+
+    def _inside(value: date, periods: list[tuple[date, date]]) -> bool:
+        return any(period_start <= value <= period_end for period_start, period_end in periods)
+
+    appointment_ids = frozenset(
+        int(row.id)
+        for row in appointment_rows
+        if (
+            _inside(_coerce_date(row.date), admin_periods)
+            and int(staff_id) in scheduled.get(int(row.id), set())
+        ) or (
+            _inside(_coerce_date(row.date), master_periods)
+            and row.staff_id == staff_id
+        )
+    )
+    result = AdministratorServiceScope(
+        is_administrator=True,
+        company_id=company_id,
+        appointment_condition=Appointment.id.in_(appointment_ids),
+        appointment_ids=appointment_ids,
+        appointment_count=len(appointment_ids),
+        unique_client_count=len({
+            int(row.client_id)
+            for row in appointment_rows
+            if int(row.id) in appointment_ids and row.client_id is not None
+        }),
+    )
+    cache[key] = result
+    return result
+
+
+async def fetch_staff_service_attribution_status(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    staff_id: Optional[int],
+    allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
+) -> dict[str, Any]:
+    scope = await _administrator_service_scope(
+        db,
+        start,
+        end,
+        staff_id,
+        allowed_company_ids,
+        factual_at,
+    )
+    return {
+        'mode': 'administrator_schedule' if scope.is_administrator else 'master',
+        'source_status': scope.source_status,
+        'missing_sources': list(scope.missing_sources),
+    }
+
+
+async def _staff_schedule_coverage_info(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+    factual_at: Optional[datetime] = None,
+) -> dict[str, Any]:
+    factual_at = factual_at or _factual_now()
+    reporting_start, state = (
+        await db.execute(
+            select(Company.reporting_start_date, SyncSourceState)
+            .outerjoin(
+                SyncSourceState,
+                and_(
+                    SyncSourceState.company_id == Company.id,
+                    SyncSourceState.source == STAFF_SCHEDULE_SOURCE,
+                ),
+            )
+            .where(Company.id == company_id)
+        )
+    ).one()
+    if reporting_start is None:
+        reporting_start = await db.scalar(
+            select(func.min(Appointment.date)).where(Appointment.company_id == company_id)
+        ) or date.today()
+    first_reportable_date = max(start, _coerce_date(reporting_start))
+    required_start = first_reportable_date - timedelta(days=1)
+    no_reportable_period = _coerce_date(reporting_start) > end
+    invalid_event_timestamps = False
+    if not no_reportable_period:
+        invalid_event_timestamps = bool(
+            await db.scalar(
+                select(
+                    exists(
+                        select(1).where(
+                            _appt_revenue_filters(
+                                first_reportable_date,
+                                end,
+                                company_id,
+                                factual_at=factual_at,
+                            ),
+                            Appointment.datetime.is_(None),
+                        )
+                    )
+                )
+            )
+        )
+    covered = (no_reportable_period or (
+        state is not None
+        and _coerce_date(state.period_start) <= required_start
+        and _coerce_date(state.period_end) >= end
+    )) and not invalid_event_timestamps
+    missing_sources = []
+    if invalid_event_timestamps:
+        missing_sources.append('appointments_detail')
+    if not no_reportable_period and (
+        state is None
+        or _coerce_date(state.period_start) > required_start
+        or _coerce_date(state.period_end) < end
+    ):
+        missing_sources.append(STAFF_SCHEDULE_SOURCE)
+    return {
+        'ready': covered,
+        'required_start': required_start,
+        'required_end': end,
+        'covered_start': _coerce_date(state.period_start) if state is not None else None,
+        'covered_end': _coerce_date(state.period_end) if state is not None else None,
+        'missing_sources': missing_sources,
+        'invalid_event_timestamps': invalid_event_timestamps,
+    }
+
+
+async def _staff_schedule_coverage_diagnostic(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+    company_title: str | None = None,
+    factual_at: Optional[datetime] = None,
+    periods: Optional[list[tuple[date, date]]] = None,
+) -> dict[str, Any] | None:
+    coverage_periods = periods or [(start, end)]
+    infos = [
+        await _staff_schedule_coverage_info(
+            db,
+            period_start,
+            period_end,
+            company_id,
+            factual_at=factual_at,
+        )
+        for period_start, period_end in coverage_periods
+    ]
+    unavailable = [info for info in infos if not info['ready']]
+    if not unavailable:
+        return None
+    invalid_timestamps = any(
+        bool(info.get('invalid_event_timestamps'))
+        for info in unavailable
+    )
+    required_start = min(info['required_start'] for info in unavailable)
+    required_end = max(info['required_end'] for info in unavailable)
+    covered_starts = [
+        info['covered_start'] for info in unavailable
+        if info['covered_start'] is not None
+    ]
+    covered_ends = [
+        info['covered_end'] for info in unavailable
+        if info['covered_end'] is not None
+    ]
+    return {
+        'code': (
+            'appointment_timestamp_coverage'
+            if invalid_timestamps
+            else 'staff_schedule_coverage'
+        ),
+        'severity': 'warning',
+        'message': (
+            'Не у всех завершенных записей есть время для сопоставления со сменой'
+            if invalid_timestamps
+            else 'Графики администраторов покрывают не весь выбранный период'
+        ),
+        'company_id': company_id,
+        'company_title': company_title,
+        'required_start': required_start.isoformat(),
+        'required_end': required_end.isoformat(),
+        'covered_start': min(covered_starts).isoformat() if covered_starts else None,
+        'covered_end': max(covered_ends).isoformat() if covered_ends else None,
+    }
+
+
+async def _admin_extra_service_metrics(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+    staff_ids: list[int],
+    factual_at: Optional[datetime] = None,
+    admin_periods_by_staff: Optional[dict[int, list[tuple[date, date]]]] = None,
+) -> dict[int, dict[str, float]]:
+    """Count labeled extras and completed visits covered by every administrator shift."""
+    ordered_staff_ids = sorted({int(staff_id) for staff_id in staff_ids})
+    metrics = {
+        staff_id: {'extra_services_qty': 0.0, 'extra_services_denominator': 0.0}
+        for staff_id in ordered_staff_ids
+    }
+    if not ordered_staff_ids:
+        return metrics
+
+    periods_by_staff = {
+        staff_id: list(
+            (admin_periods_by_staff or {}).get(staff_id, [(start, end)])
+        )
+        for staff_id in ordered_staff_ids
+    }
+
+    timezone_name = await db.scalar(select(Company.timezone).where(Company.id == company_id))
+    timezone = _branch_timezone(timezone_name)
+    if db.get_bind().dialect.name == 'postgresql':
+        appointment_extra = (
+            select(
+                Appointment.id.label('appointment_id'),
+                Appointment.company_id.label('company_id'),
+                Appointment.date.label('appointment_date'),
+                Appointment.datetime.label('appointment_datetime'),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (ServiceLabel.is_extra.is_(True), func.coalesce(Transaction.amount, 0)),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label('extra_services_qty'),
+            )
+            .select_from(Appointment)
+            .outerjoin(
+                Transaction,
+                and_(
+                    Transaction.appointment_id == Appointment.id,
+                    Transaction.company_id == Appointment.company_id,
+                ),
+            )
+            .outerjoin(ServiceLabel, _transaction_service_label_join())
+            .where(
+                _appt_revenue_filters(
+                    start,
+                    end,
+                    company_id,
+                    factual_at=factual_at,
+                )
+            )
+            .group_by(
+                Appointment.id,
+                Appointment.company_id,
+                Appointment.date,
+                Appointment.datetime,
+            )
+            .subquery()
+        )
+        schedule = aliased(StaffSchedule)
+        role_clauses = [
+            and_(
+                schedule.staff_id == staff_id,
+                _date_period_condition(
+                    appointment_extra.c.appointment_date,
+                    periods_by_staff[staff_id],
+                ),
+            )
+            for staff_id in ordered_staff_ids
+            if periods_by_staff[staff_id]
+        ]
+        if not role_clauses:
+            return metrics
+        role_filter = or_(*role_clauses)
+        appointment_staff_pairs = (
+            select(
+                appointment_extra.c.appointment_id,
+                schedule.staff_id.label('staff_id'),
+                appointment_extra.c.extra_services_qty,
+            )
+            .select_from(appointment_extra)
+            .join(
+                schedule,
+                _postgres_schedule_slot_condition(
+                    schedule,
+                    appointment_extra.c.company_id,
+                    appointment_extra.c.appointment_datetime,
+                    timezone.key,
+                ),
+            )
+            .where(role_filter)
+            .distinct()
+            .subquery()
+        )
+        rows = (
+            await db.execute(
+                select(
+                    appointment_staff_pairs.c.staff_id,
+                    func.count().label('appointments'),
+                    func.coalesce(
+                        func.sum(appointment_staff_pairs.c.extra_services_qty),
+                        0,
+                    ).label('extra_services_qty'),
+                )
+                .group_by(appointment_staff_pairs.c.staff_id)
+            )
+        ).all()
+        for row in rows:
+            metrics[int(row.staff_id)] = {
+                'extra_services_qty': float(row.extra_services_qty or 0.0),
+                'extra_services_denominator': float(row.appointments or 0.0),
+            }
+        return metrics
+
+    appointment_rows = (
+        await db.execute(
+            select(
+                Appointment.id,
+                Appointment.date,
+                Appointment.datetime,
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (ServiceLabel.is_extra.is_(True), func.coalesce(Transaction.amount, 0)),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label('extra_services_qty'),
+            )
+            .select_from(Appointment)
+            .outerjoin(
+                Transaction,
+                and_(
+                    Transaction.appointment_id == Appointment.id,
+                    Transaction.company_id == Appointment.company_id,
+                ),
+            )
+            .outerjoin(ServiceLabel, _transaction_service_label_join())
+            .where(
+                _appt_revenue_filters(
+                    start,
+                    end,
+                    company_id,
+                    factual_at=factual_at,
+                )
+            )
+            .group_by(Appointment.id, Appointment.date, Appointment.datetime)
+            .order_by(Appointment.datetime.asc(), Appointment.id.asc())
+        )
+    ).all()
+    if not appointment_rows:
+        return metrics
+
+    schedule_rows = (
+        await db.execute(
+            select(
+                StaffSchedule.staff_id,
+                StaffSchedule.date,
+                StaffSchedule.slot_from,
+                StaffSchedule.slot_to,
+            )
+            .where(
+                StaffSchedule.company_id == company_id,
+                StaffSchedule.staff_id.in_(ordered_staff_ids),
+                StaffSchedule.date >= start - timedelta(days=1),
+                StaffSchedule.date <= end,
+            )
+        )
+    ).all()
+    scheduled_by_appointment = _scheduled_staff_ids_by_appointment(
+        appointment_rows,
+        schedule_rows,
+        timezone,
+        start,
+        end,
+    )
+    for appointment in appointment_rows:
+        for staff_id in scheduled_by_appointment.get(int(appointment.id), set()):
+            appointment_date = _coerce_date(appointment.date)
+            if not any(
+                period_start <= appointment_date <= period_end
+                for period_start, period_end in periods_by_staff.get(staff_id, [])
+            ):
+                continue
+            metrics[staff_id]['extra_services_denominator'] += 1.0
+            metrics[staff_id]['extra_services_qty'] += float(appointment.extra_services_qty or 0.0)
+    return metrics
 
 
 async def _admin_opz_by_created_appointments(
@@ -3779,7 +4903,7 @@ async def _admin_opz_by_created_appointments(
     events = [
         AdminAssignmentEvent(
             event_id=event.event_id,
-            event_date=event.create_date.date(),
+            event_date=event.event_date,
             event_moment=event.create_date,
             created_user_id=event.created_user_id,
         )
@@ -3915,6 +5039,7 @@ async def _staff_fact_components_by_branch(
     user_id_by_staff: dict[int, Optional[int]],
     admin_clients_by_staff: dict[int, int],
     admin_opz_by_staff: dict[int, int],
+    admin_extra_metrics_by_staff: dict[int, dict[str, float]],
     review_facts_by_staff: dict[int, float],
     opz_events: list[OpzEvent],
     factual_at: Optional[datetime] = None,
@@ -4075,10 +5200,20 @@ async def _staff_fact_components_by_branch(
                 _service_qty_sum(title_expr, CAMOUFLAGE_TITLE_PARTS).label('camouflage_qty'),
                 _service_qty_sum(title_expr, FACE_CARE_TITLE_PARTS).label('face_care_qty'),
                 _service_qty_sum(title_expr, HEAD_CARE_TITLE_PARTS).label('head_care_qty'),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (ServiceLabel.is_extra.is_(True), func.coalesce(Transaction.amount, 0)),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label('extra_services_qty'),
             )
             .select_from(Transaction)
             .join(Appointment, Appointment.id == Transaction.appointment_id)
             .outerjoin(ServiceCatalog, _transaction_service_catalog_join())
+            .outerjoin(ServiceLabel, _transaction_service_label_join())
             .where(
                 _appt_revenue_filters(
                     start, end, company_id, factual_at=factual_at
@@ -4093,6 +5228,7 @@ async def _staff_fact_components_by_branch(
             'camouflage_qty': float(row.camouflage_qty or 0.0),
             'face_care_qty': float(row.face_care_qty or 0.0),
             'head_care_qty': float(row.head_care_qty or 0.0),
+            'extra_services_qty': float(row.extra_services_qty or 0.0),
         }
         for row in service_group_rows
         if row.staff_id is not None
@@ -4131,6 +5267,7 @@ async def _staff_fact_components_by_branch(
                 'opz_qty': float(admin_opz_by_staff.get(staff_id, 0)),
                 REVIEWS_QTY_CODE: float(review_facts_by_staff.get(staff_id, 0.0)),
             }
+            values.update(admin_extra_metrics_by_staff.get(staff_id, {}))
         else:
             denominator = appointments_by_staff.get(staff_id, 0.0)
             values = {
@@ -4204,7 +5341,46 @@ async def _plan_metric_components_by_staff(
     )
     rows = (await db.execute(stmt)).all()
     out: dict[int, dict[str, float]] = {staff_id: {} for staff_id in staff_ids}
-    categories: dict[int, str] = {}
+    input_rows = (
+        await db.execute(
+            select(PlanStaffInput).where(
+                PlanStaffInput.period_start == start,
+                PlanStaffInput.period_end == end,
+                PlanStaffInput.company_id == company_id,
+                PlanStaffInput.staff_id.in_(staff_ids),
+            )
+        )
+    ).scalars().all()
+    branch_setting = await db.scalar(
+        select(PlanBranchSetting).where(
+            PlanBranchSetting.period_start == start,
+            PlanBranchSetting.period_end == end,
+            PlanBranchSetting.company_id == company_id,
+        )
+    )
+    branch_values = {
+        field: getattr(branch_setting, field, None)
+        for field in BRANCH_SETTING_FIELDS
+    }
+    for row in input_rows:
+        staff_id = int(row.staff_id)
+        out.setdefault(staff_id, {}).update(
+            _staff_metric_values_from_input(
+                {
+                    'staff_category': row.staff_category,
+                    **{
+                        field: getattr(row, field, None)
+                        for field in STAFF_INPUT_FIELDS
+                    },
+                },
+                branch_values,
+            )
+        )
+    categories: dict[int, str] = {
+        int(row.staff_id): row.staff_category
+        for row in input_rows
+        if row.staff_category in STAFF_CATEGORY_METRIC_CODES
+    }
     for row in rows:
         if row.staff_id is None:
             continue
@@ -4285,6 +5461,66 @@ async def _manual_review_fact_values_by_company(
     return totals
 
 
+async def _manual_review_fact_values_for_role_periods(
+    db: AsyncSession,
+    role_periods_by_company: dict[int, dict[int, list[tuple[date, date]]]],
+) -> dict[int, float]:
+    """Sum monthly review facts only for months in which the staff role was administrator."""
+    pairs = [
+        (company_id, staff_id)
+        for company_id, staff_periods in role_periods_by_company.items()
+        for staff_id in staff_periods
+    ]
+    totals = {company_id: 0.0 for company_id in role_periods_by_company}
+    if not pairs:
+        return totals
+    period_start = min(
+        start
+        for staff_periods in role_periods_by_company.values()
+        for periods in staff_periods.values()
+        for start, _ in periods
+    )
+    period_end = max(
+        end
+        for staff_periods in role_periods_by_company.values()
+        for periods in staff_periods.values()
+        for _, end in periods
+    )
+    rows = (
+        await db.execute(
+            select(
+                ManualFactMetric.company_id,
+                ManualFactMetric.staff_id,
+                ManualFactMetric.period_start,
+                ManualFactMetric.period_end,
+                ManualFactMetric.value,
+            ).where(
+                ManualFactMetric.period_start <= period_end,
+                ManualFactMetric.period_end >= period_start,
+                tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(pairs),
+                ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
+                reporting_start_clause(
+                    ManualFactMetric.company_id,
+                    ManualFactMetric.period_end,
+                ),
+            )
+        )
+    ).all()
+    for row in rows:
+        role_periods = role_periods_by_company.get(int(row.company_id), {}).get(
+            int(row.staff_id),
+            [],
+        )
+        if any(
+            period_start <= row.period_end and period_end >= row.period_start
+            for period_start, period_end in role_periods
+        ):
+            totals[int(row.company_id)] = totals.get(int(row.company_id), 0.0) + float(
+                row.value or 0.0
+            )
+    return totals
+
+
 async def _resolve_plan_period(
     db: AsyncSession,
     start: date,
@@ -4355,6 +5591,18 @@ def _metric_cells(
     return cells
 
 
+def _mark_metric_cells_unavailable(cells: list[dict[str, Any]], codes: set[str]) -> None:
+    for cell in cells:
+        if cell.get('code') not in codes:
+            continue
+        cell.update({
+            'fact': None,
+            'remaining': None,
+            'completion_pct': None,
+            'status': 'partial',
+        })
+
+
 def _has_plan_values(plan_values: dict[str, float]) -> bool:
     return bool(plan_values)
 
@@ -4400,6 +5648,15 @@ def _metric_fact_value(group: dict[str, Any], code: str) -> float:
     return 0.0
 
 
+def _metric_fact_optional(group: dict[str, Any], code: str) -> float | None:
+    for cell in group.get('metrics') or []:
+        if cell.get('code') != code:
+            continue
+        value = cell.get('fact')
+        return None if value is None else float(value or 0.0)
+    return None
+
+
 def _metric_plan_value(group: dict[str, Any], code: str) -> float | None:
     for cell in group.get('metrics') or []:
         if cell.get('code') == code:
@@ -4409,7 +5666,7 @@ def _metric_plan_value(group: dict[str, Any], code: str) -> float | None:
 
 
 def _extra_service_qty(group: dict[str, Any]) -> float:
-    return sum(_metric_fact_value(group, code) for code in GOODS_KPI_CODES)
+    return _metric_fact_value(group, 'extra_services_qty')
 
 
 def _staff_leaderboards_payload(
@@ -4462,17 +5719,19 @@ def _staff_leaderboards_payload(
 
     extra_total = sum(_extra_service_qty(group) for group in barbers)
     extra_rows = []
-    for group in barbers:
-        qty = _extra_service_qty(group)
+    for group in staff:
+        qty = _metric_fact_optional(group, 'extra_services_qty')
+        pct = _metric_fact_optional(group, 'extra_services_pct')
+        is_barber = (group.get('category') or 'unknown') == 'barber'
         row = identity(group)
         row.update({
             'qty': _round_metric_value(qty, 'number'),
             'sum': (
                 _round_metric_value(extra_revenue_by_staff.get(group.get('staff_id'), 0.0), 'money')
-                if extra_revenue_available else None
+                if extra_revenue_available and is_barber else None
             ),
-            'pct': _round_metric_value(_metric_fact_value(group, 'extra_services_pct'), 'percent'),
-            'share_pct': share(qty, extra_total),
+            'pct': _round_metric_value(pct, 'percent'),
+            'share_pct': share(qty or 0.0, extra_total) if is_barber else None,
         })
         extra_rows.append(row)
 
@@ -4568,6 +5827,11 @@ def _staff_leaderboards_payload(
     }
     if not extra_revenue_available:
         payload['_partial_reasons'] = ['extra_service_revenue']
+    if any(
+        _metric_fact_optional(group, 'extra_services_qty') is None
+        for group in admins
+    ):
+        payload.setdefault('_partial_reasons', []).append(STAFF_SCHEDULE_SOURCE)
     return payload
 
 
@@ -4667,7 +5931,6 @@ async def _client_fact_diagnostics(
             .where(
                 Staff.company_id == branch_id,
                 Staff.id.in_(admin_staff_ids),
-                Staff.fired == 0,
             )
         )
     ).all()
@@ -4750,7 +6013,15 @@ async def _admin_staff_ids_by_company(
     staff_rows = (
         await db.execute(
             select(Staff.id, Staff.name, Staff.position, Staff.company_id)
-            .where(Staff.company_id.in_(company_ids), Staff.fired == 0)
+            .where(
+                Staff.company_id.in_(company_ids),
+                _period_relevant_staff_clause(
+                    plan_start,
+                    plan_end,
+                    plan_start,
+                    plan_end,
+                ),
+            )
         )
     ).all()
     plan_rows = (
@@ -4766,11 +6037,26 @@ async def _admin_staff_ids_by_company(
             .distinct()
         )
     ).all()
+    input_rows = (
+        await db.execute(
+            select(PlanStaffInput.staff_id, PlanStaffInput.staff_category).where(
+                PlanStaffInput.period_start == plan_start,
+                PlanStaffInput.period_end == plan_end,
+                PlanStaffInput.company_id.in_(company_ids),
+                PlanStaffInput.staff_id.is_not(None),
+            )
+        )
+    ).all()
     plan_category_by_staff = {
+        int(row.staff_id): row.staff_category
+        for row in input_rows
+        if row.staff_category in STAFF_CATEGORY_METRIC_CODES
+    }
+    plan_category_by_staff.update({
         int(row.staff_id): row.staff_category
         for row in plan_rows
         if row.staff_category in STAFF_CATEGORY_METRIC_CODES
-    }
+    })
 
     out: dict[int, list[int]] = {int(company_id): [] for company_id in company_ids}
     for row in staff_rows:
@@ -4782,14 +6068,59 @@ async def _admin_staff_ids_by_company(
     return {company_id: sorted(staff_ids) for company_id, staff_ids in out.items()}
 
 
+def _period_relevant_staff_clause(
+    start: date,
+    end: date,
+    plan_start: date,
+    plan_end: date,
+):
+    has_schedule_in_period = exists(
+        select(1).where(
+            StaffSchedule.staff_id == Staff.id,
+            StaffSchedule.company_id == Staff.company_id,
+            StaffSchedule.date >= start - timedelta(days=1),
+            StaffSchedule.date <= end,
+        )
+    )
+    has_plan_in_period = exists(
+        select(1).where(
+            PlanMetric.staff_id == Staff.id,
+            PlanMetric.company_id == Staff.company_id,
+            PlanMetric.period_start <= plan_end,
+            PlanMetric.period_end >= plan_start,
+        )
+    )
+    has_plan_input_in_period = exists(
+        select(1).where(
+            PlanStaffInput.staff_id == Staff.id,
+            PlanStaffInput.company_id == Staff.company_id,
+            PlanStaffInput.period_start <= plan_end,
+            PlanStaffInput.period_end >= plan_start,
+        )
+    )
+    return or_(
+        Staff.fired == 0,
+        has_schedule_in_period,
+        has_plan_in_period,
+        has_plan_input_in_period,
+    )
+
+
 async def _fetch_company_staff(
     db: AsyncSession,
     company_id: int,
+    start: date,
+    end: date,
+    plan_start: date,
+    plan_end: date,
     staff_id: Optional[int] = None,
 ) -> list[Any]:
     stmt = (
         select(Staff.id, Staff.name, Staff.position, Staff.user_id, Staff.fired)
-        .where(Staff.company_id == company_id, Staff.fired == 0)
+        .where(
+            Staff.company_id == company_id,
+            _period_relevant_staff_clause(start, end, plan_start, plan_end),
+        )
         .order_by(Staff.position.asc(), Staff.name.asc())
     )
     if staff_id is not None:
@@ -4820,7 +6151,14 @@ async def _staff_plan_groups_for_branch(
     # Categories, attribution and facts are calculated for the whole branch, and only
     # the rendered rows are filtered afterwards. Narrowing the staff scope earlier
     # assigns every unclaimed event to the remaining administrators and changes facts.
-    staff_rows = await _fetch_company_staff(db, branch_id)
+    staff_rows = await _fetch_company_staff(
+        db,
+        branch_id,
+        start,
+        end,
+        plan_start,
+        plan_end,
+    )
     staff_ids = [int(row.id) for row in staff_rows]
     plans_by_staff, categories_by_staff = await _plan_metric_components_by_staff(
         db,
@@ -4835,59 +6173,125 @@ async def _staff_plan_groups_for_branch(
         plan_values = plans_by_staff.get(sid, {})
         categories_by_staff_id[sid] = _staff_category(staff, categories_by_staff.get(sid), plan_values)
 
+    staff_rows = [
+        staff
+        for staff in staff_rows
+        if not staff.fired or categories_by_staff_id[int(staff.id)] == 'administrator'
+    ]
+    staff_ids = [int(row.id) for row in staff_rows]
+
     user_id_by_staff: dict[int, Optional[int]] = {
         int(staff.id): getattr(staff, 'user_id', None) for staff in staff_rows
     }
-
-    admin_staff_ids = [sid for sid in staff_ids if categories_by_staff_id.get(sid) == 'administrator']
-    barber_staff_ids = [sid for sid in staff_ids if categories_by_staff_id.get(sid) == 'barber']
-    admin_clients_by_staff = await _admin_clients_by_finished_appointments(
-        db,
-        start,
-        end,
-        branch_id,
-        admin_staff_ids,
-        user_id_by_staff,
-        barber_staff_ids or None,
-        factual_at=factual_at,
-    )
     if opz_events is None:
         opz_events = await _opz_events(
             db, start, end, branch_id, factual_at=factual_at
         )
-    admin_opz_by_staff = await _admin_opz_by_created_appointments(
+    role_periods_by_staff = await _staff_role_periods_by_staff(
         db,
         start,
         end,
         branch_id,
-        admin_staff_ids,
-        user_id_by_staff,
-        barber_staff_ids or None,
-        opz_events=opz_events,
-        factual_at=factual_at,
+        {
+            int(staff.id): getattr(staff, 'position', None)
+            for staff in staff_rows
+        },
     )
-    admin_review_facts_by_staff = await _manual_review_fact_values_by_staff(
-        db,
+    fact_components_by_staff: dict[int, list[dict[str, float]]] = {
+        sid: [] for sid in staff_ids
+    }
+    unavailable_extra_staff_ids: set[int] = set()
+    for segment_start, segment_end, segment_categories in _staff_role_segments(
         start,
         end,
-        branch_id,
-        admin_staff_ids,
-    )
-
-    facts_by_staff = await _staff_fact_components_by_branch(
-        db,
-        start,
-        end,
-        branch_id,
-        staff_ids,
-        categories_by_staff_id,
-        user_id_by_staff,
-        admin_clients_by_staff,
-        admin_opz_by_staff,
-        admin_review_facts_by_staff,
-        opz_events,
-        factual_at,
-    )
+        role_periods_by_staff,
+    ):
+        admin_staff_ids = [
+            sid for sid in staff_ids
+            if segment_categories.get(sid) == 'administrator'
+        ]
+        barber_staff_ids = [
+            sid for sid in staff_ids
+            if segment_categories.get(sid) == 'barber'
+        ]
+        schedule_coverage = (
+            await _staff_schedule_coverage_info(
+                db,
+                segment_start,
+                segment_end,
+                branch_id,
+                factual_at=factual_at,
+            )
+            if admin_staff_ids
+            else {'ready': True}
+        )
+        if not schedule_coverage['ready']:
+            unavailable_extra_staff_ids.update(admin_staff_ids)
+        admin_clients_by_staff = await _admin_clients_by_finished_appointments(
+            db,
+            segment_start,
+            segment_end,
+            branch_id,
+            admin_staff_ids,
+            user_id_by_staff,
+            barber_staff_ids or None,
+            factual_at=factual_at,
+        )
+        segment_opz_events = [
+            event for event in opz_events
+            if segment_start <= event.event_date <= segment_end
+        ]
+        admin_opz_by_staff = await _admin_opz_by_created_appointments(
+            db,
+            segment_start,
+            segment_end,
+            branch_id,
+            admin_staff_ids,
+            user_id_by_staff,
+            barber_staff_ids or None,
+            opz_events=segment_opz_events,
+            factual_at=factual_at,
+        )
+        admin_extra_metrics_by_staff = (
+            await _admin_extra_service_metrics(
+                db,
+                segment_start,
+                segment_end,
+                branch_id,
+                admin_staff_ids,
+                factual_at=factual_at,
+            )
+            if schedule_coverage['ready']
+            else {}
+        )
+        admin_review_facts_by_staff = await _manual_review_fact_values_by_staff(
+            db,
+            segment_start,
+            segment_end,
+            branch_id,
+            admin_staff_ids,
+        )
+        segment_facts = await _staff_fact_components_by_branch(
+            db,
+            segment_start,
+            segment_end,
+            branch_id,
+            staff_ids,
+            segment_categories,
+            user_id_by_staff,
+            admin_clients_by_staff,
+            admin_opz_by_staff,
+            admin_extra_metrics_by_staff,
+            admin_review_facts_by_staff,
+            segment_opz_events,
+            factual_at,
+        )
+        for sid, values in segment_facts.items():
+            fact_components_by_staff.setdefault(sid, []).append(values)
+    facts_by_staff = {
+        sid: _sum_metric_components(component_rows)
+        for sid, component_rows in fact_components_by_staff.items()
+    }
 
     if not include_all_staff:
         staff_rows = [
@@ -4905,6 +6309,16 @@ async def _staff_plan_groups_for_branch(
         plan_values = plans_by_staff.get(sid, {})
         category = categories_by_staff_id[sid]
         metrics = metrics_for_category(category)
+        metric_cells = _metric_cells(
+            plan_values,
+            facts_by_staff.get(sid, {}),
+            metrics,
+        )
+        if sid in unavailable_extra_staff_ids:
+            _mark_metric_cells_unavailable(
+                metric_cells,
+                {'extra_services_qty', 'extra_services_pct'},
+            )
         groups.append({
             'company_id': branch_id,
             'company_title': company_title,
@@ -4914,11 +6328,7 @@ async def _staff_plan_groups_for_branch(
             'scope': 'staff',
             'category': category,
             'category_label': STAFF_CATEGORY_LABELS.get(category, STAFF_CATEGORY_LABELS['unknown']),
-            'metrics': _metric_cells(
-                plan_values,
-                facts_by_staff.get(sid, {}),
-                metrics,
-            ),
+            'metrics': metric_cells,
         })
     if staff_id is not None:
         return [group for group in groups if group.get('staff_id') == staff_id]
@@ -4930,6 +6340,7 @@ async def fetch_staff(
     company_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
+    include_staff_ids: Optional[list[int]] = None,
 ) -> list[dict[str, Any]]:
     if force_allowed:
         allowed = allowed_company_ids or []
@@ -4944,11 +6355,17 @@ async def fetch_staff(
             Staff.position,
             Staff.user_id,
             Staff.company_id,
+            Staff.fired,
             Company.title.label('company_title'),
         )
         .select_from(Staff)
         .join(Company, Company.id == Staff.company_id)
-        .where(Staff.fired == 0)
+        .where(
+            or_(
+                Staff.fired == 0,
+                Staff.id.in_(sorted(set(include_staff_ids or []))),
+            )
+        )
         .order_by(Company.title.asc(), Staff.name.asc(), Staff.id.asc())
     )
     if allowed is not None:
@@ -4965,6 +6382,7 @@ async def fetch_staff(
             'user_id': row.user_id,
             'company_id': row.company_id,
             'company_title': row.company_title,
+            'is_active': not bool(row.fired),
         }
         for row in rows
         if (
@@ -5055,7 +6473,11 @@ def _payload_branch_setting(branch: dict[str, Any], setting: PlanBranchSetting |
 
 
 def _payload_staff_input(staff: dict[str, Any], item: PlanStaffInput | None) -> dict[str, Any]:
-    category = item.staff_category if item is not None else _plan_staff_category(staff.get('position'))
+    category = (
+        item.staff_category
+        if item is not None and item.staff_category in STAFF_CATEGORY_METRIC_CODES
+        else _plan_staff_category(staff.get('position'))
+    )
     return {
         'company_id': int(staff['company_id']),
         'company_title': staff.get('company_title'),
@@ -5063,11 +6485,16 @@ def _payload_staff_input(staff: dict[str, Any], item: PlanStaffInput | None) -> 
         'staff_name': staff.get('name'),
         'position': staff.get('position'),
         'user_id': staff.get('user_id'),
+        'is_active': staff.get('is_active', True),
         'staff_category': category if category in STAFF_CATEGORY_METRIC_CODES else 'barber',
         'clients': _round_metric_value(item.clients, 'number') if item is not None else None,
         'avg_check_total': _round_optional(item.avg_check_total) if item is not None else None,
         'reviews_qty': _round_metric_value(item.reviews_qty, 'number') if item is not None else None,
         'cosmo_qty': _round_metric_value(item.cosmo_qty, 'number') if item is not None else None,
+        'extra_services_qty': (
+            _round_metric_value(item.extra_services_qty, 'number') if item is not None else None
+        ),
+        'extra_services_pct': _round_optional(item.extra_services_pct) if item is not None else None,
         'updated_at': item.updated_at.isoformat() if item is not None else None,
     }
 
@@ -5076,26 +6503,78 @@ async def _plan_settings_snapshot(
     db: AsyncSession,
     period_start: date,
     period_end: date,
+    company_ids: Optional[list[int]] = None,
 ) -> tuple[dict[int, PlanBranchSetting], dict[int, PlanStaffInput]]:
+    branch_conditions = [
+        PlanBranchSetting.period_start == period_start,
+        PlanBranchSetting.period_end == period_end,
+    ]
+    staff_conditions = [
+        PlanStaffInput.period_start == period_start,
+        PlanStaffInput.period_end == period_end,
+    ]
+    legacy_conditions = [
+        PlanMetric.period_start == period_start,
+        PlanMetric.period_end == period_end,
+        PlanMetric.staff_id.is_not(None),
+        PlanMetric.metric_code.in_(STAFF_INPUT_FIELDS),
+    ]
+    if company_ids is not None:
+        branch_conditions.append(PlanBranchSetting.company_id.in_(company_ids))
+        staff_conditions.append(PlanStaffInput.company_id.in_(company_ids))
+        legacy_conditions.append(PlanMetric.company_id.in_(company_ids))
     branch_rows = (
         await db.execute(
-            select(PlanBranchSetting).where(
-                PlanBranchSetting.period_start == period_start,
-                PlanBranchSetting.period_end == period_end,
-            )
+            select(PlanBranchSetting).where(*branch_conditions)
         )
     ).scalars().all()
     staff_rows = (
         await db.execute(
-            select(PlanStaffInput).where(
-                PlanStaffInput.period_start == period_start,
-                PlanStaffInput.period_end == period_end,
-            )
+            select(PlanStaffInput).where(*staff_conditions)
         )
     ).scalars().all()
+    staff_by_id = {int(row.staff_id): row for row in staff_rows}
+    legacy_metric_rows = (
+        await db.execute(
+            select(PlanMetric).where(*legacy_conditions)
+        )
+    ).scalars().all()
+    legacy_values: dict[int, dict[str, float]] = {}
+    legacy_meta: dict[int, PlanMetric] = {}
+    for row in legacy_metric_rows:
+        staff_id = int(row.staff_id)
+        if staff_id in staff_by_id:
+            continue
+        legacy_values.setdefault(staff_id, {})[row.metric_code] = float(row.value)
+        current = legacy_meta.get(staff_id)
+        if current is None or row.updated_at > current.updated_at:
+            legacy_meta[staff_id] = row
+    position_by_staff = {
+        int(row.id): row.position
+        for row in (
+            await db.execute(
+                select(Staff.id, Staff.position).where(Staff.id.in_(list(legacy_values)))
+            )
+        ).all()
+    }
+    for staff_id, values in legacy_values.items():
+        meta = legacy_meta[staff_id]
+        staff_by_id[staff_id] = PlanStaffInput(
+            period_start=period_start,
+            period_end=period_end,
+            company_id=int(meta.company_id),
+            staff_id=staff_id,
+            staff_category=(
+                meta.staff_category
+                if meta.staff_category in STAFF_CATEGORY_METRIC_CODES
+                else _plan_staff_category(position_by_staff.get(staff_id))
+            ),
+            updated_at=meta.updated_at,
+            **values,
+        )
     return (
         {int(row.company_id): row for row in branch_rows},
-        {int(row.staff_id): row for row in staff_rows},
+        staff_by_id,
     )
 
 
@@ -5108,6 +6587,8 @@ def _staff_metric_values_from_input(
     avg_check = float(staff_input.get('avg_check_total') or 0.0)
     reviews_qty = float(staff_input.get('reviews_qty') or 0.0)
     cosmo_qty_input = float(staff_input.get('cosmo_qty') or 0.0)
+    extra_services_qty = staff_input.get('extra_services_qty')
+    extra_services_pct = staff_input.get('extra_services_pct')
     cosmo_price = float(branch_setting.get('cosmo_price') or 0.0)
 
     if category == 'administrator':
@@ -5120,6 +6601,10 @@ def _staff_metric_values_from_input(
             rounded_cosmo = _round_half_up_int(cosmo_qty_input)
             values['cosmo_qty'] = rounded_cosmo
             values['cosmo_sum'] = rounded_cosmo * cosmo_price
+        if extra_services_qty is not None:
+            values['extra_services_qty'] = _round_half_up_int(float(extra_services_qty))
+        if extra_services_pct is not None:
+            values['extra_services_pct'] = float(extra_services_pct)
         return values
 
     if clients <= 0 or avg_check <= 0:
@@ -5142,6 +6627,7 @@ def _staff_metric_values_from_input(
         'cosmo_qty': cosmo_qty,
         'cosmo_sum': cosmo_qty * cosmo_price,
         'opz_qty': opz_qty,
+        'extra_services_qty': wax_qty + head_care_qty + face_care_qty + camouflage_qty,
     }
 
 
@@ -5151,7 +6637,18 @@ def _branch_metric_values_from_staff(
     values: dict[str, float] = {}
     for category, metrics in staff_metric_rows:
         if category == 'barber':
-            for code in ('revenue', 'clients', 'wax_qty', 'head_care_qty', 'face_care_qty', 'camouflage_qty', 'cosmo_qty', 'cosmo_sum', 'opz_qty'):
+            for code in (
+                'revenue',
+                'clients',
+                'wax_qty',
+                'head_care_qty',
+                'face_care_qty',
+                'camouflage_qty',
+                'cosmo_qty',
+                'cosmo_sum',
+                'opz_qty',
+                'extra_services_qty',
+            ):
                 if code in metrics:
                     values[code] = values.get(code, 0.0) + float(metrics[code] or 0.0)
         elif category == 'administrator' and REVIEWS_QTY_CODE in metrics:
@@ -5208,8 +6705,19 @@ async def fetch_plan_settings(
     period_start, period_end = _plan_month_range(month)
     source_start, source_end = _plan_month_range(copy_from) if copy_from else (period_start, period_end)
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
-    staff_rows = await fetch_staff(db, allowed_company_ids=allowed_company_ids, force_allowed=force_allowed)
-    branch_settings, staff_inputs = await _plan_settings_snapshot(db, source_start, source_end)
+    company_ids = [int(branch['id']) for branch in branches]
+    branch_settings, staff_inputs = await _plan_settings_snapshot(
+        db,
+        source_start,
+        source_end,
+        company_ids,
+    )
+    staff_rows = await fetch_staff(
+        db,
+        allowed_company_ids=allowed_company_ids,
+        force_allowed=force_allowed,
+        include_staff_ids=list(staff_inputs),
+    )
 
     payload_branches = [_payload_branch_setting(branch, branch_settings.get(int(branch['id']))) for branch in branches]
     payload_staff = [
@@ -5296,6 +6804,8 @@ def _normalize_plan_settings_payload(
             field: _parse_setting_number(row.get(field), field)
             for field in STAFF_INPUT_FIELDS
         }
+        if values.get('extra_services_pct') is not None and values['extra_services_pct'] > 100:
+            raise ValueError(f'extra_services_pct must be between 0 and 100 for staff {staff_id}')
         if category == 'barber' and values.get('clients') and not values.get('avg_check_total'):
             raise ValueError(f'avg_check_total is required for barber {staff_id} when clients is greater than zero')
         normalized_staff.append({
@@ -5319,6 +6829,10 @@ async def save_plan_settings(
     branch_ids = sorted({int(row['company_id']) for row in normalized_branches})
     if not branch_ids:
         raise ValueError('at least one branch setting is required')
+    staff_company_ids = sorted({int(row['company_id']) for row in normalized_staff})
+    unlisted_staff_company_ids = sorted(set(staff_company_ids) - set(branch_ids))
+    if unlisted_staff_company_ids:
+        raise ValueError(f'staff company is not included in branches: {unlisted_staff_company_ids[0]}')
 
     allowed = (allowed_company_ids or []) if force_allowed else (allowed_company_ids if allowed_company_ids is not None else await branch_company_ids(db))
     if allowed is not None:
@@ -5334,25 +6848,137 @@ async def save_plan_settings(
     if missing_company_ids:
         raise ValueError(f'company does not exist: {missing_company_ids[0]}')
 
+    saved_branch_settings, saved_staff_inputs = await _plan_settings_snapshot(
+        db,
+        period_start,
+        period_end,
+        branch_ids,
+    )
+    saved_staff_inputs = {
+        staff_id: item
+        for staff_id, item in saved_staff_inputs.items()
+        if int(item.company_id) in branch_ids
+    }
+    fired_by_staff = {
+        int(row.id): bool(row.fired)
+        for row in (
+            await db.execute(
+                select(Staff.id, Staff.fired).where(Staff.id.in_(list(saved_staff_inputs)))
+            )
+        ).all()
+    }
+    existing_category_by_staff = {
+        int(item.staff_id): item.staff_category
+        for item in saved_staff_inputs.values()
+    }
+    submitted_keys = {
+        (int(row['company_id']), int(row['staff_id']))
+        for row in normalized_staff
+    }
+    edited_staff_keys = {
+        (int(row['company_id']), int(row['staff_id']))
+        for row in normalized_staff
+        if (
+            (saved := saved_staff_inputs.get(int(row['staff_id']))) is None
+            and _setting_has_values(row, STAFF_INPUT_FIELDS)
+        ) or (
+            saved is not None
+            and (
+                row['staff_category'] != saved.staff_category
+                or any(
+                    row.get(field) != getattr(saved, field, None)
+                    for field in STAFF_INPUT_FIELDS
+                )
+            )
+        )
+    }
+    edited_branch_ids = {
+        int(row['company_id'])
+        for row in normalized_branches
+        if (
+            (saved := saved_branch_settings.get(int(row['company_id']))) is None
+            and _setting_has_values(row, BRANCH_SETTING_FIELDS)
+        ) or (
+            saved is not None
+            and any(
+                row.get(field) != getattr(saved, field, None)
+                for field in BRANCH_SETTING_FIELDS
+            )
+        )
+    }
+    edited_branch_ids.update(company for company, _ in edited_staff_keys)
+    for item in saved_staff_inputs.values():
+        key = (int(item.company_id), int(item.staff_id))
+        if not fired_by_staff.get(int(item.staff_id), False) or key in submitted_keys:
+            continue
+        normalized_staff.append({
+            'company_id': int(item.company_id),
+            'staff_id': int(item.staff_id),
+            'staff_category': item.staff_category,
+            **{
+                field: getattr(item, field)
+                for field in STAFF_INPUT_FIELDS
+            },
+        })
+
     staff_ids = sorted({int(row['staff_id']) for row in normalized_staff})
     if staff_ids:
         staff_rows = (
             await db.execute(
                 select(Staff.id, Staff.company_id, Staff.name, Staff.position, Staff.fired)
-                .where(Staff.id.in_(staff_ids), Staff.fired == 0)
+                .where(
+                    Staff.id.in_(staff_ids),
+                    _period_relevant_staff_clause(
+                        period_start,
+                        period_end,
+                        period_start,
+                        period_end,
+                    ),
+                )
             )
         ).all()
         valid_staff: dict[int, Any] = {int(row.id): row for row in staff_rows}
         for row in normalized_staff:
             staff_row = valid_staff.get(int(row['staff_id']))
             if staff_row is None:
-                raise ValueError(f'staff does not exist or is fired: {row["staff_id"]}')
+                raise ValueError(f'staff does not exist or is unrelated to this period: {row["staff_id"]}')
             if int(staff_row.company_id) != int(row['company_id']):
                 raise ValueError(f'staff {row["staff_id"]} does not belong to company {row["company_id"]}')
-            expected_category = _plan_staff_category(staff_row.position)
+            expected_category = _plan_staff_category(
+                staff_row.position,
+                existing_category_by_staff.get(int(row['staff_id'])),
+            )
             if row['staff_category'] != expected_category:
                 raise ValueError(f'staff {row["staff_id"]} category must be {expected_category}')
 
+    legacy_plan_values = [
+        {
+            'company_id': int(row.company_id),
+            'staff_id': int(row.staff_id) if row.staff_id is not None else None,
+            'staff_category': row.staff_category,
+            'metric_code': row.metric_code,
+            'value': float(row.value),
+            'source': row.source,
+            'updated_at': row.updated_at,
+        }
+        for row in (
+            await db.execute(
+                select(PlanMetric).where(
+                    PlanMetric.period_start == period_start,
+                    PlanMetric.period_end == period_end,
+                    PlanMetric.company_id.in_(branch_ids),
+                    or_(
+                        PlanMetric.source.is_(None),
+                        PlanMetric.source != PLAN_SETTINGS_SOURCE,
+                    ),
+                )
+            )
+        ).scalars().all()
+    ]
+    legacy_metric_keys = {
+        (row['company_id'], row['staff_id'], row['metric_code'])
+        for row in legacy_plan_values
+    }
     now = datetime.now()
     await db.execute(
         delete(PlanBranchSetting).where(
@@ -5396,8 +7022,6 @@ async def save_plan_settings(
         )
 
     for row in normalized_staff:
-        if not _setting_has_values(row, STAFF_INPUT_FIELDS):
-            continue
         db.add(
             PlanStaffInput(
                 period_start=period_start,
@@ -5409,6 +7033,8 @@ async def save_plan_settings(
                 avg_check_total=row.get('avg_check_total'),
                 reviews_qty=row.get('reviews_qty'),
                 cosmo_qty=row.get('cosmo_qty'),
+                extra_services_qty=row.get('extra_services_qty'),
+                extra_services_pct=row.get('extra_services_pct'),
                 updated_at=now,
             )
         )
@@ -5416,8 +7042,13 @@ async def save_plan_settings(
     branch_metric_values, staff_metric_values = _calculate_plan_settings_metrics(normalized_branches, normalized_staff)
     staff_categories = {int(row['staff_id']): row['staff_category'] for row in normalized_staff}
 
+    generated_metric_keys: set[tuple[int, int | None, str]] = set()
     for company_id, values in branch_metric_values.items():
         for metric_code, value in values.items():
+            key = (company_id, None, metric_code)
+            if key in legacy_metric_keys and company_id not in edited_branch_ids:
+                continue
+            generated_metric_keys.add(key)
             db.add(
                 PlanMetric(
                     period_start=period_start,
@@ -5435,6 +7066,11 @@ async def save_plan_settings(
     staff_company = {int(row['staff_id']): int(row['company_id']) for row in normalized_staff}
     for staff_id, values in staff_metric_values.items():
         for metric_code, value in values.items():
+            key = (staff_company[staff_id], staff_id, metric_code)
+            staff_key = (staff_company[staff_id], staff_id)
+            if key in legacy_metric_keys and staff_key not in edited_staff_keys:
+                continue
+            generated_metric_keys.add(key)
             db.add(
                 PlanMetric(
                     period_start=period_start,
@@ -5448,6 +7084,24 @@ async def save_plan_settings(
                     updated_at=now,
                 )
             )
+
+    for row in legacy_plan_values:
+        key = (row['company_id'], row['staff_id'], row['metric_code'])
+        if key in generated_metric_keys:
+            continue
+        if row['staff_id'] is None and row['company_id'] in edited_branch_ids:
+            continue
+        if row['staff_id'] is not None and (
+            row['company_id'], row['staff_id']
+        ) in edited_staff_keys:
+            continue
+        db.add(
+            PlanMetric(
+                period_start=period_start,
+                period_end=period_end,
+                **row,
+            )
+        )
 
     await db.commit()
     return await fetch_plan_settings(
@@ -5687,6 +7341,7 @@ async def fetch_plan_fact(
             db,
             allowed_company_ids=allowed_company_ids,
             force_allowed=force_allowed,
+            include_staff_ids=[staff_id],
         )
         selected_staff = next((staff for staff in staff_rows if staff['id'] == staff_id), None)
         if selected_staff is not None:
@@ -5733,9 +7388,15 @@ async def fetch_plan_fact(
             opz_override=float(len(branch_opz_events)),
             factual_at=factual_at,
         )
-        branch_admin_ids = await _admin_staff_ids_by_company(db, plan_start, plan_end, [branch_id])
-        branch_review_facts = await _manual_review_fact_values_by_company(
-            db, start, end, branch_admin_ids
+        role_periods_by_company = await _administrator_role_periods_by_company(
+            db,
+            start,
+            end,
+            [branch_id],
+        )
+        branch_review_facts = await _manual_review_fact_values_for_role_periods(
+            db,
+            role_periods_by_company,
         )
         branch_fact[REVIEWS_QTY_CODE] = branch_review_facts.get(branch_id, 0.0)
         groups = await _staff_plan_groups_for_branch(
@@ -5761,6 +7422,23 @@ async def fetch_plan_fact(
         diagnostics = await _client_fact_diagnostics(
             db, start, end, branch_id, groups, factual_at
         )
+        branch_admin_periods = _merge_date_periods([
+            period
+            for periods in role_periods_by_company.get(branch_id, {}).values()
+            for period in periods
+        ])
+        if branch_admin_periods:
+            schedule_diagnostic = await _staff_schedule_coverage_diagnostic(
+                db,
+                start,
+                end,
+                branch_id,
+                branch['title'],
+                factual_at=factual_at,
+                periods=branch_admin_periods,
+            )
+            if schedule_diagnostic is not None:
+                diagnostics.append(schedule_diagnostic)
         extra_revenue_result = (
             await _extra_service_revenue_by_staff(
                 db, start, end, [branch_id], factual_at
@@ -5804,9 +7482,15 @@ async def fetch_plan_fact(
             opz_override=float(len(opz_events_by_company[branch_id])),
             factual_at=factual_at,
         )
-    admin_ids_by_company = await _admin_staff_ids_by_company(db, plan_start, plan_end, company_ids)
-    review_facts_by_company = await _manual_review_fact_values_by_company(
-        db, start, end, admin_ids_by_company
+    role_periods_by_company = await _administrator_role_periods_by_company(
+        db,
+        start,
+        end,
+        company_ids,
+    )
+    review_facts_by_company = await _manual_review_fact_values_for_role_periods(
+        db,
+        role_periods_by_company,
     )
     for branch_id in company_ids:
         facts_by_company.setdefault(branch_id, {})[REVIEWS_QTY_CODE] = review_facts_by_company.get(branch_id, 0.0)
@@ -5875,6 +7559,27 @@ async def fetch_plan_fact(
         )
         if include_extra_service_revenue else {}
     )
+    diagnostics = []
+    branch_title_by_id = {int(branch['id']): branch['title'] for branch in branches}
+    for branch_id in company_ids:
+        admin_periods = _merge_date_periods([
+            period
+            for periods in role_periods_by_company.get(branch_id, {}).values()
+            for period in periods
+        ])
+        if not admin_periods:
+            continue
+        schedule_diagnostic = await _staff_schedule_coverage_diagnostic(
+            db,
+            start,
+            end,
+            branch_id,
+            branch_title_by_id.get(branch_id),
+            factual_at=factual_at,
+            periods=admin_periods,
+        )
+        if schedule_diagnostic is not None:
+            diagnostics.append(schedule_diagnostic)
 
     return {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
@@ -5882,7 +7587,7 @@ async def fetch_plan_fact(
         'view_scope': 'branch',
         'metrics': list(PLAN_FACT_METRICS),
         'metric_sets': _metric_sets_payload(),
-        'diagnostics': [],
+        'diagnostics': diagnostics,
         'staff_leaderboards': _staff_leaderboards_payload(
             all_staff_groups,
             extra_revenue_by_staff=extra_revenue_result or {},
@@ -5902,59 +7607,6 @@ async def branch_company_ids(db: AsyncSession) -> Optional[list[int]]:
         return None
     company_ids = [row[0] for row in rows.all()]
     return company_ids or None
-
-
-async def fetch_staff_directory(
-    db: AsyncSession,
-    include_fired: bool = False,
-    allowed_company_ids: Optional[list[int]] = None,
-    force_allowed: bool = False,
-) -> list[dict[str, Any]]:
-    if force_allowed:
-        allowed = allowed_company_ids or []
-    elif allowed_company_ids is not None:
-        allowed = allowed_company_ids
-    else:
-        allowed = await branch_company_ids(db)
-    stmt = (
-        select(
-            Company.id.label('company_id'),
-            Company.title.label('company_title'),
-            Staff.id.label('staff_id'),
-            Staff.name.label('staff_name'),
-            Staff.position,
-            Staff.user_id,
-            Staff.fired,
-            Staff.bookable,
-        )
-        .select_from(Staff)
-        .join(Company, Company.id == Staff.company_id)
-        .order_by(Company.title.asc(), Staff.name.asc(), Staff.id.asc())
-    )
-    if allowed is not None:
-        stmt = stmt.where(Company.id.in_(allowed))
-    if not include_fired:
-        stmt = stmt.where(Staff.fired == 0)
-
-    rows = (await db.execute(stmt)).all()
-    return [
-        {
-            'company_id': row.company_id,
-            'company_title': row.company_title,
-            'staff_id': row.staff_id,
-            'staff_name': row.staff_name,
-            'position': row.position,
-            'user_id': row.user_id,
-            'fired': int(row.fired or 0),
-            'working': int((row.fired or 0) == 0),
-            'bookable': int(bool(row.bookable)),
-        }
-        for row in rows
-        if (
-            not _is_waitlist_staff_name(row.staff_name)
-            and not _is_admin_placeholder_staff_name(row.staff_name)
-        )
-    ]
 
 
 async def fetch_branches(
