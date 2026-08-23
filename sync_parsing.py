@@ -68,6 +68,8 @@ def parse_time(value: Any) -> time | None:
     if not text:
         return None
     candidate = text[:8]
+    if candidate in {'24:00', '24:00:00'}:
+        return time.min
     for fmt in ('%H:%M:%S', '%H:%M'):
         try:
             return datetime.strptime(candidate, fmt).time()

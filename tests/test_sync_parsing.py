@@ -26,6 +26,8 @@ def test_parse_datetime_normalizes_aware_values_to_utc_without_host_timezone():
 def test_parse_time_accepts_hh_mm_and_hh_mm_ss():
     assert parse_time('09:30') == time(9, 30)
     assert parse_time('09:30:15') == time(9, 30, 15)
+    assert parse_time('24:00') == time.min
+    assert parse_time('24:00:00') == time.min
 
 
 def test_parse_datetime_range_bounds_expand_date_only_values():
