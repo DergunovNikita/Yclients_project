@@ -39,7 +39,6 @@ from dashboard_service import (
     fetch_revenue_daily,
     fetch_summary,
     fetch_reporting_start_dates,
-    fetch_staff_service_attribution_status,
     fetch_top_services,
     fetch_year_over_year_facts,
     reporting_start_clause,
@@ -245,7 +244,7 @@ TITLE_OVERRIDES = {
     'devices_vs_booking': 'Устройства и запись',
     'financial_overview': 'Финансовый обзор',
     'goal_conversions_report': 'Конверсии целей',
-    'goods_by_staff': 'Товары по мастерам',
+    'goods_by_staff': 'Товары по сотрудникам',
     'goods_conversion': 'Конверсия визитов в товары',
     'goods_dynamics': 'Динамика товаров',
     'losses_by_staff': 'Потери клиентов по мастерам',
@@ -602,6 +601,12 @@ async def _fetch_report_payload(
     allowed_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
+    base['calculation_scope'] = await _report_calculation_scope(
+        db,
+        report_id,
+        company_id,
+        staff_id,
+    )
     if report_id == 'nps_dashboard':
         return await _nps_payload(db, base, definition, start, end, company_id, allowed_company_ids)
     if report_id in GOODS_REPORTS:
@@ -682,6 +687,47 @@ async def _fetch_report_payload(
         allowed_company_ids,
         factual_at,
     )
+
+
+async def _report_calculation_scope(
+    db: AsyncSession,
+    report_id: str,
+    company_id: int | None,
+    staff_id: int | None,
+) -> dict[str, Any]:
+    if staff_id is not None:
+        staff = (
+            await db.execute(
+                select(
+                    Staff.name,
+                    Staff.position,
+                    Staff.company_id,
+                    Company.title.label('company_title'),
+                )
+                .join(Company, Company.id == Staff.company_id)
+                .where(Staff.id == staff_id)
+            )
+        ).one_or_none()
+        return {
+            'kind': 'staff',
+            'mode': 'plan_fact' if report_id == 'staff_leaderboard' else 'personal',
+            'staff_id': staff_id,
+            'staff_name': staff.name if staff is not None else None,
+            'staff_category': (
+                normalize_staff_category(staff.position)
+                if staff is not None
+                else None
+            ),
+            'company_id': int(staff.company_id) if staff is not None else company_id,
+            'company_title': staff.company_title if staff is not None else None,
+        }
+    if company_id is not None:
+        return {
+            'kind': 'branch',
+            'mode': 'aggregate',
+            'company_id': company_id,
+        }
+    return {'kind': 'network', 'mode': 'aggregate'}
 
 
 def _missing_payload(base: dict[str, Any], definition: ReportDefinition) -> dict[str, Any]:
@@ -864,7 +910,6 @@ async def _year_over_year_activity_bounds(
     staff_id: int | None,
     allowed_company_ids: list[int] | None,
     now: datetime,
-    created_user_id: int | None = None,
 ) -> tuple[
     date,
     date,
@@ -896,9 +941,7 @@ async def _year_over_year_activity_bounds(
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
         appointment_conditions.append(scope)
-    if created_user_id is not None:
-        appointment_conditions.append(Appointment.created_user_id == created_user_id)
-    elif staff_id is not None:
+    if staff_id is not None:
         appointment_conditions.append(Appointment.staff_id == staff_id)
     appointment_bounds = (
         await db.execute(
@@ -927,9 +970,7 @@ async def _year_over_year_activity_bounds(
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
         service_conditions.append(scope)
-    if created_user_id is not None:
-        service_conditions.append(Appointment.created_user_id == created_user_id)
-    elif staff_id is not None:
+    if staff_id is not None:
         service_conditions.append(Appointment.staff_id == staff_id)
     service_bounds = (
         await db.execute(
@@ -951,7 +992,7 @@ async def _year_over_year_activity_bounds(
     ).one()
 
     direct_component = FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE
-    if staff_id is not None and created_user_id is None:
+    if staff_id is not None:
         direct_component = or_(
             and_(
                 FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
@@ -1049,7 +1090,6 @@ async def _year_over_year_activity_bounds(
         staff_id,
         allowed_company_ids,
         factual_at=now,
-        created_user_id=created_user_id,
     )
     if opz_facts['latest_date'] is not None:
         ends.append(opz_facts['latest_date'])
@@ -1188,28 +1228,6 @@ def _year_periods(
             ),
         })
     return periods
-
-
-async def _year_over_year_created_user_id(
-    db: AsyncSession,
-    staff_id: int | None,
-) -> int | None:
-    if staff_id is None:
-        return None
-    staff = (
-        await db.execute(
-            select(Staff.position, Staff.user_id)
-            .where(Staff.id == staff_id)
-            .limit(1)
-        )
-    ).one_or_none()
-    if (
-        staff is not None
-        and normalize_staff_category(staff.position) == 'administrator'
-        and staff.user_id is not None
-    ):
-        return int(staff.user_id)
-    return None
 
 
 def _year_row_from_summary(
@@ -1392,7 +1410,6 @@ async def _year_over_year_payload(
     report_now: datetime | None = None,
 ) -> dict[str, Any]:
     report_now = report_now or _report_now()
-    created_user_id = await _year_over_year_created_user_id(db, staff_id)
     scope_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
@@ -1402,7 +1419,6 @@ async def _year_over_year_payload(
         staff_id,
         scope_company_ids,
         report_now,
-        created_user_id,
     )
     if activity_bounds is None:
         base['source_status'] = 'partial'
@@ -1440,7 +1456,6 @@ async def _year_over_year_payload(
         staff_id,
         scope_company_ids,
         factual_at=report_now,
-        created_user_id=created_user_id,
     )
     year_rows = []
     monthly_by_year: dict[int, list[dict[str, Any]]] = {}
@@ -1453,39 +1468,8 @@ async def _year_over_year_payload(
         completed = int(annual.get('appointments') or 0)
         unique_clients = int(annual.get('unique_clients') or 0)
         revenue = float(annual.get('revenue') or 0)
-        attribution = await fetch_staff_service_attribution_status(
-            db,
-            period_start,
-            period_end,
-            staff_id,
-            scope_company_ids,
-            report_now,
-        )
-        attribution_missing = list(attribution.get('missing_sources') or [])
-        if attribution.get('mode') == 'administrator_schedule':
-            if attribution.get('source_status') == 'ready':
-                attributed_extra_rows = await fetch_extra_services(
-                    db,
-                    period_start,
-                    period_end,
-                    company_id,
-                    None,
-                    staff_id,
-                    allowed_company_ids=scope_company_ids,
-                    factual_at=report_now,
-                )
-                extra_service_count: float | None = sum(
-                    float(row.get('sold') or 0) for row in attributed_extra_rows
-                )
-                extra_service_revenue: float | None = sum(
-                    float(row.get('revenue') or 0) for row in attributed_extra_rows
-                )
-            else:
-                extra_service_count = None
-                extra_service_revenue = None
-        else:
-            extra_service_count = float(annual.get('extra_service_count') or 0)
-            extra_service_revenue = float(annual.get('extra_service_revenue') or 0)
+        extra_service_count = float(annual.get('extra_service_count') or 0)
+        extra_service_revenue = float(annual.get('extra_service_revenue') or 0)
         summary = {
             'revenue': {
                 'total': revenue,
@@ -1544,11 +1528,10 @@ async def _year_over_year_payload(
             *year_row['missing_components'],
             *technical_missing,
             *opz_missing,
-            *attribution_missing,
         })
         if year_row['missing_components']:
             year_row['source_status'] = 'partial'
-        _mask_unknown_year_metrics(year_row, [*technical_missing, *attribution_missing])
+        _mask_unknown_year_metrics(year_row, technical_missing)
         if 'appointments_detail' in opz_missing:
             year_row['opz_qty'] = None
             year_row['opz_pct'] = None
@@ -1802,11 +1785,11 @@ async def _financial_payload(
     avg = summary.get('average_check', {})
     visits = summary.get('visit_metrics', {})
     base['average_check_source_status'] = avg.get('source_status')
-    base['missing_sources'] = sorted({
-        *(avg.get('missing_components') or []),
-        *(summary.get('missing_sources') or []),
-    })
-    if summary.get('source_status') == 'partial':
+    base['missing_sources'] = sorted(avg.get('missing_components') or [])
+    if (
+        summary.get('source_status') == 'partial'
+        and summary.get('service_attribution', {}).get('mode') != 'administrator_schedule'
+    ):
         base['source_status'] = 'partial'
     base['notes'].append({
         'kind': 'formula',
@@ -1919,31 +1902,13 @@ async def _services_payload(
         allowed_company_ids=allowed_company_ids,
         factual_at=factual_at,
     )
-    summary = await fetch_summary(
-        db,
-        start,
-        end,
-        company_id,
-        staff_id,
-        include_appointments_breakdown=False,
-        allowed_company_ids=allowed_company_ids,
-        factual_at=factual_at,
-    )
-    revenue = summary.get('revenue', {})
-    attribution = summary.get('service_attribution', {})
-    administrator_scope = attribution.get('mode') == 'administrator_schedule'
-    if administrator_scope:
-        total_revenue = sum(float(row.get('revenue') or 0) for row in all_services)
-        total_sold = sum(float(row.get('sold') or 0) for row in all_services)
-    else:
-        total_revenue = float(revenue.get('service_revenue') or 0)
-        total_sold = float(revenue.get('service_count') or 0)
-    if attribution.get('source_status') == 'partial':
-        base['source_status'] = 'partial'
-        base['missing_sources'] = sorted({
-            *base.get('missing_sources', []),
-            *summary.get('missing_sources', []),
-        })
+    total_revenue = sum(float(row.get('revenue') or 0) for row in all_services)
+    total_sold = sum(float(row.get('sold') or 0) for row in all_services)
+    attribution = {
+        'mode': 'master',
+        'source_status': 'ready',
+        'missing_sources': [],
+    }
     services = all_services[:25]
     extra = all_extra[:25]
     base['cards'] = [
@@ -2766,7 +2731,7 @@ async def _goods_payload(
     )
 
     goods: dict[str, dict[str, Any]] = defaultdict(lambda: {'good_title': 'Товар', 'sales_count': 0, 'units': 0.0, 'revenue': 0.0})
-    by_staff: dict[str, dict[str, Any]] = defaultdict(lambda: {'staff_name': 'Без мастера', 'sales_count': 0, 'revenue': 0.0})
+    by_staff: dict[str, dict[str, Any]] = defaultdict(lambda: {'staff_name': 'Без продавца', 'sales_count': 0, 'revenue': 0.0})
     by_period: dict[str, dict[str, Any]] = defaultdict(lambda: {'period': '', 'sales_count': 0, 'units': 0.0, 'revenue': 0.0})
     for row in inventory_rows:
         key = f'{row.company_id}:{row.good_id or row.good_title or "unknown"}'
@@ -2793,7 +2758,7 @@ async def _goods_payload(
         goods[key]['sales_count'] += 1
         goods[key]['revenue'] += revenue
         staff_key = str(row.get('master_id') or 'none')
-        by_staff[staff_key]['staff_name'] = row.get('staff_name') or 'Без мастера'
+        by_staff[staff_key]['staff_name'] = row.get('staff_name') or 'Без продавца'
         by_staff[staff_key]['sales_count'] += 1
         by_staff[staff_key]['revenue'] += revenue
         period = _period_key(row.get('date'), granularity)
@@ -2810,7 +2775,7 @@ async def _goods_payload(
         _card('Выручка товаров', total_revenue, MONEY_FORMAT),
         _card('Единиц продано', total_units, NUMBER_FORMAT),
         _card('Уникальных товаров', len(goods_rows), NUMBER_FORMAT),
-        _card('Мастеров с продажами', len(staff_rows), NUMBER_FORMAT),
+        _card('Сотрудников с продажами', len(staff_rows), NUMBER_FORMAT),
     ]
     base['charts'] = [
         _chart(
@@ -2845,9 +2810,9 @@ async def _goods_payload(
         ),
         _table(
             'goods_by_staff',
-            'Продажи по мастерам',
+            'Продажи по сотрудникам',
             [
-                ('staff_name', 'Мастер', 'text'),
+                ('staff_name', 'Продавец', 'text'),
                 ('sales_count', 'Продаж', NUMBER_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
             ],
@@ -3097,9 +3062,40 @@ async def _leaderboard_payload_impl(
 
     revenue_barber = boards.get('revenue_barber', boards.get('revenue_top', []))
     revenue_admin = boards.get('revenue_admin', [])
-    base['cards'] = [
-        _card('Топ выручка мастера', revenue_barber[0]['value'] if revenue_barber else 0, MONEY_FORMAT),
-    ]
+    if any(
+        boards.get(key)
+        for key in (
+            'extra_services_admin',
+            'opz_admin',
+            'revenue_admin',
+        )
+    ):
+        base['notes'].append({
+            'kind': 'info',
+            'title': 'Область расчета показателей администраторов',
+            'text': (
+                'Личная выручка и косметика относятся к самому продавцу; '
+                'ОПЗ — к записям под ответственностью администратора; '
+                'допуслуги — ко всему филиалу во время его смен.'
+            ),
+        })
+    if staff_id is not None:
+        selected_revenue = (revenue_barber or revenue_admin)
+        base['cards'] = [
+            _card(
+                'Личная выручка выбранного сотрудника',
+                selected_revenue[0]['value'] if selected_revenue else 0,
+                MONEY_FORMAT,
+            ),
+        ]
+    else:
+        base['cards'] = [
+            _card(
+                'Топ выручка мастера',
+                revenue_barber[0]['value'] if revenue_barber else 0,
+                MONEY_FORMAT,
+            ),
+        ]
     charts = []
     if revenue_barber:
         charts.append(
@@ -3115,7 +3111,7 @@ async def _leaderboard_payload_impl(
         charts.append(
             _chart(
                 'leaderboard_revenue_admin',
-                'Топ по выручке — админы',
+                'Топ по личной выручке — администраторы',
                 'bar',
                 [row['staff'] for row in revenue_admin],
                 [{'label': 'Выручка', 'data': [row['value'] for row in revenue_admin], 'format': MONEY_FORMAT}],
@@ -3135,7 +3131,7 @@ async def _leaderboard_payload_impl(
         ),
         _ranking_table(
             'extra_services_admin',
-            'Топ по допуслугам — администраторы',
+            'Топ по допуслугам филиала во время смен — администраторы',
             [staff_col, branch_col, qty_col, ('pct', 'Доп. услуги, %', PERCENT_FORMAT)],
             boards.get('extra_services_admin_rankings', {}),
             'pct',
@@ -3171,7 +3167,7 @@ async def _leaderboard_payload_impl(
         ),
         _ranking_table(
             'opz_admin',
-            'Топ по ОПЗ — админы',
+            'Топ по ОПЗ в записях под ответственностью — администраторы',
             [staff_col, branch_col, qty_col, ('pct', 'ОПЗ, %', PERCENT_FORMAT)],
             boards.get('opz_admin_rankings', {}),
             'pct',
@@ -3196,7 +3192,7 @@ async def _leaderboard_payload_impl(
         ),
         _table(
             'revenue_admin',
-            'Топ по выручке — админы',
+            'Топ по личной выручке — администраторы',
             [staff_col, branch_col, ('value', 'Выручка', MONEY_FORMAT)],
             revenue_admin,
             hide_when_empty=True,

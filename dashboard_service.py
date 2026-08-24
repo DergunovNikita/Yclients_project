@@ -61,6 +61,7 @@ from plan_config import (
     REVIEWS_QTY_CODE,
     STAFF_CATEGORY_LABELS,
     STAFF_CATEGORY_METRIC_CODES,
+    metric_scope_for_category,
     is_visible_staff_plan,
     metrics_for_category,
     normalize_staff_category,
@@ -482,6 +483,44 @@ def financial_appointment_match_condition():
     )
 
 
+def financial_goods_transaction_match_condition():
+    external_candidate = aliased(GoodTransaction)
+    has_external_match = exists(
+        select(1)
+        .where(
+            external_candidate.company_id == FinancialTransaction.company_id,
+            external_candidate.external_id == FinancialTransaction.sold_item_id,
+        )
+        .correlate(FinancialTransaction)
+    )
+    return and_(
+        FinancialTransaction.company_id == GoodTransaction.company_id,
+        or_(
+            FinancialTransaction.sold_item_id == GoodTransaction.external_id,
+            and_(
+                GoodTransaction.external_id.is_(None),
+                FinancialTransaction.sold_item_id == GoodTransaction.id,
+                ~has_external_match,
+            ),
+        ),
+    )
+
+
+def _goods_seller_staff_id():
+    linked_seller_id = (
+        select(GoodTransaction.master_id)
+        .where(
+            financial_goods_transaction_match_condition(),
+            GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
+        )
+        .correlate(FinancialTransaction)
+        .order_by(GoodTransaction.id.asc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    return func.coalesce(linked_seller_id, FinancialTransaction.master_id)
+
+
 def _financial_attributed_staff_id():
     linked_staff_id = (
         select(Appointment.staff_id)
@@ -494,7 +533,14 @@ def _financial_attributed_staff_id():
         .limit(1)
         .scalar_subquery()
     )
-    return func.coalesce(FinancialTransaction.master_id, linked_staff_id)
+    appointment_staff_id = func.coalesce(FinancialTransaction.master_id, linked_staff_id)
+    return case(
+        (
+            FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
+            _goods_seller_staff_id(),
+        ),
+        else_=appointment_staff_id,
+    )
 
 
 def _business_financial_master_condition(factual_at: Optional[datetime] = None):
@@ -507,7 +553,7 @@ def _business_financial_master_condition(factual_at: Optional[datetime] = None):
     linked_business_appointment = exists(
         select(1).where(*linked_conditions)
     )
-    return or_(
+    fallback_condition = or_(
         and_(
             FinancialTransaction.master_id.is_not(None),
             _business_staff_id_condition(FinancialTransaction.master_id),
@@ -515,6 +561,23 @@ def _business_financial_master_condition(factual_at: Optional[datetime] = None):
         and_(
             FinancialTransaction.master_id.is_(None),
             or_(FinancialTransaction.record_id.is_(None), linked_business_appointment),
+        ),
+    )
+    goods_seller_id = _goods_seller_staff_id()
+    return or_(
+        and_(
+            FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
+            or_(
+                and_(
+                    goods_seller_id.is_not(None),
+                    _business_staff_id_condition(goods_seller_id),
+                ),
+                and_(goods_seller_id.is_(None), fallback_condition),
+            ),
+        ),
+        and_(
+            func.coalesce(FinancialTransaction.sold_item_type, '') != GOODS_SOLD_ITEM_TYPE,
+            fallback_condition,
         ),
     )
 
@@ -1905,6 +1968,18 @@ async def fetch_summary(
                 else 'master'
             ),
             'source_status': current_service_scope.source_status,
+            'appointment_count': (
+                current_service_scope.appointment_count
+                if current_service_scope.is_administrator
+                and current_service_scope.source_status == 'ready'
+                else None
+            ),
+            'unique_client_count': (
+                current_service_scope.unique_client_count
+                if current_service_scope.is_administrator
+                and current_service_scope.source_status == 'ready'
+                else None
+            ),
         },
         'revenue': {
             'total': cur_rev,
@@ -2039,7 +2114,6 @@ async def fetch_year_over_year_facts(
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
-    created_user_id: Optional[int] = None,
 ) -> dict[str, Any]:
     """Batch annual/monthly facts using the Overview/plan-fact primitives."""
 
@@ -2079,7 +2153,6 @@ async def fetch_year_over_year_facts(
             end,
             company_id,
             staff_id,
-            created_user_id=created_user_id,
             allowed_company_ids=allowed_company_ids,
             factual_at=factual_at,
         )
@@ -2135,7 +2208,6 @@ async def fetch_year_over_year_facts(
             end,
             company_id,
             staff_id,
-            created_user_id=created_user_id,
             allowed_company_ids=allowed_company_ids,
             factual_at=factual_at,
         ),
@@ -2177,7 +2249,7 @@ async def fetch_year_over_year_facts(
         monthly[year][month]['service_revenue'] = service_revenue
 
     direct_component = FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE
-    if staff_id is not None and created_user_id is None:
+    if staff_id is not None:
         direct_component = or_(
             and_(direct_component, _financial_staff_attribution_condition(staff_id)),
             and_(
@@ -2270,18 +2342,7 @@ async def fetch_year_over_year_facts(
     )
     if dependency_scope is not None:
         dependency_filters.append(dependency_scope)
-    if created_user_id is not None:
-        dependency_filters.append(or_(
-            and_(
-                FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
-                Appointment.created_user_id == created_user_id,
-            ),
-            and_(
-                FinancialTransaction.master_id.is_(None),
-                direct_component,
-            ),
-        ))
-    elif staff_id is not None:
+    if staff_id is not None:
         dependency_filters.append(or_(
             and_(
                 FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
@@ -3147,18 +3208,24 @@ async def fetch_top_services(
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
+    *,
+    use_administrator_schedule: bool = False,
 ) -> list[dict[str, Any]]:
     factual_at = factual_at or _factual_now()
     allowed_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
-    administrator_scope = await _administrator_service_scope(
-        db,
-        start,
-        end,
-        staff_id,
-        allowed_company_ids,
-        factual_at,
+    administrator_scope = (
+        await _administrator_service_scope(
+            db,
+            start,
+            end,
+            staff_id,
+            allowed_company_ids,
+            factual_at,
+        )
+        if use_administrator_schedule
+        else AdministratorServiceScope(is_administrator=False)
     )
     effective_staff_id = None if administrator_scope.is_administrator else staff_id
     administrator_filter = (
@@ -3299,15 +3366,16 @@ async def fetch_paid_goods_rows(
     """Paid goods operations using the Overview/plan-fact revenue formula."""
     factual_at = factual_at or _factual_now()
     attributed_staff_id = _financial_attributed_staff_id()
+    good_id = func.coalesce(GoodTransaction.good_id, FinancialTransaction.sold_item_id)
     stmt = (
         select(
             FinancialTransaction.id,
             FinancialTransaction.company_id,
-            FinancialTransaction.sold_item_id.label('good_id'),
+            good_id.label('good_id'),
             FinancialTransaction.date,
             FinancialTransaction.amount,
             attributed_staff_id.label('master_id'),
-            GoodCatalog.title.label('good_title'),
+            func.coalesce(GoodTransaction.good_title, GoodCatalog.title).label('good_title'),
             Staff.name.label('staff_name'),
         )
         .select_from(FinancialTransaction)
@@ -3319,10 +3387,14 @@ async def fetch_paid_goods_rows(
             ),
         )
         .outerjoin(
+            GoodTransaction,
+            financial_goods_transaction_match_condition(),
+        )
+        .outerjoin(
             GoodCatalog,
             and_(
                 GoodCatalog.company_id == FinancialTransaction.company_id,
-                GoodCatalog.good_id == FinancialTransaction.sold_item_id,
+                GoodCatalog.good_id == GoodTransaction.good_id,
             ),
         )
         .outerjoin(Staff, Staff.id == attributed_staff_id)
@@ -3363,18 +3435,24 @@ async def fetch_extra_services(
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
+    *,
+    use_administrator_schedule: bool = False,
 ) -> list[dict[str, Any]]:
     factual_at = factual_at or _factual_now()
     allowed_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
-    administrator_scope = await _administrator_service_scope(
-        db,
-        start,
-        end,
-        staff_id,
-        allowed_company_ids,
-        factual_at,
+    administrator_scope = (
+        await _administrator_service_scope(
+            db,
+            start,
+            end,
+            staff_id,
+            allowed_company_ids,
+            factual_at,
+        )
+        if use_administrator_schedule
+        else AdministratorServiceScope(is_administrator=False)
     )
     effective_staff_id = None if administrator_scope.is_administrator else staff_id
     administrator_filter = (
@@ -5036,7 +5114,6 @@ async def _staff_fact_components_by_branch(
     company_id: int,
     staff_ids: list[int],
     category_by_staff_id: dict[int, str],
-    user_id_by_staff: dict[int, Optional[int]],
     admin_clients_by_staff: dict[int, int],
     admin_opz_by_staff: dict[int, int],
     admin_extra_metrics_by_staff: dict[int, dict[str, float]],
@@ -5053,7 +5130,6 @@ async def _staff_fact_components_by_branch(
         await db.execute(
             select(
                 Appointment.staff_id,
-                Appointment.created_user_id,
                 func.count(func.distinct(Appointment.id)).label('appointments'),
             )
             .where(
@@ -5061,22 +5137,18 @@ async def _staff_fact_components_by_branch(
                     start, end, company_id, factual_at=factual_at
                 )
             )
-            .group_by(Appointment.staff_id, Appointment.created_user_id)
+            .group_by(Appointment.staff_id)
         )
     ).all()
     appointments_by_staff: dict[int, float] = defaultdict(float)
-    appointments_by_creator: dict[int, float] = defaultdict(float)
     for row in appointment_rows:
         if row.staff_id is not None:
             appointments_by_staff[int(row.staff_id)] += float(row.appointments or 0)
-        if row.created_user_id is not None:
-            appointments_by_creator[int(row.created_user_id)] += float(row.appointments or 0)
 
     service_rows = (
         await db.execute(
             select(
                 Appointment.staff_id,
-                Appointment.created_user_id,
                 func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
             )
             .select_from(FinancialTransaction)
@@ -5094,16 +5166,13 @@ async def _staff_fact_components_by_branch(
                 ),
                 _physical_account_condition(),
             )
-            .group_by(Appointment.staff_id, Appointment.created_user_id)
+            .group_by(Appointment.staff_id)
         )
     ).all()
     service_revenue_by_staff: dict[int, float] = defaultdict(float)
-    service_revenue_by_creator: dict[int, float] = defaultdict(float)
     for row in service_rows:
         if row.staff_id is not None:
             service_revenue_by_staff[int(row.staff_id)] += float(row.revenue or 0.0)
-        if row.created_user_id is not None:
-            service_revenue_by_creator[int(row.created_user_id)] += float(row.revenue or 0.0)
 
     attributed_staff_id = _financial_attributed_staff_id()
     direct_rows = (
@@ -5153,13 +5222,9 @@ async def _staff_fact_components_by_branch(
     ).all()
     goods_revenue_by_staff: dict[int, float] = defaultdict(float)
     topup_revenue_by_staff: dict[int, float] = defaultdict(float)
-    branch_goods_revenue = 0.0
-    branch_topup_revenue = 0.0
     for row in direct_rows:
         goods_revenue = float(row.goods_revenue or 0.0)
         topup_revenue = float(row.topup_revenue or 0.0)
-        branch_goods_revenue += goods_revenue
-        branch_topup_revenue += topup_revenue
         if row.attributed_staff_id is not None:
             goods_revenue_by_staff[int(row.attributed_staff_id)] += goods_revenue
             topup_revenue_by_staff[int(row.attributed_staff_id)] += topup_revenue
@@ -5242,24 +5307,13 @@ async def _staff_fact_components_by_branch(
     facts_by_staff: dict[int, dict[str, float]] = {}
     for staff_id in staff_ids:
         is_admin = category_by_staff_id.get(staff_id) == 'administrator'
+        denominator = appointments_by_staff.get(staff_id, 0.0)
+        revenue = (
+            service_revenue_by_staff.get(staff_id, 0.0)
+            + goods_revenue_by_staff.get(staff_id, 0.0)
+            + topup_revenue_by_staff.get(staff_id, 0.0)
+        )
         if is_admin:
-            user_id = user_id_by_staff.get(staff_id)
-            if user_id is not None:
-                denominator = appointments_by_creator.get(int(user_id), 0.0)
-                revenue = (
-                    service_revenue_by_creator.get(int(user_id), 0.0)
-                    + branch_goods_revenue
-                    + branch_topup_revenue
-                )
-            else:
-                # Preserve the pre-batch fallback: administrators without a
-                # linked YClients user were calculated by their staff id.
-                denominator = appointments_by_staff.get(staff_id, 0.0)
-                revenue = (
-                    service_revenue_by_staff.get(staff_id, 0.0)
-                    + goods_revenue_by_staff.get(staff_id, 0.0)
-                    + topup_revenue_by_staff.get(staff_id, 0.0)
-                )
             values = {
                 'revenue': revenue,
                 'clients': float(admin_clients_by_staff.get(staff_id, 0)),
@@ -5269,13 +5323,8 @@ async def _staff_fact_components_by_branch(
             }
             values.update(admin_extra_metrics_by_staff.get(staff_id, {}))
         else:
-            denominator = appointments_by_staff.get(staff_id, 0.0)
             values = {
-                'revenue': (
-                    service_revenue_by_staff.get(staff_id, 0.0)
-                    + goods_revenue_by_staff.get(staff_id, 0.0)
-                    + topup_revenue_by_staff.get(staff_id, 0.0)
-                ),
+                'revenue': revenue,
                 'clients': denominator,
                 'avg_check_denominator': denominator,
                 'opz_qty': barber_opz_by_staff.get(staff_id, 0.0),
@@ -5917,6 +5966,10 @@ def _selected_staff_plan_payload(
             'remaining': cell.get('remaining'),
             'completion_pct': cell.get('completion_pct'),
             'status': cell.get('status'),
+            'calculation_scope': metric_scope_for_category(
+                group.get('category'),
+                metric['code'],
+            ),
         })
     return {
         'company_id': group.get('company_id'),
@@ -5999,8 +6052,8 @@ async def _client_fact_diagnostics(
         'code': 'admin_barber_clients_mismatch',
         'severity': 'warning',
         'message': (
-            'Сумма клиентов в факте у администраторов не равна сумме клиентов '
-            'в факте у барберов'
+            'Сумма завершённых визитов в факте у администраторов не равна '
+            'сумме завершённых визитов в факте у барберов'
         ),
         'company_id': branch_id,
         'barber_clients_fact': _round_half_up_int(barber_clients or 0.0),
@@ -6301,7 +6354,6 @@ async def _staff_plan_groups_for_branch(
             branch_id,
             staff_ids,
             segment_categories,
-            user_id_by_staff,
             admin_clients_by_staff,
             admin_opz_by_staff,
             admin_extra_metrics_by_staff,
@@ -6337,6 +6389,11 @@ async def _staff_plan_groups_for_branch(
             facts_by_staff.get(sid, {}),
             metrics,
         )
+        for cell in metric_cells:
+            cell['calculation_scope'] = metric_scope_for_category(
+                category,
+                cell['code'],
+            )
         if sid in unavailable_extra_staff_ids:
             _mark_metric_cells_unavailable(
                 metric_cells,

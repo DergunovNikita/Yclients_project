@@ -33,7 +33,6 @@ from dashboard_service import (
     fetch_revenue_daily,
     fetch_dashboard_services,
     fetch_service_kpi_groups,
-    fetch_staff_service_attribution_status,
     save_service_label,
     save_service_management,
     create_service_kpi_group,
@@ -730,18 +729,12 @@ async def dashboard_widget_top_services(
         allowed_company_ids=scope['allowed_company_ids'],
         factual_at=factual_at,
     )
-    attribution = await fetch_staff_service_attribution_status(
-        db,
-        start,
-        end,
-        staff_id,
-        scope['allowed_company_ids'],
-        factual_at,
-    )
     return {
         'success': True,
         'data': rows,
-        **attribution,
+        'mode': 'master',
+        'source_status': 'ready',
+        'missing_sources': [],
     }
 
 
@@ -769,18 +762,12 @@ async def dashboard_widget_extra_services(
         allowed_company_ids=scope['allowed_company_ids'],
         factual_at=factual_at,
     )
-    attribution = await fetch_staff_service_attribution_status(
-        db,
-        start,
-        end,
-        staff_id,
-        scope['allowed_company_ids'],
-        factual_at,
-    )
     return {
         'success': True,
         'data': rows,
-        **attribution,
+        'mode': 'master',
+        'source_status': 'ready',
+        'missing_sources': [],
     }
 
 
@@ -1052,6 +1039,7 @@ async def dashboard_bundle(
         staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
         factual_at=factual_at,
+        use_administrator_schedule=True,
     )
     extra_services = await fetch_extra_services(
         db,
@@ -1062,6 +1050,7 @@ async def dashboard_bundle(
         staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
         factual_at=factual_at,
+        use_administrator_schedule=True,
     )
     return {
         'success': True,

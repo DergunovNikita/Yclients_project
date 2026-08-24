@@ -34,6 +34,20 @@ function renderNotes(notes = [], missingSources = []) {
   `;
 }
 
+function renderCalculationScope(scope) {
+  if (scope?.kind !== 'staff' || scope.mode !== 'personal') return '';
+  const staffName = scope.staff_name || t('dash.staffFallbackLower');
+  const branch = scope.company_title
+    ? t('reports.personalScopeBranch', { branch: scope.company_title })
+    : '';
+  return `
+    <div class="reports-note reports-note--info reports-calculation-scope">
+      <strong>${escapeHtml(t('reports.personalScopeTitle', { name: staffName }))}</strong>
+      <span>${escapeHtml(t('reports.personalScopeDescription'))}${branch ? ` ${escapeHtml(branch)}` : ''}</span>
+    </div>
+  `;
+}
+
 function renderCharts(charts = []) {
   if (!charts.length) return '';
   return `
@@ -208,6 +222,7 @@ export function renderReportData(container, data, chartManager) {
   }
 
   container.innerHTML = `
+    ${renderCalculationScope(data.calculation_scope)}
     ${renderNotes(data.notes || [], data.missing_sources || [])}
     ${renderCards(data.cards || [])}
     ${renderComparison(data)}

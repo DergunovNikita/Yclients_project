@@ -479,6 +479,44 @@
       margin-bottom: 16px;
     }
 
+    .staff-branch-scope {
+      margin-bottom: 24px;
+      padding: 16px;
+      border: 1px solid #99f6e4;
+      border-radius: 10px;
+      background: #f0fdfa;
+    }
+
+    .staff-personal-scope {
+      margin-bottom: 16px;
+      padding: 14px 16px;
+      border: 1px solid #bfdbfe;
+      border-radius: 10px;
+      background: #eff6ff;
+    }
+
+    .staff-personal-scope h2 {
+      margin: 0;
+      font-size: 16px;
+    }
+
+    .staff-branch-scope .panel-title {
+      align-items: flex-start;
+      margin-bottom: 14px;
+    }
+
+    .staff-branch-scope .visit-metrics {
+      margin-bottom: 16px;
+    }
+
+    .scope-description {
+      max-width: 920px;
+      margin: 5px 0 0;
+      color: #475569;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
     .visit-metrics {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1564,7 +1602,23 @@
         <button type="button" data-overview-jump="services" data-i18n="dash.jumpServices">Servizi</button>
       </nav>
 
+      <section class="staff-personal-scope" id="staff-personal-scope" hidden>
+        <h2 id="staff-personal-title"></h2>
+        <p class="scope-description" data-i18n="dash.personalMetricsDescription"></p>
+      </section>
+
       <section class="kpi" id="kpi"></section>
+
+      <section class="staff-branch-scope" id="staff-branch-scope" hidden>
+        <div class="panel-title">
+          <div>
+            <h2 id="staff-branch-title"></h2>
+            <p class="scope-description" data-i18n="dash.branchShiftMetricsDescription"></p>
+          </div>
+        </div>
+        <section class="visit-metrics" id="staff-branch-metrics"></section>
+        <div id="staff-branch-details"></div>
+      </section>
 
       <section data-overview-section="appointments" data-i18n-attr="aria-label:dash.jumpAppointments" aria-label="Appuntamenti">
         <div class="panel-title">
@@ -1614,12 +1668,12 @@
         </div>
       </section>
 
-      <section data-overview-section="services" data-i18n-attr="aria-label:dash.jumpServices" aria-label="Servizi">
+      <section id="services-overview-section" data-overview-section="services" data-i18n-attr="aria-label:dash.jumpServices" aria-label="Servizi">
         <div class="panel-title">
           <h2 data-i18n="dash.jumpServices">Servizi</h2>
         </div>
         <section class="visit-metrics" id="services-metrics"></section>
-        <div class="grid">
+        <div class="grid" id="services-details">
           <div class="panel wide">
             <div class="panel-title">
               <h2 data-i18n="dash.extraServices">Servizi extra</h2>

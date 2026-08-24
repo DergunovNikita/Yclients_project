@@ -11,7 +11,7 @@ REVIEWS_QTY_CODE = 'reviews_qty'
 PLAN_FACT_METRICS: tuple[dict[str, str], ...] = (
     {'code': 'revenue', 'label': 'Выручка', 'format': 'money'},
     {'code': 'avg_check_total', 'label': 'СЧ общий', 'format': 'money'},
-    {'code': 'clients', 'label': 'Кол-во клиентов', 'format': 'number'},
+    {'code': 'clients', 'label': 'Завершённые визиты', 'format': 'number'},
     {'code': 'wax_qty', 'label': 'Воск, шт', 'format': 'number'},
     {'code': 'camouflage_qty', 'label': 'Камуфляж, шт', 'format': 'number'},
     {'code': 'face_care_qty', 'label': 'Уход лицо, шт', 'format': 'number'},
@@ -127,6 +127,14 @@ STAFF_CATEGORY_LABELS = {
     'unknown': 'Без категории',
 }
 
+ADMIN_METRIC_SCOPE_BY_CODE = {
+    'clients': 'administrator_records',
+    'opz_qty': 'administrator_records',
+    'opz_pct': 'administrator_records',
+    'extra_services_qty': 'administrator_shift',
+    'extra_services_pct': 'administrator_shift',
+}
+
 STAFF_CATEGORY_ALIASES = {
     'barber': 'barber',
     'barbers': 'barber',
@@ -165,6 +173,12 @@ def metrics_for_category(category: str | None) -> tuple[dict[str, str], ...]:
     codes = STAFF_CATEGORY_METRIC_CODES.get(category or '', BARBER_METRIC_CODES)
     allowed = set(codes)
     return tuple(metric for metric in PLAN_FACT_METRICS if metric['code'] in allowed)
+
+
+def metric_scope_for_category(category: str | None, code: str) -> str:
+    if category != 'administrator':
+        return 'personal'
+    return ADMIN_METRIC_SCOPE_BY_CODE.get(code, 'personal')
 
 
 def has_zero_clients_plan(plan_values: Mapping[str, Any]) -> bool:

@@ -292,6 +292,12 @@ test('renderReportData hides flagged empty tops but keeps ranking data in a non-
 
   renderReportData(container, {
     source_status: 'ready',
+    calculation_scope: {
+      kind: 'staff',
+      mode: 'personal',
+      staff_name: 'Selected employee',
+      company_title: 'Selected branch',
+    },
     cards: [],
     charts: [],
     tables: [
@@ -313,6 +319,9 @@ test('renderReportData hides flagged empty tops but keeps ranking data in a non-
   }, charts);
 
   assert.ok(!container.innerHTML.includes('Hidden Empty Top'), 'flagged empty table is omitted');
+  assert.ok(container.innerHTML.includes('reports-calculation-scope'), 'personal staff scope is shown');
+  assert.ok(container.innerHTML.includes('Selected employee'), 'selected employee is named in the scope');
+  assert.ok(container.innerHTML.includes('Selected branch'), 'employee branch is named in the scope');
   assert.ok(container.innerHTML.includes('Kept Ranking Top'), 'ranking with data only in a non-default metric is kept');
   assert.ok(container.innerHTML.includes('Anchor Top'), 'unflagged empty table still renders as an anchor');
 });

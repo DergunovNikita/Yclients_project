@@ -1270,7 +1270,6 @@ async def test_reporting_start_trims_breakdown_cards_client_blocks_and_staff_fac
         1,
         [1],
         {1: 'barber'},
-        {1: None},
         {},
         {},
         {},
@@ -3021,7 +3020,7 @@ async def test_goods_report_revenue_matches_paid_overview_component(async_sessio
             date=datetime(2025, 1, 10, 12, 0),
             amount=2400.0,
             record_id=1,
-            sold_item_id=10,
+            sold_item_id=1,
             sold_item_type='goods_transaction',
             master_id=None,
             company_id=1,
@@ -5217,6 +5216,104 @@ async def test_dashboard_bundle_filters_by_staff(async_session):
 
 
 @pytest.mark.asyncio
+async def test_goods_revenue_uses_stock_operation_seller_not_appointment_master(async_session):
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Service master', position='Барбер', company_id=1),
+        Staff(id=2, name='Seller', position='Администратор', company_id=1, user_id=500),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(
+            id=1,
+            external_id=101,
+            company_id=1,
+            staff_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 12),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            external_id=102,
+            company_id=1,
+            staff_id=2,
+            date=date(2025, 1, 11),
+            datetime=datetime(2025, 1, 11, 12),
+            attendance=1,
+        ),
+        GoodTransaction(
+            id=10,
+            external_id=501,
+            company_id=1,
+            type_id=1,
+            amount=-1,
+            cost=3600,
+            master_id=2,
+            date=datetime(2025, 1, 10, 12),
+        ),
+        FinancialTransaction(
+            id=1,
+            company_id=1,
+            record_id=101,
+            sold_item_id=501,
+            sold_item_type='goods_transaction',
+            amount=3600,
+            date=datetime(2025, 1, 10, 12),
+        ),
+        # A payment without its stock operation stays in the branch total but must
+        # not be credited to the appointment master.
+        FinancialTransaction(
+            id=2,
+            company_id=1,
+            record_id=102,
+            sold_item_id=999,
+            sold_item_type='goods_transaction',
+            amount=700,
+            date=datetime(2025, 1, 11, 12),
+        ),
+    ])
+    await async_session.commit()
+
+    service_master = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+        staff_id=1,
+    )
+    seller = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+        staff_id=2,
+    )
+    branch = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+    )
+    plan_fact = await fetch_plan_fact(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+        include_all_staff_in_leaderboards=True,
+    )
+    seller_group = next(group for group in plan_fact['groups'] if group['staff_id'] == 2)
+    seller_metrics = {cell['code']: cell for cell in seller_group['metrics']}
+
+    assert service_master['revenue']['goods_revenue'] == 0.0
+    assert seller['revenue']['goods_revenue'] == 3600.0
+    assert seller['revenue']['total'] == 3600.0
+    assert branch['revenue']['goods_revenue'] == 4300.0
+    assert seller_metrics['revenue']['fact'] == 3600.0
+
+
+@pytest.mark.asyncio
 async def test_dashboard_plan_fact_uses_plan_and_fact_formulas(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
@@ -5485,9 +5582,11 @@ async def test_dashboard_plan_fact_uses_plan_and_fact_formulas(async_session):
     assert selected_plan_rows['revenue']['status'] == 'bad'
     assert selected_plan_rows['clients']['plan'] == 2.0
     assert selected_plan_rows['clients']['fact'] == 2.0
-    selected_staff_summary = r_selected_staff_summary.json()['data']['visit_metrics']
-    assert selected_plan_rows['opz_qty']['fact'] == selected_staff_summary['opz_qty'] == 1.0
-    assert selected_plan_rows['opz_pct']['fact'] == selected_staff_summary['opz_pct'] == 50.0
+    assert selected_plan_rows['clients']['label'] == 'Завершённые визиты'
+    selected_staff_summary = r_selected_staff_summary.json()['data']
+    assert selected_plan_rows['clients']['fact'] == selected_staff_summary['revenue']['appointments']
+    assert selected_plan_rows['opz_qty']['fact'] == selected_staff_summary['visit_metrics']['opz_qty'] == 1.0
+    assert selected_plan_rows['opz_pct']['fact'] == selected_staff_summary['visit_metrics']['opz_pct'] == 50.0
 
     assert r_partial.status_code == 200
     partial_data = r_partial.json()['data']
@@ -7329,7 +7428,7 @@ async def test_admin_extra_services_include_early_moscow_visit_before_utc_day_ro
 
 
 @pytest.mark.asyncio
-async def test_administrator_service_scope_is_used_by_overview_widgets_and_reports(
+async def test_administrator_service_scope_is_explicitly_separated_from_personal_reports(
     async_session,
     monkeypatch,
 ):
@@ -7493,6 +7592,8 @@ async def test_administrator_service_scope_is_used_by_overview_widgets_and_repor
 
     assert summary['source_status'] == 'ready'
     assert summary['service_attribution']['mode'] == 'administrator_schedule'
+    assert summary['service_attribution']['appointment_count'] == 1
+    assert summary['service_attribution']['unique_client_count'] == 1
     assert summary['revenue']['extra_service_count'] == 2.0
     assert summary['revenue']['extra_service_revenue'] == 200.0
     assert summary['visit_metrics']['extra_services_per_appointment_pct'] == 200.0
@@ -7503,10 +7604,11 @@ async def test_administrator_service_scope_is_used_by_overview_widgets_and_repor
         table for table in service_report['tables'] if table['id'] == 'extra_services'
     )
     assert service_report['source_status'] == 'ready'
-    assert report_cards['Услуг оказано'] == 3.0
-    assert report_cards['Выручка услуг'] == 300.0
-    assert report_extra['rows'][0]['sold'] == 2
-    assert report_extra['rows'][0]['revenue'] == 200.0
+    assert service_report['calculation_scope']['mode'] == 'personal'
+    assert service_report['raw']['service_attribution']['mode'] == 'master'
+    assert report_cards['Услуг оказано'] == 0.0
+    assert report_cards['Выручка услуг'] == 0.0
+    assert report_extra['rows'] == []
 
     assert bundle_response.status_code == 200
     bundle = bundle_response.json()['data']
@@ -7516,7 +7618,8 @@ async def test_administrator_service_scope_is_used_by_overview_widgets_and_repor
     assert bundle['extra_services'][0]['sold'] == 2
     assert extra_response.status_code == 200
     assert extra_response.json()['source_status'] == 'ready'
-    assert extra_response.json()['data'][0]['sold'] == 2
+    assert extra_response.json()['mode'] == 'master'
+    assert extra_response.json()['data'] == []
 
 
 @pytest.mark.asyncio
@@ -7623,16 +7726,19 @@ async def test_administrator_service_scope_fails_closed_without_schedule_coverag
     assert summary['missing_sources'] == [dashboard_service.STAFF_SCHEDULE_SOURCE]
     assert summary['revenue']['extra_service_count'] is None
     assert summary['visit_metrics']['extra_services_per_appointment_pct'] is None
-    assert report['source_status'] == 'partial'
-    assert report['missing_sources'] == [dashboard_service.STAFF_SCHEDULE_SOURCE]
+    assert report['source_status'] == 'ready'
+    assert report['calculation_scope']['mode'] == 'personal'
+    assert report['missing_sources'] == []
     assert report['raw']['services'] == []
     assert report['raw']['extra_services'] == []
     assert bundle_response.json()['data']['source_status'] == 'partial'
     assert bundle_response.json()['data']['extra_services'] == []
-    assert extra_response.json()['source_status'] == 'partial'
-    assert extra_response.json()['missing_sources'] == [dashboard_service.STAFF_SCHEDULE_SOURCE]
+    assert extra_response.json()['source_status'] == 'ready'
+    assert extra_response.json()['mode'] == 'master'
+    assert extra_response.json()['missing_sources'] == []
     assert extra_response.json()['data'] == []
-    assert top_response.json()['source_status'] == 'partial'
+    assert top_response.json()['source_status'] == 'ready'
+    assert top_response.json()['mode'] == 'master'
     assert top_response.json()['data'] == []
 
 
@@ -7741,6 +7847,7 @@ async def test_administrator_service_scope_follows_monthly_role_transitions(
         company_id=1,
         staff_id=2,
         factual_at=datetime(2025, 3, 1),
+        use_administrator_schedule=True,
     )
     plan_fact = await fetch_plan_fact(
         async_session,
@@ -8261,7 +8368,7 @@ async def test_admin_without_user_id_preserves_staff_attribution_in_batch(async_
 
 
 @pytest.mark.asyncio
-async def test_batched_direct_payment_is_not_duplicated_by_ambiguous_appointment_match(async_session):
+async def test_unmatched_goods_payment_is_not_attributed_to_appointment_master(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
     async_session.add_all([
@@ -8270,8 +8377,8 @@ async def test_batched_direct_payment_is_not_duplicated_by_ambiguous_appointment
     ])
     await async_session.flush()
 
-    # record_id=77 matches one visit by external_id and another by the local
-    # fallback id. The payment itself must still contribute exactly once.
+    # The payment has no matching stock operation, so neither possible appointment
+    # master is evidence of who sold the product.
     async_session.add_all([
         Appointment(
             id=10,
@@ -8331,11 +8438,9 @@ async def test_batched_direct_payment_is_not_duplicated_by_ambiguous_appointment
         staff_id=2,
     )
     assert parent_cells['revenue']['fact'] == 300.0
-    assert staff_cells['revenue']['fact'] == 300.0
+    assert staff_cells['revenue']['fact'] == 0.0
     assert fallback_cells['revenue']['fact'] == 0.0
-    assert [(row['master_id'], row['staff_name']) for row in external_rows] == [
-        (1, 'External match')
-    ]
+    assert external_rows == []
     assert fallback_rows == []
 
 
@@ -8391,7 +8496,7 @@ async def test_staff_scoped_plan_fact_omits_branch_average_check_leaderboard(asy
 
 
 @pytest.mark.asyncio
-async def test_admin_fact_revenue_uses_created_records_and_goods_cost(async_session):
+async def test_admin_fact_keeps_personal_revenue_separate_from_responsibility_metrics(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
     async_session.add(Staff(id=1, name='Barber', position='Барбер', company_id=1))
@@ -8480,10 +8585,20 @@ async def test_admin_fact_revenue_uses_created_records_and_goods_cost(async_sess
     app.dependency_overrides.clear()
 
     assert r.status_code == 200
+    summary = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+        staff_id=2,
+        include_appointments_breakdown=False,
+    )
     admin_group = next(g for g in r.json()['data']['groups'] if g['category'] == 'administrator')
     admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
-    assert admin_cells['revenue']['fact'] == 1000.0
-    assert admin_cells['avg_check_total']['fact'] == 1000.0
+    assert admin_cells['revenue']['calculation_scope'] == 'personal'
+    assert admin_cells['clients']['calculation_scope'] == 'administrator_records'
+    assert admin_cells['revenue']['fact'] == summary['revenue']['total'] == 0.0
+    assert admin_cells['avg_check_total']['fact'] == summary['average_check']['total'] == 0.0
     assert admin_cells['clients']['fact'] == 1.0
     assert admin_cells['cosmo_qty']['fact'] == 2.0
     assert admin_cells['cosmo_sum']['fact'] == 300.0
@@ -10302,7 +10417,7 @@ async def test_yoy_keeps_uncovered_current_year_unknown_after_last_fact(
 
 
 @pytest.mark.asyncio
-async def test_yoy_admin_scope_matches_plan_fact_creator_attribution(
+async def test_yoy_admin_scope_matches_personal_overview_and_plan_fact(
     async_session,
     monkeypatch,
 ):
@@ -10347,6 +10462,34 @@ async def test_yoy_admin_scope_matches_plan_fact_creator_attribution(
             date=datetime(2025, 2, 10, 10),
             amount=250.0,
         ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=2,
+            date=date(2025, 3, 10),
+            datetime=datetime(2025, 3, 10, 10),
+            attendance=1,
+        ),
+        GoodTransaction(
+            id=1,
+            external_id=700,
+            company_id=1,
+            master_id=2,
+            type_id=1,
+            document_id=1,
+            date=datetime(2025, 3, 10, 10),
+            amount=-1,
+            cost=300.0,
+        ),
+        FinancialTransaction(
+            id=3,
+            company_id=1,
+            master_id=None,
+            sold_item_id=700,
+            sold_item_type='goods_transaction',
+            date=datetime(2025, 3, 10, 10),
+            amount=300.0,
+        ),
     ])
     for source in (
         'appointments_detail',
@@ -10382,15 +10525,40 @@ async def test_yoy_admin_scope_matches_plan_fact_creator_attribution(
     admin_group = next(group for group in plan_fact['groups'] if group['staff_id'] == 2)
     admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
     yoy_2025 = next(row for row in yoy['raw']['years'] if row['year'] == 2025)
+    overview = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        staff_id=2,
+        include_appointments_breakdown=False,
+        factual_at=factual_at,
+    )
+    leaderboard = await dashboard_reports.fetch_report_data(
+        async_session,
+        'staff_leaderboard',
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        staff_id=2,
+    )
+    leaderboard_cards = {
+        card['label']: card['value']
+        for card in leaderboard['cards']
+    }
 
-    assert admin_cells['revenue']['fact'] == 750.0
+    assert admin_cells['revenue']['fact'] == overview['revenue']['total'] == 300.0
     assert admin_cells['clients']['fact'] == 1.0
+    assert yoy['calculation_scope']['mode'] == 'personal'
     assert yoy['raw']['latest_year'] == 2025
-    assert yoy_2025['revenue'] == 750.0
-    assert yoy_2025['service_revenue'] == 500.0
-    assert yoy_2025['topup_revenue'] == 250.0
+    assert yoy_2025['revenue'] == overview['revenue']['total'] == 300.0
+    assert yoy_2025['service_revenue'] == 0.0
+    assert yoy_2025['goods_revenue'] == 300.0
+    assert yoy_2025['topup_revenue'] == 0.0
     assert yoy_2025['appointments'] == 1
-    assert yoy_2025['avg_check'] == 750.0
+    assert yoy_2025['avg_check'] == overview['average_check']['total'] == 300.0
+    assert leaderboard['calculation_scope']['mode'] == 'plan_fact'
+    assert leaderboard_cards['Личная выручка выбранного сотрудника'] == 300.0
 
 
 @pytest.mark.asyncio

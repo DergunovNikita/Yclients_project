@@ -58,6 +58,14 @@ const els = {
   clientsMetrics: document.getElementById('clients-metrics'),
   revenueMetrics: document.getElementById('revenue-metrics'),
   servicesMetrics: document.getElementById('services-metrics'),
+  staffPersonalScope: document.getElementById('staff-personal-scope'),
+  staffPersonalTitle: document.getElementById('staff-personal-title'),
+  staffBranchScope: document.getElementById('staff-branch-scope'),
+  staffBranchTitle: document.getElementById('staff-branch-title'),
+  staffBranchMetrics: document.getElementById('staff-branch-metrics'),
+  staffBranchDetails: document.getElementById('staff-branch-details'),
+  servicesSection: document.getElementById('services-overview-section'),
+  servicesDetails: document.getElementById('services-details'),
   error: document.getElementById('error'),
   apiState: document.getElementById('api-state'),
   syncState: document.getElementById('sync-state'),
@@ -220,7 +228,6 @@ window.addEventListener('portal:session-transition', () => {
   renderPlanColumnPicker();
 });
 
-const ADMIN_HIDDEN_METRIC_CODES = new Set(['revenue', 'avg_check_total']);
 const SETTINGS_ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
 const SETTINGS_VIEWS = new Set(['planSettings', 'serviceManagement', 'reviewFacts']);
 
@@ -576,6 +583,88 @@ function goodsRevenueShare(revenue) {
   return (Number(revenue.goods_revenue || 0) / total) * 100;
 }
 
+function usesAdministratorSchedule(summary) {
+  return summary?.service_attribution?.mode === 'administrator_schedule';
+}
+
+function renderStaffPersonalScope() {
+  const selectedOption = filterEls.overview.staff.selectedOptions[0];
+  const hasSelectedStaff = Boolean(filterEls.overview.staff.value && selectedOption);
+  els.staffPersonalScope.hidden = !hasSelectedStaff;
+  if (!hasSelectedStaff) return;
+  els.staffPersonalTitle.textContent = t('dash.personalMetricsTitle', {
+    name: selectedOption.textContent?.trim() || t('dash.worker'),
+  });
+}
+
+function renderStaffBranchMetrics(summary) {
+  const isBranchScope = usesAdministratorSchedule(summary);
+  const detailsParent = isBranchScope && !summary.financials_hidden
+    ? els.staffBranchDetails
+    : els.servicesSection;
+  if (els.servicesDetails.parentElement !== detailsParent) {
+    detailsParent.appendChild(els.servicesDetails);
+  }
+  els.staffBranchScope.hidden = !isBranchScope;
+  if (!isBranchScope) {
+    renderCards(els.staffBranchMetrics, []);
+    return;
+  }
+
+  const selectedStaff = filterEls.overview.staff.selectedOptions[0]?.textContent?.trim()
+    || t('dash.worker');
+  els.staffBranchTitle.textContent = t('dash.branchShiftMetricsTitle', { name: selectedStaff });
+
+  const attribution = summary.service_attribution || {};
+  const revenue = summary.revenue || {};
+  const averageCheck = summary.average_check || {};
+  const visitMetrics = summary.visit_metrics || {};
+  const cards = [
+    {
+      label: t('dash.cardBranchShiftAppointments'),
+      value: formatMetricValue(attribution.appointment_count, 'number'),
+    },
+    {
+      label: t('dash.cardBranchShiftClients'),
+      value: formatMetricValue(attribution.unique_client_count, 'number'),
+    },
+    {
+      label: t('dash.cardExtraServiceCount'),
+      value: formatMetricValue(revenue.extra_service_count, 'number'),
+      delta: formatPct(revenue.extra_service_count_change_pct),
+      deltaValue: revenue.extra_service_count_change_pct,
+    },
+    {
+      label: t('dash.cardExtraServicesPerAppointment'),
+      value: formatMetricValue(visitMetrics.extra_services_per_appointment_pct, 'percent'),
+      delta: formatPct(visitMetrics.extra_services_per_appointment_pct_change_pct),
+      deltaValue: visitMetrics.extra_services_per_appointment_pct_change_pct,
+    },
+    {
+      label: t('dash.cardExtraServiceClients'),
+      value: formatMetricValue(visitMetrics.extra_service_clients_pct, 'percent'),
+      delta: t('dash.uniqueClientsCount', { count: formatNumber(visitMetrics.extra_service_clients) }),
+      deltaValue: null,
+    },
+    {
+      label: t('dash.cardExtraServiceRevenue'),
+      value: formatMetricValue(revenue.extra_service_revenue, 'money'),
+      delta: formatPct(revenue.extra_service_revenue_change_pct),
+      deltaValue: revenue.extra_service_revenue_change_pct,
+      present: !summary.financials_hidden,
+    },
+    {
+      label: t('dash.cardExtraServiceAverageCheck'),
+      value: formatMetricValue(averageCheck.extra_services, 'money'),
+      delta: formatPct(averageCheck.extra_services_change_pct),
+      deltaValue: averageCheck.extra_services_change_pct,
+      present: !summary.financials_hidden,
+    },
+  ];
+
+  renderCards(els.staffBranchMetrics, presentCards(cards));
+}
+
 function renderRevenueMetrics(summary) {
   if (!summary.revenue) {
     renderCards(els.revenueMetrics, []);
@@ -609,7 +698,10 @@ function renderRevenueMetrics(summary) {
     },
   ];
 
-  renderCards(els.revenueMetrics, cards);
+  renderCards(
+    els.revenueMetrics,
+    usesAdministratorSchedule(summary) ? cards.filter((_, index) => index !== 2) : cards,
+  );
 }
 
 function renderServicesMetrics(summary) {
@@ -664,7 +756,10 @@ function renderServicesMetrics(summary) {
     },
   ];
 
-  renderCards(els.servicesMetrics, presentCards(cards));
+  const visibleCards = usesAdministratorSchedule(summary)
+    ? cards.filter((_, index) => index < 4)
+    : cards;
+  renderCards(els.servicesMetrics, presentCards(visibleCards));
 }
 
 function renderVisitMetrics(summary) {
@@ -690,7 +785,10 @@ function renderVisitMetrics(summary) {
     },
   ];
 
-  renderCards(els.visitMetrics, cards);
+  renderCards(
+    els.visitMetrics,
+    usesAdministratorSchedule(summary) ? cards.slice(0, 2) : cards,
+  );
 }
 
 function renderClientsMetrics(summary) {
@@ -770,7 +868,10 @@ function renderClientsMetrics(summary) {
     },
   ];
 
-  renderCards(els.clientsMetrics, cards);
+  renderCards(
+    els.clientsMetrics,
+    usesAdministratorSchedule(summary) ? cards.filter((_, index) => index !== 2) : cards,
+  );
 }
 
 function renderAppointmentsMetrics(summary) {
@@ -1157,9 +1258,15 @@ function renderPlanSection(title, groups, metrics, meta = '') {
   `;
 }
 
-function metricsForDisplay(category, metrics) {
-  if (category !== 'administrator') return metrics;
-  return metrics.filter((metric) => !ADMIN_HIDDEN_METRIC_CODES.has(metric.code));
+const PLAN_SCOPE_ORDER = ['personal', 'administrator_records', 'administrator_shift'];
+
+function planScopeLabel(scope) {
+  const labels = {
+    personal: t('dash.scopePersonal'),
+    administrator_records: t('dash.scopeAdministratorRecords'),
+    administrator_shift: t('dash.scopeAdministratorShift'),
+  };
+  return labels[scope] || labels.personal;
 }
 
 function renderStaffCategorySections(prefix, groups, metricSets, metrics) {
@@ -1168,52 +1275,77 @@ function renderStaffCategorySections(prefix, groups, metricSets, metrics) {
   categoryOrder.forEach((category) => {
     const categoryGroups = groups.filter((group) => (group.category || 'unknown') === category);
     if (!categoryGroups.length) return;
-    const categoryMetrics = metricsForDisplay(category, metricSets[category] || metrics);
+    const categoryMetrics = metricSets[category] || metrics;
     const label = categoryGroups[0].category_label || category;
-    const title = prefix ? `${prefix} · ${label}` : label;
-    sections.push(renderPlanSection(title, categoryGroups, categoryMetrics, t('dash.staffCount', { count: categoryGroups.length })));
+    const baseTitle = prefix ? `${prefix} · ${label}` : label;
+    const scopeByCode = new Map(
+      categoryGroups
+        .flatMap((group) => group.metrics || [])
+        .map((metric) => [metric.code, metric.calculation_scope || 'personal']),
+    );
+    const scopes = category === 'administrator' ? PLAN_SCOPE_ORDER : ['personal'];
+    scopes.forEach((scope) => {
+      const scopeMetrics = categoryMetrics.filter(
+        (metric) => (scopeByCode.get(metric.code) || 'personal') === scope,
+      );
+      if (!scopeMetrics.length) return;
+      const title = category === 'administrator'
+        ? `${baseTitle} · ${planScopeLabel(scope)}`
+        : baseTitle;
+      sections.push(renderPlanSection(
+        title,
+        categoryGroups,
+        scopeMetrics,
+        t('dash.staffCount', { count: categoryGroups.length }),
+      ));
+    });
   });
   return sections;
 }
 
 function renderSelectedStaffPlanTable(staffPlan) {
   if (!staffPlan?.metrics?.length) return '';
-  return `
-    <section class="plan-section selected-staff-plan">
-      <div class="plan-section-title">
-        <h3>${t('dash.staffPlanTitle', { name: escapeHtml(staffPlan.title || t('dash.staffFallbackLower')) })}</h3>
-        <span class="meta">${escapeHtml(staffPlan.category_label || '')}</span>
-      </div>
-      <div class="table-scroll staff-plan-scroll">
-        <table class="staff-plan-table">
-          <thead>
-            <tr>
-              <th>KPI</th>
-              <th class="number">${t('dash.plan')}</th>
-              <th class="number">${t('dash.fact')}</th>
-              <th class="number">${t('dash.completionPct')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${staffPlan.metrics
-              .map(
-                (metric) => `
-                  <tr>
-                    <td>${escapeHtml(metric.label)}</td>
-                    <td class="number">${escapeHtml(formatMetricValue(metric.plan, metric.format))}</td>
-                    <td class="number">${escapeHtml(formatMetricValue(metric.fact, metric.format))}</td>
-                    <td class="number metric-status ${escapeHtml(metric.status || 'no-plan')}">
-                      ${escapeHtml(formatMetricValue(metric.completion_pct, 'percent'))}
-                    </td>
-                  </tr>
-                `,
-              )
-              .join('')}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  `;
+  const title = t('dash.staffPlanTitle', {
+    name: staffPlan.title || t('dash.staffFallbackLower'),
+  });
+  return PLAN_SCOPE_ORDER.map((scope) => {
+    const metrics = staffPlan.metrics.filter(
+      (metric) => (metric.calculation_scope || 'personal') === scope,
+    );
+    if (!metrics.length) return '';
+    return `
+      <section class="plan-section selected-staff-plan">
+        <div class="plan-section-title">
+          <h3>${escapeHtml(`${title} · ${planScopeLabel(scope)}`)}</h3>
+          <span class="meta">${escapeHtml(staffPlan.category_label || '')}</span>
+        </div>
+        <div class="table-scroll staff-plan-scroll">
+          <table class="staff-plan-table">
+            <thead>
+              <tr>
+                <th>KPI</th>
+                <th class="number">${t('dash.plan')}</th>
+                <th class="number">${t('dash.fact')}</th>
+                <th class="number">${t('dash.completionPct')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${metrics.map((metric) => `
+                <tr>
+                  <td>${escapeHtml(metric.label)}</td>
+                  <td class="number">${escapeHtml(formatMetricValue(metric.plan, metric.format))}</td>
+                  <td class="number">${escapeHtml(formatMetricValue(metric.fact, metric.format))}</td>
+                  <td class="number metric-status ${escapeHtml(metric.status || 'no-plan')}">
+                    ${escapeHtml(formatMetricValue(metric.completion_pct, 'percent'))}
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }).join('');
 }
 
 function chartValue(value) {
@@ -1272,34 +1404,41 @@ function renderPlanInsights(planFact) {
     );
     const title = t('dash.planVsFactTitle', { name: escapeHtml(selectedStaffPlan.title || t('dash.staffFallbackLower')) });
     const meta = escapeHtml(selectedStaffPlan.category_label || '');
-    PLAN_SCALE_GROUPS.forEach((scale) => {
-      const groupMetrics = visibleMetrics.filter((metric) => (metric.format || 'number') === scale.format);
-      if (!groupMetrics.length) return;
-      const heading = `${title} · ${t(scale.labelKey)}`;
-      if (scale.perMetric) {
-        const cells = groupMetrics
-          .map((metric, index) => {
-            const canvasId = `selected-staff-plan-${scale.format}-${index}`;
-            staffPlanScaleGroups.push({ canvasId, metrics: [metric], color: scale.color });
-            return `<div class="chart-box short"><canvas id="${canvasId}"></canvas></div>`;
-          })
-          .join('');
-        panels.push(`
-          <div class="panel wide">
-            <div class="panel-title"><h2>${heading}</h2><span class="meta">${meta}</span></div>
-            <div class="plan-scale-row">${cells}</div>
-          </div>
-        `);
-      } else {
-        const canvasId = `selected-staff-plan-${scale.format}`;
-        staffPlanScaleGroups.push({ canvasId, metrics: groupMetrics, color: scale.color });
-        panels.push(`
-          <div class="panel wide">
-            <div class="panel-title"><h2>${heading}</h2><span class="meta">${meta}</span></div>
-            <div class="chart-box short"><canvas id="${canvasId}"></canvas></div>
-          </div>
-        `);
-      }
+    PLAN_SCOPE_ORDER.forEach((scope) => {
+      const scopeMetrics = visibleMetrics.filter(
+        (metric) => (metric.calculation_scope || 'personal') === scope,
+      );
+      PLAN_SCALE_GROUPS.forEach((scale) => {
+        const groupMetrics = scopeMetrics.filter(
+          (metric) => (metric.format || 'number') === scale.format,
+        );
+        if (!groupMetrics.length) return;
+        const heading = `${title} · ${planScopeLabel(scope)} · ${t(scale.labelKey)}`;
+        if (scale.perMetric) {
+          const cells = groupMetrics
+            .map((metric, index) => {
+              const canvasId = `selected-staff-plan-${scope}-${scale.format}-${index}`;
+              staffPlanScaleGroups.push({ canvasId, metrics: [metric], color: scale.color });
+              return `<div class="chart-box short"><canvas id="${canvasId}"></canvas></div>`;
+            })
+            .join('');
+          panels.push(`
+            <div class="panel wide">
+              <div class="panel-title"><h2>${heading}</h2><span class="meta">${meta}</span></div>
+              <div class="plan-scale-row">${cells}</div>
+            </div>
+          `);
+        } else {
+          const canvasId = `selected-staff-plan-${scope}-${scale.format}`;
+          staffPlanScaleGroups.push({ canvasId, metrics: groupMetrics, color: scale.color });
+          panels.push(`
+            <div class="panel wide">
+              <div class="panel-title"><h2>${heading}</h2><span class="meta">${meta}</span></div>
+              <div class="chart-box short"><canvas id="${canvasId}"></canvas></div>
+            </div>
+          `);
+        }
+      });
     });
   }
 
@@ -1423,14 +1562,13 @@ function renderPlanFact(planFact) {
     const sections = [];
     if (planFact.selected_staff_plan) {
       sections.push(renderSelectedStaffPlanTable(planFact.selected_staff_plan));
+    } else {
+      if (planFact.parent_group) {
+        const branchTitle = planFact.branch?.title || planFact.parent_group.title || t('dash.branch');
+        sections.push(renderPlanSection(branchTitle, [planFact.parent_group], metricSets.branch || metrics));
+      }
+      sections.push(...renderStaffCategorySections('', groups, metricSets, metrics));
     }
-
-    if (planFact.parent_group) {
-      const branchTitle = planFact.branch?.title || planFact.parent_group.title || t('dash.branch');
-      sections.push(renderPlanSection(branchTitle, [planFact.parent_group], metricSets.branch || metrics));
-    }
-
-    sections.push(...renderStaffCategorySections('', groups, metricSets, metrics));
 
     els.planFactTable.innerHTML = diagnosticsHtml + (
       sections.join('') || `<div class="empty">${t('dash.noStaffForBranch')}</div>`
@@ -2157,7 +2295,9 @@ function renderBundle(bundle) {
     extra_services: extraServices = [],
   } = bundle;
   applyFinancialVisibility(summary);
+  renderStaffPersonalScope();
   renderKpi(summary);
+  renderStaffBranchMetrics(summary);
   renderVisitMetrics(summary);
   renderClientsMetrics(summary);
   if (summary.financials_hidden) {
