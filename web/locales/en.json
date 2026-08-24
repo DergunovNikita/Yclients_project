@@ -108,9 +108,9 @@
   "roles": {
     "platform_admin": "Platform administrator",
     "owner": "Network owner",
-    "branch_admin": "Branch administrator",
-    "manager": "Manager",
-    "viewer": "Viewer"
+    "branch_admin": "Network manager",
+    "manager": "Branch manager",
+    "viewer": "Branch employee"
   },
   "onboarding": {
     "brandSuffix": "Onboarding",
@@ -475,9 +475,9 @@
     "reportsSubhead": "Report catalog and analytics",
     "rolePlatformAdmin": "Platform Admin — platform",
     "roleOwner": "Owner — network owner",
-    "roleBranchAdmin": "Branch Admin — branch admin",
-    "roleManager": "Manager — branch metrics",
-    "roleViewer": "Viewer — read only",
+    "roleBranchAdmin": "Network manager",
+    "roleManager": "Branch manager",
+    "roleViewer": "Branch employee",
     "noBusinessNetworks": "No business networks created",
     "noPlatformTenants": "No business tenants available for platform admin.",
     "selectedNetworkData": "Dashboard shows data for the selected network",
@@ -547,9 +547,9 @@
     "selectRole": "Select role",
     "selectBranches": "Select branches",
     "selectBranch": "Select branch",
-    "roleViewer": "viewer — read only",
-    "roleManager": "manager — branch metrics",
-    "roleBranchAdmin": "branch_admin — branch admin",
+    "roleViewer": "viewer — branch employee",
+    "roleManager": "manager — branch manager",
+    "roleBranchAdmin": "branch_admin — network manager",
     "roleOwner": "owner — network owner",
     "rolePlatformAdmin": "platform_admin — platform",
     "branchCount": "{count} branches",

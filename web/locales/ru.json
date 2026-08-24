@@ -108,9 +108,9 @@
   "roles": {
     "platform_admin": "Платформенный администратор",
     "owner": "Владелец сети",
-    "branch_admin": "Администратор филиала",
-    "manager": "Менеджер",
-    "viewer": "Наблюдатель"
+    "branch_admin": "Менеджер сети",
+    "manager": "Менеджер филиала",
+    "viewer": "Сотрудник филиала"
   },
   "onboarding": {
     "brandSuffix": "Подключение",
@@ -475,9 +475,9 @@
     "reportsSubhead": "Каталог отчетов и аналитика",
     "rolePlatformAdmin": "Platform Admin — платформа",
     "roleOwner": "Owner — владелец сети",
-    "roleBranchAdmin": "Branch Admin — админ филиала",
-    "roleManager": "Manager — метрики филиала",
-    "roleViewer": "Viewer — только просмотр",
+    "roleBranchAdmin": "Менеджер сети",
+    "roleManager": "Менеджер филиала",
+    "roleViewer": "Сотрудник филиала",
     "noBusinessNetworks": "Нет созданных бизнес-сетей",
     "noPlatformTenants": "Для platform admin нет доступных business tenants.",
     "selectedNetworkData": "Dashboard показывает данные выбранной сети",
@@ -547,9 +547,9 @@
     "selectRole": "Выберите роль",
     "selectBranches": "Выберите филиалы",
     "selectBranch": "Выберите филиал",
-    "roleViewer": "viewer — только просмотр",
-    "roleManager": "manager — метрики филиала",
-    "roleBranchAdmin": "branch_admin — админ филиала",
+    "roleViewer": "viewer — сотрудник филиала",
+    "roleManager": "manager — менеджер филиала",
+    "roleBranchAdmin": "branch_admin — менеджер сети",
     "roleOwner": "owner — владелец сети",
     "rolePlatformAdmin": "platform_admin — платформа",
     "branchCount": "{count} филиалов",

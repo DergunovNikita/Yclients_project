@@ -108,9 +108,9 @@
   "roles": {
     "platform_admin": "Amministratore della piattaforma",
     "owner": "Titolare della rete",
-    "branch_admin": "Amministratore di filiale",
-    "manager": "Manager",
-    "viewer": "Osservatore"
+    "branch_admin": "Responsabile della rete",
+    "manager": "Responsabile di filiale",
+    "viewer": "Dipendente di filiale"
   },
   "onboarding": {
     "brandSuffix": "Collegamento",
@@ -475,9 +475,9 @@
     "reportsSubhead": "Catalogo report e analisi",
     "rolePlatformAdmin": "Platform Admin — piattaforma",
     "roleOwner": "Owner — titolare rete",
-    "roleBranchAdmin": "Branch Admin — admin filiale",
-    "roleManager": "Manager — metriche filiale",
-    "roleViewer": "Viewer — sola lettura",
+    "roleBranchAdmin": "Responsabile della rete",
+    "roleManager": "Responsabile di filiale",
+    "roleViewer": "Dipendente di filiale",
     "noBusinessNetworks": "Nessuna rete aziendale creata",
     "noPlatformTenants": "Nessun business tenant disponibile per platform admin.",
     "selectedNetworkData": "La dashboard mostra i dati della rete selezionata",
@@ -547,9 +547,9 @@
     "selectRole": "Seleziona ruolo",
     "selectBranches": "Seleziona filiali",
     "selectBranch": "Seleziona filiale",
-    "roleViewer": "viewer — sola lettura",
-    "roleManager": "manager — metriche filiale",
-    "roleBranchAdmin": "branch_admin — admin filiale",
+    "roleViewer": "viewer — dipendente di filiale",
+    "roleManager": "manager — responsabile di filiale",
+    "roleBranchAdmin": "branch_admin — responsabile della rete",
     "roleOwner": "owner — titolare rete",
     "rolePlatformAdmin": "platform_admin — piattaforma",
     "branchCount": "{count} filiali",

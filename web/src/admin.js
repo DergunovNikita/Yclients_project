@@ -272,7 +272,7 @@ function applyAdminMeta() {
   renderBranchOptions(createBranchSelect, createBranchDropdown);
 
   if (adminRoleLabel) {
-    adminRoleLabel.textContent = adminMeta?.role || 'admin';
+    adminRoleLabel.textContent = ROLE_LABELS[adminMeta?.role] || adminMeta?.role || 'admin';
   }
   if (openCreateUserBtn) {
     openCreateUserBtn.hidden = !canManage;
