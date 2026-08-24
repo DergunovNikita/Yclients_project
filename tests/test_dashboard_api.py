@@ -3267,6 +3267,14 @@ async def test_staff_leaderboard_applies_component_money_permissions_without_raw
 
     identity = {'staff': 'Master', 'staff_id': 1, 'company_id': 1, 'company_title': 'Salon'}
     extra_row = {**identity, 'qty': 2.0, 'sum': 500.0, 'pct': 20.0, 'share_pct': 100.0}
+    admin_extra_row = {
+        'staff': 'Admin',
+        'staff_id': 2,
+        'company_id': 1,
+        'company_title': 'Salon',
+        'qty': 3.0,
+        'pct': 30.0,
+    }
     cosmo_row = {**identity, 'qty': 1.0, 'sum': 300.0, 'pct': 12.0, 'share_pct': 100.0}
     opz_row = {**identity, 'qty': 1.0, 'pct': 10.0}
     value_row = {**identity, 'value': 2500.0}
@@ -3275,7 +3283,15 @@ async def test_staff_leaderboard_applies_component_money_permissions_without_raw
     async def fake_plan_fact(*args, **kwargs):
         return {
             'staff_leaderboards': {
-                'extra_services_rankings': {'qty': [extra_row], 'sum': [extra_row], 'pct': [extra_row]},
+                'extra_services_barber_rankings': {
+                    'qty': [extra_row],
+                    'sum': [extra_row],
+                    'pct': [extra_row],
+                },
+                'extra_services_admin_rankings': {
+                    'qty': [admin_extra_row],
+                    'pct': [admin_extra_row],
+                },
                 'cosmo_barber_rankings': {'qty': [cosmo_row], 'sum': [cosmo_row], 'pct': [cosmo_row]},
                 'cosmo_admin_rankings': {'qty': [], 'sum': [], 'pct': []},
                 'opz_barber_rankings': {'qty': [opz_row], 'pct': [opz_row]},
@@ -3314,12 +3330,21 @@ async def test_staff_leaderboard_applies_component_money_permissions_without_raw
     assert response.status_code == 200
     data = response.json()['data']
     table_ids = {table['id'] for table in data['tables']}
-    assert {'cosmo_barber', 'extra_services', 'opz_barber', 'reviews_admin'} <= table_ids
+    assert {
+        'cosmo_barber',
+        'extra_services',
+        'extra_services_admin',
+        'opz_barber',
+        'reviews_admin',
+    } <= table_ids
     assert {'revenue_barber', 'revenue_admin', 'avg_check_plan_branch', 'avg_check_plan_staff'}.isdisjoint(table_ids)
     extra = next(table for table in data['tables'] if table['id'] == 'extra_services')
     assert 'sum' not in {column['key'] for column in extra['columns']}
     assert 'sum' not in extra['ranking']['rows_by_metric']
     assert all('sum' not in row for rows in extra['ranking']['rows_by_metric'].values() for row in rows)
+    extra_admin = next(table for table in data['tables'] if table['id'] == 'extra_services_admin')
+    assert extra_admin['rows'][0]['staff'] == 'Admin'
+    assert {option['key'] for option in extra_admin['ranking']['options']} == {'qty', 'pct'}
     assert data['cards'] == []
     assert data['raw'] == {}
 
@@ -3366,13 +3391,13 @@ def test_staff_leaderboards_sort_stably_and_require_positive_average_check_plan(
 
 
 def test_staff_leaderboard_metric_variants_sort_by_the_selected_measure():
-    def group(staff_id, title, facts):
+    def group(staff_id, title, facts, *, category='barber'):
         return {
             'staff_id': staff_id,
             'title': title,
             'company_id': 1,
             'company_title': 'Salon',
-            'category': 'barber',
+            'category': category,
             'metrics': [{'code': code, 'plan': None, 'fact': value} for code, value in facts.items()],
         }
 
@@ -3399,6 +3424,10 @@ def test_staff_leaderboard_metric_variants_sort_by_the_selected_measure():
             'opz_qty': 2.0,
             'opz_pct': 50.0,
         }),
+        group(3, 'Admin leader', {
+            'extra_services_qty': 100.0,
+            'extra_services_pct': 80.0,
+        }, category='administrator'),
     ]
 
     boards = _staff_leaderboards_payload(
@@ -3406,9 +3435,14 @@ def test_staff_leaderboard_metric_variants_sort_by_the_selected_measure():
         extra_revenue_by_staff={1: 100.0, 2: 500.0},
     )
 
-    assert boards['extra_services_rankings']['qty'][0]['staff'] == 'Quantity leader'
-    assert boards['extra_services_rankings']['sum'][0]['staff'] == 'Percent leader'
-    assert boards['extra_services_rankings']['pct'][0]['staff'] == 'Percent leader'
+    assert boards['extra_services_barber_rankings']['qty'][0]['staff'] == 'Quantity leader'
+    assert boards['extra_services_barber_rankings']['sum'][0]['staff'] == 'Percent leader'
+    assert boards['extra_services_barber_rankings']['pct'][0]['staff'] == 'Percent leader'
+    assert boards['extra_services_admin_rankings']['qty'][0]['staff'] == 'Admin leader'
+    assert boards['extra_services_admin_rankings']['pct'][0]['staff'] == 'Admin leader'
+    assert 'sum' not in boards['extra_services_admin_rankings']
+    assert boards['extra_services'] == boards['extra_services_barber']
+    assert boards['extra_services_rankings'] == boards['extra_services_barber_rankings']
     assert boards['cosmo_barber_rankings']['qty'][0]['staff'] == 'Quantity leader'
     assert boards['cosmo_barber_rankings']['sum'][0]['staff'] == 'Percent leader'
     assert boards['cosmo_barber_rankings']['pct'][0]['staff'] == 'Percent leader'
@@ -7723,8 +7757,19 @@ async def test_administrator_service_scope_follows_monthly_role_transitions(
     )
     cells = {cell['code']: cell for cell in staff_group['metrics']}
     assert cells['extra_services_qty']['fact'] == expected_qty
-    leaderboard = plan_fact['staff_leaderboards']['extra_services']
+    leaderboard_key = (
+        'extra_services_admin'
+        if staff_group['category'] == 'administrator'
+        else 'extra_services_barber'
+    )
+    leaderboard = plan_fact['staff_leaderboards'][leaderboard_key]
     assert next(row for row in leaderboard if row['staff_id'] == 2)['qty'] == expected_qty
+    other_key = (
+        'extra_services_barber'
+        if staff_group['category'] == 'administrator'
+        else 'extra_services_admin'
+    )
+    assert all(row['staff_id'] != 2 for row in plan_fact['staff_leaderboards'][other_key])
 
 
 @pytest.mark.asyncio
@@ -7969,7 +8014,7 @@ async def test_admin_extra_services_are_unavailable_without_schedule_coverage(as
     assert cells['extra_services_qty']['status'] == 'partial'
     assert cells['extra_services_pct']['fact'] is None
     assert cells['extra_services_pct']['status'] == 'partial'
-    assert result['staff_leaderboards']['extra_services_rankings']['qty'] == []
+    assert result['staff_leaderboards']['extra_services_admin_rankings']['qty'] == []
     assert result['staff_leaderboards']['_partial_reasons'] == ['staff_schedules']
     diagnostic = next(item for item in result['diagnostics'] if item['code'] == 'staff_schedule_coverage')
     assert diagnostic['required_start'] == '2024-12-31'

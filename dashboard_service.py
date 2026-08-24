@@ -5717,23 +5717,36 @@ def _staff_leaderboards_payload(
         ))
         return eligible[:limit]
 
-    extra_total = sum(_extra_service_qty(group) for group in barbers)
-    extra_rows = []
-    for group in staff:
-        qty = _metric_fact_optional(group, 'extra_services_qty')
-        pct = _metric_fact_optional(group, 'extra_services_pct')
-        is_barber = (group.get('category') or 'unknown') == 'barber'
-        row = identity(group)
-        row.update({
-            'qty': _round_metric_value(qty, 'number'),
-            'sum': (
-                _round_metric_value(extra_revenue_by_staff.get(group.get('staff_id'), 0.0), 'money')
-                if extra_revenue_available and is_barber else None
-            ),
-            'pct': _round_metric_value(pct, 'percent'),
-            'share_pct': share(qty or 0.0, extra_total) if is_barber else None,
-        })
-        extra_rows.append(row)
+    def extra_rows(
+        source: list[dict[str, Any]],
+        *,
+        include_revenue: bool,
+    ) -> list[dict[str, Any]]:
+        total = sum(_extra_service_qty(group) for group in source)
+        rows = []
+        for group in source:
+            qty = _metric_fact_optional(group, 'extra_services_qty')
+            row = identity(group)
+            row.update({
+                'qty': _round_metric_value(qty, 'number'),
+                'pct': _round_metric_value(
+                    _metric_fact_optional(group, 'extra_services_pct'),
+                    'percent',
+                ),
+            })
+            if include_revenue:
+                row.update({
+                    'sum': (
+                        _round_metric_value(
+                            extra_revenue_by_staff.get(group.get('staff_id'), 0.0),
+                            'money',
+                        )
+                        if extra_revenue_available else None
+                    ),
+                    'share_pct': share(qty or 0.0, total),
+                })
+            rows.append(row)
+        return rows
 
     def cosmo_rows(source: list[dict[str, Any]]) -> list[dict[str, Any]]:
         total = sum(_metric_fact_value(group, 'cosmo_sum') for group in source)
@@ -5786,9 +5799,15 @@ def _staff_leaderboards_payload(
             rows.append(row)
         return top_rows(rows, 'pct', eligibility=lambda row: float(row.get('plan') or 0.0) > 0)
 
-    extra_rankings = {
-        metric: top_rows(extra_rows, metric)
+    extra_barber_rows = extra_rows(barbers, include_revenue=True)
+    extra_admin_rows = extra_rows(admins, include_revenue=False)
+    extra_barber_rankings = {
+        metric: top_rows(extra_barber_rows, metric)
         for metric in ('qty', 'sum', 'pct')
+    }
+    extra_admin_rankings = {
+        metric: top_rows(extra_admin_rows, metric)
+        for metric in ('qty', 'pct')
     }
     cosmo_barber_rows = cosmo_rows(barbers)
     cosmo_admin_rows = cosmo_rows(admins)
@@ -5807,8 +5826,12 @@ def _staff_leaderboards_payload(
     reviews_admin = top_rows(value_rows(admins, REVIEWS_QTY_CODE, 'number'), 'value')
     avg_check_legacy = top_rows(value_rows(barbers, 'avg_check_total', 'money'), 'value')
     payload = {
-        'extra_services': extra_rankings['qty'],
-        'extra_services_rankings': extra_rankings,
+        'extra_services': extra_barber_rankings['qty'],
+        'extra_services_rankings': extra_barber_rankings,
+        'extra_services_barber': extra_barber_rankings['qty'],
+        'extra_services_barber_rankings': extra_barber_rankings,
+        'extra_services_admin': extra_admin_rankings['qty'],
+        'extra_services_admin_rankings': extra_admin_rankings,
         'cosmo_barber': cosmo_barber_rankings['sum'],
         'cosmo_barber_rankings': cosmo_barber_rankings,
         'cosmo_admin': cosmo_admin_rankings['sum'],

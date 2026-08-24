@@ -3126,11 +3126,20 @@ async def _leaderboard_payload_impl(
     base['tables'] = [
         _ranking_table(
             'extra_services',
-            'Топ по услугам с меткой «Доп. услуга»',
+            'Топ по допуслугам — мастера',
             [staff_col, branch_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), ('pct', 'Доп. услуги, %', PERCENT_FORMAT), extra_share_col],
-            boards.get('extra_services_rankings', {}),
+            boards.get('extra_services_barber_rankings', boards.get('extra_services_rankings', {})),
             'pct',
             [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
+            hide_when_empty=True,
+        ),
+        _ranking_table(
+            'extra_services_admin',
+            'Топ по допуслугам — администраторы',
+            [staff_col, branch_col, qty_col, ('pct', 'Доп. услуги, %', PERCENT_FORMAT)],
+            boards.get('extra_services_admin_rankings', {}),
+            'pct',
+            [('qty', 'По количеству'), ('pct', 'По проценту')],
             hide_when_empty=True,
         ),
         _ranking_table(
