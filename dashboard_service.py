@@ -6803,7 +6803,10 @@ async def fetch_plan_settings(
     payload_staff = [
         _payload_staff_input(staff, staff_inputs.get(int(staff['id'])))
         for staff in staff_rows
-        if any(int(branch['id']) == int(staff['company_id']) for branch in branches)
+        if (
+            any(int(branch['id']) == int(staff['company_id']) for branch in branches)
+            and (copy_from is None or staff.get('is_active', True))
+        )
     ]
     calculation_branches = [
         {
@@ -6904,6 +6907,7 @@ async def save_plan_settings(
     staff: list[dict[str, Any]],
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
+    replace_existing_plan: bool = False,
 ) -> dict[str, Any]:
     period_start, period_end, normalized_branches, normalized_staff = _normalize_plan_settings_payload(month, branches, staff)
     branch_ids = sorted({int(row['company_id']) for row in normalized_branches})
@@ -6972,6 +6976,8 @@ async def save_plan_settings(
             )
         )
     }
+    if replace_existing_plan:
+        edited_staff_keys.update(submitted_keys)
     edited_branch_ids = {
         int(row['company_id'])
         for row in normalized_branches
@@ -6987,19 +6993,22 @@ async def save_plan_settings(
         )
     }
     edited_branch_ids.update(company for company, _ in edited_staff_keys)
-    for item in saved_staff_inputs.values():
-        key = (int(item.company_id), int(item.staff_id))
-        if not fired_by_staff.get(int(item.staff_id), False) or key in submitted_keys:
-            continue
-        normalized_staff.append({
-            'company_id': int(item.company_id),
-            'staff_id': int(item.staff_id),
-            'staff_category': item.staff_category,
-            **{
-                field: getattr(item, field)
-                for field in STAFF_INPUT_FIELDS
-            },
-        })
+    if replace_existing_plan:
+        edited_branch_ids.update(branch_ids)
+    else:
+        for item in saved_staff_inputs.values():
+            key = (int(item.company_id), int(item.staff_id))
+            if not fired_by_staff.get(int(item.staff_id), False) or key in submitted_keys:
+                continue
+            normalized_staff.append({
+                'company_id': int(item.company_id),
+                'staff_id': int(item.staff_id),
+                'staff_category': item.staff_category,
+                **{
+                    field: getattr(item, field)
+                    for field in STAFF_INPUT_FIELDS
+                },
+            })
 
     staff_ids = sorted({int(row['staff_id']) for row in normalized_staff})
     if staff_ids:
@@ -7166,6 +7175,8 @@ async def save_plan_settings(
             )
 
     for row in legacy_plan_values:
+        if replace_existing_plan:
+            continue
         key = (row['company_id'], row['staff_id'], row['metric_code'])
         if key in generated_metric_keys:
             continue

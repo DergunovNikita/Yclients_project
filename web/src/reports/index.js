@@ -99,7 +99,12 @@ function periodSubtitle(data) {
   return `${formatDate(period.start)} .. ${formatDate(period.end)} · ${period.granularity}`;
 }
 
-export function initReports({ clearError, showError, setApiState }) {
+export function initReports({
+  clearError,
+  showError,
+  setApiState,
+  pushHistory = (state, url) => history.pushState(state, '', url),
+}) {
   const els = {
     view: document.getElementById('reports-view'),
     count: document.getElementById('reports-count'),
@@ -371,7 +376,7 @@ export function initReports({ clearError, showError, setApiState }) {
     state.activeReportId = '';
     setCatalogVisible(true);
     els.viewer.classList.remove('visible');
-    if (push) history.pushState({ view: 'reports' }, '', reportPath());
+    if (push) pushHistory({ view: 'reports' }, reportPath());
     renderCatalog();
   }
 
@@ -429,7 +434,7 @@ export function initReports({ clearError, showError, setApiState }) {
     }
     const request = reportRequests.start();
     applyReportFilterVisibility(meta);
-    if (push) history.pushState({ view: 'reports', report: reportId }, '', reportPath(reportId, reportSearch()));
+    if (push) pushHistory({ view: 'reports', report: reportId }, reportPath(reportId, reportSearch()));
     setCatalogVisible(false);
     els.viewer.classList.add('visible');
     els.viewerTitle.textContent = meta.title;

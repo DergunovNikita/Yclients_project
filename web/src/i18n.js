@@ -90,7 +90,7 @@ export function userDataLoadErrorMessage() {
  * Mount a <select> language switcher into `container` and wire it to setLocale.
  * Reloads translations in place; no page reload.
  */
-export function mountLanguageSwitcher(container) {
+export function mountLanguageSwitcher(container, { beforeChange, afterChange } = {}) {
   if (!container) return null;
   const existing = container.querySelector('select.lang-switcher');
   if (existing) return existing;
@@ -104,7 +104,24 @@ export function mountLanguageSwitcher(container) {
     if (locale === getLocale()) option.selected = true;
     select.appendChild(option);
   });
-  select.addEventListener('change', (event) => setLocale(event.target.value));
+  select.addEventListener('change', async (event) => {
+    const previousLocale = getLocale();
+    const nextLocale = event.target.value;
+    select.disabled = true;
+    try {
+      const allowed = beforeChange
+        ? await beforeChange({ previousLocale, nextLocale })
+        : true;
+      if (!allowed) {
+        select.value = previousLocale;
+        return;
+      }
+      setLocale(nextLocale);
+      if (afterChange) await afterChange({ previousLocale, nextLocale });
+    } finally {
+      select.disabled = false;
+    }
+  });
   container.appendChild(select);
   return select;
 }

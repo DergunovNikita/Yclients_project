@@ -567,7 +567,8 @@
     .demo-mode #service-management-save,
     .demo-mode #service-management-reset,
     .demo-mode #service-group-add,
-    .demo-mode #review-fact-save { display: none !important; }
+    .demo-mode #review-fact-save,
+    .demo-mode #floating-editor-save { display: none !important; }
 
     .card,
     .panel {
@@ -928,6 +929,43 @@
       margin-top: 12px;
     }
 
+    body.floating-editor-save-visible .shell {
+      padding-bottom: 112px;
+    }
+
+    .floating-editor-save {
+      position: fixed;
+      right: 24px;
+      bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      width: max-content;
+      max-width: min(440px, calc(100% - 32px));
+      padding: 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      background: #ffffff;
+      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+    }
+
+    .floating-editor-save[hidden] {
+      display: none;
+    }
+
+    .floating-editor-save__status {
+      flex: 1 1 auto;
+      min-width: 0;
+      color: #9a3412;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .floating-editor-save button {
+      flex: 0 0 auto;
+    }
+
     .plan-settings-table input {
       min-width: 86px;
       text-align: right;
@@ -1017,6 +1055,52 @@
       border: 1px solid #cbd5e1;
       background: #ffffff;
       color: #334155;
+    }
+
+    .unsaved-changes-dialog {
+      width: min(460px, calc(100% - 32px));
+      padding: 0;
+      border: 1px solid #dbe3ef;
+      border-radius: 12px;
+      background: #ffffff;
+      color: #172033;
+      box-shadow: 0 24px 64px rgba(15, 23, 42, 0.22);
+    }
+
+    .unsaved-changes-dialog::backdrop {
+      background: rgba(15, 23, 42, 0.48);
+    }
+
+    .unsaved-changes-dialog__content {
+      padding: 24px;
+    }
+
+    .unsaved-changes-dialog h2 {
+      margin: 0 0 10px;
+      font-size: 20px;
+    }
+
+    .unsaved-changes-dialog p {
+      margin: 0;
+      color: #475569;
+      line-height: 1.55;
+    }
+
+    .unsaved-changes-dialog__actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 22px;
+    }
+
+    @media (max-width: 560px) {
+      .unsaved-changes-dialog__actions {
+        flex-direction: column-reverse;
+      }
+
+      .unsaved-changes-dialog__actions button {
+        width: 100%;
+      }
     }
 
     .empty {
@@ -1483,6 +1567,19 @@
       .shell {
         width: min(100% - 20px, 1180px);
         padding-top: 16px;
+      }
+
+      body.floating-editor-save-visible .shell {
+        padding-bottom: 124px;
+      }
+
+      .floating-editor-save {
+        right: 10px;
+        bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+        left: 10px;
+        justify-content: space-between;
+        width: auto;
+        max-width: none;
       }
 
       .toolbar,
@@ -2015,6 +2112,39 @@
       </section>
     </section>
   </main>
+  <aside
+    class="floating-editor-save"
+    id="floating-editor-save"
+    aria-label="Salva modifiche"
+    data-i18n-attr="aria-label:dash.saveChanges"
+    hidden
+  >
+    <span
+      class="floating-editor-save__status"
+      id="floating-editor-save-status"
+      data-i18n="dash.unsavedChanges"
+      aria-live="polite"
+    >Ci sono modifiche non salvate</span>
+    <button type="button" id="floating-editor-save-button" data-i18n="dash.saveChanges">Salva modifiche</button>
+  </aside>
+  <dialog
+    class="unsaved-changes-dialog"
+    id="unsaved-changes-dialog"
+    aria-modal="true"
+    aria-labelledby="unsaved-changes-title"
+    aria-describedby="unsaved-changes-message"
+  >
+    <div class="unsaved-changes-dialog__content">
+      <h2 id="unsaved-changes-title" data-i18n="dash.unsavedChangesTitle">Modifiche non salvate</h2>
+      <p id="unsaved-changes-message" data-i18n="dash.unsavedChangesMessage">
+        Vuoi davvero lasciare questa pagina? Tutte le modifiche non salvate andranno perse
+      </p>
+      <form method="dialog" class="unsaved-changes-dialog__actions">
+        <button type="submit" class="secondary" value="leave" id="unsaved-changes-leave" data-i18n="dash.unsavedChangesLeave">Esci</button>
+        <button type="submit" value="stay" id="unsaved-changes-stay" data-i18n="dash.unsavedChangesStay" autofocus>Rimani</button>
+      </form>
+    </div>
+  </dialog>
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>

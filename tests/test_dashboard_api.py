@@ -6606,6 +6606,151 @@ async def test_plan_settings_copy_from_month_does_not_write(async_session):
 
 
 @pytest.mark.asyncio
+async def test_plan_settings_copy_excludes_fired_staff_and_recalculates(async_session):
+    august_start = date(2025, 8, 1)
+    august_end = date(2025, 8, 31)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=10, name='Active barber', position='Барбер', company_id=1, fired=0),
+        Staff(id=20, name='Former admin', position='Администратор', company_id=1, fired=1),
+        PlanBranchSetting(
+            period_start=august_start,
+            period_end=august_end,
+            company_id=1,
+            wax_pct=0.2,
+            updated_at=datetime(2025, 8, 1),
+        ),
+        PlanStaffInput(
+            period_start=august_start,
+            period_end=august_end,
+            company_id=1,
+            staff_id=10,
+            staff_category='barber',
+            clients=100,
+            avg_check_total=3000,
+            updated_at=datetime(2025, 8, 1),
+        ),
+        PlanStaffInput(
+            period_start=august_start,
+            period_end=august_end,
+            company_id=1,
+            staff_id=20,
+            staff_category='administrator',
+            reviews_qty=12,
+            updated_at=datetime(2025, 8, 1),
+        ),
+        PlanStaffInput(
+            period_start=date(2025, 9, 1),
+            period_end=date(2025, 9, 30),
+            company_id=1,
+            staff_id=20,
+            staff_category='administrator',
+            reviews_qty=50,
+            updated_at=datetime(2025, 9, 1),
+        ),
+        PlanMetric(
+            period_start=date(2025, 9, 1),
+            period_end=date(2025, 9, 30),
+            company_id=1,
+            staff_id=20,
+            staff_category='administrator',
+            metric_code='reviews_qty',
+            value=50,
+            source='legacy_sheet',
+            updated_at=datetime(2025, 9, 1),
+        ),
+        PlanMetric(
+            period_start=date(2025, 9, 1),
+            period_end=date(2025, 9, 30),
+            company_id=1,
+            staff_id=None,
+            metric_code='reviews_qty',
+            value=50,
+            source='legacy_sheet',
+            updated_at=datetime(2025, 9, 1),
+        ),
+        PlanMetric(
+            period_start=date(2025, 9, 1),
+            period_end=date(2025, 9, 30),
+            company_id=1,
+            staff_id=10,
+            staff_category='barber',
+            metric_code='clients',
+            value=999,
+            source='legacy_sheet',
+            updated_at=datetime(2025, 9, 1),
+        ),
+        PlanMetric(
+            period_start=date(2025, 9, 1),
+            period_end=date(2025, 9, 30),
+            company_id=1,
+            staff_id=None,
+            metric_code='clients',
+            value=999,
+            source='legacy_sheet',
+            updated_at=datetime(2025, 9, 1),
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        copy_response = await client.get(
+            '/dashboard/plan/settings',
+            params={'month': '2025-09', 'copy_from': '2025-08'},
+        )
+        copied = copy_response.json()['data']
+        save_response = await client.post(
+            '/dashboard/plan/settings',
+            json={
+                'month': copied['month'],
+                'copy_from': copied['copy_from'],
+                'branches': copied['branches'],
+                'staff': copied['staff'],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert copy_response.status_code == 200
+    assert [row['staff_id'] for row in copied['staff']] == [10]
+    preview = {cell['code']: cell['value'] for cell in copied['branches'][0]['preview']}
+    assert preview['clients'] == 100
+    assert preview['revenue'] == 300000.0
+    assert preview['wax_qty'] == 20
+    assert 'reviews_qty' not in preview
+    assert save_response.status_code == 200
+
+    september_staff_ids = (
+        await async_session.execute(
+            select(PlanStaffInput.staff_id).where(
+                PlanStaffInput.period_start == date(2025, 9, 1),
+            )
+        )
+    ).scalars().all()
+    assert september_staff_ids == [10]
+    september_metrics = (
+        await async_session.execute(
+            select(PlanMetric.staff_id, PlanMetric.metric_code, PlanMetric.value).where(
+                PlanMetric.period_start == date(2025, 9, 1),
+                PlanMetric.metric_code.in_({'clients', 'reviews_qty'}),
+            )
+        )
+    ).all()
+    assert {
+        (row.staff_id, row.metric_code): row.value
+        for row in september_metrics
+    } == {
+        (None, 'clients'): 100.0,
+        (10, 'clients'): 100.0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_plan_settings_save_generates_historical_plan_metrics(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))

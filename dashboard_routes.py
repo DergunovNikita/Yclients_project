@@ -112,6 +112,7 @@ class PlanSettingsStaffPayload(BaseModel):
 
 class PlanSettingsPayload(BaseModel):
     month: str
+    copy_from: str | None = Field(None, pattern=r'^\d{4}-(0[1-9]|1[0-2])$')
     branches: list[PlanSettingsBranchPayload]
     staff: list[PlanSettingsStaffPayload]
 
@@ -841,6 +842,7 @@ async def dashboard_plan_settings_save(
             [item.model_dump() for item in payload.staff],
             allowed_company_ids=branch_ids,
             force_allowed=force_allowed,
+            replace_existing_plan=payload.copy_from is not None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

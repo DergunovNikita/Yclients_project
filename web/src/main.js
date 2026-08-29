@@ -43,10 +43,15 @@ import {
 } from './planMetricVisibility.js';
 import { initReports } from './reports/index.js';
 import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
+import {
+  createUnsavedChangesGuard,
+  editorSaveDockState,
+  historyNavigationDecision,
+  shouldHandleSameTabNavigation,
+} from './unsavedChanges.js';
 
 document.documentElement.lang = getLocale();
 applyTranslations();
-mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListener('change', () => location.reload());
 
 const apiKey = import.meta.env?.VITE_API_KEY || '';
 const DEMO_AUTOLOGIN = import.meta.env.VITE_DEMO_AUTOLOGIN;
@@ -114,6 +119,9 @@ const els = {
   planSettingsStaffMeta: document.getElementById('plan-settings-staff-meta'),
   planSettingsBranches: document.getElementById('plan-settings-branches'),
   planSettingsStaff: document.getElementById('plan-settings-staff'),
+  floatingEditorSave: document.getElementById('floating-editor-save'),
+  floatingEditorSaveStatus: document.getElementById('floating-editor-save-status'),
+  floatingEditorSaveButton: document.getElementById('floating-editor-save-button'),
   serviceFilterBranch: document.getElementById('service-filter-branch'),
   serviceFilterCategory: document.getElementById('service-filter-category'),
   serviceFilterGroup: document.getElementById('service-filter-group'),
@@ -136,6 +144,9 @@ const els = {
   tenantMeta: document.getElementById('tenant-meta'),
   overviewPresetButtons: [...document.querySelectorAll('[data-overview-preset]')],
   overviewJumpButtons: [...document.querySelectorAll('[data-overview-jump]')],
+  profileSettingsLink: document.querySelector('#user-profile-link a[href]'),
+  unsavedChangesDialog: document.getElementById('unsaved-changes-dialog'),
+  unsavedChangesStay: document.getElementById('unsaved-changes-stay'),
 };
 
 const filterEls = {
@@ -195,7 +206,12 @@ let planSettingsSavedData = null;
 let planSettingsSavedSnapshot = '';
 let planSettingsDirty = false;
 let planSettingsLoadedMonth = '';
-let allowDirtyPlanSettingsNavigation = false;
+let planSettingsSaving = false;
+let reviewFactSavedSnapshot = '';
+let reviewFactSavedData = null;
+let reviewFactDirty = false;
+let reviewFactLoadedFilters = null;
+let reviewFactSaving = false;
 let serviceManagementData = { rows: [], groups: [], categories: [] };
 let serviceManagementSavedData = null;
 let serviceManagementSavedSnapshot = '';
@@ -218,6 +234,148 @@ const viewRequestScopes = {
   branches: createLatestRequestScope(),
 };
 const viewsWithData = new Set();
+const HISTORY_POSITION_KEY = 'dashboardPosition';
+let historyPosition = 0;
+let currentHistoryUrl = window.location.href;
+let suppressedHistoryTraversal = null;
+let handlingHistoryNavigation = false;
+let historyCorrectionPromise = null;
+let unsavedDialogResolve = null;
+
+function showUnsavedChangesDialog() {
+  if (!els.unsavedChangesDialog || typeof els.unsavedChangesDialog.showModal !== 'function') {
+    return Promise.resolve(window.confirm(t('dash.unsavedChangesMessage')));
+  }
+  const trigger = document.activeElement;
+  els.unsavedChangesDialog.returnValue = 'stay';
+  els.unsavedChangesDialog.showModal();
+  queueMicrotask(() => els.unsavedChangesStay?.focus());
+  return new Promise((resolve) => {
+    unsavedDialogResolve = (shouldLeave) => {
+      if (!shouldLeave && trigger instanceof HTMLElement) trigger.focus();
+      resolve(shouldLeave);
+    };
+  });
+}
+
+function finishUnsavedChangesDialog() {
+  const resolve = unsavedDialogResolve;
+  unsavedDialogResolve = null;
+  resolve?.(els.unsavedChangesDialog.returnValue === 'leave');
+}
+
+function hasProtectedDirtyChanges() {
+  return (
+    (activeView === 'planSettings' && planSettingsDirty)
+    || (activeView === 'reviewFacts' && reviewFactDirty)
+  );
+}
+
+function protectedSavePending() {
+  return (
+    (activeView === 'planSettings' && planSettingsSaving)
+    || (activeView === 'reviewFacts' && reviewFactSaving)
+  );
+}
+
+function discardProtectedChanges() {
+  if (activeView === 'planSettings') {
+    if (planSettingsSavedData) renderPlanSettings(JSON.parse(JSON.stringify(planSettingsSavedData)));
+    else setPlanSettingsDirty(false);
+  }
+  if (activeView === 'reviewFacts') {
+    restoreReviewFactFilters();
+    if (reviewFactSavedData) renderReviewFactEditor(JSON.parse(JSON.stringify(reviewFactSavedData)));
+    else setReviewFactDirty(false);
+  }
+}
+
+const protectedChangesGuard = createUnsavedChangesGuard({
+  isDirty: hasProtectedDirtyChanges,
+  isBlocked: protectedSavePending,
+  confirmLeave: showUnsavedChangesDialog,
+  onDiscard: discardProtectedChanges,
+});
+
+function updateFloatingEditorSave() {
+  const state = editorSaveDockState({
+    activeView,
+    planSettingsDirty,
+    planSettingsSaving,
+    reviewFactDirty,
+    reviewFactSaving,
+    isDemo: document.body.classList.contains('demo-mode'),
+  });
+  els.floatingEditorSave.hidden = !state.visible;
+  document.body.classList.toggle('floating-editor-save-visible', state.visible);
+  if (!state.visible) return;
+  els.floatingEditorSaveStatus.textContent = t('dash.unsavedChanges');
+  els.floatingEditorSaveButton.disabled = state.saving;
+  els.floatingEditorSaveButton.textContent = state.saving ? t('common.saving') : t('dash.saveChanges');
+}
+
+async function runDashboardNavigation(action) {
+  if (!serviceManagementNavigationAllowed({
+    mutationPending: serviceManagementMutationPending,
+    activeView,
+  })) return false;
+  if (!confirmDiscardServiceManagement()) return false;
+  if (serviceManagementDirty) setServiceManagementDirty(false);
+  return protectedChangesGuard.run(action);
+}
+
+function dashboardPath(view) {
+  const paths = {
+    overview: '/#overview',
+    plan: '/#plan-fact',
+    planSettings: '/#plan-settings',
+    serviceManagement: '/#services',
+    reviewFacts: '/#review-facts',
+    reports: '/reports',
+  };
+  return paths[view] || paths.overview;
+}
+
+function replaceDashboardHistory(state, url = window.location.href) {
+  history.replaceState({
+    ...(history.state || {}),
+    ...state,
+    [HISTORY_POSITION_KEY]: historyPosition,
+  }, '', url);
+  currentHistoryUrl = new URL(url, window.location.href).href;
+}
+
+function pushDashboardHistory(state, url) {
+  historyPosition += 1;
+  history.pushState({ ...state, [HISTORY_POSITION_KEY]: historyPosition }, '', url);
+  currentHistoryUrl = new URL(url, window.location.href).href;
+}
+
+function restoreHistoryPosition(delta) {
+  if (!delta) return Promise.resolve();
+  return new Promise((resolve) => {
+    suppressedHistoryTraversal = {
+      expectedPosition: historyPosition,
+      resolve,
+    };
+    history.go(delta);
+  });
+}
+
+els.unsavedChangesDialog?.addEventListener('close', finishUnsavedChangesDialog);
+els.unsavedChangesDialog?.addEventListener('cancel', (event) => {
+  event.preventDefault();
+  els.unsavedChangesDialog.close('stay');
+});
+els.unsavedChangesDialog?.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  event.stopPropagation();
+  els.unsavedChangesDialog.close('stay');
+});
+els.unsavedChangesDialog?.addEventListener('click', (event) => {
+  if (event.target === els.unsavedChangesDialog) els.unsavedChangesDialog.close('stay');
+});
 
 window.addEventListener('portal:session-transition', () => {
   Object.values(viewRequestScopes).forEach((scope) => scope.abort());
@@ -1688,8 +1846,9 @@ function renderPlanSettingsStaff(rows) {
 function setPlanSettingsDirty(isDirty) {
   planSettingsDirty = isDirty;
   els.planSettingsDirty.classList.toggle('visible', isDirty);
-  els.planSettingsSave.disabled = !planSettingsData;
-  els.planSettingsReset.disabled = !isDirty || !planSettingsSavedData;
+  els.planSettingsSave.disabled = planSettingsSaving || !planSettingsData;
+  els.planSettingsReset.disabled = planSettingsSaving || !isDirty || !planSettingsSavedData;
+  updateFloatingEditorSave();
 }
 
 function planSettingsInputValue(selector) {
@@ -1751,10 +1910,6 @@ function renderPlanSettings(data, { updateSnapshot = true, dirty = false } = {})
   }
 }
 
-function confirmDiscardPlanSettings() {
-  return !planSettingsDirty || window.confirm(t('dash.confirmDiscardPlanSettings'));
-}
-
 function confirmDiscardServiceManagement() {
   return !serviceManagementDirty || window.confirm(t('dash.confirmDiscardServiceManagement'));
 }
@@ -1800,32 +1955,42 @@ async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom 
 }
 
 async function savePlanSettings() {
+  if (planSettingsSaving || !planSettingsData) return;
+  planSettingsSaving = true;
+  updateFloatingEditorSave();
   clearError();
   setPlanSettingsLoading(true);
   setApiState(t('dash.apiSaving'), 'warn');
   try {
-    const payload = await postJson('/dashboard/plan/settings', collectPlanSettingsPayload());
+    const requestPayload = collectPlanSettingsPayload();
+    if (planSettingsData.copy_from) requestPayload.copy_from = planSettingsData.copy_from;
+    const payload = await postJson('/dashboard/plan/settings', requestPayload);
     renderPlanSettings(payload.data);
     setApiState(t('dash.apiConnected'), 'ok');
   } catch (error) {
     showError(error.message, { apiStatus: error.apiStatus, retry: () => savePlanSettings() });
   } finally {
+    planSettingsSaving = false;
     setPlanSettingsLoading(false);
+    updateFloatingEditorSave();
   }
 }
 
 async function copyPreviousPlanSettings() {
-  if (!confirmDiscardPlanSettings()) return;
   const month = els.planSettingsMonth.value || currentMonthValue();
-  await loadPlanSettings({ month, copyFrom: previousMonthValue(month), dirty: true });
+  await protectedChangesGuard.run(() => loadPlanSettings({
+    month,
+    copyFrom: previousMonthValue(month),
+    dirty: true,
+  }));
 }
 
 async function reloadPlanSettingsMonth() {
-  if (!confirmDiscardPlanSettings()) {
+  const month = els.planSettingsMonth.value || currentMonthValue();
+  const loaded = await protectedChangesGuard.run(() => loadPlanSettings({ month }));
+  if (!loaded) {
     els.planSettingsMonth.value = planSettingsLoadedMonth || currentMonthValue();
-    return;
   }
-  await loadPlanSettings({ month: els.planSettingsMonth.value || currentMonthValue() });
 }
 
 function renderServiceBranchOptions() {
@@ -2176,50 +2341,89 @@ function renderReviewFactEditor(data) {
 
   if (!reviewFactRows.length) {
     els.reviewFactEditor.innerHTML = `<div class="empty compact">${t('dash.noActiveAdministrators')}</div>`;
-    els.reviewFactSave.disabled = true;
-    return;
+  } else {
+    els.reviewFactEditor.innerHTML = `
+      <div class="table-scroll review-fact-scroll">
+        <table class="review-fact-table">
+          <thead>
+            <tr>
+              <th>${t('dash.branch')}</th>
+              <th>${t('dash.administrator')}</th>
+              <th class="number">${t('dash.reviewsFact')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${reviewFactRows
+              .map((row) => {
+                const inactiveMark = row.is_active === false
+                  ? ` <span class="meta">· ${escapeHtml(t('dash.reviewFactInactive'))}</span>`
+                  : '';
+                return `
+                  <tr>
+                    <td>${escapeHtml(row.company_title || t('dash.branchFallbackWithId', { id: row.company_id }))}</td>
+                    <td>${escapeHtml(row.staff_name)}${inactiveMark}</td>
+                    <td class="number">
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        inputmode="numeric"
+                        data-company-id="${escapeHtml(row.company_id)}"
+                        data-staff-id="${escapeHtml(row.staff_id)}"
+                        value="${escapeHtml(formatInputNumber(row.value))}"
+                      />
+                    </td>
+                  </tr>
+                `;
+              })
+              .join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
   }
 
-  els.reviewFactSave.disabled = false;
-  els.reviewFactEditor.innerHTML = `
-    <div class="table-scroll review-fact-scroll">
-      <table class="review-fact-table">
-        <thead>
-          <tr>
-            <th>${t('dash.branch')}</th>
-            <th>${t('dash.administrator')}</th>
-            <th class="number">${t('dash.reviewsFact')}</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${reviewFactRows
-            .map((row) => {
-              const inactiveMark = row.is_active === false
-                ? ` <span class="meta">· ${escapeHtml(t('dash.reviewFactInactive'))}</span>`
-                : '';
-              return `
-                <tr>
-                  <td>${escapeHtml(row.company_title || t('dash.branchFallbackWithId', { id: row.company_id }))}</td>
-                  <td>${escapeHtml(row.staff_name)}${inactiveMark}</td>
-                  <td class="number">
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      inputmode="numeric"
-                      data-company-id="${escapeHtml(row.company_id)}"
-                      data-staff-id="${escapeHtml(row.staff_id)}"
-                      value="${escapeHtml(formatInputNumber(row.value))}"
-                    />
-                  </td>
-                </tr>
-              `;
-            })
-            .join('')}
-        </tbody>
-      </table>
-    </div>
-  `;
+  reviewFactSavedData = JSON.parse(JSON.stringify(data || { rows: [] }));
+  reviewFactLoadedFilters = reviewFactFilters();
+  reviewFactSavedSnapshot = reviewFactDraftSnapshot();
+  setReviewFactDirty(false);
+}
+
+function reviewFactFilters() {
+  const filter = filterEls.reviewFacts;
+  return {
+    month: filter.month.value,
+    branch: filter.branch.value,
+    staff: filter.staff.value,
+  };
+}
+
+function restoreReviewFactFilters() {
+  if (!reviewFactLoadedFilters) return;
+  const filter = filterEls.reviewFacts;
+  filter.month.value = reviewFactLoadedFilters.month;
+  filter.branch.value = reviewFactLoadedFilters.branch;
+  filter.staff.value = reviewFactLoadedFilters.staff;
+  customFilterDropdowns[filter.branch.id]?.refresh();
+  customFilterDropdowns[filter.staff.id]?.refresh();
+}
+
+function reviewFactDraftSnapshot() {
+  return JSON.stringify([...els.reviewFactEditor.querySelectorAll('input[data-staff-id]')].map((input) => ({
+    companyId: input.dataset.companyId,
+    staffId: input.dataset.staffId,
+    value: input.value.trim(),
+  })));
+}
+
+function setReviewFactDirty(isDirty) {
+  reviewFactDirty = isDirty;
+  els.reviewFactSave.disabled = reviewFactSaving || !reviewFactRows.length;
+  updateFloatingEditorSave();
+}
+
+function updateReviewFactDirtyFromForm() {
+  setReviewFactDirty(reviewFactDraftSnapshot() !== reviewFactSavedSnapshot);
 }
 
 function reviewFactParams() {
@@ -2270,6 +2474,9 @@ function reviewFactPayload() {
 }
 
 async function saveReviewFactEditor() {
+  if (reviewFactSaving || !reviewFactRows.length) return;
+  reviewFactSaving = true;
+  updateFloatingEditorSave();
   clearError();
   els.reviewFactSave.disabled = true;
   els.reviewFactSave.textContent = t('common.saving');
@@ -2282,8 +2489,9 @@ async function saveReviewFactEditor() {
   } catch (error) {
     showError(error.message, { apiStatus: error.apiStatus, retry: () => saveReviewFactEditor() });
   } finally {
+    reviewFactSaving = false;
     els.reviewFactSave.textContent = t('dash.saveFact');
-    els.reviewFactSave.disabled = !reviewFactRows.length;
+    setReviewFactDirty(reviewFactDirty);
   }
 }
 
@@ -2484,6 +2692,7 @@ function setActiveView(view) {
   els.viewLinks.forEach((link) => {
     link.classList.toggle('active', link.dataset.viewLink === view);
   });
+  updateFloatingEditorSave();
   const labels = {
     overview: t('dash.subhead'),
     plan: t('dash.planSubhead'),
@@ -2717,6 +2926,7 @@ async function startSession() {
     if (!onboardingOk) return;
     const isDemo = currentUser?.is_demo === true;
     document.body.classList.toggle('demo-mode', isDemo);
+    updateFloatingEditorSave();
     const demoBanner = document.getElementById('demo-banner');
     if (demoBanner) {
       demoBanner.hidden = !isDemo;
@@ -2752,12 +2962,24 @@ async function startSession() {
   }
   await loadBranches();
   setActiveView(viewFromLocation());
+  const existingPosition = Number(history.state?.[HISTORY_POSITION_KEY]);
+  historyPosition = Number.isFinite(existingPosition) ? existingPosition : 0;
+  replaceDashboardHistory({ view: activeView });
   await ensureStaffForView(activeView);
   await loadCurrentView();
 }
 
 async function init() {
-  reportsController = initReports({ clearError, showError, setApiState });
+  reportsController = initReports({
+    clearError,
+    showError,
+    setApiState,
+    pushHistory: pushDashboardHistory,
+  });
+  mountLanguageSwitcher(document.getElementById('lang-switcher'), {
+    beforeChange: () => runDashboardNavigation(async () => {}),
+    afterChange: () => window.location.reload(),
+  });
   [filterEls.overview, filterEls.plan].forEach((filter) => defaultDates(filter));
   setReviewFactDefaultMonth();
   els.overviewPresetButtons.forEach((button) => {
@@ -2771,9 +2993,13 @@ async function init() {
 }
 
 filterEls.overview.load.addEventListener('click', () => loadDashboard());
-els.tenantSelect?.addEventListener('change', () => {
-  setSelectedPortalAccountId(els.tenantSelect.value);
-  window.location.reload();
+els.tenantSelect?.addEventListener('change', async () => {
+  const requestedTenantId = els.tenantSelect.value;
+  const changed = await runDashboardNavigation(async () => {
+    setSelectedPortalAccountId(requestedTenantId);
+    window.location.reload();
+  });
+  if (!changed) els.tenantSelect.value = String(selectedTenant?.id || '');
 });
 filterEls.overview.start.addEventListener('change', () => {
   els.overviewPresetButtons.forEach((button) => button.classList.remove('active'));
@@ -2833,13 +3059,39 @@ document.addEventListener('keydown', (event) => {
     setPlanColumnPickerOpen(false, { restoreFocus: true });
   }
 });
-filterEls.reviewFacts.load.addEventListener('click', () => loadReviewFacts());
-filterEls.reviewFacts.month.addEventListener('change', () => loadReviewFacts());
-filterEls.reviewFacts.branch.addEventListener('change', async () => {
-  await refreshStaffForBranch(filterEls.reviewFacts, loadReviewFacts);
+filterEls.reviewFacts.load.addEventListener('click', () => protectedChangesGuard.run(() => loadReviewFacts()));
+filterEls.reviewFacts.month.addEventListener('change', async () => {
+  const requestedMonth = filterEls.reviewFacts.month.value;
+  const changed = await protectedChangesGuard.run(async () => {
+    filterEls.reviewFacts.month.value = requestedMonth;
+    await loadReviewFacts();
+  });
+  if (!changed) restoreReviewFactFilters();
 });
-filterEls.reviewFacts.staff.addEventListener('change', () => loadReviewFacts());
+filterEls.reviewFacts.branch.addEventListener('change', async () => {
+  const requestedBranch = filterEls.reviewFacts.branch.value;
+  const changed = await protectedChangesGuard.run(async () => {
+    filterEls.reviewFacts.branch.value = requestedBranch;
+    customFilterDropdowns[filterEls.reviewFacts.branch.id]?.refresh();
+    await refreshStaffForBranch(filterEls.reviewFacts, loadReviewFacts);
+  });
+  if (!changed) restoreReviewFactFilters();
+});
+filterEls.reviewFacts.staff.addEventListener('change', async () => {
+  const requestedStaff = filterEls.reviewFacts.staff.value;
+  const changed = await protectedChangesGuard.run(async () => {
+    filterEls.reviewFacts.staff.value = requestedStaff;
+    customFilterDropdowns[filterEls.reviewFacts.staff.id]?.refresh();
+    await loadReviewFacts();
+  });
+  if (!changed) restoreReviewFactFilters();
+});
 els.reviewFactSave.addEventListener('click', () => saveReviewFactEditor());
+els.floatingEditorSaveButton.addEventListener('click', () => {
+  if (activeView === 'planSettings') savePlanSettings();
+  if (activeView === 'reviewFacts') saveReviewFactEditor();
+});
+els.reviewFactEditor.addEventListener('input', () => updateReviewFactDirtyFromForm());
 els.planSettingsLoad.addEventListener('click', () => reloadPlanSettingsMonth());
 els.planSettingsMonth.addEventListener('change', () => reloadPlanSettingsMonth());
 els.planSettingsCopy.addEventListener('click', () => copyPreviousPlanSettings());
@@ -2887,105 +3139,167 @@ document.addEventListener('click', async (event) => {
   const href = link.getAttribute('href');
   if (!href || !href.startsWith('/reports')) return;
   event.preventDefault();
-  if (!serviceManagementNavigationAllowed({
-    mutationPending: serviceManagementMutationPending,
-    activeView,
-  })) return;
-  history.pushState({ view: 'reports' }, '', href);
-  setActiveView('reports');
-  await ensureStaffForView('reports');
-  await loadCurrentView();
+  await runDashboardNavigation(async () => {
+    pushDashboardHistory({ view: 'reports' }, href);
+    setActiveView('reports');
+    await ensureStaffForView('reports');
+    await loadCurrentView();
+  });
 });
 
 els.viewLinks.forEach((link) => {
   link.addEventListener('click', async (event) => {
     const view = link.dataset.viewLink;
     if (!view) return;
-    if (!serviceManagementNavigationAllowed({
-      mutationPending: serviceManagementMutationPending,
-      activeView,
-    })) {
-      event.preventDefault();
-      return;
-    }
-    if (!canAccessView(view)) {
-      event.preventDefault();
-      history.replaceState({ view: 'overview' }, '', '/#overview');
-      setActiveView('overview');
-      await ensureStaffForView('overview');
-      loadCurrentView();
-      return;
-    }
-    if (!confirmDiscardPlanSettings() || !confirmDiscardServiceManagement()) {
-      event.preventDefault();
-      return;
-    }
     event.preventDefault();
-    if (planSettingsDirty) {
-      setPlanSettingsDirty(false);
-      allowDirtyPlanSettingsNavigation = true;
+    if (!canAccessView(view)) {
+      await runDashboardNavigation(async () => {
+        replaceDashboardHistory({ view: 'overview' }, dashboardPath('overview'));
+        setActiveView('overview');
+        await ensureStaffForView('overview');
+        await loadCurrentView();
+      });
+      return;
     }
-    if (serviceManagementDirty) setServiceManagementDirty(false);
-    const paths = {
-      overview: '/#overview',
-      plan: '/#plan-fact',
-      planSettings: '/#plan-settings',
-      serviceManagement: '/#services',
-      reviewFacts: '/#review-facts',
-      reports: '/reports',
-    };
-    history.pushState({ view }, '', paths[view] || '/#overview');
-    setActiveView(view);
-    await ensureStaffForView(view);
-    loadCurrentView();
+    await runDashboardNavigation(async () => {
+      pushDashboardHistory({ view }, dashboardPath(view));
+      setActiveView(view);
+      await ensureStaffForView(view);
+      await loadCurrentView();
+    });
   });
 });
 
-window.addEventListener('hashchange', async () => {
-  const nextView = viewFromLocation();
-  if (nextView === activeView) return;
-  if (!serviceManagementNavigationAllowed({
-    mutationPending: serviceManagementMutationPending,
-    activeView,
-  })) {
-    history.replaceState({ view: 'serviceManagement' }, '', '/#services');
+els.profileSettingsLink?.addEventListener('click', async (event) => {
+  if (!shouldHandleSameTabNavigation(event)) return;
+  const href = els.profileSettingsLink.getAttribute('href');
+  if (!href) return;
+  event.preventDefault();
+  await runDashboardNavigation(async () => {
+    window.location.assign(href);
+  });
+});
+
+window.addEventListener('popstate', async (event) => {
+  const targetPosition = Number(event.state?.[HISTORY_POSITION_KEY]);
+  const needsGuard = protectedSavePending()
+    || hasProtectedDirtyChanges()
+    || (activeView === 'serviceManagement' && (serviceManagementDirty || serviceManagementMutationPending));
+  const decision = historyNavigationDecision({
+    targetPosition,
+    currentPosition: historyPosition,
+    restorationPosition: suppressedHistoryTraversal?.expectedPosition ?? null,
+    handlingNavigation: handlingHistoryNavigation,
+    needsGuard,
+  });
+
+  if (decision.type === 'completeRestoration') {
+    historyPosition = decision.position;
+    const { resolve } = suppressedHistoryTraversal;
+    suppressedHistoryTraversal = null;
+    resolve();
     return;
   }
-  if (planSettingsDirty && activeView === 'planSettings' && nextView !== 'planSettings') {
-    if (!allowDirtyPlanSettingsNavigation && !confirmDiscardPlanSettings()) {
-      window.location.hash = '#plan-settings';
+
+  if (decision.type === 'restore') {
+    if (!decision.delta) return;
+    if (suppressedHistoryTraversal) {
+      history.go(decision.delta);
       return;
     }
-    setPlanSettingsDirty(false);
-  }
-  if (serviceManagementDirty && activeView === 'serviceManagement' && nextView !== 'serviceManagement') {
-    if (!confirmDiscardServiceManagement()) {
-      window.location.hash = '#services';
-      return;
+    const correction = restoreHistoryPosition(decision.delta);
+    historyCorrectionPromise = correction;
+    try {
+      await correction;
+    } finally {
+      if (historyCorrectionPromise === correction) historyCorrectionPromise = null;
     }
-    setServiceManagementDirty(false);
+    return;
   }
-  allowDirtyPlanSettingsNavigation = false;
-  setActiveView(nextView);
-  await ensureStaffForView(nextView);
-  await loadCurrentView();
-});
-window.addEventListener('popstate', async () => {
+
+  if (decision.type === 'guard') {
+    handlingHistoryNavigation = true;
+    try {
+      await restoreHistoryPosition(decision.delta);
+      await runDashboardNavigation(async () => {
+        if (historyCorrectionPromise) await historyCorrectionPromise;
+        history.go(-decision.delta);
+      });
+    } finally {
+      handlingHistoryNavigation = false;
+    }
+    return;
+  }
+
+  if (decision.type === 'guardUnknown') {
+    const targetUrl = window.location.href;
+    const nextView = viewFromLocation();
+    replaceDashboardHistory({ view: activeView }, currentHistoryUrl);
+    handlingHistoryNavigation = true;
+    try {
+      await runDashboardNavigation(async () => {
+        pushDashboardHistory({ view: nextView }, targetUrl);
+        setActiveView(nextView);
+        await ensureStaffForView(nextView);
+        await loadCurrentView();
+      });
+    } finally {
+      handlingHistoryNavigation = false;
+    }
+    return;
+  }
+
+  if (decision.position !== null) historyPosition = decision.position;
+  currentHistoryUrl = window.location.href;
   const nextView = viewFromLocation();
   if (nextView === activeView && nextView !== 'reports') return;
-  if (!serviceManagementNavigationAllowed({
-    mutationPending: serviceManagementMutationPending,
-    activeView,
-  })) {
-    history.pushState({ view: 'serviceManagement' }, '', '/#services');
-    return;
-  }
   setActiveView(nextView);
   await ensureStaffForView(nextView);
   await loadCurrentView();
 });
+window.addEventListener('hashchange', async (event) => {
+  const taggedPosition = Number(history.state?.[HISTORY_POSITION_KEY]);
+  if (Number.isFinite(taggedPosition)) return;
+
+  const nextView = viewFromLocation();
+  const targetPosition = historyPosition + 1;
+  history.replaceState({
+    ...(history.state || {}),
+    view: nextView,
+    [HISTORY_POSITION_KEY]: targetPosition,
+  }, '', event.newURL);
+
+  const needsGuard = protectedSavePending()
+    || hasProtectedDirtyChanges()
+    || (activeView === 'serviceManagement' && (serviceManagementDirty || serviceManagementMutationPending));
+  if (!needsGuard) {
+    historyPosition = targetPosition;
+    currentHistoryUrl = event.newURL;
+    setActiveView(nextView);
+    await ensureStaffForView(nextView);
+    await loadCurrentView();
+    return;
+  }
+
+  handlingHistoryNavigation = true;
+  try {
+    await restoreHistoryPosition(-1);
+    await runDashboardNavigation(async () => {
+      history.go(1);
+    });
+  } finally {
+    handlingHistoryNavigation = false;
+  }
+});
 window.addEventListener('beforeunload', (event) => {
-  if (!planSettingsDirty && !serviceManagementDirty && !serviceManagementMutationPending) return;
+  if (
+    !planSettingsDirty
+    && !planSettingsSaving
+    && !reviewFactDirty
+    && !reviewFactSaving
+    && !serviceManagementDirty
+    && !serviceManagementMutationPending
+  ) return;
   event.preventDefault();
   event.returnValue = '';
 });
