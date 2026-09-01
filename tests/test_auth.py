@@ -3052,6 +3052,7 @@ async def test_forbid_demo_blocks_writes_but_allows_reads(auth_db):
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         for path in (
             '/sync/trigger',
+            '/dashboard/plan/opz_fact',
             '/dashboard/services/kpi_groups',
             '/onboarding/credentials',
             '/auth/logout-all',

@@ -109,6 +109,24 @@ test('floating save dock follows the active editor dirty and saving state', () =
     visible: true,
     saving: false,
   });
+  assert.deepEqual(editorSaveDockState({
+    ...base,
+    activeView: 'opzFacts',
+    opzFactDirty: true,
+  }), {
+    editor: 'opzFacts',
+    visible: true,
+    saving: false,
+  });
+  assert.deepEqual(editorSaveDockState({
+    ...base,
+    activeView: 'opzFacts',
+    opzFactSaving: true,
+  }), {
+    editor: 'opzFacts',
+    visible: true,
+    saving: true,
+  });
 });
 
 test('floating save dock stays hidden outside editors and in demo mode', () => {

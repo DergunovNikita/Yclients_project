@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -24,9 +24,11 @@ from auth_scope import (
     require_tenant_context,
     user_branch_ids,
 )
+import dashboard_service
 from dashboard_service import (
     fetch_branches,
     fetch_extra_services,
+    fetch_manual_opz_facts,
     fetch_manual_review_facts,
     fetch_plan_fact,
     fetch_plan_settings,
@@ -40,6 +42,7 @@ from dashboard_service import (
     archive_service_kpi_group,
     save_service_kpi_assignment,
     save_plan_settings,
+    save_manual_opz_facts,
     save_manual_review_facts,
     fetch_staff,
     fetch_summary,
@@ -85,6 +88,19 @@ class ManualReviewFactsPayload(BaseModel):
     company_id: int | None = None
     staff_id: int | None = None
     items: list[ManualReviewFactItem]
+
+
+class ManualOpzFactItem(BaseModel):
+    company_id: int
+    staff_id: int
+    value: float | None = None
+
+
+class ManualOpzFactsPayload(BaseModel):
+    month: str
+    company_id: int | None = None
+    staff_id: int | None = None
+    items: list[ManualOpzFactItem]
 
 
 class PlanSettingsBranchPayload(BaseModel):
@@ -662,7 +678,7 @@ async def dashboard_widget_summary(
 ):
     start, end = _parse_range(start_date, end_date)
     scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
-    factual_at = datetime.now(UTC).replace(tzinfo=None)
+    factual_at = dashboard_service.factual_now()
     summary = await fetch_summary(
         db,
         start,
@@ -719,7 +735,7 @@ async def dashboard_widget_top_services(
     require_financial_access(ctx)
     start, end = _parse_range(start_date, end_date)
     scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
-    factual_at = datetime.now(UTC).replace(tzinfo=None)
+    factual_at = dashboard_service.factual_now()
     rows = await fetch_top_services(
         db,
         start,
@@ -752,7 +768,7 @@ async def dashboard_widget_extra_services(
     require_financial_access(ctx)
     start, end = _parse_range(start_date, end_date)
     scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
-    factual_at = datetime.now(UTC).replace(tzinfo=None)
+    factual_at = dashboard_service.factual_now()
     rows = await fetch_extra_services(
         db,
         start,
@@ -901,6 +917,58 @@ async def dashboard_plan_reviews_fact_save(
     return {'success': True, 'data': data}
 
 
+@router.get('/plan/opz_fact')
+async def dashboard_plan_opz_fact(
+    month: str = Query(..., description='Additional OPZ month in YYYY-MM format'),
+    company_id: int | None = Query(None),
+    staff_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    _require_settings_admin(ctx)
+    scope = query_scope(ctx, company_id)
+    staff_id = effective_staff_id(ctx, staff_id)
+    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
+    branch_ids, force_allowed = user_branch_ids(ctx)
+    try:
+        data = await fetch_manual_opz_facts(
+            db,
+            month,
+            scope['company_id'],
+            staff_id,
+            allowed_company_ids=branch_ids,
+            force_allowed=force_allowed,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
+
+
+@router.post('/plan/opz_fact', dependencies=[Depends(forbid_demo)])
+async def dashboard_plan_opz_fact_save(
+    payload: ManualOpzFactsPayload,
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    _require_settings_admin(ctx)
+    scope = query_scope(ctx, payload.company_id)
+    payload_staff_id = effective_staff_id(ctx, payload.staff_id)
+    branch_ids, force_allowed = user_branch_ids(ctx)
+    try:
+        data = await save_manual_opz_facts(
+            db,
+            payload.month,
+            scope['company_id'],
+            payload_staff_id,
+            [item.model_dump() for item in payload.items],
+            allowed_company_ids=branch_ids,
+            force_allowed=force_allowed,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
+
+
 def _require_visibility_admin(ctx: AccessContext) -> None:
     if not (ctx.full_access or ctx.role in ('owner', 'platform_admin')):
         raise HTTPException(status_code=403, detail='Not allowed to configure metric visibility')
@@ -995,7 +1063,7 @@ async def dashboard_bundle(
 ):
     start, end = _parse_range(start_date, end_date)
     scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
-    factual_at = datetime.now(UTC).replace(tzinfo=None)
+    factual_at = dashboard_service.factual_now()
     summary = await fetch_summary(
         db,
         start,

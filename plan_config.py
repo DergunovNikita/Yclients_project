@@ -7,6 +7,7 @@ from typing import Any
 
 
 REVIEWS_QTY_CODE = 'reviews_qty'
+OPZ_QTY_CODE = 'opz_qty'
 
 PLAN_FACT_METRICS: tuple[dict[str, str], ...] = (
     {'code': 'revenue', 'label': 'Выручка', 'format': 'money'},

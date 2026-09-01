@@ -454,7 +454,7 @@ async def test_dashboard_year_over_year_uses_actual_history_and_overview_formula
     assert r.status_code == 200
     data = r.json()['data']
     assert data['report_id'] == 'year_over_year'
-    assert statement_count <= 15
+    assert statement_count <= 16
     assert data['source_status'] == 'ready'
     assert data['raw']['service_detail_excluded'] is True
     assert [row['year'] for row in data['raw']['years']] == [2023, 2024, 2025, 2026]
@@ -1270,6 +1270,7 @@ async def test_reporting_start_trims_breakdown_cards_client_blocks_and_staff_fac
         1,
         [1],
         {1: 'barber'},
+        {},
         {},
         {},
         {},
@@ -2218,7 +2219,7 @@ async def test_year_over_year_query_count_does_not_grow_with_history_years(
 
     assert [row['year'] for row in data['raw']['years']] == list(range(2015, 2027))
     assert data['raw']['latest_year'] == 2026
-    assert statement_count <= 15
+    assert statement_count <= 16
 
 
 @pytest.mark.asyncio
@@ -6094,6 +6095,1260 @@ async def test_manual_review_facts_feed_plan_fact_for_administrators(async_sessi
     assert mid_month_parent['reviews_qty']['fact'] == 7.0
     assert mid_month_admin_cells['reviews_qty']['fact'] == 7.0
     assert mid_month_admin_cells['reviews_qty']['completion_pct'] == 70.0
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_facts_add_to_calculated_opz(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        Staff(id=1, name='Barber', position='Барбер', company_id=1, fired=0),
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0, user_id=500),
+        Client(id=1, name='Returning client', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 10),
+            attendance=1,
+        ),
+        # Booked on the way out — one calculated OPZ, created by the administrator.
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 2, 1),
+            create_date=datetime(2025, 1, 10, 12),
+            created_user_id=500,
+            attendance=0,
+        ),
+    ])
+    now = datetime(2025, 1, 1, 0, 0, 0)
+    async_session.add_all([
+        PlanMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            metric_code='opz_qty',
+            value=10.0,
+            updated_at=now,
+        ),
+        PlanMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=2,
+            staff_category='administrator',
+            metric_code='opz_qty',
+            value=10.0,
+            updated_at=now,
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        baseline_plan = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+        baseline_editor = await client.get(
+            '/dashboard/plan/opz_fact',
+            params={'month': '2025-01', 'company_id': 1},
+        )
+        save_response = await client.post(
+            '/dashboard/plan/opz_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 3}],
+            },
+        )
+        editor_response = await client.get(
+            '/dashboard/plan/opz_fact',
+            params={'month': '2025-01', 'company_id': 1},
+        )
+        plan_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+        network_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+        )
+        summary_response = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+        mid_month_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-13', 'company_id': 1},
+        )
+        mid_month_summary = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-13', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    # Without a manual value the editor and Plan/fact show the calculated OPZ alone.
+    assert baseline_editor.status_code == 200
+    baseline_rows = baseline_editor.json()['data']['rows']
+    assert [(row['staff_id'], row['current_value'], row['value'], row['total_value']) for row in baseline_rows] == [
+        (2, 1.0, 0.0, 1.0)
+    ]
+    baseline_cells = {
+        cell['code']: cell
+        for cell in baseline_plan.json()['data']['parent_group']['metrics']
+    }
+    assert baseline_cells['opz_qty']['fact'] == 1.0
+
+    assert save_response.status_code == 200
+    assert editor_response.status_code == 200
+    editor_data = editor_response.json()['data']
+    assert [(row['staff_id'], row['current_value'], row['value'], row['total_value']) for row in editor_data['rows']] == [
+        (2, 1.0, 3.0, 4.0)
+    ]
+    assert editor_data['current_total'] == 1.0
+    assert editor_data['manual_total'] == 3.0
+    # `total_value` keeps the meaning it has for the reviews editor — the manual sum — and
+    # the combined number this editor renders has its own field.
+    assert editor_data['total_value'] == 3.0
+    assert editor_data['combined_total'] == 4.0
+
+    saved_rows = (
+        await async_session.execute(
+            select(ManualFactMetric).where(
+                ManualFactMetric.period_start == date(2025, 1, 1),
+                ManualFactMetric.period_end == date(2025, 1, 31),
+                ManualFactMetric.company_id == 1,
+                ManualFactMetric.staff_id == 2,
+                ManualFactMetric.metric_code == 'opz_qty',
+            )
+        )
+    ).scalars().all()
+    assert [row.value for row in saved_rows] == [3.0]
+
+    assert plan_response.status_code == 200
+    plan_data = plan_response.json()['data']
+    branch_cells = {cell['code']: cell for cell in plan_data['parent_group']['metrics']}
+    assert branch_cells['opz_qty']['fact'] == 4.0
+    # The percentage has to follow the summed numerator, not the calculated part alone.
+    branch_clients = branch_cells['clients']['fact'] or 0.0
+    assert branch_cells['opz_pct']['fact'] == pytest.approx(
+        100.0 * 4.0 / branch_clients if branch_clients else 0.0
+    )
+
+    admin_group = next(group for group in plan_data['groups'] if group['category'] == 'administrator')
+    admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
+    assert admin_cells['opz_qty']['fact'] == 4.0
+    assert admin_cells['opz_qty']['completion_pct'] == 40.0
+
+    assert network_response.status_code == 200
+    network_groups = network_response.json()['data']['groups']
+    network_cells = {cell['code']: cell for cell in network_groups[0]['metrics']}
+    assert network_cells['opz_qty']['fact'] == 4.0
+
+    assert summary_response.status_code == 200
+    summary_data = summary_response.json()['data']
+    assert summary_data['visit_metrics']['opz_qty'] == 4.0
+    # The overview derives its own percentage, so the summed numerator has to reach it too.
+    assert summary_data['visit_metrics']['opz_pct'] == pytest.approx(
+        100.0 * 4.0 / summary_data['revenue']['appointments']
+    )
+
+    # A past window shorter than the month gets the calculated part only: a monthly value
+    # cannot be split, and importing all of it into 13 days would overstate the fact.
+    assert mid_month_response.status_code == 200
+    mid_month_cells = {
+        cell['code']: cell
+        for cell in mid_month_response.json()['data']['parent_group']['metrics']
+    }
+    assert mid_month_cells['opz_qty']['fact'] == 1.0
+    assert mid_month_summary.json()['data']['visit_metrics']['opz_qty'] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_facts_cleared_value_restores_calculated_fact(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        Staff(id=1, name='Barber', position='Барбер', company_id=1, fired=0),
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0, user_id=500),
+        Client(id=1, name='Returning client', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 2, 1),
+            create_date=datetime(2025, 1, 10, 12),
+            created_user_id=500,
+            attendance=0,
+        ),
+        ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=2,
+            metric_code='opz_qty',
+            value=5.0,
+            updated_at=datetime(2025, 1, 20, 10, 0, 0),
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        negative_response = await client.post(
+            '/dashboard/plan/opz_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': -1}],
+            },
+        )
+        invalid_month_response = await client.get(
+            '/dashboard/plan/opz_fact',
+            params={'month': '2025-01-01', 'company_id': 1},
+        )
+        # A non-finite number passes `value < 0`, so it needs its own guard to stay a 400.
+        not_a_number_response = await client.post(
+            '/dashboard/plan/opz_fact',
+            content='{"month": "2025-01", "company_id": 1, "items": '
+                    '[{"company_id": 1, "staff_id": 2, "value": NaN}]}',
+            headers={'Content-Type': 'application/json'},
+        )
+        cleared_response = await client.post(
+            '/dashboard/plan/opz_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': None}],
+            },
+        )
+        summary_response = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    assert negative_response.status_code == 400
+    assert invalid_month_response.status_code == 400
+    assert not_a_number_response.status_code == 400
+    assert cleared_response.status_code == 200
+    cleared_row = cleared_response.json()['data']['rows'][0]
+    assert (cleared_row['current_value'], cleared_row['value'], cleared_row['total_value']) == (1.0, 0.0, 1.0)
+    assert summary_response.json()['data']['visit_metrics']['opz_qty'] == 1.0
+
+    remaining = (
+        await async_session.execute(
+            select(ManualFactMetric).where(ManualFactMetric.metric_code == 'opz_qty')
+        )
+    ).scalars().all()
+    assert remaining == []
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_facts_reach_year_facts(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0, user_id=500),
+        ManualFactMetric(
+            period_start=date(2025, 3, 1),
+            period_end=date(2025, 3, 31),
+            company_id=1,
+            staff_id=2,
+            metric_code='opz_qty',
+            value=4.0,
+            updated_at=datetime(2025, 4, 1, 10, 0, 0),
+        ),
+        ManualFactMetric(
+            period_start=date(2024, 3, 1),
+            period_end=date(2024, 3, 31),
+            company_id=1,
+            staff_id=2,
+            metric_code='opz_qty',
+            value=2.0,
+            updated_at=datetime(2024, 4, 1, 10, 0, 0),
+        ),
+    ])
+    await async_session.commit()
+
+    facts = await dashboard_service.fetch_opz_year_facts(
+        async_session,
+        date(2024, 1, 1),
+        date(2025, 12, 31),
+        1,
+        None,
+    )
+    assert facts['counts'] == {2024: 2.0, 2025: 4.0}
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_editor_column_matches_plan_fact_admin_row(async_session):
+    """The baseline the editor offers must be the number it will be added to.
+
+    Plan/fact drops events anchored on a barber the branch no longer lists, so an editor
+    that counted every branch event would show an administrator a larger baseline than
+    their own row.
+    """
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        Staff(id=1, name='Left barber', position='Барбер', company_id=1, fired=1),
+        Staff(id=2, name='Barber', position='Барбер', company_id=1, fired=0),
+        Staff(id=3, name='Admin', position='Администратор', company_id=1, fired=0, user_id=500),
+        Client(id=1, name='Client of the fired barber', company_id=1),
+        Client(id=2, name='Client of the active barber', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 2, 1),
+            create_date=datetime(2025, 1, 10, 12),
+            created_user_id=500,
+            attendance=0,
+        ),
+        Appointment(
+            id=3,
+            company_id=1,
+            staff_id=2,
+            client_id=2,
+            date=date(2025, 1, 11),
+            datetime=datetime(2025, 1, 11, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=4,
+            company_id=1,
+            staff_id=2,
+            client_id=2,
+            date=date(2025, 2, 2),
+            create_date=datetime(2025, 1, 11, 12),
+            created_user_id=500,
+            attendance=0,
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        editor_response = await client.get(
+            '/dashboard/plan/opz_fact',
+            params={'month': '2025-01', 'company_id': 1},
+        )
+        plan_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    editor_rows = editor_response.json()['data']['rows']
+    assert [(row['staff_id'], row['current_value']) for row in editor_rows] == [(3, 1.0)]
+
+    admin_group = next(
+        group for group in plan_response.json()['data']['groups']
+        if group['category'] == 'administrator'
+    )
+    admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
+    assert admin_cells['opz_qty']['fact'] == editor_rows[0]['current_value']
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_facts_can_filter_by_staff(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        Staff(id=2, name='Admin one', position='Администратор', company_id=1, fired=0),
+        Staff(id=3, name='Admin two', position='Администратор', company_id=1, fired=0),
+        ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=3,
+            metric_code='opz_qty',
+            value=2.0,
+            updated_at=datetime(2025, 1, 20, 10, 0, 0),
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        all_staff = await client.get(
+            '/dashboard/plan/opz_fact',
+            params={'month': '2025-01', 'company_id': 1},
+        )
+        single_staff = await client.get(
+            '/dashboard/plan/opz_fact',
+            params={'month': '2025-01', 'company_id': 1, 'staff_id': 3},
+        )
+        foreign_staff_save = await client.post(
+            '/dashboard/plan/opz_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'staff_id': 3,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 1}],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert {row['staff_id'] for row in all_staff.json()['data']['rows']} == {2, 3}
+    filtered = single_staff.json()['data']
+    assert [(row['staff_id'], row['value']) for row in filtered['rows']] == [(3, 2.0)]
+    assert filtered['manual_total'] == 2.0
+    # A row outside the selected staff member must not slip through the payload.
+    assert foreign_staff_save.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_lookup_short_circuits_without_stored_values(async_session):
+    """The overview asks twice per request, so an empty top-up must stay one query."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.commit()
+
+    statement_count = 0
+
+    def count_statements(*_args):
+        nonlocal statement_count
+        statement_count += 1
+
+    event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
+    try:
+        empty_total = await dashboard_service._manual_opz_scope_total(
+            async_session,
+            date(2025, 1, 1),
+            date(2025, 1, 31),
+            [1],
+        )
+    finally:
+        event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
+
+    assert empty_total == 0.0
+    assert statement_count == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_scope_lookup_touches_only_branches_holding_a_value(async_session):
+    """The overview asks twice per request; a stored value must not wake every branch."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add_all([
+        Company(id=1, title='Salon one', group_id=1),
+        Company(id=2, title='Salon two', group_id=1),
+        Company(id=3, title='Salon three', group_id=1),
+    ])
+    async_session.add_all([
+        Staff(id=2, name='Admin one', position='Администратор', company_id=1, fired=0),
+        Staff(id=3, name='Admin two', position='Администратор', company_id=2, fired=0),
+        Staff(id=4, name='Admin three', position='Администратор', company_id=3, fired=0),
+    ])
+    await async_session.flush()
+    async_session.add(ManualFactMetric(
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 1, 31),
+        company_id=1,
+        staff_id=2,
+        metric_code='opz_qty',
+        value=4.0,
+        updated_at=datetime(2025, 1, 20, 10, 0, 0),
+    ))
+    await async_session.commit()
+
+    counts = {}
+
+    def measure(label, company_ids):
+        statements = 0
+
+        def count_statements(*_args):
+            nonlocal statements
+            statements += 1
+
+        async def run():
+            nonlocal statements
+            event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
+            try:
+                value = await dashboard_service._manual_opz_scope_total(
+                    async_session, date(2025, 1, 1), date(2025, 1, 31), company_ids
+                )
+            finally:
+                event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
+            counts[label] = (value, statements)
+
+        return run()
+
+    await measure('one branch', [1])
+    await measure('three branches', [1, 2, 3])
+
+    assert counts['one branch'][0] == counts['three branches'][0] == 4.0
+    # Branches 2 and 3 hold nothing, so widening the scope must not cost extra queries.
+    assert counts['three branches'][1] <= counts['one branch'][1]
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_ignores_months_when_the_staff_was_not_an_administrator(async_session):
+    """A stored value only counts for the months the person actually was an administrator."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=2, name='Barber then', position='Барбер', company_id=1, fired=0))
+    await async_session.flush()
+    async_session.add(ManualFactMetric(
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 1, 31),
+        company_id=1,
+        staff_id=2,
+        metric_code='opz_qty',
+        value=9.0,
+        updated_at=datetime(2025, 1, 20, 10, 0, 0),
+    ))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        summary_response = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    assert summary_response.json()['data']['visit_metrics']['opz_qty'] == 0.0
+
+    year_facts = await dashboard_service.fetch_opz_year_facts(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        1,
+        None,
+    )
+    assert year_facts['counts'] == {}
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_counts_only_whole_or_running_months(async_session, monkeypatch):
+    """A monthly value is indivisible, so only whole months and the running month count.
+
+    The overview ships "today" and "week" presets; without this rule a single day would
+    carry the entire month of top-ups, and a week across a month boundary two of them.
+    """
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.flush()
+    async_session.add_all([
+        ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=2,
+            metric_code='opz_qty',
+            value=3.0,
+            updated_at=datetime(2025, 1, 20, 10, 0, 0),
+        ),
+        ManualFactMetric(
+            period_start=date(2025, 2, 1),
+            period_end=date(2025, 2, 28),
+            company_id=1,
+            staff_id=2,
+            metric_code='opz_qty',
+            value=2.0,
+            updated_at=datetime(2025, 2, 20, 10, 0, 0),
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    metrics_by_period = {}
+
+    async def opz_qty(start_date, end_date):
+        app.dependency_overrides[api.get_async_db] = override_db
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url='http://test') as client:
+            summary = await client.get(
+                '/dashboard/widget/summary',
+                params={'start_date': start_date, 'end_date': end_date, 'company_id': 1},
+            )
+            plan = await client.get(
+                '/dashboard/widget/plan_fact',
+                params={'start_date': start_date, 'end_date': end_date, 'company_id': 1},
+            )
+        app.dependency_overrides.clear()
+        plan_cells = {
+            cell['code']: cell
+            for cell in plan.json()['data']['parent_group']['metrics']
+        }
+        visit_metrics = summary.json()['data']['visit_metrics']
+        metrics_by_period[(start_date, end_date)] = visit_metrics
+        summary_value = visit_metrics['opz_qty']
+        # The overview and Plan/fact must never disagree about the same period.
+        assert plan_cells['opz_qty']['fact'] == summary_value
+        return summary_value
+
+    assert await opz_qty('2025-01-05', '2025-01-12') == 0.0
+    assert await opz_qty('2025-01-28', '2025-02-03') == 0.0
+    assert await opz_qty('2025-01-01', '2025-01-31') == 3.0
+    assert await opz_qty('2025-01-01', '2025-02-28') == 5.0
+
+    # The month-to-date view the dashboard opens with keeps the running month whole:
+    # a monthly plan would otherwise stand against a fact that is missing on purpose.
+    frozen_now = datetime(2025, 1, 20, 12, 0)
+    monkeypatch.setattr(dashboard_service, 'factual_now', lambda: frozen_now)
+    assert await opz_qty('2025-01-01', '2025-01-20') == 3.0
+    assert await opz_qty('2025-01-05', '2025-01-20') == 0.0
+
+    # Early in a month the running month IS a couple of days, and a period that reaches
+    # today from before the 1st still covers this month from its start.
+    monkeypatch.setattr(dashboard_service, 'factual_now', lambda: datetime(2025, 2, 2, 12, 0))
+    assert await opz_qty('2025-02-02', '2025-02-02') == 0.0
+    assert await opz_qty('2025-02-01', '2025-02-02') == 2.0
+    assert await opz_qty('2025-01-27', '2025-02-02') == 2.0
+
+    # The previous window of a month-to-date period is the tail of the previous month and
+    # would count nothing on its own, so the delta weighs month against month: February's
+    # 2 against January's 3, not against zero.
+    month_to_date = metrics_by_period[('2025-02-01', '2025-02-02')]
+    assert month_to_date['opz_qty'] == 2.0
+    assert month_to_date['opz_qty_change_pct'] == pytest.approx(-33.33)
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_daily_series_stays_calculated(async_session):
+    """The chart under the tile cannot carry a monthly value, so it must not try."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        Staff(id=1, name='Barber', position='Барбер', company_id=1, fired=0),
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0, user_id=500),
+        Client(id=1, name='Returning client', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 10),
+            attendance=1,
+        ),
+        Appointment(
+            id=2,
+            company_id=1,
+            staff_id=1,
+            client_id=1,
+            date=date(2025, 2, 1),
+            create_date=datetime(2025, 1, 10, 12),
+            created_user_id=500,
+            attendance=0,
+        ),
+        ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=2,
+            metric_code='opz_qty',
+            value=7.0,
+            updated_at=datetime(2025, 1, 20, 10, 0, 0),
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        daily_response = await client.get(
+            '/dashboard/widget/revenue_daily',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+        summary_response = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    daily_rows = daily_response.json()['data']
+    assert sum(row['opz_qty'] for row in daily_rows) == 1.0
+    assert summary_response.json()['data']['visit_metrics']['opz_qty'] == 8.0
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_fact_write_is_scoped_to_the_user_branches_and_role(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add_all([
+        Company(id=1, title='Salon', group_id=1),
+        Company(id=2, title='Other salon', group_id=1),
+    ])
+    async_session.add_all([
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0),
+        Staff(id=3, name='Other admin', position='Администратор', company_id=2, fired=0),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    contexts = {
+        'branch_admin': AccessContext.from_user(
+            user_id=10,
+            role='branch_admin',
+            portal_account_id=1,
+            company_ids=[1],
+        ),
+        'manager': AccessContext.from_user(
+            user_id=11,
+            role='manager',
+            portal_account_id=1,
+            company_ids=[1],
+        ),
+    }
+    active = {'role': 'branch_admin'}
+
+    async def override_access():
+        return contexts[active['role']]
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        foreign_branch = await client.post(
+            '/dashboard/plan/opz_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 2,
+                'items': [{'company_id': 2, 'staff_id': 3, 'value': 1}],
+            },
+        )
+        active['role'] = 'manager'
+        manager_read = await client.get(
+            '/dashboard/plan/opz_fact',
+            params={'month': '2025-01', 'company_id': 1},
+        )
+        manager_write = await client.post(
+            '/dashboard/plan/opz_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 1}],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    # A branch outside the user scope must not be writable through the payload.
+    assert foreign_branch.status_code in (400, 403)
+    assert manager_read.status_code == 403
+    assert manager_write.status_code == 403
+
+    stored = (
+        await async_session.execute(
+            select(ManualFactMetric).where(ManualFactMetric.metric_code == 'opz_qty')
+        )
+    ).scalars().all()
+    assert stored == []
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_editor_totals_count_only_what_reports_count(async_session):
+    """A value stored for a month the person was not an administrator stays editable.
+
+    It must not be promised in the header total either — nothing else counts it.
+    """
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0),
+        Staff(id=3, name='Barber', position='Барбер', company_id=1, fired=0),
+        Staff(id=4, name='Barber without a value', position='Барбер', company_id=1, fired=0),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=2,
+            metric_code='opz_qty',
+            value=4.0,
+            updated_at=datetime(2025, 1, 20, 10, 0, 0),
+        ),
+        ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=3,
+            metric_code='opz_qty',
+            value=6.0,
+            updated_at=datetime(2025, 1, 20, 10, 0, 0),
+        ),
+        ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=4,
+            metric_code='opz_qty',
+            value=0.0,
+            updated_at=datetime(2025, 1, 20, 10, 0, 0),
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        editor_response = await client.get(
+            '/dashboard/plan/opz_fact',
+            params={'month': '2025-01', 'company_id': 1},
+        )
+        summary_response = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    editor = editor_response.json()['data']
+    rows = {row['staff_id']: row for row in editor['rows']}
+    assert rows[2]['counted'] is True
+    assert rows[3]['counted'] is False
+    # The barber row keeps its stored value on screen so it can be cleared, but its
+    # "total actual" cannot promise a number the reports drop.
+    assert rows[3]['value'] == 6.0
+    assert rows[3]['total_value'] == 0.0
+    # The flag does not wait for a value: a row that could never count says so up front.
+    assert rows[4]['value'] == 0.0
+    assert rows[4]['counted'] is False
+    assert editor['manual_total'] == 4.0
+    assert editor['combined_total'] == 4.0
+    assert editor['combined_total'] == summary_response.json()['data']['visit_metrics']['opz_qty']
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_overview_staff_filter_stays_on_one_attribution(async_session):
+    """A filtered overview attributes OPZ to the barber, so it must not add the top-up."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.flush()
+    async_session.add(ManualFactMetric(
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 1, 31),
+        company_id=1,
+        staff_id=2,
+        metric_code='opz_qty',
+        value=5.0,
+        updated_at=datetime(2025, 1, 20, 10, 0, 0),
+    ))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        branch_summary = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+        staff_summary = await client.get(
+            '/dashboard/widget/summary',
+            params={
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+                'company_id': 1,
+                'staff_id': 2,
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert branch_summary.json()['data']['visit_metrics']['opz_qty'] == 5.0
+    staff_metrics = staff_summary.json()['data']['visit_metrics']
+    assert staff_metrics['opz_qty'] == 0.0
+    assert staff_metrics['opz_pct'] == 0.0
+
+    # The year facts answer a staff filter the same way, for the same reason.
+    branch_year = await dashboard_service.fetch_opz_year_facts(
+        async_session, date(2025, 1, 1), date(2025, 12, 31), 1, None
+    )
+    staff_year = await dashboard_service.fetch_opz_year_facts(
+        async_session, date(2025, 1, 1), date(2025, 12, 31), 1, 2
+    )
+    assert branch_year['counts'] == {2025: 5.0}
+    assert staff_year['counts'] == {}
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_scope_lookup_cost_is_bounded_when_every_branch_holds_a_value(async_session):
+    """The overview pays this twice per request, so the loaded path needs a ceiling too."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add_all([
+        Company(id=1, title='Salon one', group_id=1),
+        Company(id=2, title='Salon two', group_id=1),
+        Company(id=3, title='Salon three', group_id=1),
+    ])
+    async_session.add_all([
+        Staff(id=2, name='Admin one', position='Администратор', company_id=1, fired=0),
+        Staff(id=3, name='Admin two', position='Администратор', company_id=2, fired=0),
+        Staff(id=4, name='Admin three', position='Администратор', company_id=3, fired=0),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=company_id,
+            staff_id=staff_id,
+            metric_code='opz_qty',
+            value=2.0,
+            updated_at=datetime(2025, 1, 20, 10, 0, 0),
+        )
+        for company_id, staff_id in ((1, 2), (2, 3), (3, 4))
+    ])
+    await async_session.commit()
+
+    statement_count = 0
+
+    def count_statements(*_args):
+        nonlocal statement_count
+        statement_count += 1
+
+    event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
+    try:
+        total = await dashboard_service._manual_opz_scope_total(
+            async_session, date(2025, 1, 1), date(2025, 1, 31), [1, 2, 3]
+        )
+    finally:
+        event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
+
+    assert total == 6.0
+    # 1 probe + 1 staff query + 2 per branch that holds a value + 1 rows query.
+    assert statement_count <= 9
+
+    # Growth must stay linear in the branches that hold a value, not worse.
+    async_session.add_all([
+        Company(id=4, title='Salon four', group_id=1),
+        Company(id=5, title='Salon five', group_id=1),
+        Company(id=6, title='Salon six', group_id=1),
+    ])
+    async_session.add_all([
+        Staff(id=5, name='Admin four', position='Администратор', company_id=4, fired=0),
+        Staff(id=6, name='Admin five', position='Администратор', company_id=5, fired=0),
+        Staff(id=7, name='Admin six', position='Администратор', company_id=6, fired=0),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=company_id,
+            staff_id=staff_id,
+            metric_code='opz_qty',
+            value=2.0,
+            updated_at=datetime(2025, 1, 20, 10, 0, 0),
+        )
+        for company_id, staff_id in ((4, 5), (5, 6), (6, 7))
+    ])
+    await async_session.commit()
+
+    doubled_count = 0
+
+    def count_doubled(*_args):
+        nonlocal doubled_count
+        doubled_count += 1
+
+    event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_doubled)
+    try:
+        doubled_total = await dashboard_service._manual_opz_scope_total(
+            async_session, date(2025, 1, 1), date(2025, 1, 31), [1, 2, 3, 4, 5, 6]
+        )
+    finally:
+        event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_doubled)
+
+    assert doubled_total == 12.0
+    assert doubled_count <= statement_count + 2 * 3
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_delta_compares_like_periods(async_session, monkeypatch):
+    """A flat top-up every month must read as no growth, whatever the period length."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.flush()
+    async_session.add_all([
+        ManualFactMetric(
+            period_start=date(year, month, 1),
+            period_end=date(year, month, monthrange(year, month)[1]),
+            company_id=1,
+            staff_id=2,
+            metric_code='opz_qty',
+            value=10.0,
+            updated_at=datetime(year, month, 20, 10, 0, 0),
+        )
+        for year in (2024, 2025)
+        for month in range(1, 13)
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    async def metrics(start_date, end_date):
+        app.dependency_overrides[api.get_async_db] = override_db
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url='http://test') as client:
+            response = await client.get(
+                '/dashboard/widget/summary',
+                params={'start_date': start_date, 'end_date': end_date, 'company_id': 1},
+            )
+        app.dependency_overrides.clear()
+        return response.json()['data']['visit_metrics']
+
+    one_month = await metrics('2025-12-01', '2025-12-31')
+    assert (one_month['opz_qty'], one_month['opz_qty_change_pct']) == (10.0, 0.0)
+
+    quarter = await metrics('2025-10-01', '2025-12-31')
+    assert (quarter['opz_qty'], quarter['opz_qty_change_pct']) == (30.0, 0.0)
+
+    # `previous_period()` steps back by days, so for a month shorter than its predecessor
+    # the window starts on the 2nd and would count nothing at all. Whole-month selections
+    # compare month with month instead.
+    for short_month, days in (('02', 28), ('04', 30), ('09', 30), ('11', 30)):
+        selected = await metrics(f'2025-{short_month}-01', f'2025-{short_month}-{days}')
+        assert (selected['opz_qty'], selected['opz_qty_change_pct']) == (10.0, 0.0)
+
+    # A rolling window that crosses a month boundary counts the running month, so its
+    # baseline is the month before it — one month against one month, not against nothing.
+    monkeypatch.setattr(dashboard_service, 'factual_now', lambda: datetime(2025, 12, 2, 12, 0))
+    crossing_week = await metrics('2025-11-26', '2025-12-02')
+    assert (crossing_week['opz_qty'], crossing_week['opz_qty_change_pct']) == (10.0, 0.0)
+
+    month_to_date = await metrics('2025-12-01', '2025-12-02')
+    assert (month_to_date['opz_qty'], month_to_date['opz_qty_change_pct']) == (10.0, 0.0)
+
+    # A window that ends mid-month gets the same treatment as one that ends on the last
+    # day: quarter-to-date is weighed against the three months before it, not against two.
+    monkeypatch.setattr(dashboard_service, 'factual_now', lambda: datetime(2025, 12, 15, 12, 0))
+    quarter_to_date = await metrics('2025-10-01', '2025-12-15')
+    assert (quarter_to_date['opz_qty'], quarter_to_date['opz_qty_change_pct']) == (30.0, 0.0)
+    year_to_date = await metrics('2025-01-01', '2025-12-15')
+    assert (year_to_date['opz_qty'], year_to_date['opz_qty_change_pct']) == (120.0, 0.0)
+    rolling_month = await metrics('2025-11-16', '2025-12-15')
+    assert (rolling_month['opz_qty'], rolling_month['opz_qty_change_pct']) == (10.0, 0.0)
+
+    year = await metrics('2025-01-01', '2025-12-31')
+    assert (year['opz_qty'], year['opz_qty_change_pct']) == (120.0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_delta_uses_the_matching_previous_months(async_session):
+    """A quarter is compared with the quarter before it, not with its own months."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.flush()
+    async_session.add_all([
+        ManualFactMetric(
+            period_start=date(2025, month, 1),
+            period_end=date(2025, month, monthrange(2025, month)[1]),
+            company_id=1,
+            staff_id=2,
+            metric_code='opz_qty',
+            value=10.0,
+            updated_at=datetime(2025, month, 20, 10, 0, 0),
+        )
+        for month in (10, 11, 12)
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    async def metrics(start_date, end_date):
+        app.dependency_overrides[api.get_async_db] = override_db
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url='http://test') as client:
+            response = await client.get(
+                '/dashboard/widget/summary',
+                params={'start_date': start_date, 'end_date': end_date, 'company_id': 1},
+            )
+        app.dependency_overrides.clear()
+        return response.json()['data']['visit_metrics']
+
+    # The quarter that holds every top-up is compared with the empty quarter before it.
+    fourth_quarter = await metrics('2025-10-01', '2025-12-31')
+    assert (fourth_quarter['opz_qty'], fourth_quarter['opz_qty_change_pct']) == (30.0, 100.0)
+
+    # An empty quarter stays empty — the following one must not leak into its base.
+    third_quarter = await metrics('2025-07-01', '2025-09-30')
+    assert third_quarter['opz_qty'] == 0.0
+
+    year = await metrics('2025-01-01', '2025-12-31')
+    assert (year['opz_qty'], year['opz_qty_change_pct']) == (30.0, 100.0)
+
+
+@pytest.mark.asyncio
+async def test_manual_opz_respects_the_branch_reporting_start(async_session):
+    """A month before the branch opened counts nowhere, and the editor says so up front."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1, reporting_start_date=date(2025, 6, 1)))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.flush()
+    async_session.add_all([
+        ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=2,
+            metric_code='opz_qty',
+            value=5.0,
+            updated_at=datetime(2025, 1, 20, 10, 0, 0),
+        ),
+        ManualFactMetric(
+            period_start=date(2025, 7, 1),
+            period_end=date(2025, 7, 31),
+            company_id=1,
+            staff_id=2,
+            metric_code='opz_qty',
+            value=4.0,
+            updated_at=datetime(2025, 7, 20, 10, 0, 0),
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        before_opening = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+        after_opening = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-07-01', 'end_date': '2025-07-31', 'company_id': 1},
+        )
+        editor_before = await client.get(
+            '/dashboard/plan/opz_fact',
+            params={'month': '2025-01', 'company_id': 1},
+        )
+        editor_after = await client.get(
+            '/dashboard/plan/opz_fact',
+            params={'month': '2025-07', 'company_id': 1},
+        )
+        plan_before = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    assert before_opening.json()['data']['visit_metrics']['opz_qty'] == 0.0
+    assert after_opening.json()['data']['visit_metrics']['opz_qty'] == 4.0
+
+    before_rows = editor_before.json()['data']
+    assert before_rows['rows'][0]['counted'] is False
+    assert before_rows['manual_total'] == 0.0
+    assert editor_after.json()['data']['manual_total'] == 4.0
+
+    plan_cells = {
+        cell['code']: cell
+        for cell in plan_before.json()['data']['parent_group']['metrics']
+    }
+    assert plan_cells['opz_qty']['fact'] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_plan_settings_save_drops_the_cached_administrator_roles(async_session):
+    """Roles are memoised per request and derived from the plan, so a save must drop them.
+
+    Nothing today reads them again inside a saving request; the point of the test is that
+    the day something does, it reads the roles the save just wrote.
+    """
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.commit()
+
+    await dashboard_service._administrator_role_periods_by_company(
+        async_session, date(2025, 1, 1), date(2025, 1, 31), [1]
+    )
+    assert async_session.info.get('administrator_role_periods')
+
+    await dashboard_service.save_plan_settings(
+        async_session,
+        '2025-01',
+        [{'company_id': 1, 'wax_pct': 10}],
+        [{
+            'company_id': 1,
+            'staff_id': 2,
+            'staff_category': 'administrator',
+            'reviews_qty': 3,
+        }],
+    )
+
+    assert not async_session.info.get('administrator_role_periods')
 
 
 @pytest.mark.asyncio

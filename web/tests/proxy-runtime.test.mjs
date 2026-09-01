@@ -294,6 +294,20 @@ test('catch-all proxy enforces dashboard and auth route allowlists', () => {
     assert.equal(metricVisibility.ok, true);
     assert.equal(metricVisibility.target.href, 'https://vm.example.test/dashboard/metric-visibility');
 
+    // Every dashboard route the SPA calls has to be listed here, in both copies of the
+    // proxy — an endpoint missing from the allowlist answers 404 only in the deployed app.
+    for (const buildTarget of [buildWebProxyTarget, buildRootProxyTarget]) {
+      for (const [method, path] of [
+        ['GET', '/api/dashboard/plan/reviews_fact?month=2025-01'],
+        ['POST', '/api/dashboard/plan/reviews_fact'],
+        ['GET', '/api/dashboard/plan/opz_fact?month=2025-01'],
+        ['POST', '/api/dashboard/plan/opz_fact'],
+      ]) {
+        const result = buildTarget(requestStub(method, {}, path));
+        assert.equal(result.ok, true, `${method} ${path}`);
+      }
+    }
+
     const serviceBatch = buildWebProxyTarget(requestStub('PATCH', {}, '/api/dashboard/services'));
     assert.equal(serviceBatch.ok, true);
     assert.equal(serviceBatch.target.href, 'https://vm.example.test/dashboard/services');

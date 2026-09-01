@@ -95,6 +95,9 @@ const els = {
   reviewFactEditor: document.getElementById('review-fact-editor'),
   reviewFactMeta: document.getElementById('review-fact-meta'),
   reviewFactSave: document.getElementById('review-fact-save'),
+  opzFactEditor: document.getElementById('opz-fact-editor'),
+  opzFactMeta: document.getElementById('opz-fact-meta'),
+  opzFactSave: document.getElementById('opz-fact-save'),
   servicesTable: document.getElementById('services-table'),
   extraServicesTable: document.getElementById('extra-services-table'),
   revenueChart: document.getElementById('revenue-chart'),
@@ -106,6 +109,7 @@ const els = {
   planSettingsView: document.getElementById('plan-settings-view'),
   serviceManagementView: document.getElementById('service-management-view'),
   reviewFactsView: document.getElementById('review-facts-view'),
+  opzFactsView: document.getElementById('opz-facts-view'),
   reportsView: document.getElementById('reports-view'),
   viewLinks: [...document.querySelectorAll('[data-view-link]')],
   planSettingsMonth: document.getElementById('plan-settings-month'),
@@ -170,6 +174,12 @@ const filterEls = {
     staff: document.getElementById('review-fact-staff'),
     load: document.getElementById('review-fact-load'),
   },
+  opzFacts: {
+    month: document.getElementById('opz-fact-month'),
+    branch: document.getElementById('opz-fact-branch'),
+    staff: document.getElementById('opz-fact-staff'),
+    load: document.getElementById('opz-fact-load'),
+  },
 };
 
 const customFilterDropdowns = {};
@@ -201,6 +211,7 @@ const pageOpenedAt = new Date();
 let activeView = 'overview';
 let branchOptions = [];
 let reviewFactRows = [];
+let opzFactRows = [];
 let planSettingsData = null;
 let planSettingsSavedData = null;
 let planSettingsSavedSnapshot = '';
@@ -212,6 +223,11 @@ let reviewFactSavedData = null;
 let reviewFactDirty = false;
 let reviewFactLoadedFilters = null;
 let reviewFactSaving = false;
+let opzFactSavedSnapshot = '';
+let opzFactSavedData = null;
+let opzFactDirty = false;
+let opzFactLoadedFilters = null;
+let opzFactSaving = false;
 let serviceManagementData = { rows: [], groups: [], categories: [] };
 let serviceManagementSavedData = null;
 let serviceManagementSavedSnapshot = '';
@@ -231,6 +247,7 @@ const viewRequestScopes = {
   planSettings: createLatestRequestScope(),
   serviceManagement: createLatestRequestScope(),
   reviewFacts: createLatestRequestScope(),
+  opzFacts: createLatestRequestScope(),
   branches: createLatestRequestScope(),
 };
 const viewsWithData = new Set();
@@ -268,6 +285,7 @@ function hasProtectedDirtyChanges() {
   return (
     (activeView === 'planSettings' && planSettingsDirty)
     || (activeView === 'reviewFacts' && reviewFactDirty)
+    || (activeView === 'opzFacts' && opzFactDirty)
   );
 }
 
@@ -275,6 +293,7 @@ function protectedSavePending() {
   return (
     (activeView === 'planSettings' && planSettingsSaving)
     || (activeView === 'reviewFacts' && reviewFactSaving)
+    || (activeView === 'opzFacts' && opzFactSaving)
   );
 }
 
@@ -287,6 +306,11 @@ function discardProtectedChanges() {
     restoreReviewFactFilters();
     if (reviewFactSavedData) renderReviewFactEditor(JSON.parse(JSON.stringify(reviewFactSavedData)));
     else setReviewFactDirty(false);
+  }
+  if (activeView === 'opzFacts') {
+    restoreOpzFactFilters();
+    if (opzFactSavedData) renderOpzFactEditor(JSON.parse(JSON.stringify(opzFactSavedData)));
+    else setOpzFactDirty(false);
   }
 }
 
@@ -304,6 +328,8 @@ function updateFloatingEditorSave() {
     planSettingsSaving,
     reviewFactDirty,
     reviewFactSaving,
+    opzFactDirty,
+    opzFactSaving,
     isDemo: document.body.classList.contains('demo-mode'),
   });
   els.floatingEditorSave.hidden = !state.visible;
@@ -331,6 +357,7 @@ function dashboardPath(view) {
     planSettings: '/#plan-settings',
     serviceManagement: '/#services',
     reviewFacts: '/#review-facts',
+    opzFacts: '/#opz-facts',
     reports: '/reports',
   };
   return paths[view] || paths.overview;
@@ -387,7 +414,7 @@ window.addEventListener('portal:session-transition', () => {
 });
 
 const SETTINGS_ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
-const SETTINGS_VIEWS = new Set(['planSettings', 'serviceManagement', 'reviewFacts']);
+const SETTINGS_VIEWS = new Set(['planSettings', 'serviceManagement', 'reviewFacts', 'opzFacts']);
 
 function hasSettingsAdminAccess() {
   if (apiKey && !currentUser) return true;
@@ -416,6 +443,7 @@ function applyDashboardPermissions() {
   els.planSettingsView.hidden = hideSettings;
   els.serviceManagementView.hidden = hideSettings;
   els.reviewFactsView.hidden = hideSettings;
+  els.opzFactsView.hidden = hideSettings;
 }
 
 function setOverviewSectionHidden(section, hidden) {
@@ -616,9 +644,11 @@ function defaultDates(filter) {
   filter.start.value = formatInputDate(start);
 }
 
-function setReviewFactDefaultMonth() {
+function setManualFactDefaultMonths() {
   const now = new Date(pageOpenedAt);
-  filterEls.reviewFacts.month.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  filterEls.reviewFacts.month.value = month;
+  filterEls.opzFacts.month.value = month;
 }
 
 function overviewPresetRange(preset) {
@@ -2343,8 +2373,8 @@ function renderReviewFactEditor(data) {
     els.reviewFactEditor.innerHTML = `<div class="empty compact">${t('dash.noActiveAdministrators')}</div>`;
   } else {
     els.reviewFactEditor.innerHTML = `
-      <div class="table-scroll review-fact-scroll">
-        <table class="review-fact-table">
+      <div class="table-scroll manual-fact-scroll">
+        <table class="manual-fact-table">
           <thead>
             <tr>
               <th>${t('dash.branch')}</th>
@@ -2495,6 +2525,232 @@ async function saveReviewFactEditor() {
   }
 }
 
+function renderOpzFactEditor(data) {
+  opzFactRows = data?.rows || [];
+  els.opzFactMeta.textContent = t('dash.opzFactMeta', {
+    admins: opzFactRows.length,
+    current: formatNumber(data?.current_total || 0),
+    additional: formatNumber(data?.manual_total || 0),
+    total: formatNumber(data?.combined_total || 0),
+  });
+
+  if (!opzFactRows.length) {
+    els.opzFactEditor.innerHTML = `<div class="empty compact">${t('dash.noActiveAdministrators')}</div>`;
+  } else {
+    els.opzFactEditor.innerHTML = `
+      <div class="table-scroll manual-fact-scroll">
+        <table class="manual-fact-table">
+          <thead>
+            <tr>
+              <th>${t('dash.branch')}</th>
+              <th>${t('dash.administrator')}</th>
+              <th class="number">${t('dash.currentOpz')}</th>
+              <th class="number">${t('dash.additionalOpz')}</th>
+              <th class="number">${t('dash.opzFactTotal')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${opzFactRows
+              .map((row) => {
+                const marks = [];
+                if (row.is_active === false) marks.push(t('dash.opzFactInactive'));
+                if (row.counted === false) marks.push(t('dash.opzFactNotCounted'));
+                const inactiveMark = marks.length
+                  ? ` <span class="meta">· ${escapeHtml(marks.join(' · '))}</span>`
+                  : '';
+                const current = Number(row.current_value || 0);
+                return `
+                  <tr data-current-value="${escapeHtml(current)}" data-counted="${row.counted === false ? 'false' : 'true'}">
+                    <td>${escapeHtml(row.company_title || t('dash.branchFallbackWithId', { id: row.company_id }))}</td>
+                    <td>${escapeHtml(row.staff_name)}${inactiveMark}</td>
+                    <td class="number">${escapeHtml(formatNumber(current))}</td>
+                    <td class="number">
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        inputmode="numeric"
+                        data-company-id="${escapeHtml(row.company_id)}"
+                        data-staff-id="${escapeHtml(row.staff_id)}"
+                        value="${escapeHtml(formatInputNumber(row.value))}"
+                      />
+                    </td>
+                    <td class="number" data-total-cell>${escapeHtml(formatNumber(row.total_value ?? current))}</td>
+                  </tr>
+                `;
+              })
+              .join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  opzFactSavedData = JSON.parse(JSON.stringify(data || { rows: [] }));
+  opzFactLoadedFilters = opzFactFilters();
+  opzFactSavedSnapshot = opzFactDraftSnapshot();
+  setOpzFactDirty(false);
+}
+
+// The fact is the sum, so the row shows it before saving — not only after the reload.
+function refreshOpzFactTotals() {
+  let currentTotal = 0;
+  let additionalTotal = 0;
+  els.opzFactEditor.querySelectorAll('input[data-staff-id]').forEach((input) => {
+    const row = input.closest('tr');
+    if (!row) return;
+    const current = Number(row.dataset.currentValue || 0);
+    const rawValue = input.value.trim().replace(',', '.');
+    const parsed = rawValue === '' ? 0 : Number(rawValue);
+    const valid = Number.isFinite(parsed) && parsed >= 0;
+    // The server stores whole units, so the preview must not promise a fraction — and a
+    // row the reports ignore must not add itself to the totals either.
+    const counted = row.dataset.counted !== 'false';
+    const additional = valid && counted ? Math.round(parsed) : 0;
+    const totalCell = row.querySelector('[data-total-cell]');
+    if (totalCell) totalCell.textContent = formatNumber(current + additional);
+    currentTotal += current;
+    additionalTotal += additional;
+  });
+  els.opzFactMeta.textContent = t('dash.opzFactMeta', {
+    admins: opzFactRows.length,
+    current: formatNumber(currentTotal),
+    additional: formatNumber(additionalTotal),
+    total: formatNumber(currentTotal + additionalTotal),
+  });
+}
+
+function opzFactFilters() {
+  const filter = filterEls.opzFacts;
+  return {
+    month: filter.month.value,
+    branch: filter.branch.value,
+    staff: filter.staff.value,
+  };
+}
+
+function restoreOpzFactFilters() {
+  if (!opzFactLoadedFilters) return;
+  const filter = filterEls.opzFacts;
+  filter.month.value = opzFactLoadedFilters.month;
+  filter.branch.value = opzFactLoadedFilters.branch;
+  filter.staff.value = opzFactLoadedFilters.staff;
+  customFilterDropdowns[filter.branch.id]?.refresh();
+  customFilterDropdowns[filter.staff.id]?.refresh();
+}
+
+function opzFactDraftSnapshot() {
+  return JSON.stringify([...els.opzFactEditor.querySelectorAll('input[data-staff-id]')].map((input) => ({
+    companyId: input.dataset.companyId,
+    staffId: input.dataset.staffId,
+    value: input.value.trim(),
+  })));
+}
+
+function setOpzFactDirty(isDirty) {
+  opzFactDirty = isDirty;
+  els.opzFactSave.disabled = opzFactSaving || !opzFactRows.length;
+  updateFloatingEditorSave();
+}
+
+function updateOpzFactDirtyFromForm() {
+  setOpzFactDirty(opzFactDraftSnapshot() !== opzFactSavedSnapshot);
+}
+
+function opzFactParams() {
+  const filter = filterEls.opzFacts;
+  return {
+    month: filter.month.value,
+    company_id: filter.branch.value,
+    staff_id: filter.staff.value,
+  };
+}
+
+async function loadOpzFactEditor({ signal = null } = {}) {
+  const payload = await fetchJson('/dashboard/plan/opz_fact', opzFactParams(), {
+    retry: () => loadOpzFacts(),
+    signal,
+  });
+  renderOpzFactEditor(payload.data);
+}
+
+async function loadOpzFacts() {
+  const filter = filterEls.opzFacts;
+  const request = beginViewRequest('opzFacts');
+  clearError();
+  setFilterLoading(filter, true);
+
+  const syncStatus = loadSyncStatus();
+  try {
+    await loadOpzFactEditor({ signal: request.signal });
+    if (!request.isCurrent()) return;
+    viewsWithData.add('opzFacts');
+    clearError();
+    setLoadedApiState(null, { empty: opzFactRows.length === 0 });
+    await syncStatus;
+  } catch (error) {
+    if (isSupersededRequest(error) || !request.isCurrent()) return;
+    showError(error.message, { apiStatus: error.apiStatus, retry: () => loadOpzFacts() });
+  } finally {
+    if (request.isCurrent()) {
+      setFilterLoading(filter, false);
+      request.finish();
+    }
+  }
+}
+
+function opzFactPayload() {
+  const filter = filterEls.opzFacts;
+  const items = [...els.opzFactEditor.querySelectorAll('input[data-staff-id]')].map((input) => {
+    const rawValue = input.value.trim().replace(',', '.');
+    if (rawValue === '') {
+      return {
+        company_id: Number(input.dataset.companyId),
+        staff_id: Number(input.dataset.staffId),
+        value: null,
+      };
+    }
+    const value = Number(rawValue);
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(t('dash.opzFactNonNegative'));
+    }
+    return {
+      company_id: Number(input.dataset.companyId),
+      staff_id: Number(input.dataset.staffId),
+      value,
+    };
+  });
+
+  return {
+    month: filter.month.value,
+    company_id: filter.branch.value ? Number(filter.branch.value) : null,
+    staff_id: filter.staff.value ? Number(filter.staff.value) : null,
+    items,
+  };
+}
+
+async function saveOpzFactEditor() {
+  if (opzFactSaving || !opzFactRows.length) return;
+  opzFactSaving = true;
+  updateFloatingEditorSave();
+  clearError();
+  els.opzFactSave.disabled = true;
+  els.opzFactSave.textContent = t('common.saving');
+  setApiState(t('dash.apiSaving'), 'warn');
+
+  try {
+    const payload = await postJson('/dashboard/plan/opz_fact', opzFactPayload());
+    renderOpzFactEditor(payload.data);
+    setApiState(t('dash.apiConnected'), 'ok');
+  } catch (error) {
+    showError(error.message, { apiStatus: error.apiStatus, retry: () => saveOpzFactEditor() });
+  } finally {
+    opzFactSaving = false;
+    els.opzFactSave.textContent = t('dash.saveFact');
+    setOpzFactDirty(opzFactDirty);
+  }
+}
+
 function renderBundle(bundle) {
   const {
     summary,
@@ -2592,7 +2848,9 @@ async function loadStaff(filter, { force = false } = {}) {
     });
     if (!request.isCurrent()) return 'superseded';
     const staffOptions = payload.data || [];
-    const defaultLabel = filter === filterEls.reviewFacts ? t('dash.allStaff') : t('dash.allWorkers');
+    const defaultLabel = filter === filterEls.reviewFacts || filter === filterEls.opzFacts
+      ? t('dash.allStaff')
+      : t('dash.allWorkers');
     filter.staff.innerHTML = `<option value="">${defaultLabel}</option>`;
     staffOptions.forEach((staff) => {
       const option = document.createElement('option');
@@ -2628,6 +2886,7 @@ async function refreshStaffForBranch(filter, loadView) {
 function filterForView(view) {
   if (view === 'plan') return filterEls.plan;
   if (view === 'reviewFacts') return filterEls.reviewFacts;
+  if (view === 'opzFacts') return filterEls.opzFacts;
   return filterEls.overview;
 }
 
@@ -2672,6 +2931,7 @@ function viewFromLocation() {
   else if (window.location.hash === '#plan-settings') view = 'planSettings';
   else if (window.location.hash === '#services') view = 'serviceManagement';
   else if (window.location.hash === '#review-facts') view = 'reviewFacts';
+  else if (window.location.hash === '#opz-facts') view = 'opzFacts';
   return accessibleView(view);
 }
 
@@ -2688,6 +2948,7 @@ function setActiveView(view) {
   els.planSettingsView.classList.toggle('active', view === 'planSettings');
   els.serviceManagementView.classList.toggle('active', view === 'serviceManagement');
   els.reviewFactsView.classList.toggle('active', view === 'reviewFacts');
+  els.opzFactsView.classList.toggle('active', view === 'opzFacts');
   els.reportsView.classList.toggle('active', view === 'reports');
   els.viewLinks.forEach((link) => {
     link.classList.toggle('active', link.dataset.viewLink === view);
@@ -2699,6 +2960,7 @@ function setActiveView(view) {
     planSettings: t('dash.planSettingsSubhead'),
     serviceManagement: t('dash.serviceManagementSubhead'),
     reviewFacts: t('dash.reviewFactsSubhead'),
+    opzFacts: t('dash.opzFactsSubhead'),
     reports: t('dash.reportsSubhead'),
   };
   els.periodLabel.textContent = labels[view] || labels.overview;
@@ -2799,6 +3061,8 @@ async function loadCurrentView() {
     await loadServiceManagement();
   } else if (activeView === 'reviewFacts') {
     await loadReviewFacts();
+  } else if (activeView === 'opzFacts') {
+    await loadOpzFacts();
   } else if (activeView === 'reports') {
     await reportsController?.loadFromLocation();
   } else {
@@ -2981,7 +3245,7 @@ async function init() {
     afterChange: () => window.location.reload(),
   });
   [filterEls.overview, filterEls.plan].forEach((filter) => defaultDates(filter));
-  setReviewFactDefaultMonth();
+  setManualFactDefaultMonths();
   els.overviewPresetButtons.forEach((button) => {
     button.classList.toggle('active', button.dataset.overviewPreset === 'month');
   });
@@ -3090,8 +3354,41 @@ els.reviewFactSave.addEventListener('click', () => saveReviewFactEditor());
 els.floatingEditorSaveButton.addEventListener('click', () => {
   if (activeView === 'planSettings') savePlanSettings();
   if (activeView === 'reviewFacts') saveReviewFactEditor();
+  if (activeView === 'opzFacts') saveOpzFactEditor();
 });
 els.reviewFactEditor.addEventListener('input', () => updateReviewFactDirtyFromForm());
+filterEls.opzFacts.load.addEventListener('click', () => protectedChangesGuard.run(() => loadOpzFacts()));
+filterEls.opzFacts.month.addEventListener('change', async () => {
+  const requestedMonth = filterEls.opzFacts.month.value;
+  const changed = await protectedChangesGuard.run(async () => {
+    filterEls.opzFacts.month.value = requestedMonth;
+    await loadOpzFacts();
+  });
+  if (!changed) restoreOpzFactFilters();
+});
+filterEls.opzFacts.branch.addEventListener('change', async () => {
+  const requestedBranch = filterEls.opzFacts.branch.value;
+  const changed = await protectedChangesGuard.run(async () => {
+    filterEls.opzFacts.branch.value = requestedBranch;
+    customFilterDropdowns[filterEls.opzFacts.branch.id]?.refresh();
+    await refreshStaffForBranch(filterEls.opzFacts, loadOpzFacts);
+  });
+  if (!changed) restoreOpzFactFilters();
+});
+filterEls.opzFacts.staff.addEventListener('change', async () => {
+  const requestedStaff = filterEls.opzFacts.staff.value;
+  const changed = await protectedChangesGuard.run(async () => {
+    filterEls.opzFacts.staff.value = requestedStaff;
+    customFilterDropdowns[filterEls.opzFacts.staff.id]?.refresh();
+    await loadOpzFacts();
+  });
+  if (!changed) restoreOpzFactFilters();
+});
+els.opzFactSave.addEventListener('click', () => saveOpzFactEditor());
+els.opzFactEditor.addEventListener('input', () => {
+  refreshOpzFactTotals();
+  updateOpzFactDirtyFromForm();
+});
 els.planSettingsLoad.addEventListener('click', () => reloadPlanSettingsMonth());
 els.planSettingsMonth.addEventListener('change', () => reloadPlanSettingsMonth());
 els.planSettingsCopy.addEventListener('click', () => copyPreviousPlanSettings());
@@ -3297,6 +3594,8 @@ window.addEventListener('beforeunload', (event) => {
     && !planSettingsSaving
     && !reviewFactDirty
     && !reviewFactSaving
+    && !opzFactDirty
+    && !opzFactSaving
     && !serviceManagementDirty
     && !serviceManagementMutationPending
   ) return;

@@ -568,6 +568,7 @@
     .demo-mode #service-management-reset,
     .demo-mode #service-group-add,
     .demo-mode #review-fact-save,
+    .demo-mode #opz-fact-save,
     .demo-mode #floating-editor-save { display: none !important; }
 
     .card,
@@ -877,21 +878,21 @@
     .metric-status.bad { background: #fee2e2; color: #991b1b; }
     .metric-status.no-plan { background: #f1f5f9; color: #64748b; }
 
-    .review-fact-panel {
+    .manual-fact-panel {
       margin-bottom: 16px;
     }
 
-    .review-fact-scroll table {
+    .manual-fact-scroll table {
       min-width: 520px;
     }
 
-    .review-fact-table input {
+    .manual-fact-table input {
       max-width: 72px;
       margin-left: auto;
       text-align: right;
     }
 
-    .review-fact-actions {
+    .manual-fact-actions {
       display: flex;
       justify-content: flex-end;
       margin-top: 12px;
@@ -1654,6 +1655,7 @@
       <a class="tab" href="#plan-settings" data-view-link="planSettings" data-i18n="dash.tabPlanSettings">Impostazione piani</a>
       <a class="tab" href="#services" data-view-link="serviceManagement" data-i18n="dash.tabServices">Servizi</a>
       <a class="tab" href="#review-facts" data-view-link="reviewFacts" data-i18n="dash.tabReviewFacts">Consuntivo recensioni</a>
+      <a class="tab" href="#opz-facts" data-view-link="opzFacts" data-i18n="dash.tabOpzFacts">OPZ aggiuntivi</a>
       <a class="tab" href="/reports" data-view-link="reports" data-i18n="dash.tabReports">Report</a>
     </nav>
 
@@ -1892,7 +1894,7 @@
         <div id="plan-settings-branches"></div>
       </div>
 
-      <div class="panel wide review-fact-panel">
+      <div class="panel wide manual-fact-panel">
         <div class="panel-title">
           <h2 data-i18n="dash.staffPlans">Piani dei dipendenti</h2>
           <span class="meta" id="plan-settings-staff-meta"></span>
@@ -1900,6 +1902,7 @@
         <div id="plan-settings-staff"></div>
         <div class="plan-settings-actions">
           <a class="tab" href="#review-facts" data-view-link="reviewFacts" data-i18n="dash.tabReviewFacts">Consuntivo recensioni</a>
+          <a class="tab" href="#opz-facts" data-view-link="opzFacts" data-i18n="dash.tabOpzFacts">OPZ aggiuntivi</a>
           <button type="button" id="plan-settings-save" data-i18n="dash.save">Salva</button>
         </div>
       </div>
@@ -1994,15 +1997,49 @@
         <button type="button" id="review-fact-load" data-i18n="dash.refresh">Aggiorna</button>
       </section>
 
-      <div class="panel wide review-fact-panel">
+      <div class="panel wide manual-fact-panel">
         <div class="panel-title">
           <h2 data-i18n="dash.reviewFacts">Consuntivo recensioni</h2>
           <span class="meta" id="review-fact-meta"></span>
         </div>
         <p class="meta" data-i18n="dash.reviewFactMonthHint">Il valore vale per tutto il mese.</p>
         <div id="review-fact-editor"></div>
-        <div class="review-fact-actions">
+        <div class="manual-fact-actions">
           <button type="button" id="review-fact-save" data-i18n="dash.saveFact">Salva consuntivo</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="opz-facts-view" data-view="opzFacts">
+      <section class="toolbar" data-i18n-attr="aria-label:dash.ariaOpzFilters" aria-label="Filtri OPZ aggiuntivi">
+        <label>
+          <span data-i18n="dash.month">Mese</span>
+          <input type="month" id="opz-fact-month" />
+        </label>
+        <label>
+          <span data-i18n="dash.branch">Filiale</span>
+          <select id="opz-fact-branch">
+            <option value="" data-i18n="dash.allBranches">Tutte le filiali</option>
+          </select>
+        </label>
+        <label>
+          <span data-i18n="dash.staff">Dipendente</span>
+          <select id="opz-fact-staff">
+            <option value="" data-i18n="dash.allStaff">Tutti i dipendenti</option>
+          </select>
+        </label>
+        <button type="button" id="opz-fact-load" data-i18n="dash.refresh">Aggiorna</button>
+      </section>
+
+      <div class="panel wide manual-fact-panel">
+        <div class="panel-title">
+          <h2 data-i18n="dash.opzFacts">OPZ aggiuntivi</h2>
+          <span class="meta" id="opz-fact-meta"></span>
+        </div>
+        <p class="meta" data-i18n="dash.opzFactMonthHint">Il valore vale per tutto il mese.</p>
+        <div id="opz-fact-editor"></div>
+        <div class="manual-fact-actions">
+          <button type="button" id="opz-fact-save" data-i18n="dash.saveFact">Salva consuntivo</button>
         </div>
       </div>
     </section>

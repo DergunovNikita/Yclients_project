@@ -34,6 +34,8 @@ export function editorSaveDockState({
   planSettingsSaving,
   reviewFactDirty,
   reviewFactSaving,
+  opzFactDirty,
+  opzFactSaving,
   isDemo = false,
 }) {
   const editors = {
@@ -44,6 +46,10 @@ export function editorSaveDockState({
     reviewFacts: {
       dirty: reviewFactDirty,
       saving: reviewFactSaving,
+    },
+    opzFacts: {
+      dirty: opzFactDirty,
+      saving: opzFactSaving,
     },
   };
   const editor = editors[activeView];

@@ -356,6 +356,7 @@ async def root():
             "/dashboard/bundle": "Сводка дашборда за период (JSON)",
             "/dashboard/widget/plan_fact": "План/факт по филиалам за период",
             "/dashboard/plan/reviews_fact": "Ручной факт по отзывам администраторов",
+            "/dashboard/plan/opz_fact": "Дополнительные ОПЗ администраторов",
             "/dashboard/widget/sync_status": "Статус синка для UI",
         },
     }

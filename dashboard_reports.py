@@ -6,7 +6,7 @@ import traceback
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from plan_config import normalize_staff_category
 
+import dashboard_service
 from dashboard_service import (
     COMPLETED_ATTENDANCE,
     GOODS_SALE_TYPE_ID,
@@ -62,7 +63,9 @@ DECIMAL_FORMAT = 'decimal'
 
 
 def _report_now() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
+    # Reports read the same clock as the rest of the dashboard, through the module so that
+    # freezing `dashboard_service.factual_now` reaches reports too.
+    return dashboard_service.factual_now()
 
 
 YOY_ANNUAL_SOURCES = (

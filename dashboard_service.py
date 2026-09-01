@@ -56,6 +56,7 @@ from models import (
     Transaction,
 )
 from plan_config import (
+    OPZ_QTY_CODE,
     PLAN_FACT_METRICS,
     RAW_PLAN_FACT_CODES,
     REVIEWS_QTY_CODE,
@@ -659,7 +660,8 @@ async def fetch_reporting_start_dates(
     }
 
 
-def _factual_now() -> datetime:
+def factual_now() -> datetime:
+    """Wall clock every dashboard surface treats as 'now'."""
     return datetime.now(UTC).replace(tzinfo=None)
 
 
@@ -1692,7 +1694,7 @@ async def fetch_summary(
     include_appointments_breakdown: bool = True,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    factual_at = factual_at or _factual_now()
+    factual_at = factual_at or factual_now()
     current_dr = DateRange(start=start, end=end)
     prev_dr = current_dr.previous_period()
     appointment_company_ids = await _appointment_company_ids(
@@ -1788,6 +1790,13 @@ async def fetch_summary(
         staff_id,
         company_ids=appointment_company_ids,
         factual_at=factual_at,
+    ) + await _manual_opz_scope_total(
+        db,
+        start,
+        end,
+        appointment_company_ids,
+        staff_id,
+        factual_at,
     )
     prev_opz_qty = await _opz_count_scope(
         db,
@@ -1797,6 +1806,14 @@ async def fetch_summary(
         staff_id,
         company_ids=appointment_company_ids,
         factual_at=factual_at,
+    ) + (
+        0.0
+        if staff_id is not None
+        else await _manual_opz_months_total(
+            db,
+            appointment_company_ids,
+            _previous_period_countable_months(start, end, factual_at),
+        )
     )
     cur_average_check = await _average_check_block(
         db,
@@ -2475,7 +2492,7 @@ async def fetch_revenue_daily(
     include_opz: bool = True,
     factual_at: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
-    factual_at = factual_at or _factual_now()
+    factual_at = factual_at or factual_now()
     effective_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
@@ -3211,7 +3228,7 @@ async def fetch_top_services(
     *,
     use_administrator_schedule: bool = False,
 ) -> list[dict[str, Any]]:
-    factual_at = factual_at or _factual_now()
+    factual_at = factual_at or factual_now()
     allowed_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
@@ -3364,7 +3381,7 @@ async def fetch_paid_goods_rows(
     factual_at: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
     """Paid goods operations using the Overview/plan-fact revenue formula."""
-    factual_at = factual_at or _factual_now()
+    factual_at = factual_at or factual_now()
     attributed_staff_id = _financial_attributed_staff_id()
     good_id = func.coalesce(GoodTransaction.good_id, FinancialTransaction.sold_item_id)
     stmt = (
@@ -3438,7 +3455,7 @@ async def fetch_extra_services(
     *,
     use_administrator_schedule: bool = False,
 ) -> list[dict[str, Any]]:
-    factual_at = factual_at or _factual_now()
+    factual_at = factual_at or factual_now()
     allowed_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
@@ -3946,6 +3963,15 @@ async def fetch_opz_year_facts(
                 if latest_date is not None
                 else event.event_date
             )
+    # Any staff-level filter counts events by one attribution — the barber of the visit for
+    # `staff_id`, the creator for `created_user_id` — and a top-up owned by an administrator
+    # would reconcile with neither. The branch and network scopes carry it.
+    if staff_id is None and created_user_id is None:
+        # `latest_date` bounds the whole year-over-year report, not just OPZ, so a manual
+        # month must not move it: the top-up would drag every other metric's window with it.
+        manual_months = await _manual_opz_by_month(db, start, end, company_ids, factual_at)
+        for month_start, manual_value in manual_months.items():
+            counts[month_start.year] += manual_value
     return {
         'counts': dict(counts),
         'latest_date': latest_date,
@@ -4209,6 +4235,15 @@ async def _administrator_role_periods_by_company(
     end: date,
     company_ids: list[int],
 ) -> dict[int, dict[int, list[tuple[date, date]]]]:
+    # One request asks for the same window several times (overview, branch fact, network
+    # fact), and every miss costs two queries per branch. Safe while nothing writes the
+    # tables the roles come from (`PlanMetric`, `PlanStaffInput`, `Staff`) and then re-reads
+    # roles in the same session — a save that starts doing so must drop this entry.
+    cache: dict[Any, Any] = db.info.setdefault('administrator_role_periods', {})
+    cache_key = (start, end, tuple(sorted(int(company_id) for company_id in company_ids)))
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
     plan_start, plan_end = _month_window(start, end)
     staff_rows = (
         await db.execute(
@@ -4246,6 +4281,7 @@ async def _administrator_role_periods_by_company(
             for staff_id, (admin_periods, _) in role_periods.items()
             if admin_periods
         }
+    cache[cache_key] = result
     return result
 
 
@@ -4422,7 +4458,7 @@ async def _administrator_service_scope(
     if staff_id is None:
         return AdministratorServiceScope(is_administrator=False)
 
-    factual_at = factual_at or _factual_now()
+    factual_at = factual_at or factual_now()
     cache: dict[tuple[Any, ...], AdministratorServiceScope] = db.info.setdefault(
         'administrator_service_scopes',
         {},
@@ -4632,7 +4668,7 @@ async def _staff_schedule_coverage_info(
     company_id: int,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    factual_at = factual_at or _factual_now()
+    factual_at = factual_at or factual_now()
     reporting_start, state = (
         await db.execute(
             select(Company.reporting_start_date, SyncSourceState)
@@ -5055,7 +5091,7 @@ async def _fact_metric_components(
     opz_override: Optional[float] = None,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, float]:
-    factual_at = factual_at or _factual_now()
+    factual_at = factual_at or factual_now()
     average_check = await _average_check_block(
         db,
         DateRange(start, end),
@@ -5118,11 +5154,12 @@ async def _staff_fact_components_by_branch(
     admin_opz_by_staff: dict[int, int],
     admin_extra_metrics_by_staff: dict[int, dict[str, float]],
     review_facts_by_staff: dict[int, float],
+    manual_opz_by_staff: dict[int, float],
     opz_events: list[OpzEvent],
     factual_at: Optional[datetime] = None,
 ) -> dict[int, dict[str, float]]:
     """Calculate staff facts with a bounded set of branch-level aggregate queries."""
-    factual_at = factual_at or _factual_now()
+    factual_at = factual_at or factual_now()
     if not staff_ids:
         return {}
 
@@ -5318,7 +5355,10 @@ async def _staff_fact_components_by_branch(
                 'revenue': revenue,
                 'clients': float(admin_clients_by_staff.get(staff_id, 0)),
                 'avg_check_denominator': denominator,
-                'opz_qty': float(admin_opz_by_staff.get(staff_id, 0)),
+                'opz_qty': (
+                    float(admin_opz_by_staff.get(staff_id, 0))
+                    + float(manual_opz_by_staff.get(staff_id, 0.0))
+                ),
                 REVIEWS_QTY_CODE: float(review_facts_by_staff.get(staff_id, 0.0)),
             }
             values.update(admin_extra_metrics_by_staff.get(staff_id, {}))
@@ -5443,17 +5483,51 @@ async def _plan_metric_components_by_staff(
     }, categories
 
 
-async def _manual_review_fact_values(
+def _countable_manual_months(
+    start: date,
+    end: date,
+    factual_at: Optional[datetime] = None,
+) -> set[date]:
+    """Months whose manual value the period is allowed to count, keyed by their 1st day.
+
+    A monthly value cannot be split, so it counts only where a whole month is the honest
+    answer: the period covers the month, or it reaches today while starting no later than
+    the 1st of that month — the month-to-date view the dashboard opens with, where a monthly
+    plan meets an unfinished month. A past week would otherwise import a whole month of
+    top-ups into seven days; early in a month, month-to-date is genuinely a few days long.
+    """
+    today = (factual_at or factual_now()).date()
+    countable: set[date] = set()
+    for month_start, month_end in _month_slices(
+        date(start.year, start.month, 1),
+        date(end.year, end.month, monthrange(end.year, end.month)[1]),
+    ):
+        covers_month = start <= month_start and end >= month_end
+        month_to_date = (
+            start <= month_start
+            and month_start <= today <= month_end
+            and end >= today
+        )
+        if covers_month or month_to_date:
+            countable.add(month_start)
+    return countable
+
+
+async def _manual_fact_values(
     db: AsyncSession,
     start: date,
     end: date,
     staff_ids_by_company: dict[int, list[int]],
+    metric_code: str,
+    countable_months: Optional[set[date]] = None,
 ) -> dict[tuple[int, int], float]:
-    """Manual review facts of every calendar month the period touches.
+    """Manual facts of the months the period touches.
 
-    Reviews are entered per month, so a month is taken as a whole as soon as the period
-    overlaps it: the plan for reviews is monthly too (`_resolve_plan_period`), and a
-    month-to-date dashboard must not show a zero fact against a full-month plan.
+    Which months those are depends on the metric. Without `countable_months` every month
+    the period overlaps counts whole — that is `reviews_qty`, where a monthly plan must not
+    stand against a zero fact in a month-to-date view. `opz_qty` passes an explicit set
+    instead (`_countable_manual_months`), because it is added to a calculated fact that is
+    itself limited to the period.
     """
     pairs = [
         (company_id, staff_id)
@@ -5461,6 +5535,8 @@ async def _manual_review_fact_values(
         for staff_id in staff_ids
     ]
     if not pairs:
+        return {}
+    if countable_months is not None and not countable_months:
         return {}
     window_start, window_end = _month_window(start, end)
     stmt = (
@@ -5473,11 +5549,13 @@ async def _manual_review_fact_values(
             ManualFactMetric.period_start >= window_start,
             ManualFactMetric.period_end <= window_end,
             tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(pairs),
-            ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
+            ManualFactMetric.metric_code == metric_code,
             reporting_start_clause(ManualFactMetric.company_id, ManualFactMetric.period_end),
         )
         .group_by(ManualFactMetric.company_id, ManualFactMetric.staff_id)
     )
+    if countable_months is not None:
+        stmt = stmt.where(ManualFactMetric.period_start.in_(sorted(countable_months)))
     rows = (await db.execute(stmt)).all()
     return {
         (int(row.company_id), int(row.staff_id)): float(row.value or 0.0)
@@ -5485,44 +5563,40 @@ async def _manual_review_fact_values(
     }
 
 
-async def _manual_review_fact_values_by_staff(
+async def _manual_fact_values_by_staff(
     db: AsyncSession,
     start: date,
     end: date,
     company_id: int,
     staff_ids: list[int],
+    metric_code: str,
+    countable_months: Optional[set[date]] = None,
 ) -> dict[int, float]:
-    values = await _manual_review_fact_values(db, start, end, {company_id: staff_ids})
+    values = await _manual_fact_values(
+        db, start, end, {company_id: staff_ids}, metric_code, countable_months
+    )
     return {staff_id: value for (_, staff_id), value in values.items()}
 
 
-async def _manual_review_fact_values_by_company(
-    db: AsyncSession,
-    start: date,
-    end: date,
-    staff_ids_by_company: dict[int, list[int]],
-) -> dict[int, float]:
-    """Branch totals summed over the same administrators the staff rows are built from."""
-    totals: dict[int, float] = {company_id: 0.0 for company_id in staff_ids_by_company}
-    values = await _manual_review_fact_values(db, start, end, staff_ids_by_company)
-    for (company_id, _), value in values.items():
-        totals[company_id] = totals.get(company_id, 0.0) + value
-    return totals
-
-
-async def _manual_review_fact_values_for_role_periods(
+async def _manual_fact_rows_for_role_periods(
     db: AsyncSession,
     role_periods_by_company: dict[int, dict[int, list[tuple[date, date]]]],
-) -> dict[int, float]:
-    """Sum monthly review facts only for months in which the staff role was administrator."""
+    metric_code: str,
+    countable_months: Optional[set[date]] = None,
+) -> list[Any]:
+    """Stored rows of months in which the staff member was an administrator.
+
+    Every surface that shows a manual fact reads it through this filter, so a value left
+    behind by someone who stopped being an administrator cannot count on one screen and
+    be missing on another.
+    """
     pairs = [
         (company_id, staff_id)
         for company_id, staff_periods in role_periods_by_company.items()
         for staff_id in staff_periods
     ]
-    totals = {company_id: 0.0 for company_id in role_periods_by_company}
     if not pairs:
-        return totals
+        return []
     period_start = min(
         start
         for staff_periods in role_periods_by_company.values()
@@ -5547,7 +5621,7 @@ async def _manual_review_fact_values_for_role_periods(
                 ManualFactMetric.period_start <= period_end,
                 ManualFactMetric.period_end >= period_start,
                 tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(pairs),
-                ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
+                ManualFactMetric.metric_code == metric_code,
                 reporting_start_clause(
                     ManualFactMetric.company_id,
                     ManualFactMetric.period_end,
@@ -5555,19 +5629,219 @@ async def _manual_review_fact_values_for_role_periods(
             )
         )
     ).all()
-    for row in rows:
-        role_periods = role_periods_by_company.get(int(row.company_id), {}).get(
-            int(row.staff_id),
-            [],
+    return [
+        row for row in rows
+        if (countable_months is None or _coerce_date(row.period_start) in countable_months)
+        and any(
+            role_start <= row.period_end and role_end >= row.period_start
+            for role_start, role_end in role_periods_by_company
+            .get(int(row.company_id), {})
+            .get(int(row.staff_id), [])
         )
-        if any(
-            period_start <= row.period_end and period_end >= row.period_start
-            for period_start, period_end in role_periods
-        ):
-            totals[int(row.company_id)] = totals.get(int(row.company_id), 0.0) + float(
-                row.value or 0.0
-            )
+    ]
+
+
+async def _manual_fact_values_for_role_periods(
+    db: AsyncSession,
+    role_periods_by_company: dict[int, dict[int, list[tuple[date, date]]]],
+    metric_code: str,
+    countable_months: Optional[set[date]] = None,
+) -> dict[int, float]:
+    """Sum monthly manual facts per branch over the administrator months only."""
+    totals = {company_id: 0.0 for company_id in role_periods_by_company}
+    for row in await _manual_fact_rows_for_role_periods(
+        db, role_periods_by_company, metric_code, countable_months
+    ):
+        totals[int(row.company_id)] = totals.get(int(row.company_id), 0.0) + float(row.value or 0.0)
     return totals
+
+
+async def _manual_opz_scope_keys(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_ids: list[int],
+    countable_months: Optional[set[date]] = None,
+) -> list[tuple[int, int]]:
+    """(branch, staff) pairs that carry a stored top-up in the months the period touches.
+
+    Resolving administrator role periods costs queries per branch, so the dashboard first
+    asks who has anything at all — an empty top-up then stays a single query, and a filled
+    one only resolves the branches that actually hold a value.
+    """
+    if not company_ids:
+        return []
+    window_start, window_end = _month_window(start, end)
+    filters = [
+        ManualFactMetric.period_start <= window_end,
+        ManualFactMetric.period_end >= window_start,
+        ManualFactMetric.company_id.in_(company_ids),
+        ManualFactMetric.metric_code == OPZ_QTY_CODE,
+        # A stored zero adds nothing, and the editor keeps writing them: counting it as a
+        # value would make every branch resolve role periods to add 0.0.
+        ManualFactMetric.value != 0,
+    ]
+    if countable_months is not None:
+        if not countable_months:
+            return []
+        filters.append(ManualFactMetric.period_start.in_(sorted(countable_months)))
+    rows = (
+        await db.execute(
+            select(ManualFactMetric.company_id, ManualFactMetric.staff_id)
+            .where(*filters)
+            .distinct()
+        )
+    ).all()
+    return [(int(row.company_id), int(row.staff_id)) for row in rows]
+
+
+async def _administrator_role_periods_for_keys(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    keys: list[tuple[int, int]],
+) -> dict[int, dict[int, list[tuple[date, date]]]]:
+    """Administrator months of exactly the (branch, staff) pairs that hold a stored value."""
+    selected_by_company: dict[int, set[int]] = {}
+    for company_id, staff_id in keys:
+        selected_by_company.setdefault(int(company_id), set()).add(int(staff_id))
+    role_periods = await _administrator_role_periods_by_company(
+        db, start, end, sorted(selected_by_company)
+    )
+    return {
+        company_id: {
+            sid: periods
+            for sid, periods in staff_periods.items()
+            if sid in selected_by_company.get(company_id, set())
+        }
+        for company_id, staff_periods in role_periods.items()
+    }
+
+
+def _shift_month_start(month_start: date, months_back: int) -> date:
+    shifted = month_start
+    for _ in range(months_back):
+        shifted = (shifted - timedelta(days=1)).replace(day=1)
+    return shifted
+
+
+def _previous_period_countable_months(
+    start: date,
+    end: date,
+    factual_at: Optional[datetime] = None,
+) -> set[date]:
+    """Months the previous window weighs against the current one.
+
+    The same number of months, immediately before the current ones. `previous_period()`
+    steps back by days, so its own window rarely lines up with calendar months — February
+    would land on a window starting on the 2nd and count nothing, and a quarter-to-date
+    would be compared against one month fewer than it holds. Comparing an equal count of
+    months keeps the delta about the months, not about where the window happens to cut.
+    """
+    current = _countable_manual_months(start, end, factual_at)
+    if not current:
+        return set()
+    return {_shift_month_start(month_start, len(current)) for month_start in current}
+
+
+async def _manual_opz_by_month(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_ids: list[int],
+    factual_at: Optional[datetime] = None,
+) -> dict[date, float]:
+    """Manual OPZ of the countable months, keyed by the 1st day of each month."""
+    if not company_ids:
+        return {}
+    countable_months = _countable_manual_months(start, end, factual_at)
+    if not countable_months:
+        return {}
+    keys = await _manual_opz_scope_keys(db, start, end, company_ids, countable_months)
+    if not keys:
+        return {}
+    role_periods = await _administrator_role_periods_for_keys(db, start, end, keys)
+    totals: dict[date, float] = {}
+    for row in await _manual_fact_rows_for_role_periods(
+        db, role_periods, OPZ_QTY_CODE, countable_months
+    ):
+        month_start = _coerce_date(row.period_start)
+        totals[month_start] = totals.get(month_start, 0.0) + float(row.value or 0.0)
+    return totals
+
+
+async def _manual_opz_months_total(
+    db: AsyncSession,
+    company_ids: list[int],
+    countable_months: set[date],
+    role_window: Optional[tuple[date, date]] = None,
+) -> float:
+    """Manual OPZ of the given calendar months across the scope.
+
+    `role_window` is the period the administrator roles are resolved over. Plan/fact uses
+    the selected period, so the overview passes it too — the staff set depends on the
+    window, and two windows would let the same month admit different administrators on the
+    two screens. Months outside any period (the baseline of a previous period) fall back to
+    their own span.
+    """
+    if not company_ids or not countable_months:
+        return 0.0
+    window_start = min(countable_months)
+    last_month = max(countable_months)
+    window_end = date(
+        last_month.year, last_month.month, monthrange(last_month.year, last_month.month)[1]
+    )
+    keys = await _manual_opz_scope_keys(
+        db, window_start, window_end, company_ids, countable_months
+    )
+    if not keys:
+        return 0.0
+    role_start, role_end = role_window or (window_start, window_end)
+    totals = await _manual_fact_values_for_role_periods(
+        db,
+        await _administrator_role_periods_for_keys(db, role_start, role_end, keys),
+        OPZ_QTY_CODE,
+        countable_months,
+    )
+    return float(sum(totals.values()))
+
+
+async def _manual_opz_scope_total(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_ids: list[int],
+    staff_id: Optional[int] = None,
+    factual_at: Optional[datetime] = None,
+) -> float:
+    """Manual OPZ of a selected period, counted the way Plan/fact counts it for a branch.
+
+    A staff filter is left out on purpose: the calculated half of a filtered overview is
+    attributed to the barber of the visit, so adding the administrator's top-up would
+    produce a number that reconciles with neither their Plan/fact row nor the branch.
+    """
+    if staff_id is not None:
+        return 0.0
+    return await _manual_opz_months_total(
+        db,
+        company_ids,
+        _countable_manual_months(start, end, factual_at),
+        role_window=(start, end),
+    )
+
+
+def _apply_manual_opz(fact: dict[str, float], manual_value: float) -> None:
+    """Add the manual OPZ top-up to a fact block and re-derive its percentage.
+
+    `_fact_metric_components()` derives `opz_pct` before the manual part is known, so the
+    percentage has to follow the summed numerator — otherwise the branch shows a grown
+    quantity next to the old share.
+    """
+    if not manual_value:
+        return
+    fact['opz_qty'] = float(fact.get('opz_qty') or 0.0) + float(manual_value)
+    clients = float(fact.get('clients') or 0.0)
+    fact['opz_pct'] = 100.0 * fact['opz_qty'] / clients if clients else 0.0
 
 
 async def _resolve_plan_period(
@@ -6081,8 +6355,10 @@ async def _admin_staff_ids_by_company(
 ) -> dict[int, list[int]]:
     """Administrators as Plan/fact sees them — the plan category wins over the position.
 
-    Manual review facts are entered, summed per branch and shown per staff member through
-    this one set, so the branch total always equals the sum of its staff rows.
+    This set drives the manual-fact editors and validates what they write. The reported
+    numbers go through the monthly roles instead (`_administrator_role_periods_by_company`),
+    which is what keeps a value out of the reports once its owner stops being an
+    administrator; while plans are monthly the two agree.
     """
     if not company_ids:
         return {}
@@ -6210,23 +6486,19 @@ async def _fetch_company_staff(
     ]
 
 
-async def _staff_plan_groups_for_branch(
+async def _branch_staff_role_context(
     db: AsyncSession,
     start: date,
     end: date,
     plan_start: date,
     plan_end: date,
     branch_id: int,
-    staff_id: Optional[int] = None,
-    include_all_staff: bool = False,
-    company_title: str | None = None,
-    opz_events: list[OpzEvent] | None = None,
-    factual_at: Optional[datetime] = None,
-) -> list[dict[str, Any]]:
-    factual_at = factual_at or _factual_now()
-    # Categories, attribution and facts are calculated for the whole branch, and only
-    # the rendered rows are filtered afterwards. Narrowing the staff scope earlier
-    # assigns every unclaimed event to the remaining administrators and changes facts.
+) -> tuple[list[Any], dict[int, dict[str, float]], dict[int, str], dict[int, Any]]:
+    """Staff, plan categories and monthly role periods of one branch.
+
+    Plan/fact rows and the additional-OPZ editor must spread the same events over the
+    same people, so both read the branch staff through this one helper.
+    """
     staff_rows = await _fetch_company_staff(
         db,
         branch_id,
@@ -6254,15 +6526,6 @@ async def _staff_plan_groups_for_branch(
         for staff in staff_rows
         if not staff.fired or categories_by_staff_id[int(staff.id)] == 'administrator'
     ]
-    staff_ids = [int(row.id) for row in staff_rows]
-
-    user_id_by_staff: dict[int, Optional[int]] = {
-        int(staff.id): getattr(staff, 'user_id', None) for staff in staff_rows
-    }
-    if opz_events is None:
-        opz_events = await _opz_events(
-            db, start, end, branch_id, factual_at=factual_at
-        )
     role_periods_by_staff = await _staff_role_periods_by_staff(
         db,
         start,
@@ -6273,6 +6536,101 @@ async def _staff_plan_groups_for_branch(
             for staff in staff_rows
         },
     )
+    return staff_rows, plans_by_staff, categories_by_staff_id, role_periods_by_staff
+
+
+async def _admin_opz_by_staff_for_period(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    plan_start: date,
+    plan_end: date,
+    branch_id: int,
+    factual_at: Optional[datetime] = None,
+) -> dict[int, float]:
+    """Calculated OPZ per administrator, exactly as the Plan/fact staff rows count it.
+
+    The barber filter and the role segments are part of the result: an event anchored on
+    a barber the branch no longer lists never reaches an administrator row, so a column
+    that skipped them would offer a larger baseline than the fact it is added to.
+    """
+    factual_at = factual_at or factual_now()
+    staff_rows, _, _, role_periods_by_staff = await _branch_staff_role_context(
+        db, start, end, plan_start, plan_end, branch_id
+    )
+    staff_ids = [int(row.id) for row in staff_rows]
+    if not staff_ids:
+        return {}
+    user_id_by_staff: dict[int, Optional[int]] = {
+        int(staff.id): getattr(staff, 'user_id', None) for staff in staff_rows
+    }
+    opz_events = await _opz_events(db, start, end, branch_id, factual_at=factual_at)
+    totals: dict[int, float] = {}
+    for segment_start, segment_end, segment_categories in _staff_role_segments(
+        start,
+        end,
+        role_periods_by_staff,
+    ):
+        admin_staff_ids = [
+            sid for sid in staff_ids if segment_categories.get(sid) == 'administrator'
+        ]
+        if not admin_staff_ids:
+            continue
+        barber_staff_ids = [
+            sid for sid in staff_ids if segment_categories.get(sid) == 'barber'
+        ]
+        segment_events = [
+            event for event in opz_events
+            if segment_start <= event.event_date <= segment_end
+        ]
+        counts = await _admin_opz_by_created_appointments(
+            db,
+            segment_start,
+            segment_end,
+            branch_id,
+            admin_staff_ids,
+            user_id_by_staff,
+            barber_staff_ids or None,
+            opz_events=segment_events,
+            factual_at=factual_at,
+        )
+        for sid, value in counts.items():
+            totals[sid] = totals.get(sid, 0.0) + float(value)
+    return totals
+
+
+async def _staff_plan_groups_for_branch(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    plan_start: date,
+    plan_end: date,
+    branch_id: int,
+    staff_id: Optional[int] = None,
+    include_all_staff: bool = False,
+    company_title: str | None = None,
+    opz_events: list[OpzEvent] | None = None,
+    factual_at: Optional[datetime] = None,
+) -> list[dict[str, Any]]:
+    factual_at = factual_at or factual_now()
+    # Categories, attribution and facts are calculated for the whole branch, and only
+    # the rendered rows are filtered afterwards. Narrowing the staff scope earlier
+    # assigns every unclaimed event to the remaining administrators and changes facts.
+    staff_rows, plans_by_staff, categories_by_staff_id, role_periods_by_staff = (
+        await _branch_staff_role_context(db, start, end, plan_start, plan_end, branch_id)
+    )
+    staff_ids = [int(row.id) for row in staff_rows]
+
+    user_id_by_staff: dict[int, Optional[int]] = {
+        int(staff.id): getattr(staff, 'user_id', None) for staff in staff_rows
+    }
+    if opz_events is None:
+        opz_events = await _opz_events(
+            db, start, end, branch_id, factual_at=factual_at
+        )
+    # The month set is decided once for the whole period: a role segment is a slice of it,
+    # and deciding per slice would let a partial period claim a whole month after all.
+    countable_manual_months = _countable_manual_months(start, end, factual_at)
     fact_components_by_staff: dict[int, list[dict[str, float]]] = {
         sid: [] for sid in staff_ids
     }
@@ -6340,12 +6698,22 @@ async def _staff_plan_groups_for_branch(
             if schedule_coverage['ready']
             else {}
         )
-        admin_review_facts_by_staff = await _manual_review_fact_values_by_staff(
+        admin_review_facts_by_staff = await _manual_fact_values_by_staff(
             db,
             segment_start,
             segment_end,
             branch_id,
             admin_staff_ids,
+            REVIEWS_QTY_CODE,
+        )
+        admin_manual_opz_by_staff = await _manual_fact_values_by_staff(
+            db,
+            segment_start,
+            segment_end,
+            branch_id,
+            admin_staff_ids,
+            OPZ_QTY_CODE,
+            countable_manual_months,
         )
         segment_facts = await _staff_fact_components_by_branch(
             db,
@@ -6358,6 +6726,7 @@ async def _staff_plan_groups_for_branch(
             admin_opz_by_staff,
             admin_extra_metrics_by_staff,
             admin_review_facts_by_staff,
+            admin_manual_opz_by_staff,
             segment_opz_events,
             factual_at,
         )
@@ -6910,6 +7279,8 @@ async def save_plan_settings(
     replace_existing_plan: bool = False,
 ) -> dict[str, Any]:
     period_start, period_end, normalized_branches, normalized_staff = _normalize_plan_settings_payload(month, branches, staff)
+    # Staff categories come from the plan, so anything cached from before this write is stale.
+    db.info.pop('administrator_role_periods', None)
     branch_ids = sorted({int(row['company_id']) for row in normalized_branches})
     if not branch_ids:
         raise ValueError('at least one branch setting is required')
@@ -7203,11 +7574,12 @@ async def save_plan_settings(
     )
 
 
-async def _stored_manual_review_facts(
+async def _stored_manual_facts(
     db: AsyncSession,
     month_start: date,
     month_end: date,
     company_ids: list[int],
+    metric_code: str,
 ) -> dict[tuple[int, int], list[ManualFactMetric]]:
     """Stored rows of one month, without the reporting-start cut.
 
@@ -7222,7 +7594,7 @@ async def _stored_manual_review_facts(
                 ManualFactMetric.period_start >= month_start,
                 ManualFactMetric.period_end <= month_end,
                 ManualFactMetric.company_id.in_(company_ids),
-                ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
+                ManualFactMetric.metric_code == metric_code,
             )
         )
     ).scalars().all()
@@ -7232,9 +7604,10 @@ async def _stored_manual_review_facts(
     return out
 
 
-async def fetch_manual_review_facts(
+async def _fetch_manual_facts(
     db: AsyncSession,
     month: str,
+    metric_code: str,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
@@ -7248,7 +7621,7 @@ async def fetch_manual_review_facts(
     empty_payload = {
         'month': _month_value(month_start),
         'period': {'start': month_start.isoformat(), 'end': month_end.isoformat()},
-        'metric_code': REVIEWS_QTY_CODE,
+        'metric_code': metric_code,
         'total_value': 0.0,
         'rows': [],
     }
@@ -7256,7 +7629,7 @@ async def fetch_manual_review_facts(
         return empty_payload
 
     admin_ids_by_company = await _admin_staff_ids_by_company(db, month_start, month_end, company_ids)
-    stored = await _stored_manual_review_facts(db, month_start, month_end, company_ids)
+    stored = await _stored_manual_facts(db, month_start, month_end, company_ids, metric_code)
     keys = {
         (company, staff)
         for company, staff_ids in admin_ids_by_company.items()
@@ -7305,15 +7678,153 @@ async def fetch_manual_review_facts(
     }
 
 
-async def save_manual_review_facts(
+async def fetch_manual_review_facts(
     db: AsyncSession,
     month: str,
+    company_id: Optional[int] = None,
+    staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
+    force_allowed: bool = False,
+) -> dict[str, Any]:
+    payload = await _fetch_manual_facts(
+        db,
+        month,
+        REVIEWS_QTY_CODE,
+        company_id,
+        staff_id,
+        allowed_company_ids=allowed_company_ids,
+        force_allowed=force_allowed,
+    )
+    return payload
+
+
+async def _admin_opz_current_values(
+    db: AsyncSession,
+    month_start: date,
+    month_end: date,
+    company_ids: list[int],
+) -> dict[tuple[int, int], float]:
+    """Calculated OPZ per administrator, taken from the Plan/fact distribution itself.
+
+    The whole staff set of the branch takes part even when the editor is filtered down to
+    one row: narrowing it earlier would hand the remaining administrators events that are
+    not theirs.
+    """
+    values: dict[tuple[int, int], float] = {}
+    for company_id in company_ids:
+        totals = await _admin_opz_by_staff_for_period(
+            db,
+            month_start,
+            month_end,
+            month_start,
+            month_end,
+            company_id,
+        )
+        for staff_id, value in totals.items():
+            values[(int(company_id), int(staff_id))] = float(value)
+    return values
+
+
+async def _countable_manual_opz_keys(
+    db: AsyncSession,
+    month_start: date,
+    month_end: date,
+    company_ids: list[int],
+) -> set[tuple[int, int]]:
+    """(branch, staff) pairs whose value for this month would reach the reports.
+
+    Answered from the roles and the reporting-start date alone, without looking at what is
+    stored: the editor has to warn before a value is typed, not after it is saved.
+    """
+    if not company_ids:
+        return set()
+    # Same cut as `reporting_start_clause(company_id, period_end)`, in Python: the flag is
+    # answered before a row exists, so there is nothing to filter in SQL.
+    reporting_starts = await fetch_reporting_start_dates(db, company_ids)
+    role_periods = await _administrator_role_periods_by_company(
+        db, month_start, month_end, company_ids
+    )
+    keys: set[tuple[int, int]] = set()
+    for company_id, staff_periods in role_periods.items():
+        reporting_start = reporting_starts.get(int(company_id))
+        if reporting_start is not None and month_end < reporting_start:
+            continue
+        for staff_id, periods in staff_periods.items():
+            if any(
+                period_start <= month_end and period_end >= month_start
+                for period_start, period_end in periods
+            ):
+                keys.add((int(company_id), int(staff_id)))
+    return keys
+
+
+async def fetch_manual_opz_facts(
+    db: AsyncSession,
+    month: str,
+    company_id: Optional[int] = None,
+    staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
+    force_allowed: bool = False,
+) -> dict[str, Any]:
+    """Editor payload for additional OPZ: calculated value, manual top-up and their sum."""
+    payload = await _fetch_manual_facts(
+        db,
+        month,
+        OPZ_QTY_CODE,
+        company_id,
+        staff_id,
+        allowed_company_ids=allowed_company_ids,
+        force_allowed=force_allowed,
+    )
+    month_start, month_end = _plan_month_range(month)
+    company_ids = sorted({int(row['company_id']) for row in payload['rows']})
+    # Only the branches actually rendered: a staff filter or a branch without
+    # administrators must not drag the whole network through the distribution.
+    current_values = await _admin_opz_current_values(
+        db,
+        month_start,
+        month_end,
+        company_ids,
+    )
+    # A value only reaches the reports through the administrator months and the
+    # reporting-start cut. The flag answers "would a value entered here count?", so the
+    # editor can say so before the value is typed, not after it is saved and dropped.
+    counted_keys = await _countable_manual_opz_keys(db, month_start, month_end, company_ids)
+    for row in payload['rows']:
+        key = (int(row['company_id']), int(row['staff_id']))
+        current = current_values.get(key, 0.0)
+        row['current_value'] = _round_half_up_int(current)
+        counted = key in counted_keys
+        row['counted'] = counted
+        row['total_value'] = _round_half_up_int(
+            current + (float(row['value'] or 0.0) if counted else 0.0)
+        )
+    counted_rows = [row for row in payload['rows'] if row['counted']]
+    payload['manual_total'] = _round_half_up_int(
+        sum(float(row['value'] or 0.0) for row in counted_rows)
+    )
+    payload['current_total'] = _round_half_up_int(
+        sum(float(row['current_value'] or 0.0) for row in payload['rows'])
+    )
+    # `total_value` keeps the meaning it has in the shared payload (the manual sum); the
+    # combined number this editor shows gets its own name.
+    payload['total_value'] = payload['manual_total']
+    payload['combined_total'] = _round_half_up_int(
+        sum(float(row['total_value'] or 0.0) for row in payload['rows'])
+    )
+    return payload
+
+
+async def _write_manual_facts(
+    db: AsyncSession,
+    month: str,
+    metric_code: str,
     company_id: Optional[int],
     staff_id: Optional[int],
     items: list[dict[str, Any]],
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
-) -> dict[str, Any]:
+) -> None:
     month_start, month_end = _plan_month_range(month)
     scoped_company_id = int(company_id) if company_id is not None else None
     scoped_staff_id = int(staff_id) if staff_id is not None else None
@@ -7336,20 +7847,15 @@ async def save_manual_review_facts(
             try:
                 value = float(raw_value)
             except (TypeError, ValueError):
-                raise ValueError(f'invalid reviews fact for staff {item_staff_id}') from None
+                raise ValueError(f'invalid {metric_code} fact for staff {item_staff_id}') from None
+            if not math.isfinite(value):
+                raise ValueError(f'invalid {metric_code} fact for staff {item_staff_id}')
             if value < 0:
-                raise ValueError(f'reviews fact cannot be negative for staff {item_staff_id}')
+                raise ValueError(f'{metric_code} fact cannot be negative for staff {item_staff_id}')
         normalized_items[(item_company_id, item_staff_id)] = value
 
     if not normalized_items:
-        return await fetch_manual_review_facts(
-            db,
-            month,
-            scoped_company_id,
-            scoped_staff_id,
-            allowed_company_ids=allowed_company_ids,
-            force_allowed=force_allowed,
-        )
+        return
 
     allowed = (allowed_company_ids or []) if force_allowed else (
         allowed_company_ids if allowed_company_ids is not None else await branch_company_ids(db)
@@ -7363,7 +7869,7 @@ async def save_manual_review_facts(
     admin_ids_by_company = await _admin_staff_ids_by_company(
         db, month_start, month_end, item_company_ids
     )
-    stored = await _stored_manual_review_facts(db, month_start, month_end, item_company_ids)
+    stored = await _stored_manual_facts(db, month_start, month_end, item_company_ids, metric_code)
     # Staff who already have a value stay editable even after they stop being administrators —
     # otherwise their value would keep counting in the branch total with no way to clear it.
     valid_staff_keys = {
@@ -7382,7 +7888,7 @@ async def save_manual_review_facts(
             ManualFactMetric.period_start >= month_start,
             ManualFactMetric.period_end <= month_end,
             tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(list(normalized_items)),
-            ManualFactMetric.metric_code == REVIEWS_QTY_CODE,
+            ManualFactMetric.metric_code == metric_code,
         )
     )
     for (item_company_id, item_staff_id), value in normalized_items.items():
@@ -7394,7 +7900,7 @@ async def save_manual_review_facts(
                 period_end=month_end,
                 company_id=item_company_id,
                 staff_id=item_staff_id,
-                metric_code=REVIEWS_QTY_CODE,
+                metric_code=metric_code,
                 value=_round_half_up_int(value),
                 source='dashboard',
                 updated_at=now,
@@ -7402,11 +7908,61 @@ async def save_manual_review_facts(
         )
 
     await db.commit()
+
+
+async def save_manual_review_facts(
+    db: AsyncSession,
+    month: str,
+    company_id: Optional[int],
+    staff_id: Optional[int],
+    items: list[dict[str, Any]],
+    allowed_company_ids: Optional[list[int]] = None,
+    force_allowed: bool = False,
+) -> dict[str, Any]:
+    await _write_manual_facts(
+        db,
+        month,
+        REVIEWS_QTY_CODE,
+        company_id,
+        staff_id,
+        items,
+        allowed_company_ids=allowed_company_ids,
+        force_allowed=force_allowed,
+    )
     return await fetch_manual_review_facts(
         db,
         month,
-        scoped_company_id,
-        scoped_staff_id,
+        int(company_id) if company_id is not None else None,
+        int(staff_id) if staff_id is not None else None,
+        allowed_company_ids=allowed_company_ids,
+        force_allowed=force_allowed,
+    )
+
+
+async def save_manual_opz_facts(
+    db: AsyncSession,
+    month: str,
+    company_id: Optional[int],
+    staff_id: Optional[int],
+    items: list[dict[str, Any]],
+    allowed_company_ids: Optional[list[int]] = None,
+    force_allowed: bool = False,
+) -> dict[str, Any]:
+    await _write_manual_facts(
+        db,
+        month,
+        OPZ_QTY_CODE,
+        company_id,
+        staff_id,
+        items,
+        allowed_company_ids=allowed_company_ids,
+        force_allowed=force_allowed,
+    )
+    return await fetch_manual_opz_facts(
+        db,
+        month,
+        int(company_id) if company_id is not None else None,
+        int(staff_id) if staff_id is not None else None,
         allowed_company_ids=allowed_company_ids,
         force_allowed=force_allowed,
     )
@@ -7424,7 +7980,7 @@ async def fetch_plan_fact(
     include_all_staff_in_leaderboards: bool = False,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    factual_at = factual_at or _factual_now()
+    factual_at = factual_at or factual_now()
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
     selected_staff: dict[str, Any] | None = None
     if staff_id is not None:
@@ -7485,11 +8041,19 @@ async def fetch_plan_fact(
             end,
             [branch_id],
         )
-        branch_review_facts = await _manual_review_fact_values_for_role_periods(
+        branch_review_facts = await _manual_fact_values_for_role_periods(
             db,
             role_periods_by_company,
+            REVIEWS_QTY_CODE,
         )
         branch_fact[REVIEWS_QTY_CODE] = branch_review_facts.get(branch_id, 0.0)
+        branch_manual_opz = await _manual_fact_values_for_role_periods(
+            db,
+            role_periods_by_company,
+            OPZ_QTY_CODE,
+            _countable_manual_months(start, end, factual_at),
+        )
+        _apply_manual_opz(branch_fact, branch_manual_opz.get(branch_id, 0.0))
         groups = await _staff_plan_groups_for_branch(
             db,
             start,
@@ -7579,12 +8143,20 @@ async def fetch_plan_fact(
         end,
         company_ids,
     )
-    review_facts_by_company = await _manual_review_fact_values_for_role_periods(
+    review_facts_by_company = await _manual_fact_values_for_role_periods(
         db,
         role_periods_by_company,
+        REVIEWS_QTY_CODE,
+    )
+    manual_opz_by_company = await _manual_fact_values_for_role_periods(
+        db,
+        role_periods_by_company,
+        OPZ_QTY_CODE,
+        _countable_manual_months(start, end, factual_at),
     )
     for branch_id in company_ids:
         facts_by_company.setdefault(branch_id, {})[REVIEWS_QTY_CODE] = review_facts_by_company.get(branch_id, 0.0)
+        _apply_manual_opz(facts_by_company[branch_id], manual_opz_by_company.get(branch_id, 0.0))
         staff_groups_by_company[branch_id] = await _staff_plan_groups_for_branch(
             db,
             start,
