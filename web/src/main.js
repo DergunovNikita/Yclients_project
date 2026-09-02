@@ -18,6 +18,7 @@ import {
   latestServiceManagementTimestamp,
   mergeServiceManagementResult,
   patchJson as sharedPatchJson,
+  reportSearchParams,
   postJson as sharedPostJson,
   serviceManagementChanges,
   serviceManagementControls,
@@ -41,6 +42,7 @@ import {
   normalizeHiddenPlanMetricCodes,
   setPlanMetricHidden,
 } from './planMetricVisibility.js';
+import { inputDateValue } from './period.js';
 import { initReports } from './reports/index.js';
 import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
 import {
@@ -640,8 +642,8 @@ function patchJson(path, body, options = {}) {
 function defaultDates(filter) {
   const now = new Date(pageOpenedAt);
   const start = new Date(now.getFullYear(), now.getMonth(), 1);
-  filter.end.value = formatInputDate(now);
-  filter.start.value = formatInputDate(start);
+  filter.end.value = inputDateValue(now);
+  filter.start.value = inputDateValue(start);
 }
 
 function setManualFactDefaultMonths() {
@@ -669,8 +671,8 @@ function overviewPresetRange(preset) {
 
 function setOverviewPreset(preset) {
   const range = overviewPresetRange(preset);
-  filterEls.overview.start.value = formatInputDate(range.start);
-  filterEls.overview.end.value = formatInputDate(range.end);
+  filterEls.overview.start.value = inputDateValue(range.start);
+  filterEls.overview.end.value = inputDateValue(range.end);
   els.overviewPresetButtons.forEach((button) => {
     button.classList.toggle('active', button.dataset.overviewPreset === preset);
   });
@@ -687,21 +689,15 @@ function previousMonthValue(month) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 }
 
-function formatInputDate(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
 function overviewReportUrl(reportId) {
   const filter = filterEls.overview;
-  const params = new URLSearchParams();
-  if (filter.start.value) params.set('start_date', filter.start.value);
-  if (filter.end.value) params.set('end_date', filter.end.value);
-  if (filter.branch.value) params.set('company_id', filter.branch.value);
-  if (filter.staff.value) params.set('staff_id', filter.staff.value);
-  params.set('granularity', 'month');
+  const params = reportSearchParams({
+    start_date: filter.start.value,
+    end_date: filter.end.value,
+    company_id: filter.branch.value,
+    staff_id: filter.staff.value,
+    granularity: 'month',
+  });
   return `/reports/${encodeURIComponent(reportId)}?${params.toString()}`;
 }
 
@@ -3239,6 +3235,7 @@ async function init() {
     showError,
     setApiState,
     pushHistory: pushDashboardHistory,
+    replaceHistory: replaceDashboardHistory,
   });
   mountLanguageSwitcher(document.getElementById('lang-switcher'), {
     beforeChange: () => runDashboardNavigation(async () => {}),

@@ -7,8 +7,17 @@ import {
   createTimedAbortContext,
   filterServiceManagementResult,
   latestServiceManagementTimestamp,
+  REPORT_FILTER_KEYS,
+  reportCompareParams,
   reportDataCacheKey,
   reportDataState,
+  reportFiltersFromParams,
+  reportHistoryAction,
+  reportLinkSearch,
+  reportPeriodIsValid,
+  reportRequestFilters,
+  staffSelectionForOptions,
+  reportSearchParams,
   chartTooltipValue,
   reportFilterVisibility,
   reportRefreshPresentation,
@@ -412,4 +421,227 @@ test('tableHasRows detects data across plain rows and ranking metrics', () => {
   assert.equal(tableHasRows({ rows: [], ranking: { rows_by_metric: { qty: [], pct: [] } } }), false);
   assert.equal(tableHasRows({ rows: [], ranking: { rows_by_metric: { qty: [], pct: [{ staff: 'A' }] } } }), true);
   assert.equal(tableHasRows({}), false);
+});
+
+test('a report link carries the whole filter state, not just what it mentions', () => {
+  const full = reportFiltersFromParams(new URLSearchParams(
+    'start_date=2026-08-01&end_date=2026-08-31&company_id=7&staff_id=42'
+    + '&granularity=month&compare_start_date=2025-08-01&compare_end_date=2025-08-31',
+  ));
+  assert.deepEqual(full, {
+    start_date: '2026-08-01',
+    end_date: '2026-08-31',
+    company_id: '7',
+    staff_id: '42',
+    granularity: 'month',
+    compare_start_date: '2025-08-01',
+    compare_end_date: '2025-08-31',
+    compare_enabled: true,
+  });
+
+  // Going back to an entry that named no branch, staff or comparison must drop them
+  // rather than inherit the filters of the report being left behind.
+  const bare = reportFiltersFromParams(new URLSearchParams('start_date=2026-08-01'));
+  assert.equal(bare.company_id, '');
+  assert.equal(bare.staff_id, '');
+  assert.equal(bare.compare_start_date, '');
+  assert.equal(bare.compare_enabled, false);
+  assert.equal(bare.granularity, 'day');
+  // Half a window is not a window: the API rejects one bound without the other.
+  const half = reportFiltersFromParams(new URLSearchParams('compare_end_date=2025-08-31'));
+  assert.equal(half.compare_enabled, false);
+  assert.equal(half.compare_end_date, '');
+});
+
+test('a report link reads back exactly what it was written from', () => {
+  const filters = {
+    start_date: '2026-08-01',
+    end_date: '2026-08-31',
+    company_id: '7',
+    staff_id: '42',
+    granularity: 'month',
+    compare_start_date: '2025-08-01',
+    compare_end_date: '2025-08-31',
+    compare_enabled: true,
+  };
+  assert.deepEqual(reportFiltersFromParams(reportSearchParams(filters)), filters);
+
+  // An unticked comparison leaves no trace in the link.
+  const offRoundTrip = reportFiltersFromParams(
+    reportSearchParams({ ...filters, compare_enabled: false }),
+  );
+  assert.equal(offRoundTrip.compare_enabled, false);
+  assert.equal(offRoundTrip.compare_start_date, '');
+
+  // Neither does half a window, which the API would reject on the way back in.
+  const halfRoundTrip = reportFiltersFromParams(
+    reportSearchParams({ ...filters, compare_end_date: '' }),
+  );
+  assert.equal(halfRoundTrip.compare_enabled, false);
+  assert.equal(halfRoundTrip.compare_start_date, '');
+
+  // An empty form produces an empty link, and granularity comes back at its default.
+  assert.equal(reportSearchParams({}).toString(), '');
+  assert.equal(reportFiltersFromParams(reportSearchParams({})).granularity, 'day');
+});
+
+test('the request and the link ask for the same comparison', () => {
+  const base = {
+    start_date: '2026-08-01',
+    end_date: '2026-08-31',
+    granularity: 'month',
+    compare_start_date: '2025-08-01',
+    compare_end_date: '2025-08-31',
+  };
+  const cases = [
+    { ...base, compare_enabled: true },
+    { ...base, compare_enabled: false },
+    { ...base, compare_enabled: true, compare_end_date: '' },
+    { ...base, compare_enabled: true, compare_start_date: '', compare_end_date: '' },
+    // Inverted like the main period, and just as much a window still being typed.
+    { ...base, compare_enabled: true, compare_start_date: '2025-09-30', compare_end_date: '2025-08-31' },
+  ];
+  for (const filters of cases) {
+    const request = reportCompareParams(filters);
+    const link = reportFiltersFromParams(reportSearchParams(filters));
+    assert.equal(link.compare_enabled, Boolean(request), `disagreed on ${JSON.stringify(filters)}`);
+    if (!request) continue;
+    assert.equal(link.compare_start_date, request.compare_start_date);
+    assert.equal(link.compare_end_date, request.compare_end_date);
+  }
+});
+
+test('only a filter change rewrites the history entry', () => {
+  const currentUrl = '/reports/financial_overview?start_date=2026-08-01&granularity=day';
+  // Opening a report from the catalog is a navigation.
+  assert.equal(reportHistoryAction({
+    push: true, historyUrl: currentUrl, currentUrl,
+  }), 'push');
+  // Changing a filter keeps one entry but makes its URL tell the truth.
+  assert.equal(reportHistoryAction({
+    push: false,
+    historyUrl: '/reports/financial_overview?start_date=2026-08-01&granularity=month',
+    currentUrl,
+  }), 'replace');
+  // Landing on an entry that already says this leaves history untouched.
+  assert.equal(reportHistoryAction({
+    push: false, historyUrl: currentUrl, currentUrl,
+  }), 'none');
+});
+
+test('a period caught mid-edit never reaches the address bar', () => {
+  const valid = {
+    start_date: '2026-08-01',
+    end_date: '2026-08-31',
+    company_id: '7',
+    granularity: 'month',
+  };
+  assert.equal(reportPeriodIsValid(valid), true);
+  // Typing the new start before the new end inverts the range the API accepts.
+  assert.equal(reportPeriodIsValid({ start_date: '2026-09-30', end_date: '2026-09-01' }), false);
+  // A single day is a range. An empty bound is not this rule's business: the query
+  // parameter is required, so the endpoint rejects it before the ordering matters.
+  assert.equal(reportPeriodIsValid({ start_date: '2026-08-01', end_date: '2026-08-01' }), true);
+  assert.equal(reportPeriodIsValid({ start_date: '2026-08-01', end_date: '' }), true);
+
+  const currentSearch = 'start_date=2026-06-01&end_date=2026-06-30&granularity=day';
+  // Every link — the report's and the catalog's alike — is written through this one rule.
+  assert.equal(
+    reportLinkSearch({ filters: valid, currentSearch }),
+    'start_date=2026-08-01&end_date=2026-08-31&company_id=7&granularity=month',
+  );
+  assert.equal(
+    reportLinkSearch({ filters: { ...valid, start_date: '2026-09-30', end_date: '2026-09-01' }, currentSearch }),
+    currentSearch,
+  );
+
+  // The compare row is typed the same way and carries the same hazard: an inverted window
+  // reaches neither the request nor the link, so no round trip is spent on a 400.
+  const comparing = {
+    ...valid,
+    compare_enabled: true,
+    compare_start_date: '2025-09-30',
+    compare_end_date: '2025-08-31',
+  };
+  assert.equal(reportCompareParams(comparing), null);
+  assert.equal(
+    reportLinkSearch({ filters: comparing, currentSearch }).includes('compare_start_date'),
+    false,
+  );
+});
+
+test('a staff link keeps its employee only while that branch still has them', () => {
+  // The select reports '' for an id whose option has not been rendered yet, so the
+  // selection is decided against the ids that are about to be rendered instead.
+  assert.equal(staffSelectionForOptions('42', [7, 42, 99]), '42');
+  assert.equal(staffSelectionForOptions(42, ['42']), '42');
+  // An employee of another branch falls back to the whole branch, deliberately.
+  assert.equal(staffSelectionForOptions('42', [7, 99]), '');
+  assert.equal(staffSelectionForOptions('42', []), '');
+  assert.equal(staffSelectionForOptions('', [7, 42]), '');
+});
+
+test('every report filter reaches the link and comes back', () => {
+  // The request, the link and the parser walk REPORT_FILTER_KEYS, so a filter added to it
+  // cannot reach the request while quietly falling out of the link a user shares.
+  const filters = Object.fromEntries(REPORT_FILTER_KEYS.map((key) => [key, `${key}-value`]));
+  filters.granularity = 'month';
+  const roundTripped = reportFiltersFromParams(reportSearchParams(filters));
+  for (const key of REPORT_FILTER_KEYS) {
+    assert.equal(roundTripped[key], filters[key], `${key} did not survive the link`);
+  }
+});
+
+test('a report that hides the period is run and linked with a valid one', () => {
+  // The date inputs are shared, so this report can inherit an inverted range it never shows.
+  const inherited = {
+    start_date: '2026-09-30',
+    end_date: '2026-09-01',
+    company_id: '7',
+    granularity: 'day',
+  };
+  const fallbackPeriod = { start: '2026-08-01', end: '2026-08-31' };
+
+  // A report that uses the period keeps exactly what the form holds.
+  assert.deepEqual(
+    reportRequestFilters({ filters: inherited, periodApplies: true, fallbackPeriod }),
+    inherited,
+  );
+
+  const substituted = reportRequestFilters({
+    filters: inherited,
+    periodApplies: false,
+    fallbackPeriod,
+  });
+  assert.equal(substituted.start_date, '2026-08-01');
+  assert.equal(substituted.end_date, '2026-08-31');
+  assert.equal(substituted.company_id, '7');
+  // Valid, so the report is neither blocked nor left with a frozen link that would drop
+  // the branch the user picked.
+  assert.equal(reportPeriodIsValid(substituted), true);
+});
+
+test('a report that hides the period still publishes the filters the user did pick', () => {
+  // Composed the way reportSearch() composes it: the link is built from the form's own
+  // values, and only the freeze rule is told whether the period is in use.
+  const inverted = {
+    start_date: '2026-09-05',
+    end_date: '2026-08-31',
+    company_id: '7',
+    granularity: 'day',
+  };
+  const currentSearch = 'start_date=2026-09-05&end_date=2026-08-31&company_id=5&granularity=day';
+
+  // A report that shows the period keeps the last valid link while the range is inverted —
+  // the user can see the dates and fix them.
+  assert.equal(
+    reportLinkSearch({ filters: inverted, currentSearch, periodApplies: true }),
+    currentSearch,
+  );
+
+  // One that hides the period cannot be fixed by its user, so freezing its link would strand
+  // the branch they switched to in the data while the URL kept advertising the old one.
+  const published = reportLinkSearch({ filters: inverted, currentSearch, periodApplies: false });
+  assert.equal(published.includes('company_id=7'), true);
+  assert.equal(published.includes('start_date=2026-09-05'), true);
 });

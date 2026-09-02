@@ -9,11 +9,34 @@ import {
   staffRefreshAllowsDataLoad,
 } from '../dashboardApi.js';
 import { ReportChartManager } from './charts.js';
-import { defaultReportDates, escapeHtml, formatDate } from './format.js';
+import { escapeHtml, formatDate } from './format.js';
+import { comparePeriodOnLoad, defaultReportDates, nextComparePeriod } from '../period.js';
 import { GROUP_LABELS, STATUS_LABELS, sourceLabel } from './registry.js';
 import { renderReportData } from './renderers/generic.js';
 import { intlLocale, t } from '../i18n.js';
-import { reportFilterVisibility } from '../dashboardRequestState.js';
+import {
+  DEFAULT_GRANULARITY,
+  REPORT_FILTER_KEYS,
+  reportCompareParams,
+  reportFilterVisibility,
+  reportFiltersFromParams,
+  reportHistoryAction,
+  reportLinkSearch,
+  reportPeriodIsValid,
+  reportRequestFilters,
+  staffSelectionForOptions,
+} from '../dashboardRequestState.js';
+
+// The one place a filter key is tied to its input: everything else walks
+// REPORT_FILTER_KEYS, so a key added without an input here fails loudly instead of
+// silently missing the form.
+const FILTER_INPUTS = {
+  start_date: 'start',
+  end_date: 'end',
+  company_id: 'branch',
+  staff_id: 'staff',
+  granularity: 'granularity',
+};
 
 const FAVORITES_KEY = 'yclients_reports_favorites';
 
@@ -74,23 +97,12 @@ function reportIdFromLocation() {
 }
 
 function applyReportParamsFromLocation(els) {
-  const params = new URLSearchParams(window.location.search);
-  const valueMap = {
-    start_date: els.start,
-    end_date: els.end,
-    company_id: els.branch,
-    staff_id: els.staff,
-    granularity: els.granularity,
-    compare_start_date: els.compareStart,
-    compare_end_date: els.compareEnd,
-  };
-  Object.entries(valueMap).forEach(([key, input]) => {
-    const value = params.get(key);
-    if (value !== null && input) input.value = value;
-  });
-  if (params.has('compare_start_date') || params.has('compare_end_date')) {
-    els.compareEnabled.checked = true;
-  }
+  const filters = reportFiltersFromParams(new URLSearchParams(window.location.search));
+  REPORT_FILTER_KEYS.forEach((key) => { els[FILTER_INPUTS[key]].value = filters[key]; });
+  els.compareStart.value = filters.compare_start_date;
+  els.compareEnd.value = filters.compare_end_date;
+  els.compareEnabled.checked = filters.compare_enabled;
+  return filters;
 }
 
 function periodSubtitle(data) {
@@ -104,6 +116,7 @@ export function initReports({
   showError,
   setApiState,
   pushHistory = (state, url) => history.pushState(state, '', url),
+  replaceHistory = (state, url) => history.replaceState(state, '', url),
 }) {
   const els = {
     view: document.getElementById('reports-view'),
@@ -153,6 +166,7 @@ export function initReports({
     reports: [],
     branches: [],
     activeReportId: '',
+    periodApplies: true,
     reportData: new Map(),
     filters: {
       search: '',
@@ -164,7 +178,7 @@ export function initReports({
     },
   };
 
-  function reportRetry() {
+  function reloadActiveReport() {
     if (state.activeReportId) openReport(state.activeReportId, false);
   }
 
@@ -205,15 +219,29 @@ export function initReports({
     const dates = defaultReportDates();
     els.start.value = els.start.value || dates.start;
     els.end.value = els.end.value || dates.end;
-    const start = new Date(`${dates.start}T00:00:00`);
-    const end = new Date(`${dates.end}T00:00:00`);
-    const span = Math.max(0, Math.round((end - start) / 86400000));
-    const cmpEnd = new Date(start);
-    cmpEnd.setDate(cmpEnd.getDate() - 1);
-    const cmpStart = new Date(cmpEnd);
-    cmpStart.setDate(cmpStart.getDate() - span);
-    els.compareStart.value = els.compareStart.value || cmpStart.toISOString().slice(0, 10);
-    els.compareEnd.value = els.compareEnd.value || cmpEnd.toISOString().slice(0, 10);
+  }
+
+  // What the compare inputs were last filled with automatically, and whether they are
+  // still ours to move. Once they hold something we did not put there, they are the
+  // user's and a new period leaves them alone.
+  let autoComparePeriod = null;
+  let compareWindowIsOurs = true;
+
+  function syncCompareDefaults() {
+    const next = nextComparePeriod(
+      { autoPeriod: autoComparePeriod, ours: compareWindowIsOurs },
+      {
+        start: els.start.value,
+        end: els.end.value,
+        compareStart: els.compareStart.value,
+        compareEnd: els.compareEnd.value,
+      },
+    );
+    autoComparePeriod = next.autoPeriod;
+    compareWindowIsOurs = next.ours;
+    if (!next.window) return;
+    els.compareStart.value = next.window.start;
+    els.compareEnd.value = next.window.end;
   }
 
   async function ensureLoaded() {
@@ -291,11 +319,13 @@ export function initReports({
       + state.branches.map((branch) => optionHtml(branch.id, branch.title, selected)).join('');
   }
 
-  async function loadStaff() {
+  // The selection is passed in rather than read back off the select: a staff id that
+  // belongs to another branch matches no option yet and the select reports '' for it,
+  // which silently widened a per-employee link to the whole branch.
+  async function loadStaff(desiredStaffId = els.staff.value) {
     state.staffLoaded = false;
     state.staffIds = [];
     const request = staffRequests.start();
-    const selected = els.staff.value;
     try {
       const payload = await fetchJson('/dashboard/staff', { company_id: els.branch.value }, {
         signal: request.signal,
@@ -303,6 +333,7 @@ export function initReports({
       });
       if (!request.isCurrent()) return 'superseded';
       const staff = payload.data || [];
+      const selected = staffSelectionForOptions(desiredStaffId, staff.map((person) => person.id));
       els.staff.innerHTML = optionHtml('', t('dash.allStaff'), selected)
         + staff.map((person) => optionHtml(
           person.id,
@@ -315,7 +346,7 @@ export function initReports({
       return 'ready';
     } catch (error) {
       if (isSupersededRequest(error) || !request.isCurrent()) return 'superseded';
-      showFilterWarning(error.message, () => loadStaff());
+      showFilterWarning(error.message, () => loadStaff(desiredStaffId));
       return 'failed';
     } finally {
       if (request.isCurrent()) request.finish();
@@ -374,55 +405,63 @@ export function initReports({
   function showCatalog(push = true) {
     reportRequests.abort();
     state.activeReportId = '';
+    state.periodApplies = true;
     setCatalogVisible(true);
     els.viewer.classList.remove('visible');
-    if (push) pushHistory({ view: 'reports' }, reportPath());
+    if (push) pushHistory({ view: 'reports' }, reportPath('', reportSearch()));
     renderCatalog();
   }
 
-  function reportParams() {
-    const params = {
-      report_id: state.activeReportId,
-      start_date: els.start.value,
-      end_date: els.end.value,
-      company_id: els.branch.value,
-      staff_id: els.staff.value,
-      granularity: els.granularity.value || 'day',
+  function currentFilters() {
+    const filters = {};
+    REPORT_FILTER_KEYS.forEach((key) => { filters[key] = els[FILTER_INPUTS[key]].value; });
+    filters.granularity = filters.granularity || DEFAULT_GRANULARITY;
+    return {
+      ...filters,
+      compare_start_date: els.compareStart.value,
+      compare_end_date: els.compareEnd.value,
+      compare_enabled: els.compareEnabled.checked,
     };
-    if (els.compareEnabled.checked) {
-      params.compare_start_date = els.compareStart.value;
-      params.compare_end_date = els.compareEnd.value;
-    }
-    return params;
   }
 
+  function requestFilters() {
+    return reportRequestFilters({
+      filters: currentFilters(),
+      periodApplies: state.periodApplies,
+      fallbackPeriod: defaultReportDates(),
+    });
+  }
+
+  function reportParams() {
+    const filters = requestFilters();
+    const params = { report_id: state.activeReportId };
+    REPORT_FILTER_KEYS.forEach((key) => { params[key] = filters[key]; });
+    // The same rule that builds the link decides what the request asks for.
+    return Object.assign(params, reportCompareParams(filters));
+  }
+
+  // The link carries the period the form actually holds — a report that ignores the
+  // period must not overwrite the one the user picked for every other report.
   function reportSearch() {
-    const params = new URLSearchParams();
-    if (els.start.value) params.set('start_date', els.start.value);
-    if (els.end.value) params.set('end_date', els.end.value);
-    if (els.branch.value) params.set('company_id', els.branch.value);
-    if (els.staff.value) params.set('staff_id', els.staff.value);
-    if (els.granularity.value) params.set('granularity', els.granularity.value);
-    if (els.compareEnabled.checked) {
-      if (els.compareStart.value) params.set('compare_start_date', els.compareStart.value);
-      if (els.compareEnd.value) params.set('compare_end_date', els.compareEnd.value);
-    }
-    return params.toString();
+    return reportLinkSearch({
+      filters: currentFilters(),
+      currentSearch: window.location.search.replace(/^\?/, ''),
+      periodApplies: state.periodApplies,
+    });
   }
 
   function applyReportFilterVisibility(meta) {
     const filters = meta.filters || {};
     const visibility = reportFilterVisibility(filters);
+    state.periodApplies = visibility.dateRange;
     if (els.startField) els.startField.hidden = !visibility.dateRange;
     if (els.endField) els.endField.hidden = !visibility.dateRange;
     if (els.granularityField) els.granularityField.hidden = !visibility.granularity;
     const canCompare = visibility.compare;
     if (els.compareRow) els.compareRow.hidden = !canCompare;
-    if (!canCompare) {
-      els.compareEnabled.checked = false;
-      els.compareStart.value = '';
-      els.compareEnd.value = '';
-    }
+    // Only the checkbox gates the request, so the window itself is kept. Blanking it
+    // here would read as the user clearing it and freeze it for the rest of the session.
+    if (!canCompare) els.compareEnabled.checked = false;
   }
 
   async function openReport(reportId, push = true) {
@@ -434,10 +473,31 @@ export function initReports({
     }
     const request = reportRequests.start();
     applyReportFilterVisibility(meta);
-    if (push) pushHistory({ view: 'reports', report: reportId }, reportPath(reportId, reportSearch()));
+    const historyState = { view: 'reports', report: reportId };
+    const historyUrl = reportPath(reportId, reportSearch());
+    const historyAction = reportHistoryAction({
+      push,
+      historyUrl,
+      currentUrl: window.location.pathname + window.location.search,
+    });
+    if (historyAction === 'push') pushHistory(historyState, historyUrl);
+    if (historyAction === 'replace') replaceHistory(historyState, historyUrl);
     setCatalogVisible(false);
     els.viewer.classList.add('visible');
     els.viewerTitle.textContent = meta.title;
+    if (!reportPeriodIsValid(requestFilters())) {
+      // The new start was typed before the new end. The API rejects that range, so say so
+      // rather than spending a request on it — and never leave the previous report's
+      // numbers standing under this report's title.
+      charts.clear();
+      els.viewerSubtitle.textContent = `${formatDate(els.start.value)} .. ${formatDate(els.end.value)}`;
+      els.content.innerHTML = `<div class="empty compact">${t('reports.periodInvertedMessage')}</div>`;
+      els.refresh.disabled = false;
+      clearError();
+      setApiState(t('reports.periodInverted'), 'warn');
+      request.finish();
+      return;
+    }
     const requestParams = reportParams();
     const cacheKey = reportDataCacheKey(requestParams);
     const previousData = state.reportData.get(cacheKey);
@@ -458,8 +518,8 @@ export function initReports({
     try {
       const payload = await fetchJson('/dashboard/reports/data', requestParams, {
         signal: request.signal,
-        retry: reportRetry,
-        onSlow: () => showError(t('dash.apiSlowMessage'), { apiStatus: 'slow', retry: reportRetry }),
+        retry: reloadActiveReport,
+        onSlow: () => showError(t('dash.apiSlowMessage'), { apiStatus: 'slow', retry: reloadActiveReport }),
       });
       if (!request.isCurrent() || state.activeReportId !== reportId) return;
       const data = payload.data;
@@ -469,7 +529,14 @@ export function initReports({
       renderReportData(els.content, data, charts);
       clearError();
       const dataState = reportDataState(data);
-      if (dataState === 'partial') {
+      const asked = currentFilters();
+      const compareDropped = Boolean(asked.compare_enabled && !reportCompareParams(asked));
+      const compareInverted = Boolean(asked.compare_start_date && asked.compare_end_date);
+      if (compareDropped) {
+        // The report is fine; only its comparison was dropped, and dropping it silently
+        // would leave the ticked checkbox claiming a comparison that is not on screen.
+        setApiState(t('reports.compareDropped'), 'warn');
+      } else if (dataState === 'partial') {
         setApiState(t('dash.apiPartial'), 'warn');
       } else if (dataState === 'empty') {
         setApiState(t('dash.apiEmpty'), 'warn');
@@ -479,7 +546,7 @@ export function initReports({
     } catch (error) {
       if (isSupersededRequest(error) || !request.isCurrent()) return;
       charts.clear();
-      showError(error.message, { apiStatus: error.apiStatus, retry: reportRetry });
+      showError(error.message, { apiStatus: error.apiStatus, retry: reloadActiveReport });
       if (!previousData) {
         els.viewerSubtitle.textContent = t('common.errorPrefix');
         els.content.innerHTML = `<div class="empty compact">${t('reports.loadFailed')}</div>`;
@@ -508,10 +575,19 @@ export function initReports({
       showCatalog(false);
       return;
     }
-    applyReportParamsFromLocation(els);
-    const locationParams = new URLSearchParams(window.location.search);
-    const requestedCompanyId = locationParams.get('company_id') || '';
-    const requestedStaffId = locationParams.get('staff_id') || '';
+    const requested = applyReportParamsFromLocation(els);
+    setDefaultDates();
+    const loaded = comparePeriodOnLoad({
+      start: els.start.value,
+      end: els.end.value,
+      compareStart: requested.compare_start_date,
+      compareEnd: requested.compare_end_date,
+    });
+    autoComparePeriod = loaded.autoPeriod;
+    compareWindowIsOurs = loaded.ours;
+    syncCompareDefaults();
+    const requestedCompanyId = requested.company_id;
+    const requestedStaffId = requested.staff_id;
     const showBlockedScope = () => {
       const retry = async () => {
         state.loaded = false;
@@ -540,13 +616,12 @@ export function initReports({
       return;
     }
     const expectedBranch = els.branch.value;
-    const staffStatus = await loadStaff();
+    const staffStatus = await loadStaff(requestedStaffId);
     if (staffStatus === 'superseded') return;
     if (!reportScopedFilterAllowsLoad(requestedStaffId, state.staffLoaded, state.staffIds)) {
       showBlockedScope();
       return;
     }
-    if (staffStatus === 'failed') els.staff.value = '';
     if (!staffRefreshAllowsDataLoad(staffStatus, expectedBranch, els.branch.value)) return;
     const reportId = reportIdFromLocation();
     if (reportId) {
@@ -585,21 +660,31 @@ export function initReports({
     if (!card) return;
     await openReport(card.dataset.reportId);
   });
-  els.viewerBack.addEventListener('click', () => showCatalog());
-  els.refresh.addEventListener('click', () => {
-    if (state.activeReportId) openReport(state.activeReportId, false);
+  els.viewerBack.addEventListener('click', () => {
+    // Walking out of a report drops its error and its status; the catalog is not it.
+    // The pill only claims a healthy API when the catalog on screen really did load.
+    clearError();
+    if (state.loaded) setApiState(t('dash.apiConnected'), 'ok');
+    showCatalog();
   });
+  els.refresh.addEventListener('click', reloadActiveReport);
   els.branch.addEventListener('change', async () => {
     const expectedBranch = els.branch.value;
     els.staff.value = '';
     const staffStatus = await loadStaff();
     if (!staffRefreshAllowsDataLoad(staffStatus, expectedBranch, els.branch.value)) return;
-    if (state.activeReportId) openReport(state.activeReportId, false);
+    reloadActiveReport();
   });
-  [els.start, els.end, els.staff, els.granularity, els.compareEnabled, els.compareStart, els.compareEnd].forEach((input) => {
+  [els.start, els.end].forEach((input) => {
     input.addEventListener('change', () => {
-      if (state.activeReportId) openReport(state.activeReportId, false);
+      syncCompareDefaults();
+      reloadActiveReport();
     });
+  });
+  // A half-written window asks for nothing until its other bound is typed in;
+  // reportCompareParams is the only gate, so the checkbox is left as the user set it.
+  [els.staff, els.granularity, els.compareEnabled, els.compareStart, els.compareEnd].forEach((input) => {
+    input.addEventListener('change', reloadActiveReport);
   });
   els.dataLabels.addEventListener('click', () => {
     const enabled = els.dataLabels.getAttribute('aria-pressed') !== 'true';

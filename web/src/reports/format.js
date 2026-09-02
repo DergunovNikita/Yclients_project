@@ -38,18 +38,3 @@ export function formatValue(value, format = 'text') {
   if (format === 'date') return formatDate(value);
   return value === null || value === undefined || value === '' ? '—' : String(value);
 }
-
-export function inputDateValue(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
-export function defaultReportDates() {
-  const now = new Date();
-  return {
-    start: inputDateValue(new Date(now.getFullYear(), now.getMonth(), 1)),
-    end: inputDateValue(now),
-  };
-}

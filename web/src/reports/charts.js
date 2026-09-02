@@ -1,18 +1,13 @@
 import Chart from 'chart.js/auto';
 
 import { formatValue } from './format.js';
+import {
+  axisValueFormat,
+  chartRenderType,
+  chartSeriesColor,
+  shouldRenderChartDataLabels,
+} from './chartSpec.js';
 import { chartTooltipValue, shouldRenderReportDataLabel } from '../dashboardRequestState.js';
-
-const PALETTE = [
-  '#0f766e',
-  '#2563eb',
-  '#b45309',
-  '#16a34a',
-  '#9333ea',
-  '#db2777',
-  '#0891b2',
-  '#64748b',
-];
 
 const dataLabelsPlugin = {
   id: 'reportDataLabels',
@@ -20,8 +15,12 @@ const dataLabelsPlugin = {
     const options = chart.options.plugins?.reportDataLabels;
     if (!options?.display) return;
 
-    const pointCount = chart.data.labels?.length || 0;
-    if (chart.config.type !== 'doughnut' && pointCount > 24) return;
+    if (!shouldRenderChartDataLabels({
+      type: chart.config.type,
+      pointCount: chart.data.labels?.length || 0,
+      datasetCount: (chart.data.datasets || [])
+        .filter((_, index) => chart.isDatasetVisible(index)).length,
+    })) return;
 
     const { ctx } = chart;
     ctx.save();
@@ -39,12 +38,12 @@ const dataLabelsPlugin = {
         const numericValue = Number(raw);
 
         const position = element.tooltipPosition();
-        const isDoughnut = chart.config.type === 'doughnut';
-        ctx.textBaseline = isDoughnut ? 'middle' : 'bottom';
+        const isArcChart = chart.config.type === 'doughnut' || chart.config.type === 'pie';
+        ctx.textBaseline = isArcChart ? 'middle' : 'bottom';
         ctx.fillText(
           formatValue(numericValue, dataset.reportFormat || 'number').replace(' ₽', ''),
           position.x,
-          isDoughnut ? position.y : position.y - 6,
+          isArcChart ? position.y : position.y - 6,
         );
       });
     });
@@ -83,50 +82,52 @@ export class ReportChartManager {
     const previous = this.instances.get(spec.id);
     if (previous) previous.destroy();
 
-    const isArc = spec.type === 'doughnut' || spec.type === 'pie';
+    const type = chartRenderType(spec);
+    const isArc = type === 'doughnut' || type === 'pie';
     const chart = new Chart(canvas, {
-      type: spec.type || 'bar',
+      type,
       data: {
         labels: spec.labels || [],
         datasets: (spec.datasets || []).map((dataset, index) => ({
           label: dataset.label,
           data: dataset.data || [],
           // Arc charts colour each segment individually; other charts colour per series.
-          borderColor: isArc ? '#ffffff' : PALETTE[index % PALETTE.length],
+          borderColor: isArc ? '#ffffff' : chartSeriesColor(index),
           backgroundColor: isArc
-            ? (dataset.data || []).map((_, i) => PALETTE[i % PALETTE.length])
-            : spec.type === 'line'
-              ? `${PALETTE[index % PALETTE.length]}22`
-              : PALETTE[index % PALETTE.length],
+            ? (dataset.data || []).map((_, i) => chartSeriesColor(i))
+            : chartSeriesColor(index),
           borderWidth: isArc ? 2 : undefined,
           tension: 0.28,
-          fill: dataset.fill ?? (spec.type === 'line'),
-          borderRadius: spec.type === 'bar' ? 4 : 0,
+          // Never filled: stacked areas hid the series drawn under them, and an area
+          // needs a translucent colour this code does not derive. The backend agrees —
+          // every spec that mentions fill sets it to false.
+          fill: false,
+          borderRadius: type === 'bar' ? 4 : 0,
           yAxisID: dataset.axis || 'y',
           reportFormat: dataset.format || 'number',
         })),
       },
-      options: this.optionsFor(spec),
+      options: this.optionsFor(spec, type),
     });
     this.instances.set(spec.id, chart);
   }
 
-  optionsFor(spec) {
-    const firstFormat = spec.datasets?.[0]?.format || 'number';
-    const hasSecondAxis = (spec.datasets || []).some((dataset) => dataset.axis === 'y1');
+  optionsFor(spec, type) {
+    const axisTicks = (axisId) => ({
+      callback: (value) => formatValue(value, axisValueFormat(spec, axisId)).replace(' ₽', ''),
+    });
     const scales = {};
-    if (spec.type !== 'doughnut') {
+    if (type !== 'doughnut' && type !== 'pie') {
       scales.y = {
         beginAtZero: true,
-        ticks: {
-          callback: (value) => formatValue(value, firstFormat).replace(' ₽', ''),
-        },
+        ticks: axisTicks('y'),
       };
-      if (hasSecondAxis) {
+      if ((spec.datasets || []).some((dataset) => dataset.axis === 'y1')) {
         scales.y1 = {
           beginAtZero: true,
           position: 'right',
           grid: { drawOnChartArea: false },
+          ticks: axisTicks('y1'),
         };
       }
     }
@@ -143,7 +144,8 @@ export class ReportChartManager {
             label: (ctx) => {
               const dataset = spec.datasets?.[ctx.datasetIndex] || {};
               const value = chartTooltipValue(ctx.parsed, ctx.chart?.options?.indexAxis);
-              return ` ${dataset.label}: ${formatValue(value, dataset.format || firstFormat)}`;
+              const format = dataset.format || axisValueFormat(spec, dataset.axis || 'y');
+              return ` ${dataset.label}: ${formatValue(value, format)}`;
             },
           },
         },

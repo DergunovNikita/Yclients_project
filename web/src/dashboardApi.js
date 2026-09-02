@@ -10,6 +10,7 @@ export { reportDataState } from './dashboardRequestState.js';
 export { reportDataCacheKey } from './dashboardRequestState.js';
 export { reportRefreshPresentation } from './dashboardRequestState.js';
 export { reportScopedFilterAllowsLoad } from './dashboardRequestState.js';
+export { reportSearchParams } from './dashboardRequestState.js';
 export { staffRefreshAllowsDataLoad } from './dashboardRequestState.js';
 export { filterServiceManagementResult } from './dashboardRequestState.js';
 export { latestServiceManagementTimestamp } from './dashboardRequestState.js';

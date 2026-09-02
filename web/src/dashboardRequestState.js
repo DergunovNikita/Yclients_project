@@ -31,6 +31,122 @@ export function reportDataState(data) {
   return data?.cards?.length || data?.charts?.length || hasRows ? 'ready' : 'empty';
 }
 
+// The filters a report is scoped by. The form, the request, the link and the parser all
+// walk this list, so a filter added here cannot reach one of them and quietly miss the
+// others — the form side ties each key to its input in one map (FILTER_INPUTS).
+export const DEFAULT_GRANULARITY = 'day';
+
+export const REPORT_FILTER_KEYS = [
+  'start_date',
+  'end_date',
+  'company_id',
+  'staff_id',
+  'granularity',
+];
+
+/**
+ * Filter values a report URL asks for.
+ *
+ * Absent means empty, never "keep what the form happens to hold": going back to an
+ * entry that carried no staff_id must drop the staff filter of the report left behind,
+ * not inherit it and then write it into that entry.
+ */
+export function reportFiltersFromParams(params) {
+  const value = (key) => params.get(key) || '';
+  const filters = {};
+  REPORT_FILTER_KEYS.forEach((key) => { filters[key] = value(key); });
+  filters.granularity = filters.granularity || DEFAULT_GRANULARITY;
+  return {
+    ...filters,
+    ...comparePeriod(value('compare_start_date'), value('compare_end_date')),
+  };
+}
+
+/**
+ * Comparison a set of filters actually asks for, or null.
+ *
+ * Half a window is not a window, and an inverted one is a range the API rejects — both
+ * are windows still being typed. The request and the link both take the answer from
+ * here, so neither spends a round trip on a period mid-edit.
+ */
+export function reportCompareParams(filters = {}) {
+  const start = filters.compare_start_date;
+  const end = filters.compare_end_date;
+  if (!filters.compare_enabled || !start || !end || start > end) return null;
+  return { compare_start_date: start, compare_end_date: end };
+}
+
+function comparePeriod(start, end) {
+  const window = reportCompareParams({
+    compare_start_date: start,
+    compare_end_date: end,
+    compare_enabled: true,
+  });
+  return {
+    compare_start_date: window ? window.compare_start_date : '',
+    compare_end_date: window ? window.compare_end_date : '',
+    compare_enabled: Boolean(window),
+  };
+}
+
+/** Query string a report link carries; the inverse of reportFiltersFromParams. */
+export function reportSearchParams(filters = {}) {
+  const params = new URLSearchParams();
+  REPORT_FILTER_KEYS.forEach((key) => {
+    if (filters[key]) params.set(key, String(filters[key]));
+  });
+  const compare = reportCompareParams(filters);
+  if (compare) {
+    params.set('compare_start_date', compare.compare_start_date);
+    params.set('compare_end_date', compare.compare_end_date);
+  }
+  return params;
+}
+
+/**
+ * What a report load should do to the history entry.
+ *
+ * A load that merely reproduces the current URL — opening a report from a popped
+ * entry — leaves history and its position bookkeeping alone.
+ */
+export function reportHistoryAction({ push, historyUrl, currentUrl }) {
+  if (push) return 'push';
+  return historyUrl === currentUrl ? 'none' : 'replace';
+}
+
+/**
+ * Filters a report is actually run and linked with.
+ *
+ * A report that hides the period ignores it, but the endpoint still wants a valid range.
+ * Substituting one keeps a period left inverted on another report from blocking it — and
+ * from freezing its link, which would drop the branch the user picked.
+ */
+export function reportRequestFilters({ filters, periodApplies = true, fallbackPeriod }) {
+  if (periodApplies || !fallbackPeriod) return filters;
+  return { ...filters, start_date: fallbackPeriod.start, end_date: fallbackPeriod.end };
+}
+
+/** A period caught mid-edit — the new start typed before the new end — the API rejects. */
+export function reportPeriodIsValid(filters = {}) {
+  const start = filters.start_date;
+  const end = filters.end_date;
+  return !start || !end || start <= end;
+}
+
+/**
+ * Query string every report link is written from.
+ *
+ * An inverted period never reaches the address bar — from the report, from the catalog,
+ * or from anywhere else — so the last valid link keeps standing while the user types.
+ * A report that hides the period is the exception: its user cannot fix what they cannot
+ * see, so its link keeps moving and carries the branch and staff they did pick.
+ */
+export function reportLinkSearch({ filters, currentSearch = '', periodApplies = true }) {
+  return !periodApplies || reportPeriodIsValid(filters)
+    ? reportSearchParams(filters).toString()
+    : currentSearch;
+}
+
 export function reportFilterVisibility(filters = {}) {
   return {
     dateRange: filters.date_range !== false,
@@ -62,6 +178,20 @@ export function reportRefreshPresentation(previousData) {
 
 export function staffRefreshAllowsDataLoad(status, expectedBranch, currentBranch) {
   return status !== 'superseded' && String(expectedBranch) === String(currentBranch);
+}
+
+/**
+ * Staff option to select once a branch's list has been rendered.
+ *
+ * Taken from the id the URL asked for rather than from the select, which reports '' for
+ * an id whose option does not exist yet and would widen a per-employee link to the
+ * whole branch.
+ */
+export function staffSelectionForOptions(requestedStaffId, optionIds) {
+  if (!requestedStaffId) return '';
+  return (optionIds || []).some((id) => String(id) === String(requestedStaffId))
+    ? String(requestedStaffId)
+    : '';
 }
 
 export function reportScopedFilterAllowsLoad(requestedId, optionsLoaded, optionIds) {
