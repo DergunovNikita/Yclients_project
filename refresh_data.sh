@@ -7,11 +7,11 @@ TRIGGER="${2:-manual}"
 INITIATOR="${3:-cli}"
 
 case "$MODE" in
-  incremental|full) ;;
+  incremental|refresh|full) ;;
   *)
     echo "Неверный режим sync: $MODE" >&2
-    echo "Использование: $0 [incremental|full] [manual|scheduled] [initiator]" >&2
-    exit 2
+    echo "Использование: $0 [incremental|refresh|full] [manual|scheduled] [initiator]" >&2
+    exit 64
     ;;
 esac
 
@@ -19,8 +19,8 @@ case "$TRIGGER" in
   manual|scheduled) ;;
   *)
     echo "Неверный trigger: $TRIGGER" >&2
-    echo "Использование: $0 [incremental|full] [manual|scheduled] [initiator]" >&2
-    exit 2
+    echo "Использование: $0 [incremental|refresh|full] [manual|scheduled] [initiator]" >&2
+    exit 64
     ;;
 esac
 

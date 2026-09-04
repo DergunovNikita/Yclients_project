@@ -1,0 +1,10 @@
+[Unit]
+Description=Run YClients BI nightly rolling refresh sync
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+Unit=yclients-sync-refresh@%i.service
+
+[Install]
+WantedBy=timers.target

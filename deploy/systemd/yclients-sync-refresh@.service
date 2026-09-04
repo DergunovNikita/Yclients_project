@@ -1,5 +1,5 @@
 [Unit]
-Description=YClients BI incremental sync
+Description=YClients BI nightly rolling refresh sync
 After=network.target docker.service
 Wants=network.target
 
@@ -9,4 +9,4 @@ Type=oneshot
 SuccessExitStatus=75
 User=%i
 WorkingDirectory=/opt/yclients_bi_system
-ExecStart=/opt/yclients_bi_system/sync.sh incremental scheduled systemd
+ExecStart=/opt/yclients_bi_system/sync.sh refresh scheduled systemd

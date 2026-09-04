@@ -2,7 +2,7 @@
 Description=Run YClients BI scheduled full sync
 
 [Timer]
-OnCalendar=*-*-* 02:00:00
+OnCalendar=Sun *-*-* 06:00:00
 Persistent=true
 Unit=yclients-sync-full@%i.service
 

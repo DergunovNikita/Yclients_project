@@ -2,6 +2,7 @@
 Production ETL pipeline for syncing YClients data into PostgreSQL.
 """
 import time
+import traceback
 from datetime import date, timedelta, datetime
 from typing import Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -10,6 +11,7 @@ from config import (
     DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD,
     SYNC_DAYS, SCHEDULE_DAYS, ANALYTICS_DAYS, DB_BATCH_SIZE,
     SYNC_HISTORY_START_DATE, SYNC_INCREMENTAL, SYNC_LOOKBACK_DAYS,
+    SYNC_REFRESH_DAYS,
     YCLIENTS_REQUEST_DELAY, YCLIENTS_TIMEOUT,
     YCLIENTS_RETRY_TOTAL, YCLIENTS_RETRY_BACKOFF,
     YCLIENTS_RETRY_AFTER_MAX,
@@ -40,6 +42,9 @@ from sync_parsing import (
 
 TRANSACTIONAL_STATE_KEY = 'transactions_last_success_date'
 HISTORICAL_COVERAGE_STATE_KEY = 'historical_source_coverage_v1'
+INCREMENTAL_SYNC_MODE = 'incremental'
+REFRESH_SYNC_MODE = 'refresh'
+FULL_SYNC_MODE = 'full'
 FULL_REFRESH_CLEANUP_STEP = 'Full refresh cleanup'
 PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
 APPOINTMENTS_SOURCE = 'appointments_detail'
@@ -173,6 +178,19 @@ def bulk_delete_by_ids(db, model, column, ids) -> int:
     return deleted
 
 
+def _step_api(args, kwargs):
+    """The YClients client a step was handed, if it was handed one."""
+    candidate = kwargs.get('api', args[0] if args else None)
+    return candidate if hasattr(candidate, 'last_dated_fetch_complete') else None
+
+
+def _incomplete_window_note(api) -> str | None:
+    """Report a step whose API told us its dated window may be short."""
+    if api is None or api.last_dated_fetch_complete:
+        return None
+    return 'окно прочитано постранично, строки могли не приехать'
+
+
 def run_sync_step(results, name: str, fn, *args, **kwargs):
     step_key = kwargs.pop('step_key', name)
     progress_callback = kwargs.pop('progress_callback', None)
@@ -180,15 +198,38 @@ def run_sync_step(results, name: str, fn, *args, **kwargs):
     progress_pct = kwargs.pop('progress_pct', None)
     started_at = time.perf_counter()
     success = False
+    step_error: str | None = None
+    step_api = _step_api(args, kwargs)
+    if step_api is not None:
+        # The flag describes the window this step is about to read. Steps that never do a
+        # dated fetch — catalogs, analytics — would otherwise inherit the verdict of
+        # whichever step ran before them, on the client they all share.
+        step_api.last_dated_fetch_complete = True
     try:
         success = bool(fn(*args, **kwargs))
         return success
+    except Exception as e:
+        # Fetch helpers raise rather than return False, and the call sits outside each
+        # step's own try. Letting that unwind aborted every branch and tenant left in the
+        # run over one endpoint's bad day, so the step is recorded as failed instead — the
+        # same standing a step that returns False gets, no more. That is a real change for
+        # steps outside `checkpoint_step_names` (clients, goods, schedules, analytics): a
+        # raise anywhere used to abort the run outright; it now costs only this step, while
+        # `error` keeps it distinguishable from a soft False so the run is still reported
+        # failed. The traceback is printed because a raise here is as likely to be a bug in
+        # this code as an unhappy endpoint.
+        print(f"  ✗ Шаг прерван: {name}")
+        traceback.print_exc()
+        step_error = f'{type(e).__name__}: {e}'
+        return False
     finally:
         elapsed = time.perf_counter() - started_at
         results.append({
             'name': name,
             'key': step_key,
             'success': success,
+            'note': _incomplete_window_note(step_api),
+            'error': step_error,
             'elapsed': elapsed,
         })
         if progress_callback is not None:
@@ -211,7 +252,16 @@ def print_sync_summary(results):
     print("=" * 60)
     for item in results:
         status = 'OK' if item['success'] else 'WARN'
-        print(f"  [{status}] {item['name']:<28} {format_duration(item['elapsed'])}")
+        note = f"  ! {item['note']}" if item.get('note') else ''
+        print(f"  [{status}] {item['name']:<28} {format_duration(item['elapsed'])}{note}")
+    degraded = [item['name'] for item in results if item.get('note')]
+    if degraded:
+        # A window read through shifting page boundaries still counts as synced — refusing
+        # it would pin the branch to full syncs forever — so it has to be visible here
+        # instead, otherwise the only trace is one line buried in the step's own output.
+        print(f"\n  Окна прочитаны постранично и могли прийти неполными: {len(degraded)}")
+        for name in degraded:
+            print(f"    - {name}")
 
 
 def get_sync_state_value(db, key: str):
@@ -260,6 +310,30 @@ def historical_sync_start_date(end_date: date, reporting_start: date | None = No
     return min(floor, end_date)
 
 
+def refresh_sync_start_date(end_date: date, reporting_start: date | None = None) -> date:
+    """Lower bound of the rolling window that re-reads recently changed facts.
+
+    Incremental mode only re-reads `SYNC_LOOKBACK_DAYS` around its checkpoint, so a
+    payment registered later than that never arrives at all: the visit stays in the
+    database without its money, and the closed month under-reports revenue forever.
+    Refresh mode reloads a wider trailing window instead of the whole history, which
+    is cheap enough to run nightly. The branch floor still applies — a window that
+    reaches past the reporting start would only fetch rows the dashboard discards.
+    """
+    floor = historical_sync_start_date(end_date, reporting_start)
+    return max(floor, end_date - timedelta(days=max(0, SYNC_REFRESH_DAYS)))
+
+
+def is_full_refresh_mode(mode: str | None) -> bool:
+    """Both refresh and full drop their window before reloading it.
+
+    Only the window differs, so every purge-and-reload decision keys off this instead
+    of comparing against 'full' and silently leaving refresh as an append-only pass —
+    which would keep transactions YClients has since deleted.
+    """
+    return (mode or '').strip().lower() in (REFRESH_SYNC_MODE, FULL_SYNC_MODE)
+
+
 def has_complete_historical_source_coverage(
     db,
     company_id: int,
@@ -306,25 +380,27 @@ def has_valid_historical_coverage_marker(
 def resolve_transaction_window(db, end_date: date, state_key: str = TRANSACTIONAL_STATE_KEY):
     full_start = full_sync_start_date(end_date)
     if not SYNC_INCREMENTAL:
-        return full_start, 'full'
+        return full_start, FULL_SYNC_MODE
 
     raw_value = get_sync_state_value(db, state_key)
     if not raw_value:
-        return full_start, 'full'
+        return full_start, FULL_SYNC_MODE
 
     try:
         last_success = date.fromisoformat(raw_value)
     except ValueError:
-        return full_start, 'full'
+        return full_start, FULL_SYNC_MODE
 
     incremental_start = last_success - timedelta(days=max(0, SYNC_LOOKBACK_DAYS))
-    return max(full_start, incremental_start), 'incremental'
+    return max(full_start, incremental_start), INCREMENTAL_SYNC_MODE
 
 
 def resolve_sync_window(db, end_date: date, requested_mode: str, state_key: str = TRANSACTIONAL_STATE_KEY):
-    normalized_mode = (requested_mode or 'incremental').strip().lower()
-    if normalized_mode == 'full':
-        return full_sync_start_date(end_date), 'full'
+    normalized_mode = (requested_mode or INCREMENTAL_SYNC_MODE).strip().lower()
+    if normalized_mode == FULL_SYNC_MODE:
+        return full_sync_start_date(end_date), FULL_SYNC_MODE
+    if normalized_mode == REFRESH_SYNC_MODE and SYNC_INCREMENTAL:
+        return max(full_sync_start_date(end_date), refresh_sync_start_date(end_date)), REFRESH_SYNC_MODE
     return resolve_transaction_window(db, end_date, state_key)
 
 
@@ -336,13 +412,11 @@ def company_has_transactional_rows(db, company_id: int) -> bool:
 
 
 def resolve_company_sync_window(db, end_date: date, requested_mode: str, company_id: int):
-    normalized_mode = (requested_mode or 'incremental').strip().lower()
-    history_start = historical_sync_start_date(
-        end_date,
-        company_reporting_start(db, company_id),
-    )
-    if normalized_mode == 'full':
-        return history_start, 'full'
+    normalized_mode = (requested_mode or INCREMENTAL_SYNC_MODE).strip().lower()
+    reporting_start = company_reporting_start(db, company_id)
+    history_start = historical_sync_start_date(end_date, reporting_start)
+    if normalized_mode == FULL_SYNC_MODE:
+        return history_start, FULL_SYNC_MODE
 
     scoped_key = transactional_state_key(company_id)
     scoped_checkpoint = get_sync_state_value(db, scoped_key)
@@ -357,7 +431,17 @@ def resolve_company_sync_window(db, end_date: date, requested_mode: str, company
         # One full pass is mandatory after introducing detailed source coverage.
         # Otherwise a legacy incremental checkpoint would only certify the recent
         # lookback window and every historical YoY value would remain unknown.
-        return history_start, 'full'
+        return history_start, FULL_SYNC_MODE
+
+    if normalized_mode == REFRESH_SYNC_MODE:
+        # A branch that has never been synced needs the whole history, not a trailing
+        # slice: refresh purges coverage for its window, and a branch with nothing
+        # behind that window would be certified on a 90-day interval it cannot honor.
+        # SYNC_INCREMENTAL=false is the operator's kill switch for windowed reads, so
+        # it must silence refresh exactly as it silences incremental.
+        if not SYNC_INCREMENTAL or not (scoped_checkpoint or has_legacy_company):
+            return history_start, FULL_SYNC_MODE
+        return refresh_sync_start_date(end_date, reporting_start), REFRESH_SYNC_MODE
 
     if scoped_checkpoint:
         return resolve_transaction_window(db, end_date, scoped_key)
@@ -365,7 +449,7 @@ def resolve_company_sync_window(db, end_date: date, requested_mode: str, company
     if has_legacy_company:
         return resolve_transaction_window(db, end_date, TRANSACTIONAL_STATE_KEY)
 
-    return history_start, 'full'
+    return history_start, FULL_SYNC_MODE
 
 
 def purge_source_window(db, model, company_id: int, start_date: str, end_date: str) -> int:
@@ -379,6 +463,10 @@ def purge_source_window(db, model, company_id: int, start_date: str, end_date: s
     Datetime bounds are used for date-only columns too; a date compares equal to the
     start of its day, so the window semantics are unchanged.
     """
+    if not start_date or not end_date:
+        # An open-ended window would match the company's whole table; a purge is only
+        # ever meant to clear the slice its reload is about to replace.
+        raise ValueError('purge_source_window requires both bounds')
     query = db.query(model).filter(model.company_id == company_id)
     lower = parse_datetime_start(start_date)
     upper = parse_datetime_end(end_date)
@@ -421,13 +509,23 @@ def purge_full_refresh_window(db, company_id: int, start_date: str, end_date: st
     never lands, the branch simply stays in full mode until it does.
     """
     try:
-        invalidate_sync_source_coverage(
-            db,
-            company_id,
-            FULL_REFRESH_COVERAGE_SOURCES,
-            parse_date(start_date),
-            parse_date(end_date),
-        )
+        window_start = parse_date(start_date)
+        # Each source must be invalidated over exactly the span it reloads. Appointments
+        # run to the schedule horizon, so stopping at end_date would leave their future
+        # tail in place and turn the purge into a middle slice — and a middle slice keeps
+        # only the newer side of the one contiguous interval the row can hold, silently
+        # discarding the branch's history. Harmless while full mode always started at
+        # that history; a rolling refresh window ends there every night.
+        source_window_ends = {APPOINTMENTS_SOURCE: parse_date(schedule_end_date)}
+        default_window_end = parse_date(end_date)
+        for source in FULL_REFRESH_COVERAGE_SOURCES:
+            invalidate_sync_source_coverage(
+                db,
+                company_id,
+                (source,),
+                window_start,
+                source_window_ends.get(source, default_window_end),
+            )
         historical_state = db.get(
             SyncState,
             historical_coverage_state_key(company_id),
@@ -1503,11 +1601,22 @@ def sync_goods(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
 # 12. Записи (appointments) и транзакции (услуги внутри записи)
 # ===================================================================
 
-def _commit_empty_source_coverage(
+def _settle_empty_source_window(
     db, company_id: str, source: str, start_date: str | None, end_date: str | None,
     db_company_id: int | None,
 ) -> bool:
-    """Record that a source returned no rows for the period so the gap is not re-fetched forever."""
+    """Record that a source returned no rows for the period so the gap is not re-fetched forever.
+
+    Deliberately does not delete, even in a purge-and-reload mode. An empty list is the
+    least verified answer the client can hand back — one well-formed
+    `{"success": true, "data": []}` on the first probe decides a window of any width, and
+    looks identical to a branch that genuinely has nothing — so deleting on it could drop
+    a whole history with nothing to restore from. Rows YClients removed inside a window
+    that then answers empty linger until a pass that returns data purges them, which is
+    the recoverable direction and the same one `_window_safe_to_purge` chooses.
+    """
+    if not start_date or not end_date:
+        return True
     try:
         cid = _db_company_id(company_id, db_company_id)
         if db is not None:
@@ -1532,7 +1641,7 @@ def sync_records(api: YClientsAPI, db, company_id: str,
         return False
     if not records:
         print("  Нет записей за указанный период")
-        return _commit_empty_source_coverage(
+        return _settle_empty_source_window(
             db, company_id, APPOINTMENTS_SOURCE, start_date, end_date, db_company_id
         )
 
@@ -1540,7 +1649,7 @@ def sync_records(api: YClientsAPI, db, company_id: str,
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        if full_refresh:
+        if _window_safe_to_purge(api, full_refresh, 'записи'):
             purged, purged_tx = purge_appointment_window(db, cid, start_date, end_date)
             print(f"  Full refresh: удалено записей {purged}, транзакций {purged_tx}")
         tx_count = 0
@@ -1686,6 +1795,23 @@ def mark_sync_source_coverage(
         state.synced_at = datetime.now()
 
 
+def _window_safe_to_purge(api, full_refresh: bool, source_label: str) -> bool:
+    """Refuse to drop a window the fetch could not read reliably.
+
+    Purge-and-reload only holds when the reload is complete. A day too busy for one page
+    is read through the shifting boundaries the split exists to avoid, so deleting the
+    window would strip rows the fetch never returned. Skipping the purge degrades to
+    append-only for that window: rows deleted upstream linger until the next clean pass,
+    which is the recoverable direction.
+    """
+    if not full_refresh:
+        return False
+    if getattr(api, 'last_dated_fetch_complete', True):
+        return True
+    print(f"  ! Окно прочитано постранично, очистка пропущена ({source_label})")
+    return False
+
+
 def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                                 start_date: str = None, end_date: str = None,
                                 db_company_id: int | None = None, full_refresh: bool = False):
@@ -1699,14 +1825,14 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
         return False
     if not txns:
         print("  Нет данных")
-        return _commit_empty_source_coverage(
-            db, company_id, PERSONAL_ACCOUNT_SOURCE, start_date, end_date, db_company_id
+        return _settle_empty_source_window(
+            db, company_id, PERSONAL_ACCOUNT_SOURCE, start_date, end_date, db_company_id,
         )
 
     try:
         cid = _db_company_id(company_id, db_company_id)
         print(f"  Найдено: {len(txns)}")
-        if full_refresh:
+        if _window_safe_to_purge(api, full_refresh, 'финансовые транзакции'):
             purged = purge_source_window(db, FinancialTransaction, cid, start_date, end_date)
             print(f"  Full refresh: удалено транзакций {purged}")
         existing_txns = load_existing_or_adopt_legacy_source_map(
@@ -1813,15 +1939,15 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
         return False
     if not txns:
         print("  Нет данных")
-        return _commit_empty_source_coverage(
-            db, company_id, GOODS_TRANSACTIONS_SOURCE, start_date, end_date, db_company_id
+        return _settle_empty_source_window(
+            db, company_id, GOODS_TRANSACTIONS_SOURCE, start_date, end_date, db_company_id,
         )
 
     print(f"  Найдено: {len(txns)}")
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        if full_refresh:
+        if _window_safe_to_purge(api, full_refresh, 'товарные транзакции'):
             purged = purge_source_window(db, GoodTransaction, cid, start_date, end_date)
             print(f"  Full refresh: удалено транзакций {purged}")
         existing_txns = load_existing_or_adopt_legacy_source_map(
@@ -1934,13 +2060,14 @@ def sync_comments(api: YClientsAPI, db, company_id: str,
         return False
     if not comments:
         print("  Нет данных")
+        # No coverage source is tracked for comments, and an empty answer never deletes.
         return True
 
     print(f"  Найдено: {len(comments)}")
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        if full_refresh:
+        if _window_safe_to_purge(api, full_refresh, 'комментарии'):
             purged = purge_source_window(db, Comment, cid, start_date, end_date)
             print(f"  Full refresh: удалено комментариев {purged}")
         existing_comments = load_existing_or_adopt_legacy_source_map(
@@ -2490,8 +2617,9 @@ def execute_sync(
             f"TIMEOUT={YCLIENTS_TIMEOUT}"
         )
         print(
-            f"Режим синхронизации транзакций: {mode or 'incremental'} "
-            f"(окно определяется по филиалам, lookback={SYNC_LOOKBACK_DAYS} дн.)"
+            f"Режим синхронизации транзакций: {mode or INCREMENTAL_SYNC_MODE} "
+            f"(окно определяется по филиалам, lookback={SYNC_LOOKBACK_DAYS} дн., "
+            f"refresh={SYNC_REFRESH_DAYS} дн.)"
         )
         print(f"Активных учётных данных: {len(credentials)}")
         emit_progress(
@@ -2633,14 +2761,19 @@ def execute_sync(
                 company_label = format_company_label(company)
                 print(f"\n{'─' * 60}")
                 print(f"Филиал: {company_label}")
+                window_hint = {
+                    INCREMENTAL_SYNC_MODE: f'lookback={SYNC_LOOKBACK_DAYS} дн.',
+                    REFRESH_SYNC_MODE: f'окно={SYNC_REFRESH_DAYS} дн., с перечиткой',
+                    FULL_SYNC_MODE: 'вся история, с перечиткой',
+                }.get(company_sync_mode, company_sync_mode)
                 print(
                     f"Окно транзакций: {company_sync_mode} "
-                    f"({company_sd} .. {ed}, lookback={SYNC_LOOKBACK_DAYS} дн.)"
+                    f"({company_sd} .. {ed}, {window_hint})"
                 )
                 print(f"{'─' * 60}")
 
                 company_step_start = len(step_results)
-                if company_sync_mode == 'full':
+                if is_full_refresh_mode(company_sync_mode):
                     cleanup_success = run_sync_step(
                         step_results,
                         f"{FULL_REFRESH_CLEANUP_STEP} [{company_label}]",
@@ -2666,7 +2799,7 @@ def execute_sync(
 
                 # Each windowed source drops and reloads its own window in one
                 # transaction, so a source that fails keeps the data it already had.
-                refresh = {'full_refresh': company_sync_mode == 'full'}
+                refresh = {'full_refresh': is_full_refresh_mode(company_sync_mode)}
                 company_steps = [
                     ("Категории услуг", sync_service_categories, {}),
                     ("Услуги", sync_services, {}),
@@ -2741,31 +2874,43 @@ def execute_sync(
                     )
 
                 company_step_results = step_results[company_step_start:]
-                if steps_successful(company_step_results, checkpoint_step_names):
-                    set_sync_state_value(db, transactional_state_key(company.id), ed)
-                    if (
-                        company_sync_mode == 'full'
-                        and has_complete_historical_source_coverage(
-                            db,
-                            company.id,
-                            end,
-                        )
-                    ):
+                if is_full_refresh_mode(company_sync_mode):
+                    # The marker asserts one thing only — that the coverage rows span the
+                    # branch's whole history — and that is read back from the rows
+                    # themselves. Restoring it is therefore independent of whether every
+                    # step succeeded: a source that owns no coverage (comments, analytics)
+                    # failing must not cost the branch a full history pass tomorrow, now
+                    # that the nightly job is a narrow window rather than that pass.
+                    if has_complete_historical_source_coverage(db, company.id, end):
                         set_sync_state_value(
                             db,
                             historical_coverage_state_key(company.id),
                             ed,
                         )
-                    elif company_sync_mode == 'full':
+                    else:
                         print(
                             "! Полное историческое покрытие источников не подтверждено; "
                             f"инкрементальный режим не включен [{company_label}]"
                         )
+                if steps_successful(company_step_results, checkpoint_step_names):
+                    set_sync_state_value(db, transactional_state_key(company.id), ed)
                     print(f"✓ Обновлено состояние инкрементальной синхронизации [{company_label}]: {ed}")
                 else:
                     print(f"! Состояние инкрементальной синхронизации не обновлено [{company_label}]")
 
-        overall_success = companies_count > 0 and steps_successful(step_results, checkpoint_step_names)
+        # A step that raised is not the same as one that declined: the first is a bug or an
+        # endpoint out of contract, and it used to abort the run. It no longer does — the
+        # remaining branches still sync — so the run's own status has to carry it instead.
+        crashed = [item['name'] for item in step_results if item.get('error')]
+        if crashed:
+            print(f"\n  Шаги, прерванные исключением: {len(crashed)}")
+            for name in crashed:
+                print(f"    - {name}")
+        overall_success = (
+            companies_count > 0
+            and not crashed
+            and steps_successful(step_results, checkpoint_step_names)
+        )
 
         print("\n" + "=" * 60)
         print("  Синхронизация завершена!")

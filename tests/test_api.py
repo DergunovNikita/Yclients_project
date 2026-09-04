@@ -1,5 +1,6 @@
 from datetime import date, datetime
 import json
+import sys
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -654,6 +655,45 @@ async def test_sync_trigger_queues_job(async_session, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['incremental', 'refresh', 'full'])
+async def test_sync_trigger_accepts_every_sync_mode(async_session, monkeypatch, mode):
+    """The dashboard must be able to request each mode the pipeline implements."""
+    captured = {}
+
+    class DummyJob:
+        id = 7
+        initiator = 'dashboard'
+        portal_account_id = None
+        credential_id = None
+        company_ids = []
+
+    DummyJob.mode = mode
+
+    async def fake_enqueue(self, db, job_mode, initiator, **kwargs):
+        captured['mode'] = job_mode
+        return DummyJob()
+
+    async def override_db():
+        yield async_session
+
+    monkeypatch.setattr(api, 'SYNC_API_TOKEN', 'test-sync-token')
+    monkeypatch.setattr(api.SyncJobService, 'async_enqueue_job', fake_enqueue)
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/sync/trigger',
+            json={'mode': mode, 'initiator': 'dashboard'},
+            headers={'X-Sync-Token': 'test-sync-token'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    assert captured['mode'] == mode
+
+
+@pytest.mark.asyncio
 async def test_sync_trigger_rejects_unconfigured_token(async_session, monkeypatch):
     async def override_db():
         yield async_session
@@ -890,3 +930,19 @@ async def test_goods_endpoint_reads_branch_scoped_catalog(async_session):
     assert payload['data'][0]['good_id'] == 100
     assert payload['data'][0]['company_id'] == 1
     assert payload['data'][0]['cost'] == 1000.0
+
+
+def test_cli_accepts_every_sync_mode(monkeypatch):
+    """The runner systemd calls must understand the mode its unit passes."""
+    import main
+
+    for mode in ('incremental', 'refresh', 'full'):
+        monkeypatch.setattr(sys, 'argv', ['main.py', '--mode', mode])
+        assert main.parse_args().mode == mode
+
+    monkeypatch.setattr(sys, 'argv', ['main.py', '--mode', 'bogus'])
+    with pytest.raises(SystemExit) as exit_info:
+        main.parse_args()
+    # argparse exits 2 for usage errors, so "already running" must not also be 2.
+    assert exit_info.value.code == 2
+    assert main.ALREADY_RUNNING_EXIT_CODE != 2

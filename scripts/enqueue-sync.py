@@ -86,7 +86,7 @@ def _print_curl(url: str, method: str, headers: dict[str, str], body: dict | Non
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode', choices=['incremental', 'full'], default='incremental')
+    parser.add_argument('--mode', choices=['incremental', 'refresh', 'full'], default='incremental')
     parser.add_argument('--tenant', type=int, help='portal_account_id')
     parser.add_argument('--global', dest='global_sync', action='store_true', help='Sync across all tenants')
     parser.add_argument('--credential', type=int, help='YClients credential id')

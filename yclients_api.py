@@ -3,6 +3,7 @@
 """
 import requests
 import time
+from datetime import date, timedelta
 from typing import Dict, Optional, List
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -12,6 +13,15 @@ class YClientsAPI:
     """Класс для работы с YClients API"""
 
     MAX_PER_PAGE = 200
+    # Budget for one dated window, scaled to the rows it actually yields — the work is
+    # proportional to rows, not to days, so a per-day budget would collapse to a
+    # constant margin on a busy branch. Measured cost is ~3 requests per page of
+    # distinct rows (255 requests for a 26-year history of 16 463 rows; 31 for a
+    # 90-day window of 2 130), so 12 leaves roughly a 4x margin. Only distinct rows
+    # raise the ceiling: an endpoint that stops filtering keeps returning the same ids,
+    # so its requests climb while its allowance does not.
+    SPLIT_REQUESTS_BASE = 500
+    SPLIT_REQUESTS_PER_PAGE = 12
 
     def __init__(
         self,
@@ -28,6 +38,9 @@ class YClientsAPI:
         self.login = login
         self.password = password
         self.user_token: Optional[str] = None
+        self._split_seen: Optional[set] = None
+        self._split_requests = 0
+        self.last_dated_fetch_complete = True
         self.base_url = 'https://api.yclients.com/api/v1'
         self.request_delay = max(0.0, request_delay)
         self.timeout = max(1.0, timeout)
@@ -133,12 +146,18 @@ class YClientsAPI:
             print(f"Ответ: {response.text[:300]}")
             return None
 
-    def _get_all_pages(self, url: str, extra_params: dict = None) -> List[Dict]:
-        """Постраничная загрузка всех записей из endpoint с пагинацией."""
+    def _get_all_pages(self, url: str, extra_params: dict = None,
+                       page_limit: int = None) -> List[Dict]:
+        """Постраничная загрузка всех записей из endpoint с пагинацией.
+
+        `page_limit` stops after that many pages; a caller that only needs to know
+        whether the response spills past one page must not pay for the rest of it.
+        """
         all_items = []
         page = 1
 
         while True:
+            self._spend_split_budget(url)
             params = {'page': page, 'count': self.MAX_PER_PAGE}
             if extra_params:
                 params.update(extra_params)
@@ -167,9 +186,132 @@ class YClientsAPI:
             if len(data) < self.MAX_PER_PAGE:
                 break
 
+            if page_limit is not None and page >= page_limit:
+                break
+
             page += 1
 
         return all_items
+
+    def _spend_split_budget(self, url: str) -> None:
+        """Stop a dated fetch whose requests grow without bringing back new rows.
+
+        The split assumes the endpoint honours `start_date`/`end_date`. If one stops
+        filtering — or starts filtering on another field — every probe comes back full,
+        the range bisects down to single days, and each day then walks the entire
+        dataset: a 90-day window over 100k rows costs one request when the filter works
+        and tens of thousands when it does not. The allowance grows only with distinct
+        rows, so the runaway stops once it starts re-serving ids it has already given —
+        on a first pass over a large dataset that still costs thousands of requests, but
+        it is bounded, where the unguarded loop was not. Honest work never approaches it:
+        the split stops at leaves under one page, so it spends ~2 requests per 200 rows
+        against an allowance of 12. Densely clustered data narrows that margin — a window
+        whose rows sit in a few dense pockets can reach ~90% of its allowance — so a
+        branch far outside the measured shapes is worth checking before assuming the
+        message below names the real cause.
+
+        Exhaustion is turned into a failed step by `run_sync_step` rather than unwinding,
+        so the remaining branches and tenants still sync. Every endpoint that splits is a
+        checkpoint step, so the run itself is still reported failed — and in a
+        purge-and-reload mode the window's coverage has already been narrowed, so the next
+        run re-fetches it.
+        """
+        if self._split_seen is None:
+            return
+        self._split_requests += 1
+        allowed = (
+            self.SPLIT_REQUESTS_BASE
+            + self.SPLIT_REQUESTS_PER_PAGE * (len(self._split_seen) // self.MAX_PER_PAGE)
+        )
+        if self._split_requests > allowed:
+            raise RuntimeError(
+                f"YClients endpoint {url} spent {self._split_requests} requests on one dated "
+                f"window for {len(self._split_seen)} distinct rows; the date filter is likely "
+                "no longer honoured"
+            )
+
+    def _keep_new_rows(self, items: List[Dict]) -> List[Dict]:
+        """Drop rows already returned by another piece of the same window.
+
+        Recorded only for rows that are actually returned: a probe's page is thrown away
+        when the range splits, and marking it seen would delete it from the children.
+        """
+        if self._split_seen is None:
+            return items
+        fresh = []
+        for item in items:
+            item_id = item.get('id') if isinstance(item, dict) else None
+            if item_id is not None:
+                if item_id in self._split_seen:
+                    continue
+                self._split_seen.add(item_id)
+            fresh.append(item)
+        return fresh
+
+    def _fetch_single_page_ranges(self, url: str, start: date, end: date) -> List[Dict]:
+        """Fetch [start, end], halving it until each request fits on one page.
+
+        Many transactions share the exact same `date`, and the endpoint paginates by
+        offset over a sort that does not break those ties deterministically. Rows on a
+        page boundary therefore shift between requests: some arrive twice and others
+        never arrive at all. Measured on one branch, June returned 639 rows over four
+        pages and silently dropped a real 3 100 ₽ payment that a narrower request
+        returned every time. A response that fits on a single page has no boundary to
+        lose rows across, so the range is split until that holds.
+
+        Only the first page is read before deciding, so a quiet range — an empty decade
+        before the branch opened, most of all — costs one request instead of a walk
+        through every month in it, and a dense range is split without first downloading
+        rows that would be thrown away.
+        """
+        window = {'start_date': start.isoformat(), 'end_date': end.isoformat()}
+        first_page = self._get_all_pages(url, window, page_limit=1)
+        if len(first_page) < self.MAX_PER_PAGE:
+            return self._keep_new_rows(first_page)
+        if start >= end:
+            # A single day busier than one page is the one case the split cannot fix:
+            # the range filter has no finer grain, so its pages are read as they come
+            # and this day alone stays exposed to the boundary shifting described above.
+            whole_day = self._get_all_pages(url, window)
+            if len(whole_day) > self.MAX_PER_PAGE:
+                # A day that filled the probe exactly and held nothing more was never at
+                # risk: one page has no boundary to lose rows across.
+                self.last_dated_fetch_complete = False
+                print(
+                    f"  ! {start.isoformat()} не умещается на одну страницу; "
+                    "строки этого дня читаются постранично и могут теряться"
+                )
+            return self._keep_new_rows(whole_day)
+
+        mid = start + timedelta(days=(end - start).days // 2)
+        return (
+            self._fetch_single_page_ranges(url, start, mid)
+            + self._fetch_single_page_ranges(url, mid + timedelta(days=1), end)
+        )
+
+    def _get_all_pages_dated(self, url: str, start_date: Optional[str],
+                             end_date: Optional[str]) -> List[Dict]:
+        """Fetch a dated endpoint in pieces small enough to page safely, de-duplicated.
+
+        `last_dated_fetch_complete` reports whether every piece fit on one page. A caller
+        that deletes its window before reloading must consult it: reloading a window that
+        was read through shifting page boundaries would delete rows the fetch never
+        returned, which is worse than keeping rows YClients has since removed.
+        """
+        if not start_date or not end_date:
+            params = {k: v for k, v in (('start_date', start_date), ('end_date', end_date)) if v}
+            return self._get_all_pages(url, params or None)
+
+        self._split_seen = set()
+        self._split_requests = 0
+        self.last_dated_fetch_complete = True
+        try:
+            return self._fetch_single_page_ranges(
+                url, date.fromisoformat(start_date), date.fromisoformat(end_date)
+            )
+        finally:
+            self._split_seen = None
+            self._split_requests = 0
 
     @staticmethod
     def _list_response_data(result: Optional[dict], endpoint: str) -> Optional[List[Dict]]:
@@ -308,13 +450,7 @@ class YClientsAPI:
             return None
 
         url = f'{self.base_url}/records/{company_id}'
-        params = {}
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
-
-        return self._get_all_pages(url, params or None)
+        return self._get_all_pages_dated(url, start_date, end_date)
 
     # ------------------------------------------------------------------
     # Финансовые транзакции (с пагинацией и датами)
@@ -327,13 +463,7 @@ class YClientsAPI:
             return None
 
         url = f'{self.base_url}/transactions/{company_id}'
-        params = {}
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
-
-        return self._get_all_pages(url, params or None)
+        return self._get_all_pages_dated(url, start_date, end_date)
 
     # ------------------------------------------------------------------
     # Товарные транзакции (с пагинацией и датами)
@@ -346,13 +476,7 @@ class YClientsAPI:
             return None
 
         url = f'{self.base_url}/storages/transactions/{company_id}'
-        params = {}
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
-
-        return self._get_all_pages(url, params or None)
+        return self._get_all_pages_dated(url, start_date, end_date)
 
     # ------------------------------------------------------------------
     # Комментарии / отзывы (с пагинацией и датами)
@@ -365,13 +489,7 @@ class YClientsAPI:
             return None
 
         url = f'{self.base_url}/comments/{company_id}/'
-        params = {}
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
-
-        return self._get_all_pages(url, params or None)
+        return self._get_all_pages_dated(url, start_date, end_date)
 
     # ------------------------------------------------------------------
     # График работы сотрудников

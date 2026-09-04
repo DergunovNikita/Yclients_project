@@ -133,6 +133,7 @@ ANALYTICS_DAYS = _get_int('ANALYTICS_DAYS', 30)
 DB_BATCH_SIZE = _get_int('DB_BATCH_SIZE', 1000)
 SYNC_INCREMENTAL = _get_bool('SYNC_INCREMENTAL', True)
 SYNC_LOOKBACK_DAYS = _get_int('SYNC_LOOKBACK_DAYS', 2)
+SYNC_REFRESH_DAYS = _get_int('SYNC_REFRESH_DAYS', 90)
 
 # ============================================================================
 # Служебные параметры синхронизации

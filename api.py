@@ -953,7 +953,7 @@ async def api_stats(request: Request, db: AsyncSession = Depends(get_async_db)):
 
 
 class SyncTriggerRequest(BaseModel):
-    mode: Literal['incremental', 'full'] = 'incremental'
+    mode: Literal['incremental', 'refresh', 'full'] = 'incremental'
     initiator: str = 'dashboard'
     portal_account_id: int | None = None
     credential_id: int | None = None

@@ -3,12 +3,14 @@ import sys
 
 from sync_orchestrator import run_sync_job
 
+ALREADY_RUNNING_EXIT_CODE = 75
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='YClients BI sync runner')
     parser.add_argument(
         '--mode',
-        choices=['incremental', 'full'],
+        choices=['incremental', 'refresh', 'full'],
         default='incremental',
         help='Тип синхронизации',
     )
@@ -36,7 +38,9 @@ def main():
 
     if result.get('status') == 'already_running':
         print('Синхронизация уже выполняется, новый запуск отклонен')
-        return 2
+        # Distinct from argparse's usage exit of 2: systemd treats this one as success,
+        # and a mistyped --mode must never qualify.
+        return ALREADY_RUNNING_EXIT_CODE
 
     if result.get('status') != 'success':
         print(f"Синхронизация завершилась со статусом {result.get('status')}")

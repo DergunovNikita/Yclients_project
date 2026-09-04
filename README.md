@@ -106,6 +106,8 @@ docker compose ps
 
 ```bash
 ./sync.sh incremental manual cli
+./sync.sh refresh manual cli      # перечитать последние SYNC_REFRESH_DAYS с очисткой окна
+./sync.sh full manual cli         # то же по всей истории
 ```
 
 Логи worker:
@@ -216,6 +218,7 @@ python scripts/sync-log-summary.py --last 5   # сводка по последн
 
 ```bash
 python scripts/enqueue-sync.py --tenant 1 --mode incremental
+python scripts/enqueue-sync.py --tenant 1 --mode refresh          # перечитать последние SYNC_REFRESH_DAYS
 python scripts/enqueue-sync.py --global --mode full --dry-run   # печатает curl
 python scripts/enqueue-sync.py --status                          # текущий статус
 ```
