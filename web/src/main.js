@@ -736,8 +736,11 @@ function renderCards(target, cards) {
         const attrs = card.href
           ? ` href="${escapeHtml(card.href)}" data-report-link class="card card--link" aria-label="${escapeHtml(actionLabel)}" title="${escapeHtml(actionLabel)}"`
           : ' class="card"';
+        // A card that names its column skips auto-placement — the last row of a grid
+        // keeps each card under its own column even where the rows above are full.
+        const slotStyle = card.column ? ` style="--card-column: ${Number(card.column)}"` : '';
         return `
-        <div class="card-slot">
+        <div class="card-slot"${slotStyle}>
           <${tag}${attrs}>
             <div class="label">${escapeHtml(card.label)}</div>
             <div class="value">${escapeHtml(card.value)}</div>
@@ -917,13 +920,6 @@ function renderRevenueMetrics(summary) {
       delta: formatPct(revenue.extra_service_revenue_change_pct),
       deltaValue: revenue.extra_service_revenue_change_pct,
     },
-    {
-      label: t('dash.cardGoodsRevenueShare'),
-      hint: t('dash.hintGoodsRevenueShare'),
-      value: formatMetricValue(goodsRevenueShare(revenue), 'percent'),
-      delta: t('dash.ofTotalRevenue'),
-      deltaValue: null,
-    },
   ];
 
   renderCards(
@@ -937,63 +933,95 @@ function renderServicesMetrics(summary) {
   const averageCheckBlock = summary.average_check;
   const revenue = revenueBlock || {};
   const averageCheck = averageCheckBlock || {};
+  const visitMetrics = summary.visit_metrics || {};
   const revenuePresent = Boolean(revenueBlock);
   const averageCheckPresent = Boolean(averageCheckBlock);
-  const cards = [
+  // One column per kind of sale: counts fill the first row, each average check sits
+  // right under its own count, so the grid needs as many columns as visible kinds.
+  const columns = [
     {
-      label: t('dash.cardServiceCount'),
-      hint: t('dash.hintServiceCount'),
-      value: formatNumber(revenue.service_count),
-      delta: formatPct(revenue.service_count_change_pct),
-      deltaValue: revenue.service_count_change_pct,
-      present: revenuePresent,
+      count: {
+        label: t('dash.cardServiceCount'),
+        hint: t('dash.hintServiceCount'),
+        value: formatNumber(revenue.service_count),
+        delta: formatPct(revenue.service_count_change_pct),
+        deltaValue: revenue.service_count_change_pct,
+        present: revenuePresent,
+      },
+      average: {
+        label: t('dash.cardServiceAverageCheck'),
+        hint: t('dash.hintServiceAverageCheck'),
+        value: formatMoney(averageCheck.services),
+        delta: formatPct(averageCheck.services_change_pct),
+        deltaValue: averageCheck.services_change_pct,
+        present: averageCheckPresent,
+      },
     },
     {
-      label: t('dash.cardServiceAverageCheck'),
-      hint: t('dash.hintServiceAverageCheck'),
-      value: formatMoney(averageCheck.services),
-      delta: formatPct(averageCheck.services_change_pct),
-      deltaValue: averageCheck.services_change_pct,
-      present: averageCheckPresent,
+      count: {
+        label: t('dash.cardGoodsCount'),
+        hint: t('dash.hintGoodsCount'),
+        value: formatNumber(revenue.goods_count),
+        delta: formatPct(revenue.goods_count_change_pct),
+        deltaValue: revenue.goods_count_change_pct,
+        present: revenuePresent,
+      },
+      average: {
+        label: t('dash.cardGoodsAverageCheck'),
+        hint: t('dash.hintGoodsAverageCheck'),
+        value: formatMoney(averageCheck.goods),
+        delta: formatPct(averageCheck.goods_change_pct),
+        deltaValue: averageCheck.goods_change_pct,
+        present: averageCheckPresent,
+      },
+      share: {
+        label: t('dash.cardGoodsRevenueShare'),
+        hint: t('dash.hintGoodsRevenueShare'),
+        value: formatMetricValue(goodsRevenueShare(revenue), 'percent'),
+        delta: t('dash.ofTotalRevenue'),
+        deltaValue: null,
+        present: revenuePresent,
+      },
     },
     {
-      label: t('dash.cardGoodsCount'),
-      hint: t('dash.hintGoodsCount'),
-      value: formatNumber(revenue.goods_count),
-      delta: formatPct(revenue.goods_count_change_pct),
-      deltaValue: revenue.goods_count_change_pct,
-      present: revenuePresent,
-    },
-    {
-      label: t('dash.cardGoodsAverageCheck'),
-      hint: t('dash.hintGoodsAverageCheck'),
-      value: formatMoney(averageCheck.goods),
-      delta: formatPct(averageCheck.goods_change_pct),
-      deltaValue: averageCheck.goods_change_pct,
-      present: averageCheckPresent,
-    },
-    {
-      label: t('dash.cardExtraServiceCount'),
-      hint: t('dash.hintExtraServiceCount'),
-      value: formatNumber(revenue.extra_service_count),
-      delta: formatPct(revenue.extra_service_count_change_pct),
-      deltaValue: revenue.extra_service_count_change_pct,
-      present: revenuePresent,
-    },
-    {
-      label: t('dash.cardExtraServiceAverageCheck'),
-      hint: t('dash.hintExtraServiceAverageCheck'),
-      value: formatMoney(averageCheck.extra_services),
-      delta: formatPct(averageCheck.extra_services_change_pct),
-      deltaValue: averageCheck.extra_services_change_pct,
-      present: averageCheckPresent,
+      count: {
+        label: t('dash.cardExtraServiceCount'),
+        hint: t('dash.hintExtraServiceCount'),
+        value: formatNumber(revenue.extra_service_count),
+        delta: formatPct(revenue.extra_service_count_change_pct),
+        deltaValue: revenue.extra_service_count_change_pct,
+        present: revenuePresent,
+      },
+      average: {
+        label: t('dash.cardExtraServiceAverageCheck'),
+        hint: t('dash.hintExtraServiceAverageCheck'),
+        value: formatMoney(averageCheck.extra_services),
+        delta: formatPct(averageCheck.extra_services_change_pct),
+        deltaValue: averageCheck.extra_services_change_pct,
+        present: averageCheckPresent,
+      },
+      // Also shown under Appointments: there it measures how often extras are sold,
+      // here it closes the extra-services column the same way the goods share does.
+      share: {
+        label: t('dash.cardExtraServicesPerAppointment'),
+        hint: t('dash.hintExtraServicesPerAppointment'),
+        value: formatMetricValue(visitMetrics.extra_services_per_appointment_pct, 'percent'),
+        delta: formatPct(visitMetrics.extra_services_per_appointment_pct_change_pct),
+        deltaValue: visitMetrics.extra_services_per_appointment_pct_change_pct,
+      },
     },
   ];
 
-  const visibleCards = usesAdministratorSchedule(summary)
-    ? cards.filter((_, index) => index < 4)
-    : cards;
-  renderCards(els.servicesMetrics, presentCards(visibleCards));
+  const visibleColumns = usesAdministratorSchedule(summary) ? columns.slice(0, 2) : columns;
+  els.servicesMetrics.style.setProperty('--metric-columns', String(visibleColumns.length));
+  renderCards(els.servicesMetrics, [
+    ...presentCards(visibleColumns.map((column) => column.count)),
+    ...presentCards(visibleColumns.map((column) => column.average)),
+    // The share row is shorter than the ones above it, so every card names its column.
+    ...presentCards(visibleColumns.flatMap((column, index) => (
+      column.share ? [{ ...column.share, column: index + 1 }] : []
+    ))),
+  ]);
 }
 
 function renderVisitMetrics(summary) {

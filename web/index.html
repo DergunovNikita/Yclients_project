@@ -524,6 +524,18 @@
       margin-bottom: 16px;
     }
 
+    /* One column per kind of sale, so every average check stays under its own count.
+       The count comes from the cards being rendered (--metric-columns). */
+    .services-metrics {
+      grid-template-columns: repeat(var(--metric-columns, 3), minmax(0, 1fr));
+    }
+
+    /* The last row holds fewer cards than the columns above it, so those cards name
+       the column they belong to instead of being packed from the left. */
+    .services-metrics .card-slot {
+      grid-column: var(--card-column, auto);
+    }
+
     .clients-metrics {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1671,6 +1683,12 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
+      /* Two columns would break the count/average pairing, so keep one per kind
+         until the single-column breakpoint takes over. */
+      .services-metrics {
+        grid-template-columns: repeat(var(--metric-columns, 3), minmax(0, 1fr));
+      }
+
       .appointments-metrics {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
@@ -1711,6 +1729,12 @@
       .appointments-metrics,
       .segmented {
         grid-template-columns: 1fr;
+      }
+
+      /* A single column has no second one to point at, and a card asking for it
+         would grow the grid an implicit column wide. */
+      .services-metrics .card-slot {
+        grid-column: auto;
       }
 
       .chart-box,
@@ -1820,7 +1844,7 @@
         <button type="button" data-overview-jump="appointments" data-i18n="dash.jumpAppointments">Appuntamenti</button>
         <button type="button" data-overview-jump="clients" data-i18n="dash.jumpClients">Clienti</button>
         <button type="button" data-overview-jump="revenue" data-i18n="dash.jumpRevenue">Ricavi</button>
-        <button type="button" data-overview-jump="services" data-i18n="dash.jumpServices">Servizi</button>
+        <button type="button" data-overview-jump="services" data-i18n="dash.jumpServices">Prodotti e servizi</button>
       </nav>
 
       <section class="staff-personal-scope" id="staff-personal-scope" hidden>
@@ -1889,11 +1913,11 @@
         </div>
       </section>
 
-      <section id="services-overview-section" data-overview-section="services" data-i18n-attr="aria-label:dash.jumpServices" aria-label="Servizi">
+      <section id="services-overview-section" data-overview-section="services" data-i18n-attr="aria-label:dash.jumpServices" aria-label="Prodotti e servizi">
         <div class="panel-title">
-          <h2 data-i18n="dash.jumpServices">Servizi</h2>
+          <h2 data-i18n="dash.jumpServices">Prodotti e servizi</h2>
         </div>
-        <section class="visit-metrics" id="services-metrics"></section>
+        <section class="visit-metrics services-metrics" id="services-metrics"></section>
         <div class="grid" id="services-details">
           <div class="panel wide">
             <div class="panel-title">
