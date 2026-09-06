@@ -43,6 +43,9 @@ import {
   setPlanMetricHidden,
 } from './planMetricVisibility.js';
 import { inputDateValue } from './period.js';
+// i18n's formatDate parses a date-only string as UTC midnight, which renders a day early
+// for any viewer west of UTC. This one pins it to local midnight.
+import { formatDate } from './reports/format.js';
 import { initReports } from './reports/index.js';
 import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
 import {
@@ -149,6 +152,7 @@ const els = {
   tenantSelect: document.getElementById('tenant-select'),
   tenantMeta: document.getElementById('tenant-meta'),
   overviewPresetButtons: [...document.querySelectorAll('[data-overview-preset]')],
+  compareNote: document.getElementById('overview-compare-note'),
   overviewJumpButtons: [...document.querySelectorAll('[data-overview-jump]')],
   profileSettingsLink: document.querySelector('#user-profile-link a[href]'),
   unsavedChangesDialog: document.getElementById('unsaved-changes-dialog'),
@@ -697,8 +701,30 @@ function overviewReportUrl(reportId) {
     company_id: filter.branch.value,
     staff_id: filter.staff.value,
     granularity: 'month',
+    // The report recomputes the same new/repeat deltas, so it has to measure against the
+    // same baseline as the card that links to it.
+    period_preset: activeOverviewPreset(),
   });
   return `/reports/${encodeURIComponent(reportId)}?${params.toString()}`;
+}
+
+let cardHintSeq = 0;
+
+// The hint button sits next to the card, not inside it: a <button> nested in the
+// card's <a> would be invalid markup and the delegated [data-report-link] handler
+// would open the report on every tap of the hint.
+function renderCardHint(hint, label) {
+  if (!hint) return '';
+  const id = `card-hint-${++cardHintSeq}`;
+  return `
+          <button
+            type="button"
+            class="card__hint"
+            data-card-hint
+            aria-describedby="${id}"
+            aria-label="${escapeHtml(t('dash.hintAria', { label }))}"
+          >i</button>
+          <span class="card__hint-body" id="${id}" role="tooltip">${escapeHtml(hint)}</span>`;
 }
 
 function renderCards(target, cards) {
@@ -711,12 +737,14 @@ function renderCards(target, cards) {
           ? ` href="${escapeHtml(card.href)}" data-report-link class="card card--link" aria-label="${escapeHtml(actionLabel)}" title="${escapeHtml(actionLabel)}"`
           : ' class="card"';
         return `
-        <${tag}${attrs}>
-          <div class="label">${escapeHtml(card.label)}</div>
-          <div class="value">${escapeHtml(card.value)}</div>
-          ${card.delta ? `<div class="delta ${deltaClass(card.deltaValue)}">${escapeHtml(card.delta)}</div>` : ''}
-          ${card.action ? `<div class="card__action">${escapeHtml(card.action)}</div>` : ''}
-        </${tag}>
+        <div class="card-slot">
+          <${tag}${attrs}>
+            <div class="label">${escapeHtml(card.label)}</div>
+            <div class="value">${escapeHtml(card.value)}</div>
+            ${card.delta ? `<div class="delta ${deltaClass(card.deltaValue)}">${escapeHtml(card.delta)}</div>` : ''}
+            ${card.action ? `<div class="card__action">${escapeHtml(card.action)}</div>` : ''}
+          </${tag}>${renderCardHint(card.hint, card.label)}
+        </div>
       `;
       },
     )
@@ -735,6 +763,7 @@ function renderKpi(summary) {
   const cards = [
     {
       label: t('dash.cardTotalRevenue'),
+      hint: t('dash.hintTotalRevenue'),
       value: formatMoney(revenue.total),
       delta: formatPct(revenue.change_pct),
       deltaValue: revenue.change_pct,
@@ -742,6 +771,7 @@ function renderKpi(summary) {
     },
     {
       label: t('dash.cardVisitedAppointments'),
+      hint: t('dash.hintVisitedAppointments'),
       value: formatNumber(revenue.appointments),
       delta: formatPct(revenue.appointments_change_pct),
       deltaValue: revenue.appointments_change_pct,
@@ -751,6 +781,9 @@ function renderKpi(summary) {
       label: averageCheck.source_status === 'partial'
         ? t('dash.cardAverageCheckTotalPartial')
         : t('dash.cardAverageCheckTotal'),
+      hint: averageCheck.source_status === 'partial'
+        ? t('dash.hintAverageCheckTotalPartial')
+        : t('dash.hintAverageCheckTotal'),
       value: formatMoney(averageCheck.total),
       delta: formatPct(averageCheck.total_change_pct),
       deltaValue: averageCheck.total_change_pct,
@@ -806,32 +839,38 @@ function renderStaffBranchMetrics(summary) {
   const cards = [
     {
       label: t('dash.cardBranchShiftAppointments'),
+      hint: t('dash.hintBranchShiftAppointments'),
       value: formatMetricValue(attribution.appointment_count, 'number'),
     },
     {
       label: t('dash.cardBranchShiftClients'),
+      hint: t('dash.hintBranchShiftClients'),
       value: formatMetricValue(attribution.unique_client_count, 'number'),
     },
     {
       label: t('dash.cardExtraServiceCount'),
+      hint: t('dash.hintExtraServiceCount'),
       value: formatMetricValue(revenue.extra_service_count, 'number'),
       delta: formatPct(revenue.extra_service_count_change_pct),
       deltaValue: revenue.extra_service_count_change_pct,
     },
     {
       label: t('dash.cardExtraServicesPerAppointment'),
+      hint: t('dash.hintExtraServicesPerAppointment'),
       value: formatMetricValue(visitMetrics.extra_services_per_appointment_pct, 'percent'),
       delta: formatPct(visitMetrics.extra_services_per_appointment_pct_change_pct),
       deltaValue: visitMetrics.extra_services_per_appointment_pct_change_pct,
     },
     {
       label: t('dash.cardExtraServiceClients'),
+      hint: t('dash.hintExtraServiceClients'),
       value: formatMetricValue(visitMetrics.extra_service_clients_pct, 'percent'),
       delta: t('dash.uniqueClientsCount', { count: formatNumber(visitMetrics.extra_service_clients) }),
       deltaValue: null,
     },
     {
       label: t('dash.cardExtraServiceRevenue'),
+      hint: t('dash.hintExtraServiceRevenue'),
       value: formatMetricValue(revenue.extra_service_revenue, 'money'),
       delta: formatPct(revenue.extra_service_revenue_change_pct),
       deltaValue: revenue.extra_service_revenue_change_pct,
@@ -839,6 +878,7 @@ function renderStaffBranchMetrics(summary) {
     },
     {
       label: t('dash.cardExtraServiceAverageCheck'),
+      hint: t('dash.hintExtraServiceAverageCheck'),
       value: formatMetricValue(averageCheck.extra_services, 'money'),
       delta: formatPct(averageCheck.extra_services_change_pct),
       deltaValue: averageCheck.extra_services_change_pct,
@@ -858,24 +898,28 @@ function renderRevenueMetrics(summary) {
   const cards = [
     {
       label: t('dash.cardServiceRevenue'),
+      hint: t('dash.hintServiceRevenue'),
       value: formatMoney(revenue.service_revenue),
       delta: formatPct(revenue.service_revenue_change_pct),
       deltaValue: revenue.service_revenue_change_pct,
     },
     {
       label: t('dash.cardGoodsRevenue'),
+      hint: t('dash.hintGoodsRevenue'),
       value: formatMoney(revenue.goods_revenue),
       delta: formatPct(revenue.goods_revenue_change_pct),
       deltaValue: revenue.goods_revenue_change_pct,
     },
     {
       label: t('dash.cardExtraServiceRevenue'),
+      hint: t('dash.hintExtraServiceRevenue'),
       value: formatMoney(revenue.extra_service_revenue),
       delta: formatPct(revenue.extra_service_revenue_change_pct),
       deltaValue: revenue.extra_service_revenue_change_pct,
     },
     {
       label: t('dash.cardGoodsRevenueShare'),
+      hint: t('dash.hintGoodsRevenueShare'),
       value: formatMetricValue(goodsRevenueShare(revenue), 'percent'),
       delta: t('dash.ofTotalRevenue'),
       deltaValue: null,
@@ -898,6 +942,7 @@ function renderServicesMetrics(summary) {
   const cards = [
     {
       label: t('dash.cardServiceCount'),
+      hint: t('dash.hintServiceCount'),
       value: formatNumber(revenue.service_count),
       delta: formatPct(revenue.service_count_change_pct),
       deltaValue: revenue.service_count_change_pct,
@@ -905,6 +950,7 @@ function renderServicesMetrics(summary) {
     },
     {
       label: t('dash.cardServiceAverageCheck'),
+      hint: t('dash.hintServiceAverageCheck'),
       value: formatMoney(averageCheck.services),
       delta: formatPct(averageCheck.services_change_pct),
       deltaValue: averageCheck.services_change_pct,
@@ -912,6 +958,7 @@ function renderServicesMetrics(summary) {
     },
     {
       label: t('dash.cardGoodsCount'),
+      hint: t('dash.hintGoodsCount'),
       value: formatNumber(revenue.goods_count),
       delta: formatPct(revenue.goods_count_change_pct),
       deltaValue: revenue.goods_count_change_pct,
@@ -919,6 +966,7 @@ function renderServicesMetrics(summary) {
     },
     {
       label: t('dash.cardGoodsAverageCheck'),
+      hint: t('dash.hintGoodsAverageCheck'),
       value: formatMoney(averageCheck.goods),
       delta: formatPct(averageCheck.goods_change_pct),
       deltaValue: averageCheck.goods_change_pct,
@@ -926,6 +974,7 @@ function renderServicesMetrics(summary) {
     },
     {
       label: t('dash.cardExtraServiceCount'),
+      hint: t('dash.hintExtraServiceCount'),
       value: formatNumber(revenue.extra_service_count),
       delta: formatPct(revenue.extra_service_count_change_pct),
       deltaValue: revenue.extra_service_count_change_pct,
@@ -933,6 +982,7 @@ function renderServicesMetrics(summary) {
     },
     {
       label: t('dash.cardExtraServiceAverageCheck'),
+      hint: t('dash.hintExtraServiceAverageCheck'),
       value: formatMoney(averageCheck.extra_services),
       delta: formatPct(averageCheck.extra_services_change_pct),
       deltaValue: averageCheck.extra_services_change_pct,
@@ -951,18 +1001,21 @@ function renderVisitMetrics(summary) {
   const cards = [
     {
       label: t('dash.cardOpzQty'),
+      hint: t('dash.hintOpzQty'),
       value: formatNumber(visitMetrics.opz_qty),
       delta: formatPct(visitMetrics.opz_qty_change_pct),
       deltaValue: visitMetrics.opz_qty_change_pct,
     },
     {
       label: t('dash.cardOpzPct'),
+      hint: t('dash.hintOpzPct'),
       value: formatMetricValue(visitMetrics.opz_pct, 'percent'),
       delta: formatPct(visitMetrics.opz_pct_change_pct),
       deltaValue: visitMetrics.opz_pct_change_pct,
     },
     {
       label: t('dash.cardExtraServicesPerAppointment'),
+      hint: t('dash.hintExtraServicesPerAppointment'),
       value: formatMetricValue(visitMetrics.extra_services_per_appointment_pct, 'percent'),
       delta: formatPct(visitMetrics.extra_services_per_appointment_pct_change_pct),
       deltaValue: visitMetrics.extra_services_per_appointment_pct_change_pct,
@@ -984,42 +1037,49 @@ function renderClientsMetrics(summary) {
   const cards = [
     {
       label: t('dash.cardUniqueClients'),
+      hint: t('dash.hintUniqueClients'),
       value: formatNumber(visitMetrics.unique_clients),
       delta: formatPct(visitMetrics.unique_clients_change_pct),
       deltaValue: visitMetrics.unique_clients_change_pct,
     },
     {
       label: t('dash.cardVisitsPerClient'),
+      hint: t('dash.hintVisitsPerClient'),
       value: formatDecimal(visitMetrics.visits_per_client),
       delta: formatPct(visitMetrics.visits_per_client_change_pct),
       deltaValue: visitMetrics.visits_per_client_change_pct,
     },
     {
       label: t('dash.cardExtraServiceClients'),
+      hint: t('dash.hintExtraServiceClients'),
       value: formatMetricValue(visitMetrics.extra_service_clients_pct, 'percent'),
       delta: t('dash.uniqueClientsCount', { count: formatNumber(visitMetrics.extra_service_clients) }),
       deltaValue: null,
     },
     {
       label: t('dash.cardOneVisitClients'),
+      hint: t('dash.hintOneVisitClients'),
       value: formatNumber(oneVisit.count),
       delta: t('dash.ofClients', { value: formatMetricValue(oneVisit.pct, 'percent') }),
       deltaValue: null,
     },
     {
       label: t('dash.cardTwoThreeVisitClients'),
+      hint: t('dash.hintTwoThreeVisitClients'),
       value: formatNumber(twoToThreeVisits.count),
       delta: t('dash.ofClients', { value: formatMetricValue(twoToThreeVisits.pct, 'percent') }),
       deltaValue: null,
     },
     {
       label: t('dash.cardFourPlusVisitClients'),
+      hint: t('dash.hintFourPlusVisitClients'),
       value: formatNumber(fourPlusVisits.count),
       delta: t('dash.ofClients', { value: formatMetricValue(fourPlusVisits.pct, 'percent') }),
       deltaValue: null,
     },
     {
       label: t('dash.cardNewClients'),
+      hint: t('dash.hintNewClients'),
       value: formatNumber(visitMetrics.new_clients),
       delta: formatPct(visitMetrics.new_clients_change_pct),
       deltaValue: visitMetrics.new_clients_change_pct,
@@ -1028,6 +1088,7 @@ function renderClientsMetrics(summary) {
     },
     {
       label: t('dash.cardNewClientsPct'),
+      hint: t('dash.hintNewClientsPct'),
       value: formatMetricValue(visitMetrics.new_clients_pct, 'percent'),
       delta: formatPct(visitMetrics.new_clients_pct_change_pct),
       deltaValue: visitMetrics.new_clients_pct_change_pct,
@@ -1036,6 +1097,7 @@ function renderClientsMetrics(summary) {
     },
     {
       label: t('dash.cardRepeatClients'),
+      hint: t('dash.hintRepeatClients'),
       value: formatNumber(visitMetrics.repeat_clients),
       delta: formatPct(visitMetrics.repeat_clients_change_pct),
       deltaValue: visitMetrics.repeat_clients_change_pct,
@@ -1044,6 +1106,7 @@ function renderClientsMetrics(summary) {
     },
     {
       label: t('dash.cardRepeatClientsPct'),
+      hint: t('dash.hintRepeatClientsPct'),
       value: formatMetricValue(visitMetrics.repeat_clients_pct, 'percent'),
       delta: formatPct(visitMetrics.repeat_clients_pct_change_pct),
       deltaValue: visitMetrics.repeat_clients_pct_change_pct,
@@ -1067,24 +1130,28 @@ function renderAppointmentsMetrics(summary) {
   const cards = [
     {
       label: t('dash.cardTotalAppointments'),
+      hint: t('dash.hintTotalAppointments'),
       value: metricValue(breakdown.total),
       delta: metricShare(breakdown.total_share_pct),
       deltaValue: null,
     },
     {
       label: t('dash.cardCancelledAppointments'),
+      hint: t('dash.hintCancelledAppointments'),
       value: metricValue(breakdown.cancelled),
       delta: metricShare(breakdown.cancelled_share_pct),
       deltaValue: null,
     },
     {
       label: t('dash.cardCompletedAppointments'),
+      hint: t('dash.hintCompletedAppointments'),
       value: metricValue(breakdown.completed),
       delta: metricShare(breakdown.completed_share_pct),
       deltaValue: null,
     },
     {
       label: t('dash.cardIncompleteAppointments'),
+      hint: t('dash.hintIncompleteAppointments'),
       value: metricValue(breakdown.incomplete),
       delta: metricShare(breakdown.incomplete_share_pct),
       deltaValue: null,
@@ -2747,6 +2814,22 @@ async function saveOpzFactEditor() {
   }
 }
 
+// Which window the deltas are measured against depends on the preset, and the same dates
+// picked two ways can land on two different baselines — so show it rather than let the
+// reader guess.
+function renderCompareNote(summary) {
+  const note = els.compareNote;
+  if (!note) return;
+  const previous = summary?.previous_period;
+  note.hidden = !previous;
+  note.textContent = previous
+    ? t('dash.overviewCompareNote', {
+      start: formatDate(previous.start),
+      end: formatDate(previous.end),
+    })
+    : '';
+}
+
 function renderBundle(bundle) {
   const {
     summary,
@@ -2755,6 +2838,7 @@ function renderBundle(bundle) {
     extra_services: extraServices = [],
   } = bundle;
   applyFinancialVisibility(summary);
+  renderCompareNote(summary);
   renderStaffPersonalScope();
   renderKpi(summary);
   renderStaffBranchMetrics(summary);
@@ -2900,6 +2984,17 @@ function filterParams(filter) {
   };
 }
 
+/**
+ * The preset the Overview window came from, for the backend to pick a baseline.
+ *
+ * Empty once the dates are edited by hand — the buttons clear their active state on
+ * every manual change, and an empty param is dropped from the query.
+ */
+function activeOverviewPreset() {
+  return els.overviewPresetButtons.find((button) => button.classList.contains('active'))
+    ?.dataset.overviewPreset || '';
+}
+
 function setFilterLoading(filter, isLoading) {
   filter.load.disabled = isLoading;
   filter.load.textContent = isLoading ? t('common.loadingShort') : t('dash.refresh');
@@ -3027,7 +3122,10 @@ async function loadDashboard() {
 
   const syncStatus = loadSyncStatus();
   try {
-    const payload = await fetchJson('/dashboard/bundle', filterParams(filter), {
+    const payload = await fetchJson('/dashboard/bundle', {
+      ...filterParams(filter),
+      period_preset: activeOverviewPreset(),
+    }, {
       retry: () => loadDashboard(),
       signal: request.signal,
     });
@@ -3426,6 +3524,41 @@ els.serviceManagementReset.addEventListener('click', () => {
   }
 });
 els.serviceGroupAdd.addEventListener('click', () => addServiceKpiGroup());
+
+function closeCardHints(except = null) {
+  document.querySelectorAll('[data-card-hint].is-open').forEach((button) => {
+    if (button === except) return;
+    button.classList.remove('is-open');
+  });
+}
+
+// Hover and focus are handled in CSS; this only covers touch, where neither fires.
+document.addEventListener('click', (event) => {
+  const hint = event.target.closest('[data-card-hint]');
+  closeCardHints(hint);
+  if (!hint) return;
+  hint.classList.toggle('is-open');
+});
+
+// Escape must dismiss a tooltip opened by hover too, and CSS :hover cannot be cleared
+// from script — so suppress the whole layer until the user moves on. Any pointer move,
+// keystroke or focus change lifts it: leaving it to the pointer alone would lock a
+// keyboard-only user out of every hint for the rest of the session.
+function releaseCardHints() {
+  document.body.classList.remove('hints-dismissed');
+}
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') {
+    releaseCardHints();
+    return;
+  }
+  closeCardHints();
+  if (document.body.classList.contains('hints-dismissed')) return;
+  document.body.classList.add('hints-dismissed');
+  document.addEventListener('pointermove', releaseCardHints, { once: true });
+  document.addEventListener('focusin', releaseCardHints, { once: true });
+});
 
 document.addEventListener('click', async (event) => {
   const link = event.target.closest('[data-report-link]');

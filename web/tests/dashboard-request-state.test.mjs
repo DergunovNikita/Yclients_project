@@ -437,6 +437,7 @@ test('a report link carries the whole filter state, not just what it mentions', 
     compare_start_date: '2025-08-01',
     compare_end_date: '2025-08-31',
     compare_enabled: true,
+    period_preset: '',
   });
 
   // Going back to an entry that named no branch, staff or comparison must drop them
@@ -451,6 +452,12 @@ test('a report link carries the whole filter state, not just what it mentions', 
   const half = reportFiltersFromParams(new URLSearchParams('compare_end_date=2025-08-31'));
   assert.equal(half.compare_enabled, false);
   assert.equal(half.compare_end_date, '');
+  // A link written without a preset leaves the report on its own baseline rule.
+  assert.equal(bare.period_preset, '');
+  assert.equal(
+    reportFiltersFromParams(new URLSearchParams('period_preset=quarter')).period_preset,
+    'quarter',
+  );
 });
 
 test('a report link reads back exactly what it was written from', () => {
@@ -463,8 +470,17 @@ test('a report link reads back exactly what it was written from', () => {
     compare_start_date: '2025-08-01',
     compare_end_date: '2025-08-31',
     compare_enabled: true,
+    period_preset: '',
   };
   assert.deepEqual(reportFiltersFromParams(reportSearchParams(filters)), filters);
+
+  // The Overview preset rides along so a reload keeps measuring the report against the
+  // same baseline as the card that linked to it. It is not a filter and has no input,
+  // so nothing else in the link machinery would carry it.
+  const fromCard = { ...filters, period_preset: 'week' };
+  const link = reportSearchParams(fromCard);
+  assert.equal(link.get('period_preset'), 'week');
+  assert.deepEqual(reportFiltersFromParams(link), fromCard);
 
   // An unticked comparison leaves no trace in the link.
   const offRoundTrip = reportFiltersFromParams(

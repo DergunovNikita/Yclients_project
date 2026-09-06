@@ -521,6 +521,7 @@ async def fetch_report_data(
     compare_end: date | None = None,
     compare_staff_id: int | None = None,
     allowed_company_ids: list[int] | None = None,
+    period_preset: str | None = None,
 ) -> dict[str, Any]:
     if report_id not in REPORT_REGISTRY:
         raise ValueError(f'unknown report_id: {report_id}')
@@ -532,6 +533,12 @@ async def fetch_report_data(
         raise ValueError('compare_start_date must be <= compare_end_date')
 
     factual_at = _report_now()
+    # An explicit comparison governs the whole page. Letting the preset drive the deltas
+    # inside the tables while the comparison block measures against the window the user
+    # ticked would put two different percentages for one metric on one screen — the
+    # segments table and the comparison panel of `new_vs_returning_cross` sit together.
+    if (compare_start and compare_end) or compare_staff_id is not None:
+        period_preset = None
     data = await _fetch_report_payload(
         db,
         report_id,
@@ -542,6 +549,7 @@ async def fetch_report_data(
         granularity,
         allowed_company_ids,
         factual_at,
+        period_preset,
     )
     if (
         report_id in COMPARE_REPORTS
@@ -561,6 +569,8 @@ async def fetch_report_data(
             granularity,
             allowed_company_ids,
             factual_at,
+            # The preset names the primary window; the compare window is its own range.
+            None,
         )
         data['comparison'] = {
             'period': compare_data['period'],
@@ -583,6 +593,7 @@ async def _fetch_report_payload(
     granularity: str,
     allowed_company_ids: list[int] | None,
     factual_at: datetime,
+    period_preset: str | None = None,
 ) -> dict[str, Any]:
     definition = REPORT_REGISTRY[report_id]
     base = {
@@ -653,7 +664,8 @@ async def _fetch_report_payload(
         )
     if report_id == 'new_vs_returning_cross':
         return await _client_recency_payload(
-            db, base, start, end, company_id, staff_id, allowed_company_ids, factual_at
+            db, base, start, end, company_id, staff_id, allowed_company_ids, factual_at,
+            period_preset,
         )
     if report_id in CLIENT_REPORTS:
         return await _clients_payload(
@@ -689,6 +701,7 @@ async def _fetch_report_payload(
         granularity,
         allowed_company_ids,
         factual_at,
+        period_preset,
     )
 
 
@@ -827,7 +840,7 @@ def _without_empty_columns(
 
 
 def _appointment_conditions(
-    start: date,
+    start: date | None,
     end: date,
     company_id: int | None,
     staff_id: int | None,
@@ -836,12 +849,14 @@ def _appointment_conditions(
     allowed_company_ids: list[int] | None = None,
     factual_at: datetime | None = None,
 ) -> list[Any]:
+    """Shared appointment filters. A `start` of None opens the window to full history."""
     conditions = [
-        Appointment.date >= start,
         Appointment.date <= end,
         business_appointment_condition(),
         reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
+    if start is not None:
+        conditions.append(Appointment.date >= start)
     if attended_only:
         conditions.append(Appointment.attendance == COMPLETED_ATTENDANCE)
     if factual_at is not None:
@@ -1752,7 +1767,10 @@ async def _financial_payload(
     granularity: str,
     allowed_company_ids: list[int] | None,
     factual_at: datetime,
+    period_preset: str | None = None,
 ) -> dict[str, Any]:
+    # Publishes the whole summary under raw, previous_period and change_pct included, so
+    # it has to measure against the same baseline as every other surface.
     summary = await fetch_summary(
         db,
         start,
@@ -1761,6 +1779,7 @@ async def _financial_payload(
         staff_id,
         allowed_company_ids=allowed_company_ids,
         factual_at=factual_at,
+        period_preset=period_preset,
     )
     daily = _aggregate_daily(
         await fetch_revenue_daily(
@@ -2131,6 +2150,7 @@ async def _clients_rows(
     staff_id: int | None,
     allowed_company_ids: list[int] | None,
     factual_at: datetime,
+    include_lifetime_visits: bool = False,
 ) -> list[dict[str, Any]]:
     visits_stmt = (
         select(
@@ -2176,6 +2196,9 @@ async def _clients_rows(
         )
         .group_by(Appointment.client_id)
     )
+    # Visit-frequency buckets follow the client's whole history at the branch, so they
+    # need a count the period-scoped `visits` cannot give. Only the clients report reads
+    # it, so callers that ignore it do not pay for the extra query.
     clients: dict[int | None, dict[str, Any]] = {}
     for row in (await db.execute(visits_stmt)).all():
         client_id = int(row.client_id) if row.client_id is not None else None
@@ -2183,14 +2206,47 @@ async def _clients_rows(
             'visits': int(row.visits or 0),
             'last_visit': row.last_visit,
             'revenue': 0.0,
+            'lifetime_visits': 0 if include_lifetime_visits else None,
         }
     for row in (await db.execute(revenue_stmt)).all():
         client_id = int(row.client_id) if row.client_id is not None else None
         client = clients.setdefault(
             client_id,
-            {'visits': 0, 'last_visit': None, 'revenue': 0.0},
+            {
+                'visits': 0,
+                'last_visit': None,
+                'revenue': 0.0,
+                'lifetime_visits': 0 if include_lifetime_visits else None,
+            },
         )
         client['revenue'] = float(row.revenue or 0)
+    # Deliberately not bounded by the report's client ids: binding them would put tens of
+    # thousands of parameters into one statement and trip asyncpg's 32767 ceiling on a
+    # full-history report. The aggregate is grouped in Postgres and cheap. The staff
+    # filter is dropped on purpose — it selects clients, it does not shorten their
+    # history — and a client who only ever paid keeps a lifetime count of 0.
+    if include_lifetime_visits:
+        lifetime_stmt = (
+            select(
+                Appointment.client_id.label('client_id'),
+                func.count(func.distinct(Appointment.id)).label('lifetime_visits'),
+            )
+            .where(and_(*_appointment_conditions(
+                None,
+                end,
+                company_id,
+                None,
+                attended_only=True,
+                allowed_company_ids=allowed_company_ids,
+                factual_at=factual_at,
+            )))
+            .group_by(Appointment.client_id)
+        )
+        for row in (await db.execute(lifetime_stmt)).all():
+            client_id = int(row.client_id) if row.client_id is not None else None
+            client = clients.get(client_id)
+            if client is not None:
+                client['lifetime_visits'] = int(row.lifetime_visits or 0)
 
     rows = []
     for client_id, client in clients.items():
@@ -2202,6 +2258,11 @@ async def _clients_rows(
         rows.append({
             'client_id': client_id,
             'visits': visits,
+            # None where it was not asked for, so a caller reading it without requesting
+            # it cannot silently bucket every client as "0 визитов"
+            'lifetime_visits': (
+                None if client['lifetime_visits'] is None else int(client['lifetime_visits'])
+            ),
             'last_visit': last_visit.isoformat() if last_visit else None,
             'days_since_last_visit': recency,
             'revenue': revenue,
@@ -2238,6 +2299,13 @@ def _client_segment_rows(rows: list[dict[str, Any]], avg_revenue: float) -> list
 
 
 def _client_visit_frequency_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Bucket the report's clients by how often they have visited the branch.
+
+    The buckets match the Overview's, but the base does not: this report lists everyone
+    with activity in the period, including clients who only paid, so its counts can run
+    above the Overview cards. '0 визитов' catches a client whose payment landed here
+    without any attended visit at the branch — rare enough that the row usually reads 0.
+    """
     buckets = {
         '0 визитов': {'bucket': '0 визитов', 'clients': 0, 'revenue': 0.0},
         '1 визит': {'bucket': '1 визит', 'clients': 0, 'revenue': 0.0},
@@ -2245,7 +2313,12 @@ def _client_visit_frequency_rows(rows: list[dict[str, Any]]) -> list[dict[str, A
         '4+ визита': {'bucket': '4+ визита', 'clients': 0, 'revenue': 0.0},
     }
     for row in rows:
-        visits = int(row.get('visits') or 0)
+        lifetime = row.get('lifetime_visits')
+        if lifetime is None:
+            # Not a bad request: the rows were built without include_lifetime_visits, and
+            # silently bucketing every client at zero would be worse than failing.
+            raise RuntimeError('visit-frequency rows need _clients_rows(include_lifetime_visits=True)')
+        visits = int(lifetime)
         if visits == 0:
             key = '0 визитов'
         elif visits == 1:
@@ -2324,7 +2397,11 @@ async def _client_recency_payload(
     staff_id: int | None,
     allowed_company_ids: list[int] | None,
     factual_at: datetime,
+    period_preset: str | None = None,
 ) -> dict[str, Any]:
+    # The Overview's new/repeat cards link straight here, so both must measure against
+    # the same baseline. Without the preset this would silently fall back to the plain
+    # preceding window and contradict the card the user just clicked.
     summary = await fetch_summary(
         db,
         start,
@@ -2333,6 +2410,7 @@ async def _client_recency_payload(
         staff_id,
         allowed_company_ids=allowed_company_ids,
         factual_at=factual_at,
+        period_preset=period_preset,
     )
     visits = summary.get('visit_metrics', {})
     rows = [
@@ -2402,7 +2480,8 @@ async def _clients_payload(
     factual_at: datetime,
 ) -> dict[str, Any]:
     rows = await _clients_rows(
-        db, start, end, company_id, staff_id, allowed_company_ids, factual_at
+        db, start, end, company_id, staff_id, allowed_company_ids, factual_at,
+        include_lifetime_visits=True,
     )
     total_revenue = sum(row['revenue'] for row in rows)
     total_visits = sum(row['visits'] for row in rows)
@@ -2489,7 +2568,7 @@ async def _clients_payload(
         ),
         _table(
             'visit_frequency',
-            'Частотность визитов',
+            'Частотность визитов за всю историю',
             [
                 ('bucket', 'Частотность', 'text'),
                 ('clients', 'Клиентов', NUMBER_FORMAT),
@@ -2567,6 +2646,8 @@ async def _churn_payload(
 ) -> dict[str, Any]:
     clients = await _clients_rows(
         db,
+        # `_service_paid_filters` in this same helper has no open-ended form, so the
+        # revenue half still needs a real lower bound.
         date(2000, 1, 1),
         end,
         company_id,

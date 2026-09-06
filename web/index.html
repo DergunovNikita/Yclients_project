@@ -583,6 +583,17 @@
       padding: 14px;
     }
 
+    /* Positioning context for the hint button, which is a sibling of the card so
+       that it never ends up inside the card's report link. */
+    .card-slot {
+      position: relative;
+      min-width: 0;
+    }
+
+    .card-slot .card {
+      height: 100%;
+    }
+
     .card--link {
       display: block;
       color: inherit;
@@ -596,6 +607,106 @@
       box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
       transform: translateY(-1px);
       outline: none;
+    }
+
+    /* 28x28 clears the 24x24 minimum target size; the visible ring stays 18px and is
+       drawn by ::before, so a near-miss on a card-wide report link opens the hint
+       instead of navigating. */
+    .card__hint {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      min-height: 0; /* the global button rule sets min-height: 40px */
+      padding: 0;
+      border: none;
+      border-radius: 50%;
+      background: none;
+      color: #64748b;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+      cursor: pointer;
+      transition: color 0.15s ease;
+    }
+
+    .card__hint::before {
+      content: '';
+      position: absolute;
+      inset: 5px;
+      z-index: -1;
+      border: 1px solid #cbd5e1;
+      border-radius: 50%;
+      background: #ffffff;
+      transition: border-color 0.15s ease;
+    }
+
+    .card__hint:hover,
+    .card__hint:focus-visible {
+      color: #2563eb;
+    }
+
+    .card__hint:hover::before,
+    .card__hint:focus-visible::before {
+      border-color: #93c5fd;
+    }
+
+    .card__hint:focus-visible {
+      outline: 2px solid #2563eb;
+      outline-offset: 1px;
+    }
+
+    /* Anchored to the right edge so it grows inward and never escapes the grid. */
+    .card__hint-body {
+      position: absolute;
+      top: 34px;
+      right: 8px;
+      z-index: 3;
+      width: max-content;
+      /* Bounded by the card, not the viewport: anchored to the right edge it grows
+         leftward, and 280px out of the first column runs off the left of the window
+         where nothing can scroll it back into view. */
+      max-width: min(280px, 100%);
+      padding: 9px 11px;
+      border-radius: 8px;
+      background: #0f172a;
+      color: #f8fafc;
+      font-size: 12px;
+      font-weight: 400;
+      line-height: 1.45;
+      text-align: left;
+      text-transform: none;
+      box-shadow: 0 10px 26px rgba(15, 23, 42, 0.22);
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.12s ease, visibility 0.12s ease;
+    }
+
+    /* `visibility: hidden` blocks pointer events, so the :hover on the tooltip itself
+       can only hold open one that is already shown — that is what lets the pointer
+       travel from the button onto the text. */
+    .card__hint:hover + .card__hint-body,
+    .card__hint:focus-visible + .card__hint-body,
+    .card__hint.is-open + .card__hint-body,
+    .card__hint-body:hover {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    /* Escape hides even a hover-opened tooltip, until the pointer moves again. */
+    .hints-dismissed .card__hint-body {
+      opacity: 0 !important;
+      visibility: hidden !important;
+    }
+
+    .card-slot:has(.card__hint) .label {
+      padding-right: 30px;
     }
 
     .card__action {
@@ -639,6 +750,15 @@
       grid-template-columns: 1.4fr 1fr;
       gap: 16px;
       align-items: start;
+    }
+
+    /* Which window the deltas are measured against depends on the preset, so it has to be
+       readable rather than inferred. (The manual half of ОПЗ weighs whole calendar months
+       on both sides instead — symmetric, so its delta stays fair.) */
+    .compare-note {
+      margin: -6px 0 16px;
+      color: #64748b;
+      font-size: 13px;
     }
 
     [data-overview-section] {
@@ -1693,6 +1813,8 @@
         <button type="button" data-overview-preset="quarter" data-i18n="dash.quarter">Trimestre</button>
         <button type="button" data-overview-preset="year" data-i18n="dash.year">Anno</button>
       </nav>
+
+      <p class="compare-note" id="overview-compare-note" hidden></p>
 
       <nav class="segmented" data-i18n-attr="aria-label:dash.ariaChartGroups" aria-label="Gruppi di grafici panoramica">
         <button type="button" data-overview-jump="appointments" data-i18n="dash.jumpAppointments">Appuntamenti</button>

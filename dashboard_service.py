@@ -9,7 +9,7 @@ from calendar import monthrange
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Any, Optional
+from typing import Any, Literal, Optional, get_args
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import Date as SQLDate
@@ -135,6 +135,24 @@ STAFF_INPUT_FIELDS = (
 )
 
 
+# Overview period presets, and how far back each one reaches for its baseline. The
+# presets all run "since the start of X until today", so stepping back by one of their
+# own units lands on the same stretch of the previous X. `week` steps by days instead,
+# which is what keeps the weekdays lined up.
+OverviewPeriodPreset = Literal['today', 'week', 'month', 'quarter', 'year']
+PRESET_MONTHS_BACK = {'today': 1, 'month': 1, 'quarter': 3, 'year': 12}
+if set(get_args(OverviewPeriodPreset)) != {*PRESET_MONTHS_BACK, 'week'}:
+    raise RuntimeError('OverviewPeriodPreset and PRESET_MONTHS_BACK disagree')
+
+
+def shift_months_back(day: date, months: int) -> date:
+    """Same day of month `months` earlier, clamped to the target month's last day."""
+    index = day.year * 12 + day.month - 1 - months
+    year, month_index = divmod(index, 12)
+    month = month_index + 1
+    return date(year, month, min(day.day, monthrange(year, month)[1]))
+
+
 @dataclass(frozen=True)
 class DateRange:
     start: date
@@ -144,11 +162,49 @@ class DateRange:
     def days(self) -> int:
         return (self.end - self.start).days + 1
 
-    def previous_period(self) -> DateRange:
-        span = self.days
+    def _preceding_window(self) -> DateRange:
         prev_end = self.start - timedelta(days=1)
-        prev_start = prev_end - timedelta(days=span - 1)
-        return DateRange(start=prev_start, end=prev_end)
+        return DateRange(start=prev_end - timedelta(days=self.days - 1), end=prev_end)
+
+    def previous_period(self, preset: Optional[str] = None) -> DateRange:
+        """The window this one is measured against.
+
+        A month-to-date is measured against the same dates a month earlier, a quarter
+        against the same stretch of the previous quarter, a year against the previous
+        year, and a week against the same weekdays seven days back. Stepping back by the
+        window's length instead would put 1-5 September against 27-31 August — the end of
+        the month, its busiest days, and a different mix of weekdays. `today` follows the
+        month rather than the weekday: the same date one month back, which is what the
+        month-over-month reading of the rest of the page compares against.
+
+        Without a preset the window keeps the plain range of equal length immediately
+        before it. Guessing month-to-date from the dates alone would put the reports page
+        at odds with itself: its compare field is pre-filled by `defaultComparePeriod`,
+        which steps back by days, and the two would then render different deltas for the
+        same metric on the same screen.
+
+        The baseline never overlaps the period it measures. A preset that does not match
+        the window it arrived with (only reachable by calling the API directly) would
+        otherwise compare the period against itself.
+        """
+        previous = self._shifted_period(preset)
+        return previous if previous.end < self.start else self._preceding_window()
+
+    def _shifted_period(self, preset: Optional[str]) -> DateRange:
+        if preset == 'week':
+            week = timedelta(days=7)
+            return DateRange(start=self.start - week, end=self.end - week)
+        months = PRESET_MONTHS_BACK.get(preset or '')
+        if months is None:
+            return self._preceding_window()
+        start = shift_months_back(self.start, months)
+        end = shift_months_back(self.end, months)
+        # A window covering whole months must land on whole months. Carrying the day
+        # number alone would measure February against 1-28 January and report the three
+        # dropped days as growth.
+        if self.start.day == 1 and self.end.day == monthrange(self.end.year, self.end.month)[1]:
+            end = end.replace(day=monthrange(end.year, end.month)[1])
+        return DateRange(start=start, end=end)
 
 
 @dataclass(frozen=True)
@@ -1233,37 +1289,54 @@ async def _client_visit_frequency_block(
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    filters = [
+    """Split the period's clients by how often they have ever visited the branch.
+
+    Buckets follow the client's whole history, the way YClients counts them. A
+    period-scoped count answers a different question and reads as a broken metric:
+    almost nobody reaches four visits inside one month, so the 4+ bucket sits at
+    zero while "one visit" swallows ~85% of the base.
+    """
+    scope_filters = [
         Appointment.attendance == COMPLETED_ATTENDANCE,
         Appointment.client_id.is_not(None),
-        Appointment.date >= dr.start,
-        Appointment.date <= dr.end,
         business_appointment_condition(),
         reporting_start_clause(Appointment.company_id, Appointment.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
-        filters.append(scope)
-    if staff_id is not None:
-        filters.append(Appointment.staff_id == staff_id)
+        scope_filters.append(scope)
     if factual_at is not None:
-        filters.append(_appointment_factual_at_condition(factual_at))
+        scope_filters.append(_appointment_factual_at_condition(factual_at))
 
-    visits_by_client = (
+    period_filters = [*scope_filters, Appointment.date >= dr.start, Appointment.date <= dr.end]
+    if staff_id is not None:
+        period_filters.append(Appointment.staff_id == staff_id)
+
+    current_clients = (
+        select(Appointment.client_id.label('client_id'))
+        .where(*period_filters)
+        .group_by(Appointment.client_id)
+        .subquery()
+    )
+    # The staff filter decides which clients are shown, not how often they came:
+    # counting one master's visits would understate every client's history. The
+    # window stops at the period end so a past period keeps reporting what was
+    # true back then, like every other factual figure on the Overview.
+    lifetime_visits = (
         select(
             Appointment.client_id.label('client_id'),
             func.count(Appointment.id).label('visit_count'),
         )
-        .where(*filters)
+        .where(*scope_filters, Appointment.date <= dr.end)
         .group_by(Appointment.client_id)
         .subquery()
     )
     row = (
         await db.execute(
             select(
-                func.count(visits_by_client.c.client_id).label('total_clients'),
+                func.count(current_clients.c.client_id).label('total_clients'),
                 func.coalesce(
-                    func.sum(case((visits_by_client.c.visit_count == 1, 1), else_=0)),
+                    func.sum(case((lifetime_visits.c.visit_count == 1, 1), else_=0)),
                     0,
                 ).label('one_visit'),
                 func.coalesce(
@@ -1271,8 +1344,8 @@ async def _client_visit_frequency_block(
                         case(
                             (
                                 and_(
-                                    visits_by_client.c.visit_count >= 2,
-                                    visits_by_client.c.visit_count <= 3,
+                                    lifetime_visits.c.visit_count >= 2,
+                                    lifetime_visits.c.visit_count <= 3,
                                 ),
                                 1,
                             ),
@@ -1282,10 +1355,12 @@ async def _client_visit_frequency_block(
                     0,
                 ).label('two_to_three_visits'),
                 func.coalesce(
-                    func.sum(case((visits_by_client.c.visit_count >= 4, 1), else_=0)),
+                    func.sum(case((lifetime_visits.c.visit_count >= 4, 1), else_=0)),
                     0,
                 ).label('four_plus_visits'),
-            ).select_from(visits_by_client)
+            )
+            .select_from(current_clients)
+            .join(lifetime_visits, lifetime_visits.c.client_id == current_clients.c.client_id)
         )
     ).one()
 
@@ -1693,10 +1768,11 @@ async def fetch_summary(
     *,
     include_appointments_breakdown: bool = True,
     factual_at: Optional[datetime] = None,
+    period_preset: Optional[str] = None,
 ) -> dict[str, Any]:
     factual_at = factual_at or factual_now()
     current_dr = DateRange(start=start, end=end)
-    prev_dr = current_dr.previous_period()
+    prev_dr = current_dr.previous_period(period_preset)
     appointment_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
@@ -5732,11 +5808,12 @@ def _previous_period_countable_months(
 ) -> set[date]:
     """Months the previous window weighs against the current one.
 
-    The same number of months, immediately before the current ones. `previous_period()`
-    steps back by days, so its own window rarely lines up with calendar months — February
-    would land on a window starting on the 2nd and count nothing, and a quarter-to-date
-    would be compared against one month fewer than it holds. Comparing an equal count of
-    months keeps the delta about the months, not about where the window happens to cut.
+    The same number of months, immediately before the current ones. This stays separate
+    from `previous_period()`, which now steps back by calendar units for the presets but
+    still by days for `week` and for windows carrying no preset — and a manual month
+    is indivisible, so a baseline that starts mid-month counts nothing at all. Comparing
+    an equal count of months keeps the delta about the months, not about where the window
+    happens to cut.
     """
     current = _countable_manual_months(start, end, factual_at)
     if not current:

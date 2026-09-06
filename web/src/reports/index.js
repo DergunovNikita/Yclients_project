@@ -167,6 +167,10 @@ export function initReports({
     branches: [],
     activeReportId: '',
     periodApplies: true,
+    // Which Overview preset produced the period, when the user arrived from a card.
+    // It picks the same baseline the card measured against; editing the period drops it,
+    // exactly as the Overview's own preset buttons do.
+    periodPreset: '',
     reportData: new Map(),
     filters: {
       search: '',
@@ -228,6 +232,15 @@ export function initReports({
   let compareWindowIsOurs = true;
 
   function syncCompareDefaults() {
+    // A preset means the table's own delta is measured against the preset's baseline, not
+    // against the day-stepped window this would pre-fill. Showing that window next to a
+    // percentage it does not describe is worse than showing none: leave it empty, and let
+    // the user type one — which then governs the whole page.
+    if (state.periodPreset) {
+      autoComparePeriod = null;
+      compareWindowIsOurs = true;
+      return;
+    }
     const next = nextComparePeriod(
       { autoPeriod: autoComparePeriod, ours: compareWindowIsOurs },
       {
@@ -421,6 +434,9 @@ export function initReports({
       compare_start_date: els.compareStart.value,
       compare_end_date: els.compareEnd.value,
       compare_enabled: els.compareEnabled.checked,
+      // Kept out of FILTER_INPUTS on purpose: it has no field, it rides along from the
+      // Overview link so the report keeps measuring against the same baseline.
+      period_preset: state.periodPreset,
     };
   }
 
@@ -436,6 +452,7 @@ export function initReports({
     const filters = requestFilters();
     const params = { report_id: state.activeReportId };
     REPORT_FILTER_KEYS.forEach((key) => { params[key] = filters[key]; });
+    if (state.periodPreset) params.period_preset = state.periodPreset;
     // The same rule that builds the link decides what the request asks for.
     return Object.assign(params, reportCompareParams(filters));
   }
@@ -576,6 +593,11 @@ export function initReports({
       return;
     }
     const requested = applyReportParamsFromLocation(els);
+    // The preset names the window it arrived with. A link carrying no dates falls back to
+    // the default period below, which the preset does not describe.
+    state.periodPreset = requested.start_date && requested.end_date
+      ? requested.period_preset || ''
+      : '';
     setDefaultDates();
     const loaded = comparePeriodOnLoad({
       start: els.start.value,
@@ -677,6 +699,7 @@ export function initReports({
   });
   [els.start, els.end].forEach((input) => {
     input.addEventListener('change', () => {
+      state.periodPreset = '';
       syncCompareDefaults();
       reloadActiveReport();
     });

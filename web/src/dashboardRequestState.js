@@ -59,6 +59,7 @@ export function reportFiltersFromParams(params) {
   return {
     ...filters,
     ...comparePeriod(value('compare_start_date'), value('compare_end_date')),
+    period_preset: value('period_preset'),
   };
 }
 
@@ -100,6 +101,11 @@ export function reportSearchParams(filters = {}) {
     params.set('compare_start_date', compare.compare_start_date);
     params.set('compare_end_date', compare.compare_end_date);
   }
+  // Not a filter — it names the Overview preset the period came from, and so the
+  // baseline the deltas are measured against. Dropping it here would let a reload
+  // silently re-measure the report against a different window than the card that
+  // linked to it.
+  if (filters.period_preset) params.set('period_preset', String(filters.period_preset));
   return params;
 }
 

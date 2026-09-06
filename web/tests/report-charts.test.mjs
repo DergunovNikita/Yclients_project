@@ -193,6 +193,26 @@ test('the compare window follows the period only until the user picks one', () =
   assert.equal(shouldAdoptComparePeriod({ compareStart: '', compareEnd: '', autoPeriod: auto }), false);
 });
 
+test('the pre-filled compare window matches the backend baseline when no preset is in play', () => {
+  // The reports page renders two deltas for the same metric: the segments table computes
+  // its own against `DateRange.previous_period(None)`, and the comparison block uses the
+  // window pre-filled here. A month shorter than its predecessor is where a calendar-based
+  // rule and this day-based one part ways, so those are the cases worth pinning.
+  // Mirrors tests/test_dashboard_api.py::test_previous_period_steps_back_by_the_presets_own_unit.
+  assert.deepEqual(
+    defaultComparePeriod('2025-11-01', '2025-11-30'),
+    { start: '2025-10-02', end: '2025-10-31' },
+  );
+  assert.deepEqual(
+    defaultComparePeriod('2026-02-01', '2026-02-28'),
+    { start: '2026-01-04', end: '2026-01-31' },
+  );
+  assert.deepEqual(
+    defaultComparePeriod('2026-09-01', '2026-09-05'),
+    { start: '2026-08-27', end: '2026-08-31' },
+  );
+});
+
 test('the compare window does not depend on the viewer timezone', () => {
   const original = process.env.TZ;
   try {

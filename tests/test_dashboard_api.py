@@ -353,11 +353,14 @@ async def test_dashboard_client_reports_revenue_uses_paid_service_rows(async_ses
     card_values = [card['value'] for card in data['cards']]
     assert card_values[:3] == [3, 3, 2200.0]
     assert card_values[3] == pytest.approx(2200.0 / 3)
+    # Buckets count the client's whole history at the branch, not the period, so the
+    # client whose only visit predates the window lands in "1 визит" and carries its
+    # in-period revenue there. "0 визитов" is left for clients who never attended.
     frequency_by_bucket = {row['bucket']: row for row in data['raw']['visit_frequency']}
-    assert frequency_by_bucket['0 визитов']['clients'] == 1
-    assert frequency_by_bucket['0 визитов']['revenue'] == 700.0
-    assert frequency_by_bucket['1 визит']['clients'] == 1
-    assert frequency_by_bucket['1 визит']['revenue'] == 0.0
+    assert frequency_by_bucket['0 визитов']['clients'] == 0
+    assert frequency_by_bucket['0 визитов']['revenue'] == 0.0
+    assert frequency_by_bucket['1 визит']['clients'] == 2
+    assert frequency_by_bucket['1 визит']['revenue'] == 700.0
     assert frequency_by_bucket['2-3 визита']['clients'] == 1
     assert frequency_by_bucket['2-3 визита']['revenue'] == 1500.0
 
@@ -4437,6 +4440,352 @@ async def test_dashboard_summary_client_visit_frequency_respects_branch_and_date
     assert company_2_frequency['four_plus_visits']['count'] == 0
 
 
+@pytest.mark.parametrize(
+    ('preset', 'start', 'end', 'expected_start', 'expected_end'),
+    [
+        # every Overview preset runs "since the start of X until today"
+        ('today', date(2026, 9, 5), date(2026, 9, 5), date(2026, 8, 5), date(2026, 8, 5)),
+        ('week', date(2026, 8, 31), date(2026, 9, 5), date(2026, 8, 24), date(2026, 8, 29)),
+        ('month', date(2026, 9, 1), date(2026, 9, 5), date(2026, 8, 1), date(2026, 8, 5)),
+        ('quarter', date(2026, 7, 1), date(2026, 9, 5), date(2026, 4, 1), date(2026, 6, 5)),
+        ('year', date(2026, 1, 1), date(2026, 9, 5), date(2025, 1, 1), date(2025, 9, 5)),
+        # a whole month is measured against the whole previous one, in both directions:
+        # carrying the day number alone would hand February a baseline of 1-28 January
+        # and report the three dropped days as growth
+        ('month', date(2026, 3, 1), date(2026, 3, 31), date(2026, 2, 1), date(2026, 2, 28)),
+        ('month', date(2026, 2, 1), date(2026, 2, 28), date(2026, 1, 1), date(2026, 1, 31)),
+        ('month', date(2026, 6, 1), date(2026, 6, 30), date(2026, 5, 1), date(2026, 5, 31)),
+        ('month', date(2026, 1, 1), date(2026, 1, 31), date(2025, 12, 1), date(2025, 12, 31)),
+        ('quarter', date(2026, 4, 1), date(2026, 6, 30), date(2026, 1, 1), date(2026, 3, 31)),
+        ('year', date(2026, 1, 1), date(2026, 12, 31), date(2025, 1, 1), date(2025, 12, 31)),
+        # a single day keeps its day number: month-end there is a coincidence, not a span
+        ('today', date(2026, 2, 28), date(2026, 2, 28), date(2026, 1, 28), date(2026, 1, 28)),
+        ('month', date(2028, 3, 1), date(2028, 3, 31), date(2028, 2, 1), date(2028, 2, 29)),
+        ('today', date(2026, 3, 31), date(2026, 3, 31), date(2026, 2, 28), date(2026, 2, 28)),
+        ('month', date(2026, 1, 1), date(2026, 1, 5), date(2025, 12, 1), date(2025, 12, 5)),
+        # dates typed by hand keep the plain window of equal length immediately before, so
+        # the reports page cannot render one delta against these dates and another against
+        # the window its own compare field pre-fills
+        (None, date(2026, 9, 1), date(2026, 9, 5), date(2026, 8, 27), date(2026, 8, 31)),
+        (None, date(2026, 11, 1), date(2026, 11, 30), date(2026, 10, 2), date(2026, 10, 31)),
+        (None, date(2026, 8, 20), date(2026, 9, 10), date(2026, 7, 29), date(2026, 8, 19)),
+        (None, date(2026, 3, 25), date(2026, 3, 31), date(2026, 3, 18), date(2026, 3, 24)),
+        (None, date(2026, 3, 29), date(2026, 3, 31), date(2026, 3, 26), date(2026, 3, 28)),
+        (None, date(2026, 5, 25), date(2026, 5, 31), date(2026, 5, 18), date(2026, 5, 24)),
+        (None, date(2026, 8, 10), date(2026, 8, 14), date(2026, 8, 5), date(2026, 8, 9)),
+        # a preset that does not describe the window it arrived with cannot make the
+        # baseline overlap the period, which would compare the period against itself
+        ('today', date(2026, 1, 1), date(2026, 12, 31), date(2025, 1, 1), date(2025, 12, 31)),
+    ],
+)
+def test_previous_period_steps_back_by_the_presets_own_unit(
+    preset, start, end, expected_start, expected_end,
+):
+    period = dashboard_service.DateRange(start=start, end=end)
+    previous = period.previous_period(preset)
+    assert (previous.start, previous.end) == (expected_start, expected_end)
+    assert previous.end < start, 'the baseline must not overlap the period it is measured against'
+    if preset not in {'month', 'quarter', 'year'}:
+        # only calendar-anchored presets may legitimately differ in length, because the
+        # month or quarter they step onto is genuinely shorter
+        assert previous.days == period.days, 'the baseline must not be shorter than the period'
+    whole_months = start.day == 1 and end.day == monthrange(end.year, end.month)[1]
+    if whole_months and preset in {'month', 'quarter', 'year'}:
+        assert previous.start.day == 1
+        assert previous.end.day == monthrange(previous.end.year, previous.end.month)[1], (
+            'a window of whole months must be measured against whole months'
+        )
+
+
+@pytest.mark.asyncio
+async def test_dashboard_summary_compares_month_to_date_with_the_same_dates_a_month_back(
+    async_session,
+):
+    """1-5 September weighs against 1-5 August, not against the tail of August."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add(Client(id=1, name='Client', company_id=1))
+    await async_session.flush()
+
+    async_session.add_all([
+        # the window the new baseline points at: two visits
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2026, 8, 3), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=1, date=date(2026, 8, 4), attendance=1),
+        # the end of August, which the old baseline used: eight visits
+        *(
+            Appointment(
+                id=10 + offset, company_id=1, staff_id=1, client_id=1,
+                date=date(2026, 8, 27) + timedelta(days=offset // 2), attendance=1,
+            )
+            for offset in range(8)
+        ),
+        # the period itself: four visits
+        *(
+            Appointment(
+                id=30 + offset, company_id=1, staff_id=1, client_id=1,
+                date=date(2026, 9, 1) + timedelta(days=offset), attendance=1,
+            )
+            for offset in range(4)
+        ),
+    ])
+    await async_session.commit()
+
+    summary = await dashboard_service.fetch_summary(
+        async_session,
+        date(2026, 9, 1),
+        date(2026, 9, 5),
+        company_id=1,
+        include_appointments_breakdown=False,
+        factual_at=datetime(2026, 9, 5, 12),
+        period_preset='month',
+    )
+    assert summary['previous_period'] == {'start': '2026-08-01', 'end': '2026-08-05'}
+    # four visits against the two of 1-5 August, not against the eight of 27-31 August
+    assert summary['revenue']['appointments'] == 4
+    assert summary['revenue']['appointments_change_pct'] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_new_vs_returning_report_uses_the_same_baseline_as_the_overview_card(async_session):
+    """The Overview's new/repeat cards link here, so both must measure the same way."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add_all([Client(id=n, name=f'Client {n}', company_id=1) for n in range(1, 6)])
+    await async_session.flush()
+
+    # The week preset's baseline (24-29 Aug) and the plain preceding window (25-30 Aug)
+    # differ by a single day, so 24 August is what separates the two rules.
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2026, 8, 24), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2026, 8, 27), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=3, date=date(2026, 9, 1), attendance=1),
+        Appointment(id=4, company_id=1, staff_id=1, client_id=4, date=date(2026, 9, 2), attendance=1),
+        Appointment(id=5, company_id=1, staff_id=1, client_id=5, date=date(2026, 9, 3), attendance=1),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    period = {'start_date': '2026-08-31', 'end_date': '2026-09-05', 'period_preset': 'week'}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        overview = await client.get('/dashboard/widget/summary', params=period)
+        report = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'new_vs_returning_cross', 'granularity': 'month', **period},
+        )
+    app.dependency_overrides.clear()
+
+    assert overview.status_code == 200
+    assert report.status_code == 200
+    visits = overview.json()['data']['visit_metrics']
+    segments = {row['segment']: row for row in report.json()['data']['raw']['segments']}
+    assert segments['Новые']['clients'] == visits['new_clients']
+    assert segments['Новые']['clients_change_pct'] == visits['new_clients_change_pct']
+    assert segments['Повторные']['clients_change_pct'] == visits['repeat_clients_change_pct']
+    # and the shared baseline is the preset's, not the plain preceding window
+    assert overview.json()['data']['previous_period'] == {'start': '2026-08-24', 'end': '2026-08-29'}
+
+
+@pytest.mark.asyncio
+async def test_overview_and_clients_report_bucket_visits_the_same_way(async_session):
+    """AGENTS.md makes this a both-paths rule: two implementations, one answer."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add_all([Client(id=n, name=f'Client {n}', company_id=1) for n in range(1, 4)])
+    await async_session.flush()
+
+    appointments = [
+        # one visit ever
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2026, 3, 5), attendance=1),
+        # two: one before the period, one inside it
+        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2025, 11, 4), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=2, date=date(2026, 3, 6), attendance=1),
+    ]
+    # four: three before the period, one inside it
+    appointments += [
+        Appointment(
+            id=10 + offset, company_id=1, staff_id=1, client_id=3,
+            date=date(2025, 8, 1) + timedelta(days=30 * offset), attendance=1,
+        )
+        for offset in range(3)
+    ]
+    appointments.append(
+        Appointment(id=20, company_id=1, staff_id=1, client_id=3, date=date(2026, 3, 7), attendance=1)
+    )
+    async_session.add_all(appointments)
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    window = {'start_date': '2026-03-01', 'end_date': '2026-03-31'}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        overview = await client.get('/dashboard/widget/summary', params=window)
+        report = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'top_clients_pareto', 'granularity': 'month', **window},
+        )
+    app.dependency_overrides.clear()
+
+    assert overview.status_code == 200
+    assert report.status_code == 200
+    frequency = overview.json()['data']['visit_metrics']['client_visit_frequency']
+    buckets = {row['bucket']: row['clients'] for row in report.json()['data']['raw']['visit_frequency']}
+    assert (frequency['one_visit']['count'], frequency['two_to_three_visits']['count'],
+            frequency['four_plus_visits']['count']) == (1, 1, 1)
+    assert buckets['1 визит'] == frequency['one_visit']['count']
+    assert buckets['2-3 визита'] == frequency['two_to_three_visits']['count']
+    assert buckets['4+ визита'] == frequency['four_plus_visits']['count']
+
+
+@pytest.mark.asyncio
+async def test_bundle_and_summary_read_the_period_preset_the_same_way(async_session):
+    """The bundle is what the Overview actually calls, and an empty preset means absent."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    await async_session.flush()
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    window = {'start_date': '2026-09-01', 'end_date': '2026-09-05'}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        bundle = await client.get('/dashboard/bundle', params={**window, 'period_preset': 'month'})
+        summary = await client.get(
+            '/dashboard/widget/summary', params={**window, 'period_preset': 'month'}
+        )
+        # Query() must stay inside the Annotated, or a bare `period_preset=` 422s the view
+        blank = await client.get('/dashboard/widget/summary', params={**window, 'period_preset': ''})
+        absent = await client.get('/dashboard/widget/summary', params=window)
+        typo = await client.get('/dashboard/widget/summary', params={**window, 'period_preset': 'MONTH'})
+    app.dependency_overrides.clear()
+
+    assert bundle.status_code == 200
+    assert summary.status_code == 200
+    month_baseline = {'start': '2026-08-01', 'end': '2026-08-05'}
+    assert bundle.json()['data']['summary']['previous_period'] == month_baseline
+    assert summary.json()['data']['previous_period'] == month_baseline
+
+    assert blank.status_code == 200
+    assert absent.status_code == 200
+    assert blank.json()['data']['previous_period'] == absent.json()['data']['previous_period']
+    assert blank.json()['data']['previous_period'] == {'start': '2026-08-27', 'end': '2026-08-31'}
+    assert typo.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_explicit_compare_window_overrides_the_preset_in_reports(async_session):
+    """One screen, one metric: the table's delta and the comparison block must agree."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add_all([Client(id=n, name=f'Client {n}', company_id=1) for n in range(1, 6)])
+    await async_session.flush()
+
+    async_session.add_all([
+        # only in the preset's baseline (24-29 Aug), not in the window ticked below
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2026, 8, 24), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2026, 8, 27), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=3, date=date(2026, 9, 1), attendance=1),
+        Appointment(id=4, company_id=1, staff_id=1, client_id=4, date=date(2026, 9, 2), attendance=1),
+        Appointment(id=5, company_id=1, staff_id=1, client_id=5, date=date(2026, 9, 3), attendance=1),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    params = {
+        'report_id': 'new_vs_returning_cross',
+        'granularity': 'month',
+        'start_date': '2026-08-31',
+        'end_date': '2026-09-05',
+        'period_preset': 'week',
+    }
+    compare = {'compare_start_date': '2026-08-27', 'compare_end_date': '2026-08-30'}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        without_compare = await client.get('/dashboard/reports/data', params=params)
+        with_compare = await client.get('/dashboard/reports/data', params={**params, **compare})
+        plain = await client.get(
+            '/dashboard/reports/data',
+            params={**{k: v for k, v in params.items() if k != 'period_preset'}, **compare},
+        )
+    app.dependency_overrides.clear()
+
+    assert without_compare.status_code == 200
+    assert with_compare.status_code == 200
+    delta = lambda r: {  # noqa: E731
+        row['segment']: row['clients_change_pct'] for row in r.json()['data']['raw']['segments']
+    }
+    # the preset still rules when nothing else was asked for...
+    assert delta(without_compare)['Новые'] == 50.0
+    # ...but an explicit window takes over, so the table cannot contradict the block beside it
+    assert delta(with_compare) == delta(plain)
+    assert delta(with_compare)['Новые'] != delta(without_compare)['Новые']
+
+
+@pytest.mark.asyncio
+async def test_dashboard_summary_client_visit_frequency_counts_branch_history(async_session):
+    """Buckets follow the whole branch history, so a regular never reads as a first-timer."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
+    async_session.add_all([
+        Client(id=1, name='First timer', company_id=1),
+        Client(id=2, name='Returning', company_id=1),
+        Client(id=3, name='Regular', company_id=1),
+        Client(id=4, name='Absent in period', company_id=1),
+    ])
+    await async_session.flush()
+
+    async_session.add_all([
+        # one visit ever, inside the period
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 3, 5), attendance=1),
+        # one earlier visit plus one in the period
+        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2024, 11, 4), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=2, date=date(2025, 3, 6), attendance=1),
+        # three earlier visits plus one in the period
+        Appointment(id=4, company_id=1, staff_id=1, client_id=3, date=date(2024, 8, 1), attendance=1),
+        Appointment(id=5, company_id=1, staff_id=1, client_id=3, date=date(2024, 9, 2), attendance=1),
+        Appointment(id=6, company_id=1, staff_id=1, client_id=3, date=date(2024, 10, 3), attendance=1),
+        Appointment(id=7, company_id=1, staff_id=1, client_id=3, date=date(2025, 3, 7), attendance=1),
+        # later visits must not promote the first-timer out of the one-visit bucket
+        Appointment(id=8, company_id=1, staff_id=1, client_id=1, date=date(2025, 4, 9), attendance=1),
+        # history alone does not put a client into the period's base
+        Appointment(id=9, company_id=1, staff_id=1, client_id=4, date=date(2024, 12, 12), attendance=1),
+    ])
+    await async_session.commit()
+
+    summary = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 3, 1),
+        date(2025, 3, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    frequency = summary['visit_metrics']['client_visit_frequency']
+    assert frequency['total_clients'] == 3
+    assert frequency['one_visit']['count'] == 1
+    assert frequency['two_to_three_visits']['count'] == 1
+    assert frequency['four_plus_visits']['count'] == 1
+    buckets = ('one_visit', 'two_to_three_visits', 'four_plus_visits')
+    assert sum(frequency[key]['count'] for key in buckets) == frequency['total_clients']
+    assert sum(frequency[key]['pct'] for key in buckets) == pytest.approx(100.0)
+
+
 @pytest.mark.asyncio
 async def test_average_check_uses_cash_income_and_business_denominator(async_session):
     async_session.add_all([
@@ -7170,9 +7519,9 @@ async def test_manual_opz_delta_compares_like_periods(async_session, monkeypatch
     quarter = await metrics('2025-10-01', '2025-12-31')
     assert (quarter['opz_qty'], quarter['opz_qty_change_pct']) == (30.0, 0.0)
 
-    # `previous_period()` steps back by days, so for a month shorter than its predecessor
-    # the window starts on the 2nd and would count nothing at all. Whole-month selections
-    # compare month with month instead.
+    # Manual months are indivisible, so a baseline that starts mid-month counts nothing.
+    # These selections carry no preset, and a window spanning several months still steps
+    # back by days, so the manual-fact baseline computes its own whole months instead.
     for short_month, days in (('02', 28), ('04', 30), ('09', 30), ('11', 30)):
         selected = await metrics(f'2025-{short_month}-01', f'2025-{short_month}-{days}')
         assert (selected['opz_qty'], selected['opz_qty_change_pct']) == (10.0, 0.0)

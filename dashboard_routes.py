@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from datetime import date, datetime
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,7 @@ from auth_scope import (
 )
 import dashboard_service
 from dashboard_service import (
+    OverviewPeriodPreset,
     fetch_branches,
     fetch_extra_services,
     fetch_manual_opz_facts,
@@ -70,6 +71,20 @@ from sync_jobs import SyncJobService
 from sync_orchestrator import get_sync_status
 
 router = APIRouter()
+
+# Which Overview preset produced the window. It picks the baseline the deltas measure
+# against, so an unknown value is rejected rather than quietly falling back to another
+# comparison. Absent means the dates were typed by hand. The set of presets lives with
+# the baseline rule that consumes it, so the two cannot drift apart.
+# Query() has to live inside the Annotated: as a default value it replaces the field and
+# the validator below never runs, so `?period_preset=` would 422 the whole view.
+PeriodPreset = Annotated[
+    OverviewPeriodPreset | None,
+    # An empty value means absent. A typo still fails loudly, because the preset decides
+    # which window every delta on the page is measured against.
+    BeforeValidator(lambda value: value or None),
+    Query(description='Preset the window came from'),
+]
 
 
 class MetricVisibilityPayload(BaseModel):
@@ -601,6 +616,7 @@ async def dashboard_report_data(
     compare_start_date: date | None = Query(None),
     compare_end_date: date | None = Query(None),
     compare_staff_id: int | None = Query(None),
+    period_preset: PeriodPreset = None,
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
     is_demo: bool = Depends(is_demo_request),
@@ -639,6 +655,7 @@ async def dashboard_report_data(
             compare_end_date,
             compare_staff_id,
             allowed_company_ids=scope['allowed_company_ids'],
+            period_preset=period_preset,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -673,6 +690,7 @@ async def dashboard_widget_summary(
     end_date: date = Query(..., description='Inclusive period end'),
     company_id: int | None = Query(None, description='Optional YClients company (salon) id'),
     staff_id: int | None = Query(None, description='Optional active staff id'),
+    period_preset: PeriodPreset = None,
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -687,6 +705,7 @@ async def dashboard_widget_summary(
         staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
         factual_at=factual_at,
+        period_preset=period_preset,
     )
     hidden = hidden_money_codes(ctx)
     if hidden:
@@ -1058,6 +1077,7 @@ async def dashboard_bundle(
     end_date: date = Query(...),
     company_id: int | None = Query(None),
     staff_id: int | None = Query(None),
+    period_preset: PeriodPreset = None,
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -1072,6 +1092,7 @@ async def dashboard_bundle(
         staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
         factual_at=factual_at,
+        period_preset=period_preset,
     )
     hidden = hidden_money_codes(ctx)
     can_see_financials = can_view_financials(ctx)
