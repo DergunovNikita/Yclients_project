@@ -7,6 +7,7 @@ import asyncio
 import csv
 import io
 import logging
+import sys
 import time as perf_time
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -18,12 +19,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import (
     API_HOST,
     API_PORT,
+    LOG_LEVEL,
     DASHBOARD_CORS_ALLOW_HEADERS,
     DASHBOARD_CORS_ALLOW_METHODS,
     DASHBOARD_CORS_ORIGIN_REGEX,
@@ -95,18 +97,40 @@ MAX_PAGE_SIZE = 5000
 DEFAULT_PAGE_SIZE = 1000
 PII_CLIENT_ROLES = USER_MANAGER_ROLES
 
-OPEN_PATHS = {"/health"}
+OPEN_PATHS = {"/health", "/health/ready"}
 if not IS_PRODUCTION:
     OPEN_PATHS.update({"/openapi.json", "/docs", "/redoc"})
 
 LOGGER = logging.getLogger('yclients.api')
-TIMED_DASHBOARD_PATHS = {
-    '/dashboard/bundle',
-    '/dashboard/widget/plan_fact',
-    '/dashboard/branches',
-    '/dashboard/staff',
-    '/dashboard/widget/sync_status',
-}
+
+
+def _configure_logging() -> None:
+    """Send application logs to stdout.
+
+    uvicorn configures only its own loggers, so without a handler here the request
+    timings below are built, formatted and then dropped: the application logger sits
+    at WARNING with no handler and `LOGGER.info` never reaches the container log.
+    """
+    logger = logging.getLogger('yclients')
+    if logger.handlers:
+        return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s %(message)s'))
+    logger.addHandler(handler)
+    logger.setLevel(LOG_LEVEL)
+    logger.propagate = False
+
+
+_configure_logging()
+
+# Every dashboard route is timed. A hand-kept list of paths silently omits whatever
+# nobody remembered to add, and the log exists to answer "did anything get slower".
+TIMED_DASHBOARD_PREFIX = '/dashboard/'
+def _timed_request_fields(request: Request) -> tuple[str, str] | None:
+    path = request.url.path
+    if not path.startswith(TIMED_DASHBOARD_PREFIX):
+        return None
+    return path, request.query_params.get('report_id') or '-'
 
 
 async def require_api_key(
@@ -181,12 +205,16 @@ async def add_security_headers(request: Request, call_next: Callable):
         response = await call_next(request)
         return _apply_security_headers(request, response)
     except Exception as exc:
-        if request.url.path in TIMED_DASHBOARD_PATHS:
+        timed = _timed_request_fields(request)
+        if timed is not None:
+            path, report_id = timed
             duration_ms = round((perf_time.perf_counter() - started) * 1000, 2)
             access = request_access(request)
             LOGGER.exception(
-                'dashboard_api_request_failed path=%s duration_ms=%s user_id=%s portal_account_id=%s role=%s exc=%s',
-                request.url.path,
+                'dashboard_api_request_failed path=%s report_id=%s duration_ms=%s '
+                'user_id=%s portal_account_id=%s role=%s exc=%s',
+                path,
+                report_id,
                 duration_ms,
                 getattr(access, 'user_id', None),
                 getattr(access, 'portal_account_id', None),
@@ -195,12 +223,16 @@ async def add_security_headers(request: Request, call_next: Callable):
             )
         raise
     finally:
-        if request.url.path in TIMED_DASHBOARD_PATHS and response is not None:
+        timed = _timed_request_fields(request)
+        if timed is not None and response is not None:
+            path, report_id = timed
             duration_ms = round((perf_time.perf_counter() - started) * 1000, 2)
             access = request_access(request)
             LOGGER.info(
-                'dashboard_api_request path=%s status=%s duration_ms=%s user_id=%s portal_account_id=%s role=%s',
-                request.url.path,
+                'dashboard_api_request path=%s report_id=%s status=%s duration_ms=%s '
+                'user_id=%s portal_account_id=%s role=%s',
+                path,
+                report_id,
                 response.status_code,
                 duration_ms,
                 getattr(access, 'user_id', None),
@@ -362,9 +394,37 @@ async def root():
     }
 
 
+# Bounded so a stuck database cannot hold the probe open past the caller's own timeout.
+HEALTH_DB_TIMEOUT_SECONDS = 3
+
+
 @app.get("/health")
 async def health():
+    """Liveness only: the process is up and serving.
+
+    Deliberately does not touch the database. The container healthcheck reads this, and
+    a database blip should not mark a working API unhealthy — readiness answers that.
+    """
     return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def health_ready(db: AsyncSession = Depends(get_async_db)):
+    """Readiness: the API can actually serve requests, database included.
+
+    The async engine is lazy — it opens no connection until the first query — so a broken
+    connection setting leaves every route returning 500 while liveness still answers 200.
+    The deploy loop reads this endpoint so that such a build fails instead of shipping.
+    """
+    try:
+        await asyncio.wait_for(db.execute(text('SELECT 1')), timeout=HEALTH_DB_TIMEOUT_SECONDS)
+    except Exception:
+        LOGGER.exception('health_ready_database_unavailable')
+        return JSONResponse(
+            status_code=503,
+            content={'status': 'degraded', 'database': 'error'},
+        )
+    return {'status': 'ok', 'database': 'ok'}
 
 
 @app.get("/groups")

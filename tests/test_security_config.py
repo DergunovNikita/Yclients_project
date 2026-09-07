@@ -334,7 +334,8 @@ def test_production_import_disables_docs_openapi_but_keeps_health_open():
     result = _run_import_api({})
 
     assert result.returncode == 0, result.stderr
-    assert "None None None ['/health']" in result.stdout
+    # Readiness is open on purpose: the deploy loop reads it before any credential exists.
+    assert "None None None ['/health', '/health/ready']" in result.stdout
 
 
 def test_production_http_docs_routes_are_closed_but_health_is_open():

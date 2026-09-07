@@ -13,6 +13,7 @@ load_dotenv()
 PRODUCTION_ENV_NAMES = {'prod', 'production'}
 APP_ENV = os.getenv('APP_ENV', 'local').strip().lower() or 'local'
 IS_PRODUCTION = APP_ENV in PRODUCTION_ENV_NAMES
+LOG_LEVEL = (os.getenv('LOG_LEVEL', 'INFO').strip() or 'INFO').upper()
 PLACEHOLDER_SECRET_VALUES = {
     'change_me_local_jwt_secret',
     'change_me_sync_api_token',

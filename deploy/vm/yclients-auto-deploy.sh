@@ -50,7 +50,9 @@ if [ -f .env ]; then
   set +a
 fi
 
-health_url="http://127.0.0.1:${API_PORT:-8000}/health"
+# Readiness, not liveness: the async engine is lazy, so /health answers 200 even when
+# the database is unreachable and every dashboard route returns 500.
+health_url="http://127.0.0.1:${API_PORT:-8000}/health/ready"
 health_retries="${HEALTH_RETRIES:-30}"
 health_interval_seconds="${HEALTH_INTERVAL_SECONDS:-2}"
 

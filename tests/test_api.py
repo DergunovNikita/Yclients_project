@@ -946,3 +946,116 @@ def test_cli_accepts_every_sync_mode(monkeypatch):
     # argparse exits 2 for usage errors, so "already running" must not also be 2.
     assert exit_info.value.code == 2
     assert main.ALREADY_RUNNING_EXIT_CODE != 2
+
+
+@pytest.mark.asyncio
+async def test_liveness_answers_without_touching_the_database():
+    """Liveness must stay cheap: the container healthcheck should not restart a working
+    API because the database blinked, and CI has no database at all."""
+    app.dependency_overrides.pop(api.get_async_db, None)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get('/health')
+
+    assert response.status_code == 200
+    assert response.json() == {'status': 'ok'}
+
+
+@pytest.mark.asyncio
+async def test_readiness_reports_the_database(async_session):
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get('/health/ready')
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() == {'status': 'ok', 'database': 'ok'}
+
+
+@pytest.mark.asyncio
+async def test_readiness_fails_when_the_database_cannot_answer():
+    """The async engine is lazy, so a broken connection setting leaves liveness green
+    while every route returns 500. Readiness is what stops that build from shipping."""
+
+    class DeadSession:
+        async def execute(self, *args, **kwargs):
+            raise OSError('connection refused')
+
+    async def override_db():
+        yield DeadSession()
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get('/health/ready')
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.json() == {'status': 'degraded', 'database': 'error'}
+
+
+@pytest.mark.asyncio
+async def test_dashboard_requests_are_timed_and_name_the_report(async_session, monkeypatch):
+    """The timing log is the only way to answer "did anything get slower" after a change.
+    It stayed silent for the whole of its existence because nothing configured a handler,
+    and it named no report because every report shares one path."""
+    import logging
+
+    records: list[logging.LogRecord] = []
+
+    class Collector(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    logger = logging.getLogger('yclients.api')
+    handler = Collector()
+    logger.addHandler(handler)
+    monkeypatch.setattr(logger, 'level', logging.INFO)
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url='http://test') as client:
+            await client.get('/dashboard/branches')
+            await client.get('/dashboard/reports/data', params={
+                'report_id': 'staff_leaderboard',
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+            })
+    finally:
+        logger.removeHandler(handler)
+        app.dependency_overrides.clear()
+
+    messages = [record.getMessage() for record in records if 'dashboard_api_request' in record.getMessage()]
+    assert any('path=/dashboard/branches report_id=-' in message for message in messages), messages
+    assert any(
+        'path=/dashboard/reports/data report_id=staff_leaderboard' in message
+        for message in messages
+    ), messages
+    assert all('duration_ms=' in message for message in messages)
+
+
+def test_only_dashboard_paths_are_timed():
+    from starlette.datastructures import URL
+
+    class FakeRequest:
+        def __init__(self, path, params=None):
+            self.url = URL(path)
+            self.query_params = params or {}
+
+    assert api._timed_request_fields(FakeRequest('/health')) is None
+    assert api._timed_request_fields(FakeRequest('/companies')) is None
+    assert api._timed_request_fields(FakeRequest('/dashboard/widget/summary')) == (
+        '/dashboard/widget/summary',
+        '-',
+    )
+    assert api._timed_request_fields(
+        FakeRequest('/dashboard/reports/data', {'report_id': 'seasonality'})
+    ) == ('/dashboard/reports/data', 'seasonality')
