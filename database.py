@@ -109,7 +109,16 @@ _async_session_factory: async_sessionmaker[AsyncSession] | None = None
 def init_async_database(host: str, port: int, name: str, user: str, password: str = '') -> None:
     global _async_session_factory
     url = build_async_database_url(host, port, name, user, password)
-    engine = create_async_engine(url, pool_pre_ping=True, pool_recycle=300)
+    # Dashboard plans reach cost estimates in the millions because the fact filters nest
+    # correlated EXISTS, so PostgreSQL JIT-compiles them with inlining and optimisation:
+    # measured on production, one such query spends 2203 ms, of which 2157 ms is LLVM, to
+    # then execute in 13 ms. Only the API sees these plans, so the ETL engine keeps JIT.
+    engine = create_async_engine(
+        url,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        connect_args={'server_settings': {'jit': 'off'}},
+    )
     _async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
 
