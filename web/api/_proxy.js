@@ -8,7 +8,10 @@ const HOP_BY_HOP_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
 ]);
-const PROXY_TIMEOUT_MS = Number(process.env.PROXY_TIMEOUT_MS || 55000);
+// Stays above nginx proxy_read_timeout (150s) so a slow report comes back as the
+// upstream's own 504 rather than this generic 503, and below maxDuration so the
+// function still has time to write the response.
+const PROXY_TIMEOUT_MS = Number(process.env.PROXY_TIMEOUT_MS || 160000);
 const REQUEST_HEADER_ALLOWLIST = new Set([
   'accept',
   'content-type',

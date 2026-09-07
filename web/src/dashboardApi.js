@@ -22,7 +22,7 @@ export { serviceManagementNavigationAllowed } from './dashboardRequestState.js';
 export { runServiceManagementMutation } from './dashboardRequestState.js';
 export { settleServiceManagementLoad } from './dashboardRequestState.js';
 
-export const REQUEST_TIMEOUT_MS = 60000;
+export const REQUEST_TIMEOUT_MS = 190000;
 export const SLOW_REQUEST_MS = 12000;
 
 const apiBase = import.meta.env?.VITE_API_BASE || '';

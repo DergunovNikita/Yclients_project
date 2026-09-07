@@ -5,7 +5,7 @@
   "framework": null,
   "functions": {
     "api/auth-proxy.js": { "maxDuration": 30 },
-    "api/dashboard/**/*.js": { "maxDuration": 60 }
+    "api/dashboard/**/*.js": { "maxDuration": 180 }
   },
   "headers": [
     {
