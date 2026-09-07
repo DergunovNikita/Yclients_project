@@ -23,20 +23,29 @@ git fetch --quiet origin "$BRANCH"
 local_rev="$(git rev-parse HEAD)"
 remote_rev="$(git rev-parse "origin/$BRANCH")"
 
+# What the containers actually serve, not what is checked out. The reset below happens
+# before the build and the migration, so a deploy that dies in between leaves the tree
+# at the target revision while api/worker still run the old image. Comparing the tree
+# would then read "nothing to deploy" on every following tick and exit 0 forever, with
+# the failure invisible and recoverable only by hand.
+deployed_rev="$(docker compose exec -T api cat /app/REVISION 2>/dev/null | tr -d '[:space:]' || true)"
+
 # The timer fires every 5 minutes. Rebuilding on every tick regardless of whether
 # anything changed grew the build cache to 12.78GB and restarted api/worker ~288
 # times a day. CI reaches this script through `systemctl start`, and at that point
 # the VM has not pulled yet, so a real deploy still passes the check below.
-if [ "$local_rev" = "$remote_rev" ] && [ "${FORCE_DEPLOY:-false}" != "true" ]; then
-  echo "Repository already at $local_rev; nothing to deploy"
+if [ "$deployed_rev" = "$remote_rev" ] && [ "${FORCE_DEPLOY:-false}" != "true" ]; then
+  echo "Already serving $remote_rev; nothing to deploy"
   exit 0
 fi
 
-if [ "$local_rev" = "$remote_rev" ]; then
-  echo "FORCE_DEPLOY is set; rebuilding $local_rev"
-else
+if [ "$local_rev" != "$remote_rev" ]; then
   echo "Deploying $local_rev -> $remote_rev"
   git reset --hard "origin/$BRANCH"
+elif [ "${FORCE_DEPLOY:-false}" = "true" ]; then
+  echo "FORCE_DEPLOY is set; rebuilding $local_rev"
+else
+  echo "Retrying deploy of $remote_rev; containers serve ${deployed_rev:-unknown}"
 fi
 
 APP_REVISION="$remote_rev" docker compose build api worker migrate

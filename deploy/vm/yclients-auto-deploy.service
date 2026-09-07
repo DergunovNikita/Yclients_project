@@ -5,6 +5,9 @@ Wants=network-online.target docker.service
 
 [Service]
 Type=oneshot
+# oneshot defaults to no timeout, so a deploy blocked on a database lock would wait
+# forever while the lock file keeps every later tick silent. A normal run takes ~1 min.
+TimeoutStartSec=1800
 Environment=APP_DIR=/opt/yclients_bi_system
 Environment=BRANCH=main
 ExecStart=/opt/yclients_bi_system/deploy/vm/yclients-auto-deploy.sh
