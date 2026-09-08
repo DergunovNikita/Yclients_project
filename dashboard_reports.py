@@ -42,6 +42,7 @@ from dashboard_service import (
     fetch_reporting_start_dates,
     fetch_top_services,
     fetch_year_over_year_facts,
+    day_window,
     reporting_start_clause,
 )
 from models import (
@@ -2774,11 +2775,10 @@ async def _goods_payload(
 ) -> dict[str, Any]:
     conditions = [
         GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
-        func.date(GoodTransaction.date) >= start,
-        func.date(GoodTransaction.date) <= end,
+        *day_window(GoodTransaction.date, start, end),
         GoodTransaction.date <= factual_at,
         _business_staff_id_condition(GoodTransaction.master_id),
-        reporting_start_clause(GoodTransaction.company_id, func.date(GoodTransaction.date)),
+        reporting_start_clause(GoodTransaction.company_id, GoodTransaction.date),
     ]
     scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -3311,9 +3311,8 @@ async def _nps_payload(
 ) -> dict[str, Any]:
     base['missing_sources'] = ['telegram_nps']
     conditions = [
-        func.date(Comment.date) >= start,
-        func.date(Comment.date) <= end,
-        reporting_start_clause(Comment.company_id, func.date(Comment.date)),
+        *day_window(Comment.date, start, end),
+        reporting_start_clause(Comment.company_id, Comment.date),
     ]
     scope = _company_scope_clause(Comment.company_id, company_id, allowed_company_ids)
     if scope is not None:

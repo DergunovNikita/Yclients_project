@@ -655,6 +655,18 @@ def _company_scope_clause(column, company_id: Optional[int], allowed_company_ids
     return None
 
 
+def day_window(column, start: date, end: date):
+    """Half-open range on the raw timestamp, replacing `date(column) BETWEEN start AND end`.
+
+    Wrapping the column in `date()` makes the predicate unsargable: no index on that column
+    can serve it, so the planner falls back to scanning the branch's whole history and
+    discarding almost all of it. The columns this is used on are `timestamp without time
+    zone`, so a half-open range selects exactly the same rows — verified across every row
+    of the fact tables against 134 boundary dates.
+    """
+    return (column >= start, column < end + timedelta(days=1))
+
+
 def reporting_start_clause(company_column, day_expr):
     """Drop facts dated before the branch's configured reporting start.
 
@@ -803,10 +815,9 @@ def _goods_revenue_filters(
 ):
     parts = [
         GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
-        func.date(GoodTransaction.date) >= start,
-        func.date(GoodTransaction.date) <= end,
+        *day_window(GoodTransaction.date, start, end),
         _business_staff_id_condition(GoodTransaction.master_id),
-        reporting_start_clause(GoodTransaction.company_id, func.date(GoodTransaction.date)),
+        reporting_start_clause(GoodTransaction.company_id, GoodTransaction.date),
     ]
     scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -877,8 +888,7 @@ def _service_paid_filters(
         FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
         Appointment.attendance == COMPLETED_ATTENDANCE,
         FinancialTransaction.amount > 0,
-        func.date(FinancialTransaction.date) >= start,
-        func.date(FinancialTransaction.date) <= end,
+        *day_window(FinancialTransaction.date, start, end),
         business_appointment_condition(),
         # A service fact belongs to the branch only if both its visit and its payment
         # fall on or after the opening. The visit clause keeps the average-check
@@ -886,9 +896,7 @@ def _service_paid_filters(
         # keeps revenue — which is bucketed by payment date — out of years the branch
         # predates. Every path that sums service revenue must apply both.
         reporting_start_clause(Appointment.company_id, Appointment.date),
-        reporting_start_clause(
-            FinancialTransaction.company_id, func.date(FinancialTransaction.date)
-        ),
+        reporting_start_clause(FinancialTransaction.company_id, FinancialTransaction.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -916,12 +924,9 @@ def _goods_paid_filters(
     parts = [
         FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
         FinancialTransaction.amount > 0,
-        func.date(FinancialTransaction.date) >= start,
-        func.date(FinancialTransaction.date) <= end,
+        *day_window(FinancialTransaction.date, start, end),
         _business_financial_master_condition(factual_at),
-        reporting_start_clause(
-            FinancialTransaction.company_id, func.date(FinancialTransaction.date)
-        ),
+        reporting_start_clause(FinancialTransaction.company_id, FinancialTransaction.date),
     ]
     scope = _company_scope_clause(FinancialTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -1110,10 +1115,9 @@ async def _average_check_block(
     goods_filters = [
         GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
         GoodTransaction.document_id.is_not(None),
-        func.date(GoodTransaction.date) >= dr.start,
-        func.date(GoodTransaction.date) <= dr.end,
+        *day_window(GoodTransaction.date, dr.start, dr.end),
         _business_staff_id_condition(GoodTransaction.master_id),
-        reporting_start_clause(GoodTransaction.company_id, func.date(GoodTransaction.date)),
+        reporting_start_clause(GoodTransaction.company_id, GoodTransaction.date),
     ]
     scope = _company_scope_clause(GoodTransaction.company_id, company_id, company_ids)
     if scope is not None:
@@ -1131,12 +1135,9 @@ async def _average_check_block(
 
     base_payment_filters = [
         FinancialTransaction.amount > 0,
-        func.date(FinancialTransaction.date) >= dr.start,
-        func.date(FinancialTransaction.date) <= dr.end,
+        *day_window(FinancialTransaction.date, dr.start, dr.end),
         _physical_account_condition(),
-        reporting_start_clause(
-            FinancialTransaction.company_id, func.date(FinancialTransaction.date)
-        ),
+        reporting_start_clause(FinancialTransaction.company_id, FinancialTransaction.date),
     ]
     if factual_at is not None:
         base_payment_filters.append(FinancialTransaction.date <= factual_at)
@@ -5316,14 +5317,11 @@ async def _staff_fact_components_by_branch(
             )
             .where(
                 FinancialTransaction.amount > 0,
-                func.date(FinancialTransaction.date) >= start,
-                func.date(FinancialTransaction.date) <= end,
+                *day_window(FinancialTransaction.date, start, end),
                 FinancialTransaction.company_id == company_id,
                 _physical_account_condition(),
                 _business_financial_master_condition(factual_at),
-                reporting_start_clause(
-                    FinancialTransaction.company_id, func.date(FinancialTransaction.date)
-                ),
+                reporting_start_clause(FinancialTransaction.company_id, FinancialTransaction.date),
                 or_(
                     FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
                     _personal_account_condition(),
