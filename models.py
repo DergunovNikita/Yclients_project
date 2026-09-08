@@ -379,6 +379,10 @@ class Appointment(Base):
 
     __table_args__ = (
         Index('uq_appointments_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
+        # Dashboard facts are always read as one branch over a date window; the date is the
+        # visit for reports and the creation for OPZ events.
+        Index('ix_appointments_company_date', 'company_id', 'date'),
+        Index('ix_appointments_company_create_date', 'company_id', 'create_date'),
     )
 
     company = relationship("Company", back_populates="appointments")
@@ -423,6 +427,7 @@ class FinancialTransaction(Base):
 
     __table_args__ = (
         Index('uq_financial_transactions_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
+        Index('ix_financial_transactions_company_date', 'company_id', 'date'),
     )
 
 
