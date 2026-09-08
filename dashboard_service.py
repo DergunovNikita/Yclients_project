@@ -8252,16 +8252,13 @@ async def fetch_plan_fact(
     groups: list[dict[str, Any]] = []
     if company_id is None and company_ids:
         network_plan = _sum_metric_components([plans_by_company.get(branch_id, {}) for branch_id in company_ids])
+        # The network row is the sum of the branch rows, including the two average-check
+        # components: the numerator is a sum of payment amounts, and the denominator counts
+        # distinct appointment ids, each of which belongs to exactly one branch. Both are
+        # additive, so recomputing them over the whole scope re-runs the heaviest query in
+        # the report to land on the number the sum already holds. (`unique_clients` would
+        # not be additive, which is why it is not one of these two and is not read here.)
         network_fact = _sum_metric_components([facts_by_company.get(branch_id, {}) for branch_id in company_ids])
-        network_average_check = await _average_check_block(
-            db,
-            DateRange(start, end),
-            None,
-            company_ids=company_ids,
-            factual_at=factual_at,
-        )
-        network_fact['revenue'] = float(network_average_check['numerator'] or 0.0)
-        network_fact['avg_check_denominator'] = float(network_average_check['denominator'] or 0.0)
         network_fact = _derive_metric_values(
             network_fact,
             include_zero_derived=True,
