@@ -3205,6 +3205,56 @@ async def test_dashboard_staff_leaderboard_report_returns_retryable_503_on_total
     }
 
 
+def test_title_matches_folds_case_in_either_alphabet():
+    """The KPI group is decided on the lowered title, Cyrillic included.
+
+    The rule used to be a list of LIKE spellings, which caught 'Воск' and 'ВОСК' but not
+    'ВоСк'. It now runs in Python, where lower() folds both alphabets, so the enumerated
+    spellings are gone and PostgreSQL and SQLite answer the same.
+    """
+    for spelling in ('воск', 'Воск', 'ВОСК', 'ВоСк', 'Воск бровей'):
+        assert dashboard_service._title_matches(spelling, dashboard_service.WAX_TITLE_PARTS)
+    assert not dashboard_service._title_matches('стрижка', dashboard_service.WAX_TITLE_PARTS)
+    assert not dashboard_service._title_matches(None, dashboard_service.WAX_TITLE_PARTS)
+
+
+@pytest.mark.asyncio
+async def test_service_group_counts_read_both_sides_of_the_title(async_session):
+    """A transaction's own title wins; a transaction without one falls back to the catalog."""
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        ServiceCatalog(company_id=1, service_id=11, title='КАМУФЛЯЖ седины', updated_at=datetime(2025, 1, 1)),
+    ])
+    await async_session.flush()
+    async_session.add(
+        Appointment(
+            id=1,
+            company_id=1,
+            staff_id=1,
+            date=date(2025, 1, 10),
+            datetime=datetime(2025, 1, 10, 12, 0, 0),
+            attendance=1,
+        )
+    )
+    await async_session.flush()
+    async_session.add_all([
+        Transaction(id=1, appointment_id=1, service_id=10, service_title='ВоСк бровей', amount=2, company_id=1),
+        Transaction(id=2, appointment_id=1, service_id=11, service_title=None, amount=3, company_id=1),
+        Transaction(id=3, appointment_id=1, service_id=12, service_title='Стрижка', amount=9, company_id=1),
+    ])
+    await async_session.commit()
+
+    counts = await dashboard_service._service_group_counts(
+        async_session, date(2025, 1, 1), date(2025, 1, 31), 1
+    )
+    assert counts['wax_qty'] == 2.0
+    assert counts['camouflage_qty'] == 3.0
+    assert counts['face_care_qty'] == 0.0
+    assert counts['head_care_qty'] == 0.0
+
+
 @pytest.mark.asyncio
 async def test_dashboard_staff_leaderboard_returns_partial_with_null_optional_sums(async_session, monkeypatch):
     async_session.add(Group(id=1, title='G1'))

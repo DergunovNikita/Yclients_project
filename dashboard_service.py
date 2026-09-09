@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+from bisect import bisect_right
 from calendar import monthrange
 from collections import defaultdict
 from dataclasses import dataclass
@@ -22,10 +23,14 @@ from sqlalchemy import (
     delete,
     exists,
     extract,
+    false,
     func,
+    not_,
     or_,
     select,
+    true,
     tuple_,
+    union_all,
 )
 from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1453,27 +1458,65 @@ async def _client_recency_block(
     }
 
 
-def _title_matches(title_expr, parts: tuple[str, ...]):
-    conditions = []
-    for part in parts:
-        # PostgreSQL lower() handles Cyrillic, while SQLite's built-in lower()
-        # only normalizes ASCII.  Keep the common source spellings explicit so
-        # report formulas behave identically in production and local tests.
-        spellings = {part, part.lower(), part.capitalize(), part.upper()}
-        conditions.extend(title_expr.like(f'%{spelling}%') for spelling in spellings)
-    return or_(*conditions)
+def _title_matches(title: Optional[str], parts: tuple[str, ...]) -> bool:
+    """Whether a service title belongs to a KPI group, by substring.
+
+    The one definition of the rule. It runs in Python rather than SQL because the whole
+    database holds under 200 distinct service titles: resolving the group once over that
+    list and pushing the answer back as an equality beats re-testing a few dozen
+    substrings on every fact row. It also settles the dialect split the SQL version had to
+    work around by hand — PostgreSQL's lower() folds Cyrillic, SQLite's does not, while
+    Python's str.lower() folds both.
+    """
+    haystack = (title or '').lower()
+    return any(part.lower() in haystack for part in parts)
 
 
-def _service_qty_sum(title_expr, parts: tuple[str, ...]):
+def _service_qty_sum(title_expr, titles: list[str]):
+    """Sum of transaction amounts whose service title is one of `titles`."""
     return func.coalesce(
         func.sum(
             case(
-                (_title_matches(title_expr, parts), func.coalesce(Transaction.amount, 0)),
+                (title_expr.in_(titles), func.coalesce(Transaction.amount, 0)),
                 else_=0,
             )
         ),
         0,
     )
+
+
+# The KPI groups a service title can fall into, and the substrings that put it there.
+SERVICE_GROUP_TITLE_PARTS = {
+    'wax_qty': WAX_TITLE_PARTS,
+    'camouflage_qty': CAMOUFLAGE_TITLE_PARTS,
+    'face_care_qty': FACE_CARE_TITLE_PARTS,
+    'head_care_qty': HEAD_CARE_TITLE_PARTS,
+}
+
+
+async def _service_group_titles(db: AsyncSession) -> dict[str, list[str]]:
+    """Service titles of each KPI group, resolved once per session.
+
+    Both sides of the coalesce the fact queries read are collected — the transaction's own
+    copy of the title and the catalog's — so the answer can be compared against that raw
+    expression, with no lower() for the two dialects to disagree on.
+    """
+    cached = db.info.get('service_group_titles')
+    if cached is not None:
+        return cached
+    # Two DISTINCTs merged here rather than one SQL UNION: the union hashes both inputs
+    # together in a single non-parallel pass, which measured 536ms against 51ms for the
+    # separate scans, and this runs on every request including the ones showing a month.
+    titles = set()
+    for column in (Transaction.service_title, ServiceCatalog.title):
+        rows = (await db.execute(select(column).where(column.is_not(None)).distinct())).all()
+        titles.update(row[0] for row in rows)
+    resolved = {
+        code: sorted(title for title in titles if _title_matches(title, parts))
+        for code, parts in SERVICE_GROUP_TITLE_PARTS.items()
+    }
+    db.info['service_group_titles'] = resolved
+    return resolved
 
 
 def _service_group_key(title_expr, service_id_expr):
@@ -3663,13 +3706,14 @@ async def _service_group_counts(
     staff_id: Optional[int] = None,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, float]:
-    title_expr = func.lower(func.coalesce(Transaction.service_title, ServiceCatalog.title, ''))
+    group_titles = await _service_group_titles(db)
+    title_expr = func.coalesce(Transaction.service_title, ServiceCatalog.title, '')
     stmt = (
         select(
-            _service_qty_sum(title_expr, WAX_TITLE_PARTS).label('wax_qty'),
-            _service_qty_sum(title_expr, CAMOUFLAGE_TITLE_PARTS).label('camouflage_qty'),
-            _service_qty_sum(title_expr, FACE_CARE_TITLE_PARTS).label('face_care_qty'),
-            _service_qty_sum(title_expr, HEAD_CARE_TITLE_PARTS).label('head_care_qty'),
+            _service_qty_sum(title_expr, group_titles['wax_qty']).label('wax_qty'),
+            _service_qty_sum(title_expr, group_titles['camouflage_qty']).label('camouflage_qty'),
+            _service_qty_sum(title_expr, group_titles['face_care_qty']).label('face_care_qty'),
+            _service_qty_sum(title_expr, group_titles['head_care_qty']).label('head_care_qty'),
             func.coalesce(
                 func.sum(
                     case(
@@ -3784,6 +3828,16 @@ async def _goods_sales_metrics(
     }
 
 
+def _visit_order_key(visit: Any) -> tuple[date, datetime, int]:
+    """Which of a client's visits is the later one. Same order the OPZ anchor is picked by."""
+    visit_date = _coerce_date(visit.date)
+    return (
+        visit_date,
+        visit.datetime or datetime.combine(visit_date, time.min),
+        int(visit.id or 0),
+    )
+
+
 async def _opz_events(
     db: AsyncSession,
     start: date,
@@ -3798,6 +3852,23 @@ async def _opz_events(
     if timezone_name is None:
         timezone_name = (await _company_timezone_names(db, [company_id])).get(company_id)
     timezone = _branch_timezone(timezone_name)
+    # One summary asks for the same branch and period from a dozen places — per metric, per
+    # branch row, and again for the baseline. Measured on the full history, 66 calls covered
+    # 12 distinct scopes. Callers only read the list or filter it into a new one, and OpzEvent
+    # is frozen, so the same list is safe to hand out.
+    cache: dict[tuple[Any, ...], list[OpzEvent]] = db.info.setdefault('opz_events', {})
+    cache_key = (
+        int(company_id),
+        start,
+        end,
+        created_user_id,
+        deduplicate_by_year,
+        factual_at,
+        timezone.key,
+    )
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
     create_start = (
         datetime.combine(start, time.min, tzinfo=timezone)
         .astimezone(UTC)
@@ -3834,6 +3905,7 @@ async def _opz_events(
     )
     candidates = (await db.execute(candidates_stmt)).all()
     if not candidates:
+        cache[cache_key] = []
         return []
 
     client_ids = sorted({candidate.client_id for candidate in candidates if candidate.client_id is not None})
@@ -3843,6 +3915,14 @@ async def _opz_events(
         Appointment.client_id.in_(client_ids),
         Appointment.date.is_not(None),
         Appointment.date <= end,
+        # An event is only counted when the booking was made on the anchor visit's day or
+        # the morning after, and a booking's local day is inside the period — so an anchor
+        # is never older than the day before it starts. Earlier visits can only be rejected
+        # further down, and dropping them here keeps a month from reading a client's whole
+        # history. They cannot change which visit anchors either: they are all older than
+        # every visit that survives, so they only ever win when nothing else is left, and
+        # that case is rejected by the same day rule.
+        Appointment.date >= start - timedelta(days=1),
         # Anchoring a rebooking on a visit the branch does not report would count an
         # OPZ event whose denominator visit is excluded, inflating opz_pct. Cutting the
         # anchor is enough: a rebooking made before the reporting start can only anchor
@@ -3866,6 +3946,17 @@ async def _opz_events(
     visits_by_client: dict[tuple[int, int], list[Any]] = {}
     for visit in visits:
         visits_by_client.setdefault((visit.company_id, visit.client_id), []).append(visit)
+    # Each client's visits, ordered once by the very key the search below wants its maximum
+    # on, with the dates alongside for the bisect. Scanning and re-maximising the list per
+    # booking cost 1.6M comparisons over the full history; the order makes the answer the
+    # entry just before the first visit later than the booking day.
+    visit_index: dict[tuple[int, int], tuple[list[date], list[Any]]] = {}
+    for client_key, client_visits in visits_by_client.items():
+        client_visits.sort(key=_visit_order_key)
+        visit_index[client_key] = (
+            [_coerce_date(visit.date) for visit in client_visits],
+            client_visits,
+        )
 
     events: list[OpzEvent] = []
     booked_clients: set[tuple[int, ...]] = set()
@@ -3874,22 +3965,15 @@ async def _opz_events(
         if local_create_moment is None:
             continue
         create_day = local_create_moment.date()
-        last_visits = [
-            visit
-            for visit in visits_by_client.get((candidate.company_id, candidate.client_id), [])
-            if visit.date <= create_day
-        ]
-        if not last_visits:
-            continue
-        last_visit = max(
-            last_visits,
-            key=lambda visit: (
-                _coerce_date(visit.date),
-                visit.datetime or datetime.combine(_coerce_date(visit.date), time.min),
-                int(visit.id or 0),
-            ),
+        visit_dates, ordered_visits = visit_index.get(
+            (candidate.company_id, candidate.client_id),
+            ([], []),
         )
-        last_visit_date = _coerce_date(last_visit.date)
+        position = bisect_right(visit_dates, create_day)
+        if not position:
+            continue
+        last_visit = ordered_visits[position - 1]
+        last_visit_date = visit_dates[position - 1]
         if candidate.date <= last_visit_date:
             continue
         if create_day not in {last_visit_date, last_visit_date + timedelta(days=1)}:
@@ -3918,6 +4002,7 @@ async def _opz_events(
             )
         )
 
+    cache[cache_key] = events
     return events
 
 
@@ -4472,19 +4557,20 @@ async def _staff_role_periods_by_staff(
     return resolved
 
 
-def _postgres_schedule_slot_condition(
-    schedule: Any,
-    appointment_company_id: Any,
-    appointment_datetime: Any,
-    timezone_name: str,
-) -> Any:
-    local_moment = func.timezone(
-        timezone_name,
-        func.timezone('UTC', appointment_datetime),
-    )
-    local_date = cast(local_moment, SQLDate)
-    local_time = cast(local_moment, SQLTime)
-    same_day = schedule.date == local_date
+def _local_moment(appointment_datetime: Any, timezone_name: str) -> Any:
+    """The visit's wall-clock moment in the branch's own timezone."""
+    return func.timezone(timezone_name, func.timezone('UTC', appointment_datetime))
+
+
+def _schedule_slot_match(schedule: Any, local_time: Any, same_day: Any) -> Any:
+    """Whether a shift covers a visit at `local_time`.
+
+    `same_day` says whether the shift's own date is the visit's day; when it is not, the
+    caller must already have pinned the shift to the day before, so that an overnight
+    shift is matched by the morning it runs into. Both callers pin that day themselves —
+    the join as an equality key, the EXISTS as an IN — because leaving the day inside this
+    predicate is what used to make it unusable for the planner.
+    """
     regular_shift = and_(
         schedule.slot_to > schedule.slot_from,
         same_day,
@@ -4495,14 +4581,36 @@ def _postgres_schedule_slot_condition(
         schedule.slot_to <= schedule.slot_from,
         or_(
             and_(same_day, local_time >= schedule.slot_from),
-            and_(schedule.date == local_date - 1, local_time < schedule.slot_to),
+            and_(not_(same_day), local_time < schedule.slot_to),
         ),
     )
     return and_(
-        schedule.company_id == appointment_company_id,
         schedule.slot_from.is_not(None),
         schedule.slot_to.is_not(None),
         or_(regular_shift, overnight_shift),
+    )
+
+
+def _postgres_schedule_slot_condition(
+    schedule: Any,
+    appointment_company_id: Any,
+    appointment_datetime: Any,
+    timezone_name: str,
+) -> Any:
+    local_moment = _local_moment(appointment_datetime, timezone_name)
+    local_date = cast(local_moment, SQLDate)
+    # Redundant with the predicate below — every shift it accepts falls on one of these two
+    # days — but stated up front it gives the planner a sargable date, which an OR buried
+    # in the match does not.
+    candidate_days = schedule.date.in_([local_date, local_date - 1])
+    return and_(
+        schedule.company_id == appointment_company_id,
+        candidate_days,
+        _schedule_slot_match(
+            schedule,
+            cast(local_moment, SQLTime),
+            schedule.date == local_date,
+        ),
     )
 
 
@@ -4896,12 +5004,16 @@ async def _admin_extra_service_metrics(
     timezone_name = await db.scalar(select(Company.timezone).where(Company.id == company_id))
     timezone = _branch_timezone(timezone_name)
     if db.get_bind().dialect.name == 'postgresql':
+        local_moment = _local_moment(Appointment.datetime, timezone.key)
+        # A CTE, not a subquery: the union below reads it twice, and PostgreSQL materializes
+        # a CTE with more than one reference instead of recomputing this aggregate.
         appointment_extra = (
             select(
                 Appointment.id.label('appointment_id'),
                 Appointment.company_id.label('company_id'),
                 Appointment.date.label('appointment_date'),
-                Appointment.datetime.label('appointment_datetime'),
+                cast(local_moment, SQLDate).label('local_date'),
+                cast(local_moment, SQLTime).label('local_time'),
                 func.coalesce(
                     func.sum(
                         case(
@@ -4935,14 +5047,36 @@ async def _admin_extra_service_metrics(
                 Appointment.date,
                 Appointment.datetime,
             )
-            .subquery()
+            .cte('appointment_extra')
         )
+
+        def _candidate_day(schedule_date: Any, same_day: Any):
+            return select(
+                appointment_extra.c.appointment_id,
+                appointment_extra.c.company_id,
+                appointment_extra.c.appointment_date,
+                schedule_date.label('schedule_date'),
+                appointment_extra.c.local_time,
+                same_day.label('same_day'),
+                appointment_extra.c.extra_services_qty,
+            )
+
+        # Two rows per visit — its own day and the one before — so the shift join gets the
+        # date as an equality key. Asking for both days inside the join condition instead
+        # leaves `company_id` as the only usable key, and company_id is a constant here:
+        # measured on one branch's history that produced 116.6M joined rows, all but 37k
+        # of them discarded by the filter. Spelling the day out costs a second pass over
+        # 49k rows and turns 28.6s into 0.2s.
+        appointment_days = union_all(
+            _candidate_day(appointment_extra.c.local_date, true()),
+            _candidate_day(appointment_extra.c.local_date - 1, false()),
+        ).subquery()
         schedule = aliased(StaffSchedule)
         role_clauses = [
             and_(
                 schedule.staff_id == staff_id,
                 _date_period_condition(
-                    appointment_extra.c.appointment_date,
+                    appointment_days.c.appointment_date,
                     periods_by_staff[staff_id],
                 ),
             )
@@ -4954,18 +5088,21 @@ async def _admin_extra_service_metrics(
         role_filter = or_(*role_clauses)
         appointment_staff_pairs = (
             select(
-                appointment_extra.c.appointment_id,
+                appointment_days.c.appointment_id,
                 schedule.staff_id.label('staff_id'),
-                appointment_extra.c.extra_services_qty,
+                appointment_days.c.extra_services_qty,
             )
-            .select_from(appointment_extra)
+            .select_from(appointment_days)
             .join(
                 schedule,
-                _postgres_schedule_slot_condition(
-                    schedule,
-                    appointment_extra.c.company_id,
-                    appointment_extra.c.appointment_datetime,
-                    timezone.key,
+                and_(
+                    schedule.company_id == appointment_days.c.company_id,
+                    schedule.date == appointment_days.c.schedule_date,
+                    _schedule_slot_match(
+                        schedule,
+                        appointment_days.c.local_time,
+                        appointment_days.c.same_day,
+                    ),
                 ),
             )
             .where(role_filter)
@@ -5367,15 +5504,16 @@ async def _staff_fact_components_by_branch(
         if row.master_id is not None
     }
 
-    title_expr = func.lower(func.coalesce(Transaction.service_title, ServiceCatalog.title, ''))
+    group_titles = await _service_group_titles(db)
+    title_expr = func.coalesce(Transaction.service_title, ServiceCatalog.title, '')
     service_group_rows = (
         await db.execute(
             select(
                 Appointment.staff_id,
-                _service_qty_sum(title_expr, WAX_TITLE_PARTS).label('wax_qty'),
-                _service_qty_sum(title_expr, CAMOUFLAGE_TITLE_PARTS).label('camouflage_qty'),
-                _service_qty_sum(title_expr, FACE_CARE_TITLE_PARTS).label('face_care_qty'),
-                _service_qty_sum(title_expr, HEAD_CARE_TITLE_PARTS).label('head_care_qty'),
+                _service_qty_sum(title_expr, group_titles['wax_qty']).label('wax_qty'),
+                _service_qty_sum(title_expr, group_titles['camouflage_qty']).label('camouflage_qty'),
+                _service_qty_sum(title_expr, group_titles['face_care_qty']).label('face_care_qty'),
+                _service_qty_sum(title_expr, group_titles['head_care_qty']).label('head_care_qty'),
                 func.coalesce(
                     func.sum(
                         case(
