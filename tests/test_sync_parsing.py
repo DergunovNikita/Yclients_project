@@ -1,6 +1,9 @@
 from datetime import date, datetime, time, timedelta, timezone
 
-from sync_parsing import parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_time
+from sync_parsing import (
+    parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_int,
+    parse_reference_id, parse_time,
+)
 
 
 def test_parse_date_accepts_iso_values():
@@ -39,3 +42,14 @@ def test_parsers_return_none_for_invalid_values():
     assert parse_date('not-a-date') is None
     assert parse_datetime('still-not-a-date') is None
     assert parse_time('99:99') is None
+
+
+def test_reference_id_treats_the_zero_sentinel_as_absent():
+    """A counter sale with no visit arrives as record_id 0, never as null."""
+    assert parse_reference_id(0) is None
+    assert parse_reference_id('0') is None
+    assert parse_reference_id(None) is None
+    assert parse_reference_id('') is None
+    assert parse_reference_id(1932171630) == 1932171630
+    # parse_int keeps the zero; only the reference form treats it as absent.
+    assert parse_int(0) == 0

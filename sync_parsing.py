@@ -114,3 +114,15 @@ def parse_int(value: Any) -> int | None:
             return int(float(text))
         except ValueError:
             return None
+
+
+def parse_reference_id(value: Any) -> int | None:
+    """Coerce a YClients foreign key, treating its zero sentinel as absent.
+
+    YClients never sends null for these: a goods sale made at the counter with no visit
+    behind it carries `record_id: 0`. Stored verbatim, that reads as "there is a visit"
+    to every `IS NULL` check, the referenced row is never found, and the sale is dropped
+    from revenue — 196 147 rub across the network before this was normalised.
+    """
+    parsed = parse_int(value)
+    return parsed or None

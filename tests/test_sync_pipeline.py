@@ -2705,3 +2705,26 @@ def test_declined_non_checkpoint_step_still_leaves_the_run_successful(monkeypatc
 
         assert result['success'] is True
         assert all(item.get('error') is None for item in result['step_results'])
+
+
+def test_counter_sale_without_a_visit_is_stored_as_unlinked():
+    """record_id 0 must not read as "there is a visit" — the sale would vanish from revenue."""
+    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10))
+        db.commit()
+
+        assert sync_financial_transactions(
+            FakeFinancialTransactionsAPI([
+                {'id': 501, 'date': '2026-06-10 12:00:00', 'amount': 1700,
+                 'sold_item_type': 'goods_transaction', 'record_id': 0, 'visit_id': 0},
+                {'id': 502, 'date': '2026-06-10 13:00:00', 'amount': 2700,
+                 'sold_item_type': 'service', 'record_id': 1932171630, 'visit_id': 7},
+            ]),
+            db, '1', start_date='2026-06-01', end_date='2026-06-30', db_company_id=1,
+        ) is True
+
+        stored = {int(r.external_id): r.record_id
+                  for r in db.query(FinancialTransaction).all()}
+        assert stored[501] is None
+        assert stored[502] == 1932171630

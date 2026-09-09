@@ -37,7 +37,8 @@ from models import (
     AnalyticsStatusMetric, ZReport, ZReportPayment, SyncState, SyncSourceState,
 )
 from sync_parsing import (
-    parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_int, parse_time,
+    parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_int,
+    parse_reference_id, parse_time,
 )
 
 TRANSACTIONAL_STATE_KEY = 'transactions_last_success_date'
@@ -1884,7 +1885,9 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                     account_id=parse_int(account.get('id')) if isinstance(account, dict) else None,
                     client_id=internal_client_id,
                     master_id=internal_master_id,
-                    record_id=parse_int(t.get('record_id')),
+                    # `record_id: 0` means the sale had no visit behind it; visit_id
+                    # carries the same sentinel but nothing keys off it.
+                    record_id=parse_reference_id(t.get('record_id')),
                     visit_id=parse_int(t.get('visit_id')),
                     sold_item_id=parse_int(t.get('sold_item_id')),
                     sold_item_type=t.get('sold_item_type'),
@@ -1904,7 +1907,7 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
                 obj.account_id = parse_int(account.get('id')) if isinstance(account, dict) else None
                 obj.client_id = internal_client_id
                 obj.master_id = internal_master_id
-                obj.record_id = parse_int(t.get('record_id'))
+                obj.record_id = parse_reference_id(t.get('record_id'))
                 obj.visit_id = parse_int(t.get('visit_id'))
                 obj.sold_item_id = parse_int(t.get('sold_item_id'))
                 obj.sold_item_type = t.get('sold_item_type')
