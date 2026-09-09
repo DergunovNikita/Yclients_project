@@ -290,6 +290,7 @@
     "role": "Ruolo",
     "theme": "Tema",
     "month": "Mese",
+    "monthPickerHint": "Il mese intero, dal 1° all'ultimo giorno. Il mese corrente arriva fino a oggi.",
     "search": "Cerca",
     "code": "Codice",
     "name": "Nome",

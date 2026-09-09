@@ -10,7 +10,14 @@ import {
 } from '../dashboardApi.js';
 import { ReportChartManager } from './charts.js';
 import { escapeHtml, formatDate } from './format.js';
-import { comparePeriodOnLoad, defaultReportDates, nextComparePeriod } from '../period.js';
+import {
+  comparePeriodOnLoad,
+  defaultReportDates,
+  monthOfRange,
+  monthRange,
+  nextComparePeriod,
+  shouldAdoptComparePeriod,
+} from '../period.js';
 import { GROUP_LABELS, STATUS_LABELS, sourceLabel } from './registry.js';
 import { renderReportData } from './renderers/generic.js';
 import { intlLocale, t } from '../i18n.js';
@@ -136,8 +143,10 @@ export function initReports({
     viewerSubtitle: document.getElementById('reports-viewer-subtitle'),
     viewerBack: document.getElementById('reports-viewer-back'),
     content: document.getElementById('reports-report-content'),
+    month: document.getElementById('report-month'),
     start: document.getElementById('report-start'),
     end: document.getElementById('report-end'),
+    monthField: document.getElementById('report-month')?.closest('label'),
     startField: document.getElementById('report-start')?.closest('label'),
     endField: document.getElementById('report-end')?.closest('label'),
     branch: document.getElementById('report-branch'),
@@ -225,6 +234,15 @@ export function initReports({
     els.end.value = els.end.value || dates.end;
   }
 
+  // The picker shows the month the period was *picked* as, so it stays empty for a
+  // hand-typed window that merely happens to run 1st to last: that window keeps the
+  // day-stepped baseline its compare field shows, and the two must agree on screen.
+  function syncMonthPicker() {
+    els.month.value = state.periodPreset === 'month'
+      ? monthOfRange(els.start.value, els.end.value)
+      : '';
+  }
+
   // What the compare inputs were last filled with automatically, and whether they are
   // still ours to move. Once they hold something we did not put there, they are the
   // user's and a new period leaves them alone.
@@ -237,6 +255,17 @@ export function initReports({
     // percentage it does not describe is worse than showing none: leave it empty, and let
     // the user type one — which then governs the whole page.
     if (state.periodPreset) {
+      // A window we filled in earlier describes a baseline the preset no longer uses,
+      // and the checkbox would send it as the comparison, silently overriding the preset.
+      if (shouldAdoptComparePeriod({
+        compareStart: els.compareStart.value,
+        compareEnd: els.compareEnd.value,
+        autoPeriod: autoComparePeriod,
+        ours: compareWindowIsOurs,
+      })) {
+        els.compareStart.value = '';
+        els.compareEnd.value = '';
+      }
       autoComparePeriod = null;
       compareWindowIsOurs = true;
       return;
@@ -471,6 +500,7 @@ export function initReports({
     const filters = meta.filters || {};
     const visibility = reportFilterVisibility(filters);
     state.periodApplies = visibility.dateRange;
+    if (els.monthField) els.monthField.hidden = !visibility.dateRange;
     if (els.startField) els.startField.hidden = !visibility.dateRange;
     if (els.endField) els.endField.hidden = !visibility.dateRange;
     if (els.granularityField) els.granularityField.hidden = !visibility.granularity;
@@ -608,6 +638,7 @@ export function initReports({
     autoComparePeriod = loaded.autoPeriod;
     compareWindowIsOurs = loaded.ours;
     syncCompareDefaults();
+    syncMonthPicker();
     const requestedCompanyId = requested.company_id;
     const requestedStaffId = requested.staff_id;
     const showBlockedScope = () => {
@@ -701,8 +732,20 @@ export function initReports({
     input.addEventListener('change', () => {
       state.periodPreset = '';
       syncCompareDefaults();
+      syncMonthPicker();
       reloadActiveReport();
     });
+  });
+  els.month.addEventListener('change', () => {
+    const range = monthRange(els.month.value);
+    if (!range) return;
+    els.start.value = range.start;
+    els.end.value = range.end;
+    // A whole month is measured against the whole month before it. Left without the
+    // preset, a 30-day window would step back 30 days and start on the 2nd.
+    state.periodPreset = 'month';
+    syncCompareDefaults();
+    reloadActiveReport();
   });
   // A half-written window asks for nothing until its other bound is typed in;
   // reportCompareParams is the only gate, so the checkbox is left as the user set it.

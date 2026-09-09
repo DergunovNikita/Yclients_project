@@ -290,6 +290,7 @@
     "role": "Role",
     "theme": "Theme",
     "month": "Month",
+    "monthPickerHint": "The whole month, from the 1st to the last day. The current month runs through today.",
     "search": "Search",
     "code": "Code",
     "name": "Name",

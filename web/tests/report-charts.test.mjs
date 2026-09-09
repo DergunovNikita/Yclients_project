@@ -15,6 +15,9 @@ import {
 import {
   comparePeriodOnLoad,
   defaultComparePeriod,
+  monthOfRange,
+  monthRange,
+  monthValue,
   nextComparePeriod,
   shouldAdoptComparePeriod,
 } from '../src/period.js';
@@ -146,6 +149,34 @@ test('the default compare window is the previous window of the same length', () 
   );
   assert.equal(defaultComparePeriod('', '2026-08-31'), null);
   assert.equal(defaultComparePeriod('2026-08-31', '2026-08-01'), null);
+});
+
+test('a picked month runs 1st to last, and stops at today while it is still running', () => {
+  const today = new Date(2026, 8, 8);
+  assert.equal(monthValue(today), '2026-09');
+  assert.deepEqual(monthRange('2026-08', today), { start: '2026-08-01', end: '2026-08-31' });
+  assert.deepEqual(monthRange('2026-02', today), { start: '2026-02-01', end: '2026-02-28' });
+  // The running month has no facts past today: asking for 30 September would divide
+  // every average by three weeks that have not happened.
+  assert.deepEqual(monthRange('2026-09', today), { start: '2026-09-01', end: '2026-09-08' });
+  // A month yet to start keeps its calendar, which simply holds nothing.
+  assert.deepEqual(monthRange('2026-10', today), { start: '2026-10-01', end: '2026-10-31' });
+
+  assert.equal(monthRange('', today), null);
+  assert.equal(monthRange('2026-13', today), null);
+  assert.equal(monthRange('2026-08-01', today), null);
+});
+
+test('the month picker shows back only the window a month would have produced', () => {
+  const today = new Date(2026, 8, 8);
+  assert.equal(monthOfRange('2026-08-01', '2026-08-31', today), '2026-08');
+  assert.equal(monthOfRange('2026-09-01', '2026-09-08', today), '2026-09');
+
+  // The running month stops at today, so its full calendar is somebody's own window.
+  assert.equal(monthOfRange('2026-09-01', '2026-09-30', today), '');
+  assert.equal(monthOfRange('2026-08-02', '2026-08-31', today), '');
+  assert.equal(monthOfRange('2026-08-01', '2026-08-30', today), '');
+  assert.equal(monthOfRange('', '', today), '');
 });
 
 test('a period crossing a DST switch keeps its calendar length', () => {

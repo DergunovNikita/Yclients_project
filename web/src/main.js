@@ -42,7 +42,7 @@ import {
   normalizeHiddenPlanMetricCodes,
   setPlanMetricHidden,
 } from './planMetricVisibility.js';
-import { inputDateValue } from './period.js';
+import { inputDateValue, monthOfRange, monthRange, monthValue } from './period.js';
 // i18n's formatDate parses a date-only string as UTC midnight, which renders a day early
 // for any viewer west of UTC. This one pins it to local midnight.
 import { formatDate } from './reports/format.js';
@@ -161,6 +161,7 @@ const els = {
 
 const filterEls = {
   overview: {
+    month: document.getElementById('overview-month'),
     start: document.getElementById('overview-start'),
     end: document.getElementById('overview-end'),
     branch: document.getElementById('overview-branch'),
@@ -168,6 +169,7 @@ const filterEls = {
     load: document.getElementById('overview-load'),
   },
   plan: {
+    month: document.getElementById('plan-month'),
     start: document.getElementById('plan-start'),
     end: document.getElementById('plan-end'),
     branch: document.getElementById('plan-branch'),
@@ -648,11 +650,25 @@ function defaultDates(filter) {
   const start = new Date(now.getFullYear(), now.getMonth(), 1);
   filter.end.value = inputDateValue(now);
   filter.start.value = inputDateValue(start);
+  filter.month.value = monthOfRange(filter.start.value, filter.end.value, now);
+}
+
+/**
+ * Move a period onto the month its picker holds.
+ *
+ * Returns false for a half-typed month, which leaves the period where it was rather
+ * than reloading the view against a window nobody asked for.
+ */
+function applyFilterMonth(filter) {
+  const range = monthRange(filter.month.value, new Date(pageOpenedAt));
+  if (!range) return false;
+  filter.start.value = range.start;
+  filter.end.value = range.end;
+  return true;
 }
 
 function setManualFactDefaultMonths() {
-  const now = new Date(pageOpenedAt);
-  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const month = monthValue(new Date(pageOpenedAt));
   filterEls.reviewFacts.month.value = month;
   filterEls.opzFacts.month.value = month;
 }
@@ -673,18 +689,41 @@ function overviewPresetRange(preset) {
   return { start, end };
 }
 
-function setOverviewPreset(preset) {
-  const range = overviewPresetRange(preset);
-  filterEls.overview.start.value = inputDateValue(range.start);
-  filterEls.overview.end.value = inputDateValue(range.end);
+// Which preset the Overview window came from; the backend picks its baseline from it.
+// Kept here rather than read back off the buttons, because a month chosen in the picker
+// keeps the month-over-month baseline while no button is lit: September measured against
+// the 30 days before it would start on 2 August and drop that month's first day.
+let overviewPreset = 'month';
+
+function highlightOverviewPreset(preset) {
   els.overviewPresetButtons.forEach((button) => {
     button.classList.toggle('active', button.dataset.overviewPreset === preset);
   });
 }
 
+function setOverviewPreset(preset) {
+  const filter = filterEls.overview;
+  const range = overviewPresetRange(preset);
+  filter.start.value = inputDateValue(range.start);
+  filter.end.value = inputDateValue(range.end);
+  overviewPreset = preset;
+  highlightOverviewPreset(preset);
+  // Only the month button picks a month; the shorter presets can land on the same window
+  // by accident (a quarter opening today, in its first month) without meaning one.
+  filter.month.value = preset === 'month'
+    ? monthOfRange(filter.start.value, filter.end.value, new Date(pageOpenedAt))
+    : '';
+}
+
+/** The period is no longer the one a preset or the month picker chose. */
+function clearOverviewPeriodChoice() {
+  overviewPreset = '';
+  highlightOverviewPreset('');
+  filterEls.overview.month.value = '';
+}
+
 function currentMonthValue() {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  return monthValue(new Date());
 }
 
 function previousMonthValue(month) {
@@ -3015,12 +3054,10 @@ function filterParams(filter) {
 /**
  * The preset the Overview window came from, for the backend to pick a baseline.
  *
- * Empty once the dates are edited by hand — the buttons clear their active state on
- * every manual change, and an empty param is dropped from the query.
+ * Empty once the dates are edited by hand, and an empty param is dropped from the query.
  */
 function activeOverviewPreset() {
-  return els.overviewPresetButtons.find((button) => button.classList.contains('active'))
-    ?.dataset.overviewPreset || '';
+  return overviewPreset;
 }
 
 function setFilterLoading(filter, isLoading) {
@@ -3369,9 +3406,7 @@ async function init() {
   });
   [filterEls.overview, filterEls.plan].forEach((filter) => defaultDates(filter));
   setManualFactDefaultMonths();
-  els.overviewPresetButtons.forEach((button) => {
-    button.classList.toggle('active', button.dataset.overviewPreset === 'month');
-  });
+  highlightOverviewPreset(overviewPreset);
   els.planSettingsMonth.value = currentMonthValue();
   renderServicesTable([]);
   renderExtraServicesTable([]);
@@ -3388,11 +3423,18 @@ els.tenantSelect?.addEventListener('change', async () => {
   });
   if (!changed) els.tenantSelect.value = String(selectedTenant?.id || '');
 });
-filterEls.overview.start.addEventListener('change', () => {
-  els.overviewPresetButtons.forEach((button) => button.classList.remove('active'));
+[filterEls.overview.start, filterEls.overview.end].forEach((input) => {
+  input.addEventListener('change', clearOverviewPeriodChoice);
 });
-filterEls.overview.end.addEventListener('change', () => {
-  els.overviewPresetButtons.forEach((button) => button.classList.remove('active'));
+filterEls.overview.month.addEventListener('change', () => {
+  if (!applyFilterMonth(filterEls.overview)) return;
+  overviewPreset = 'month';
+  // The quick button says "this month", so it only lights up for the month it means —
+  // the baseline stays month-over-month for every other one.
+  highlightOverviewPreset(
+    filterEls.overview.month.value === monthValue(new Date(pageOpenedAt)) ? 'month' : '',
+  );
+  loadDashboard();
 });
 filterEls.overview.branch.addEventListener('change', async () => {
   await refreshStaffForBranch(filterEls.overview, loadDashboard);
@@ -3413,6 +3455,12 @@ els.overviewJumpButtons.forEach((button) => {
 });
 
 filterEls.plan.load.addEventListener('click', () => loadPlanFact());
+[filterEls.plan.start, filterEls.plan.end].forEach((input) => {
+  input.addEventListener('change', () => { filterEls.plan.month.value = ''; });
+});
+filterEls.plan.month.addEventListener('change', () => {
+  if (applyFilterMonth(filterEls.plan)) loadPlanFact();
+});
 filterEls.plan.branch.addEventListener('change', async () => {
   await refreshStaffForBranch(filterEls.plan, loadPlanFact);
 });

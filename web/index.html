@@ -211,8 +211,12 @@
       background: #ffffff;
     }
 
+    .overview-toolbar {
+      grid-template-columns: repeat(3, minmax(130px, 1fr)) minmax(200px, 1.35fr) minmax(200px, 1.35fr) auto;
+    }
+
     .plan-toolbar {
-      grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) minmax(190px, 1.3fr) minmax(190px, 1.3fr) auto auto;
+      grid-template-columns: repeat(3, minmax(125px, 1fr)) minmax(180px, 1.25fr) minmax(180px, 1.25fr) auto auto;
     }
 
     .tabs {
@@ -1421,7 +1425,7 @@
 
     .report-filter-row {
       display: grid;
-      grid-template-columns: repeat(5, minmax(120px, 1fr)) auto auto;
+      grid-template-columns: repeat(6, minmax(115px, 1fr)) auto auto;
       gap: 10px;
       align-items: end;
       margin-bottom: 16px;
@@ -1635,7 +1639,9 @@
     }
 
     @media (max-width: 1100px) {
-      .plan-toolbar {
+      .overview-toolbar,
+      .plan-toolbar,
+      .report-filter-row {
         grid-template-columns: repeat(3, minmax(0, 1fr));
       }
     }
@@ -1806,7 +1812,16 @@
     <div class="alert" id="error"></div>
 
     <section class="view active" id="overview-view" data-view="overview">
-      <section class="toolbar" data-i18n-attr="aria-label:dash.ariaOverviewFilters" aria-label="Filtri panoramica">
+      <section class="toolbar overview-toolbar" data-i18n-attr="aria-label:dash.ariaOverviewFilters" aria-label="Filtri panoramica">
+        <label>
+          <span data-i18n="dash.month">Mese</span>
+          <input
+            type="month"
+            id="overview-month"
+            data-i18n-attr="title:dash.monthPickerHint"
+            title="Il mese intero, dal 1° all'ultimo giorno"
+          />
+        </label>
         <label>
           <span data-i18n="dash.from">Da</span>
           <input type="date" id="overview-start" />
@@ -1948,6 +1963,15 @@
 
     <section class="view" id="plan-view" data-view="plan">
       <section class="toolbar plan-toolbar" data-i18n-attr="aria-label:dash.ariaPlanFactFilters" aria-label="Filtri piano/consuntivo">
+        <label>
+          <span data-i18n="dash.month">Mese</span>
+          <input
+            type="month"
+            id="plan-month"
+            data-i18n-attr="title:dash.monthPickerHint"
+            title="Il mese intero, dal 1° all'ultimo giorno"
+          />
+        </label>
         <label>
           <span data-i18n="dash.from">Da</span>
           <input type="date" id="plan-start" />
@@ -2245,6 +2269,15 @@
         </div>
 
         <section class="report-filter-row" data-i18n-attr="aria-label:dash.ariaReportFilters" aria-label="Filtri report">
+          <label>
+            <span data-i18n="dash.month">Mese</span>
+            <input
+              type="month"
+              id="report-month"
+              data-i18n-attr="title:dash.monthPickerHint"
+              title="Il mese intero, dal 1° all'ultimo giorno"
+            />
+          </label>
           <label>
             <span data-i18n="dash.from">Da</span>
             <input type="date" id="report-start" />

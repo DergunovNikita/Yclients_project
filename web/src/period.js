@@ -9,12 +9,53 @@ export function inputDateValue(date) {
   return `${year}-${month}-${day}`;
 }
 
+export function monthValue(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
 export function defaultReportDates() {
   const now = new Date();
   return {
     start: inputDateValue(new Date(now.getFullYear(), now.getMonth(), 1)),
     end: inputDateValue(now),
   };
+}
+
+/**
+ * Window a picked month stands for: its 1st through its last day.
+ *
+ * A month still running ends at today instead: the days ahead hold no facts, so asking
+ * for them would put a part-month of data against a whole month of plan, and every
+ * average would be divided by days that never happened.
+ */
+export function monthRange(value, today = new Date()) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(value ?? ''));
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return null;
+  const running = today.getFullYear() === year && today.getMonth() === month - 1;
+  return {
+    start: inputDateValue(new Date(year, month - 1, 1)),
+    end: inputDateValue(running ? today : new Date(year, month, 0)),
+  };
+}
+
+/**
+ * The month a window was picked as, or '' for any other window.
+ *
+ * Only ever used to show the picker back what it asked for. Which preset a window
+ * carries is never guessed from its dates — see previous_period() on the backend and
+ * the note on nextComparePeriod: a hand-typed window keeps the day-stepped baseline its
+ * compare field shows, and inferring a month here would render one delta beside a
+ * compare window describing another.
+ */
+export function monthOfRange(startValue, endValue, today = new Date()) {
+  const match = /^(\d{4})-(\d{2})-01$/.exec(String(startValue ?? ''));
+  if (!match) return '';
+  const month = `${match[1]}-${match[2]}`;
+  const range = monthRange(month, today);
+  return range && range.end === endValue ? month : '';
 }
 
 /**
