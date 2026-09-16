@@ -295,7 +295,7 @@ test('only session endpoints can replace the cached reauthentication email', asy
     }
     return new Response(JSON.stringify({
       success: true,
-      data: { id: 55, email: 'created.viewer@example.com', role: 'viewer' },
+      data: { id: 55, email: 'created.barber@example.com', role: 'barber' },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
 

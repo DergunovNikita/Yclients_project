@@ -7,9 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import PortalUser, Staff
 
-# Legacy alias; use portal_user_syncs_to_staff() for rules.
-STAFF_SYNC_ROLES = ('branch_admin', 'manager', 'viewer')
-
 
 def portal_user_syncs_to_staff(user: PortalUser) -> bool:
     """Portal users with branch-scoped roles appear in dashboard «Работник»."""

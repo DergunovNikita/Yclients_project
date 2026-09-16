@@ -110,7 +110,8 @@
     "owner": "Titolare della rete",
     "branch_admin": "Responsabile della rete",
     "manager": "Responsabile di filiale",
-    "viewer": "Dipendente di filiale"
+    "admin": "Amministratore di filiale",
+    "barber": "Barbiere"
   },
   "onboarding": {
     "brandSuffix": "Collegamento",
@@ -486,6 +487,8 @@
     "opzFactTotal": "Totale consuntivo",
     "ariaOpzFilters": "Filtri OPZ aggiuntivi",
     "reviewFactInactive": "non è più amministratore",
+    "manualFactAuthor": "Inserito da",
+    "manualFactSelfHint": "Compili solo i tuoi dati; il responsabile della filiale può correggerli.",
     "daysCount": "{count} giorni",
     "appointmentsCount": "{count} appuntamenti",
     "noExactData": "Nessun dato preciso",
@@ -504,7 +507,8 @@
     "roleOwner": "Owner — titolare rete",
     "roleBranchAdmin": "Responsabile della rete",
     "roleManager": "Responsabile di filiale",
-    "roleViewer": "Dipendente di filiale",
+    "roleAdmin": "Amministratore di filiale",
+    "roleBarber": "Barbiere",
     "noBusinessNetworks": "Nessuna rete aziendale creata",
     "noPlatformTenants": "Nessun business tenant disponibile per platform admin.",
     "selectedNetworkData": "La dashboard mostra i dati della rete selezionata",
@@ -609,7 +613,8 @@
     "selectRole": "Seleziona ruolo",
     "selectBranches": "Seleziona filiali",
     "selectBranch": "Seleziona filiale",
-    "roleViewer": "viewer — dipendente di filiale",
+    "roleAdmin": "admin — amministratore di filiale",
+    "roleBarber": "barber — barbiere",
     "roleManager": "manager — responsabile di filiale",
     "roleBranchAdmin": "branch_admin — responsabile della rete",
     "roleOwner": "owner — titolare rete",

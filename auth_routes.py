@@ -12,7 +12,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_deps import forbid_demo, get_current_user, require_roles
+from auth_deps import forbid_demo, get_current_user, get_dashboard_access, require_roles
 from auth_hierarchy import (
     USER_ADMIN_ROLES,
     assignable_roles,
@@ -24,6 +24,7 @@ from auth_hierarchy import (
     can_manage_user,
     validate_company_ids_for_role,
 )
+from auth_scope import AccessContext, manual_fact_staff_keys
 from auth_service import (
     TOKEN_PURPOSE_RESET,
     TOKEN_PURPOSE_VERIFY,
@@ -56,11 +57,12 @@ from auth_sessions import (
     rotate_session,
     set_auth_cookies,
 )
+from dashboard_service import manual_fact_entry_keys
 from data_sources import SOURCE_YCLIENTS, authenticated_adapter_from_payload, normalize_source_type
 from database import get_async_db
 from models import Company, PortalAccount, PortalBranch, PortalUser, Staff, YClientsCredential
 from portal_audit import log_portal_audit
-from portal_account_provision import provision_all_unlinked_staff, provision_staff_account
+from portal_account_provision import provision_all_unlinked_staff, provision_staff_account, role_for_staff
 from portal_staff_sync import (
     deactivate_portal_user_staff,
     list_unlinked_staff,
@@ -141,7 +143,7 @@ class ResendVerificationRequest(BaseModel):
 
 class AdminStaffCreateAccountRequest(BaseModel):
     email: EmailStr | None = None
-    role: str = 'viewer'
+    role: str | None = None
     password: str | None = Field(default=None, min_length=8, max_length=128)
     company_ids: list[int] | None = None
 
@@ -201,10 +203,12 @@ def _user_payload(
     manageable: bool | None = None,
     *,
     staff_id: int | None = None,
+    manual_fact_scope: str | None = None,
 ) -> dict:
     payload = {
         'id': user.id,
         'staff_id': staff_id,
+        'manual_fact_scope': manual_fact_scope,
         'email': user.email,
         'full_name': user.full_name,
         'role': user.role,
@@ -236,6 +240,9 @@ def _staff_payload(staff: Staff, manageable: bool = False) -> dict:
         'is_portal_user': False,
         'manageable': manageable,
         'can_create_account': can_create_account,
+        # What the role picker should land on. Derived here so the browser never has to own a
+        # second copy of the rule — the two cannot agree on a title like «Барбер-администратор».
+        'suggested_role': role_for_staff(staff),
     }
 
 
@@ -543,13 +550,47 @@ async def delete_session(
     return {'success': True}
 
 
+async def _manual_fact_scope(
+    db: AsyncSession,
+    user: PortalUser,
+    ctx: AccessContext,
+) -> tuple[str, int | None]:
+    """How the reviews / additional-OPZ tabs must open for this user, and their staff row.
+
+    `branch` — every row of the assigned branches, `self` — only own rows, `none` — the tabs
+    stay off the screen. The rows come from `manual_fact_staff_keys`, the same scope the
+    editors enforce: deriving them a second time here is exactly how a tab that refuses to
+    open appears, because the second copy misses the branch filter.
+    """
+    if ctx.user_id != user.id:
+        # The cached context belongs to someone else (API key, dependency override): the
+        # safe answer for an access decision is the one that shows nothing.
+        return 'none', None
+    staff_keys = manual_fact_staff_keys(ctx)
+    if staff_keys is None:
+        return 'branch', None
+    entry_keys = await manual_fact_entry_keys(db, staff_keys)
+    return ('self' if entry_keys else 'none'), ctx.staff_id
+
+
 @router.get('/me')
 async def me(
     user: PortalUser = Depends(get_current_user),
+    ctx: AccessContext = Depends(get_dashboard_access),
     db: AsyncSession = Depends(get_async_db),
 ):
     branch_ids = await load_user_access_branch_ids(db, user)
-    return {'success': True, 'data': _user_payload(user, branch_ids, manageable=None)}
+    scope, staff_id = await _manual_fact_scope(db, user, ctx)
+    return {
+        'success': True,
+        'data': _user_payload(
+            user,
+            branch_ids,
+            manageable=None,
+            staff_id=staff_id,
+            manual_fact_scope=scope,
+        ),
+    }
 
 
 @router.post('/verify-email')
@@ -1587,9 +1628,12 @@ async def admin_create_staff_account(
 ):
     actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
     staff = await _load_manageable_staff(db, staff_id, actor, actor_branch_ids)
-    assert_can_assign_role(actor.role, body.role)
+    # No role in the body means nobody picked one (the row-menu shortcut skips the modal), so
+    # the CRM position decides — the same rule bulk provisioning follows.
+    role = body.role or role_for_staff(staff)
+    assert_can_assign_role(actor.role, role)
     company_ids = body.company_ids if body.company_ids is not None else [staff.company_id]
-    validate_company_ids_for_role(actor.role, actor_branch_ids, body.role, company_ids)
+    validate_company_ids_for_role(actor.role, actor_branch_ids, role, company_ids)
     if actor.role == 'platform_admin':
         invalid = sorted(set(company_ids) - set(actor_branch_ids))
         if invalid:
@@ -1601,7 +1645,7 @@ async def admin_create_staff_account(
             db,
             staff,
             email=body.email,
-            role=body.role,
+            role=role,
             password=body.password,
             company_ids=company_ids,
         )

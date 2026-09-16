@@ -8,6 +8,7 @@ import re
 from bisect import bisect_right
 from calendar import monthrange
 from collections import defaultdict
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal, Optional, get_args
@@ -50,6 +51,7 @@ from models import (
     PlanMetric,
     PlanStaffInput,
     PortalBranch,
+    PortalUser,
     ServiceCatalog,
     Service,
     ServiceKpiAssignment,
@@ -60,6 +62,8 @@ from models import (
     SyncSourceState,
     Transaction,
 )
+from auth_hierarchy import PLATFORM_ADMIN_ROLE
+from portal_audit import log_portal_audit
 from plan_config import (
     OPZ_QTY_CODE,
     PLAN_FACT_METRICS,
@@ -738,12 +742,18 @@ def factual_now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+def factual_branch_date(factual_at: Optional[datetime] = None) -> date:
+    """Business day of a naive-UTC moment — branch time, not UTC.
+
+    `factual_now()` is UTC, so taking `.date()` off it moves the business day three hours
+    early for Moscow branches: between 00:00 and 03:00 local it still reads as yesterday.
+    """
+    moment = factual_at if factual_at is not None else factual_now()
+    return moment.replace(tzinfo=UTC).astimezone(ZoneInfo(DEFAULT_BRANCH_TIMEZONE)).date()
+
+
 def _appointment_factual_at_condition(factual_at: datetime):
-    factual_date = (
-        factual_at.replace(tzinfo=UTC)
-        .astimezone(ZoneInfo(DEFAULT_BRANCH_TIMEZONE))
-        .date()
-    )
+    factual_date = factual_branch_date(factual_at)
     return or_(
         and_(
             Appointment.datetime.is_not(None),
@@ -7817,6 +7827,85 @@ async def _stored_manual_facts(
     return out
 
 
+async def manual_fact_entry_keys(
+    db: AsyncSession,
+    staff_keys: Collection[tuple[int, int]],
+) -> frozenset[tuple[int, int]]:
+    """Own rows the manual-fact editors would show for the current month.
+
+    Answers the single question the portal asks before drawing the tabs: has this staff
+    member anything to enter at all. A barber has not — both manual metrics are
+    administrator ones.
+    """
+    if not staff_keys:
+        return frozenset()
+    # One answer for both editors: a leftover value of either metric keeps the tabs open,
+    # and the tab that has nothing to show renders its own empty state.
+    owned = frozenset(staff_keys)
+    month_start, month_end = _plan_month_range(_month_value(factual_branch_date()))
+    admin_ids_by_company = await _admin_staff_ids_by_company(
+        db, month_start, month_end, sorted({company_id for company_id, _ in owned})
+    )
+    editable = {
+        (company_id, staff_id)
+        for company_id, staff_ids in admin_ids_by_company.items()
+        for staff_id in staff_ids
+    }
+    # A value left behind by someone who stopped being an administrator keeps their tabs open.
+    # Deliberately unbounded by month and metric, unlike the `stored` lookup in
+    # `_write_manual_facts`: this one only answers whether there is anything to enter at all, and
+    # the widest answer can still only open a tab — which rows a month shows is decided again.
+    stored = (
+        await db.execute(
+            select(ManualFactMetric.company_id, ManualFactMetric.staff_id)
+            .where(tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(sorted(owned)))
+            .distinct()
+        )
+    ).all()
+    editable |= {(int(row.company_id), int(row.staff_id)) for row in stored}
+    return owned & editable
+
+
+async def _attach_manual_fact_authors(
+    db: AsyncSession,
+    rows: list[dict[str, Any]],
+    portal_account_id: Optional[int],
+) -> None:
+    """Fill `updated_by_name` so the editor shows who entered the value last.
+
+    Names are read with their own SELECT instead of a join: manual facts live in the
+    tenant schema and portal users in `system`. `updated_by_user_id` is a bare integer with
+    no FK, so the tenant filter is what keeps a stale id from rendering a foreign name — hence
+    `portal_account_id` has no default anywhere on the way in: omitting it is a TypeError, not a
+    silently unscoped lookup. `None` is the API-key principal, which has no tenant to scope to.
+    """
+    user_ids = {int(row['updated_by']) for row in rows if row.get('updated_by') is not None}
+    names: dict[int, str] = {}
+    if user_ids:
+        stmt = select(PortalUser.id, PortalUser.full_name).where(PortalUser.id.in_(sorted(user_ids)))
+        if portal_account_id is not None:
+            # A platform admin editing a tenant holds no tenant of their own
+            # (`ck_portal_users_platform_admin_no_tenant`), so the filter has to admit them
+            # explicitly or their own save comes back unsigned.
+            stmt = stmt.where(
+                or_(
+                    PortalUser.portal_account_id == portal_account_id,
+                    and_(
+                        PortalUser.portal_account_id.is_(None),
+                        PortalUser.role == PLATFORM_ADMIN_ROLE,
+                    ),
+                )
+            )
+        names = {
+            int(user.id): (user.full_name or '').strip()
+            for user in (await db.execute(stmt)).all()
+        }
+    for row in rows:
+        author_id = row.get('updated_by')
+        # No email fallback: the editors are open to rank-and-file staff now.
+        row['updated_by_name'] = (names.get(int(author_id)) or None) if author_id is not None else None
+
+
 async def _fetch_manual_facts(
     db: AsyncSession,
     month: str,
@@ -7825,11 +7914,19 @@ async def _fetch_manual_facts(
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
+    allowed_staff_keys: Optional[frozenset[tuple[int, int]]] = None,
+    *,
+    portal_account_id: Optional[int],
 ) -> dict[str, Any]:
     month_start, month_end = _plan_month_range(month)
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
     if company_id is not None:
         branches = [branch for branch in branches if int(branch['id']) == company_id]
+    if allowed_staff_keys is not None:
+        # Resolving administrators of branches whose rows are discarded a few lines below is
+        # pure waste, and this path is now reachable by every employee, not only by admins.
+        owned_company_ids = {company for company, _ in allowed_staff_keys}
+        branches = [branch for branch in branches if int(branch['id']) in owned_company_ids]
     company_ids = [int(branch['id']) for branch in branches]
     empty_payload = {
         'month': _month_value(month_start),
@@ -7850,6 +7947,8 @@ async def _fetch_manual_facts(
     } | set(stored)
     if staff_id is not None:
         keys = {key for key in keys if key[1] == int(staff_id)}
+    if allowed_staff_keys is not None:
+        keys &= allowed_staff_keys
     if not keys:
         return empty_payload
 
@@ -7870,7 +7969,8 @@ async def _fetch_manual_facts(
         if info is None:
             continue
         items = stored.get((company, staff), [])
-        updated_at_values = [item.updated_at for item in items if item.updated_at is not None]
+        dated_items = [item for item in items if item.updated_at is not None]
+        latest = max(dated_items, key=lambda item: item.updated_at) if dated_items else None
         payload_rows.append({
             'company_id': company,
             'company_title': titles.get(company),
@@ -7878,9 +7978,14 @@ async def _fetch_manual_facts(
             'staff_name': info.name,
             'position': info.position,
             'is_active': staff in admin_ids_by_company.get(company, []),
-            'value': _round_half_up_int(sum(float(item.value or 0.0) for item in items)),
-            'updated_at': max(updated_at_values).isoformat() if updated_at_values else None,
+            # `None`, not `0`: the editor posts back every row it renders, so an empty cell
+            # returning a zero would read as an edit and take the author of every untouched
+            # row on the first save of the month. Nothing entered is not a value of zero.
+            'value': _round_half_up_int(sum(float(item.value or 0.0) for item in items)) if items else None,
+            'updated_at': latest.updated_at.isoformat() if latest is not None else None,
+            'updated_by': latest.updated_by_user_id if latest is not None else None,
         })
+    await _attach_manual_fact_authors(db, payload_rows, portal_account_id)
     payload_rows.sort(
         key=lambda row: (row['company_title'] or '', row['staff_name'] or '', row['staff_id'])
     )
@@ -7898,6 +8003,9 @@ async def fetch_manual_review_facts(
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
+    allowed_staff_keys: Optional[frozenset[tuple[int, int]]] = None,
+    *,
+    portal_account_id: Optional[int],
 ) -> dict[str, Any]:
     payload = await _fetch_manual_facts(
         db,
@@ -7907,6 +8015,8 @@ async def fetch_manual_review_facts(
         staff_id,
         allowed_company_ids=allowed_company_ids,
         force_allowed=force_allowed,
+        allowed_staff_keys=allowed_staff_keys,
+        portal_account_id=portal_account_id,
     )
     return payload
 
@@ -7978,6 +8088,9 @@ async def fetch_manual_opz_facts(
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
+    allowed_staff_keys: Optional[frozenset[tuple[int, int]]] = None,
+    *,
+    portal_account_id: Optional[int],
 ) -> dict[str, Any]:
     """Editor payload for additional OPZ: calculated value, manual top-up and their sum."""
     payload = await _fetch_manual_facts(
@@ -7988,6 +8101,8 @@ async def fetch_manual_opz_facts(
         staff_id,
         allowed_company_ids=allowed_company_ids,
         force_allowed=force_allowed,
+        allowed_staff_keys=allowed_staff_keys,
+        portal_account_id=portal_account_id,
     )
     month_start, month_end = _plan_month_range(month)
     company_ids = sorted({int(row['company_id']) for row in payload['rows']})
@@ -8028,6 +8143,25 @@ async def fetch_manual_opz_facts(
     return payload
 
 
+class ManualFactRowNotOpen(ValueError):
+    """The row exists but is not open for entry in the requested month.
+
+    Its own type because the editors are reachable by rank-and-file staff now: the detailed
+    reason belongs in the log, not in the sentence the SPA prints to whoever pressed Save.
+    """
+
+
+def _stored_manual_value(
+    stored: dict[tuple[int, int], list[ManualFactMetric]],
+    key: tuple[int, int],
+) -> float | None:
+    """What the editor currently shows for one row — `None` when nothing is stored."""
+    items = stored.get(key)
+    if not items:
+        return None
+    return _round_half_up_int(sum(float(item.value or 0.0) for item in items))
+
+
 async def _write_manual_facts(
     db: AsyncSession,
     month: str,
@@ -8037,6 +8171,10 @@ async def _write_manual_facts(
     items: list[dict[str, Any]],
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
+    allowed_staff_keys: Optional[frozenset[tuple[int, int]]] = None,
+    *,
+    actor_user_id: Optional[int],
+    portal_account_id: Optional[int],
 ) -> None:
     month_start, month_end = _plan_month_range(month)
     scoped_company_id = int(company_id) if company_id is not None else None
@@ -8093,18 +8231,44 @@ async def _write_manual_facts(
     invalid_keys = sorted(set(normalized_items) - valid_staff_keys)
     if invalid_keys:
         invalid_company_id, invalid_staff_id = invalid_keys[0]
-        raise ValueError(f'staff {invalid_staff_id} is not an active administrator in company {invalid_company_id}')
+        raise ManualFactRowNotOpen(
+            f'staff {invalid_staff_id} is not an active administrator in company {invalid_company_id}'
+        )
+    # A staff member reporting for themselves may only touch their own rows; branch-level
+    # roles pass `None` and keep the whole branch.
+    if allowed_staff_keys is not None:
+        foreign_keys = sorted(set(normalized_items) - allowed_staff_keys)
+        if foreign_keys:
+            foreign_company_id, foreign_staff_id = foreign_keys[0]
+            raise ValueError(
+                f'staff {foreign_staff_id} in company {foreign_company_id} is not editable by this user'
+            )
 
-    now = datetime.now()
+    # The editor posts every row it renders, not just the edited one, so writing them all back
+    # would restamp each row with whoever pressed Save — and the author column exists precisely
+    # to tell the staff member's own value from the manager's correction.
+    # Comparison is against what the editor shows, i.e. the rounded sum. A legacy row whose raw
+    # value merely rounds to the submitted one therefore keeps its raw value — resaving is not a
+    # normalisation pass, and every value written since `0040` is already a whole month integer.
+    changed_items = {
+        key: value
+        for key, value in normalized_items.items()
+        if (None if value is None else _round_half_up_int(value)) != _stored_manual_value(stored, key)
+    }
+    if not changed_items:
+        return
+
+    # The same clock every other timestamp in the system uses; the editor renders the date.
+    now = factual_now()
     await db.execute(
         delete(ManualFactMetric).where(
             ManualFactMetric.period_start >= month_start,
             ManualFactMetric.period_end <= month_end,
-            tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(list(normalized_items)),
+            tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(list(changed_items)),
             ManualFactMetric.metric_code == metric_code,
         )
     )
-    for (item_company_id, item_staff_id), value in normalized_items.items():
+    for (item_company_id, item_staff_id), value in changed_items.items():
         if value is None:
             continue
         db.add(
@@ -8117,9 +8281,29 @@ async def _write_manual_facts(
                 value=_round_half_up_int(value),
                 source='dashboard',
                 updated_at=now,
+                updated_by_user_id=actor_user_id,
             )
         )
 
+    await log_portal_audit(
+        db,
+        actor_user_id=actor_user_id,
+        portal_account_id=portal_account_id,
+        action='manual_fact.updated',
+        target_type='manual_fact',
+        target_id=_month_value(month_start),
+        metadata={
+            'metric_code': metric_code,
+            'company_ids': sorted({company for company, _ in changed_items}),
+            # Pairs, not bare staff ids: one save may span branches.
+            'rows': [[company, staff] for company, staff in sorted(changed_items)],
+            'cleared': [
+                [company, staff]
+                for (company, staff), value in sorted(changed_items.items())
+                if value is None
+            ],
+        },
+    )
     await db.commit()
 
 
@@ -8131,6 +8315,10 @@ async def save_manual_review_facts(
     items: list[dict[str, Any]],
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
+    allowed_staff_keys: Optional[frozenset[tuple[int, int]]] = None,
+    *,
+    actor_user_id: Optional[int],
+    portal_account_id: Optional[int],
 ) -> dict[str, Any]:
     await _write_manual_facts(
         db,
@@ -8141,6 +8329,9 @@ async def save_manual_review_facts(
         items,
         allowed_company_ids=allowed_company_ids,
         force_allowed=force_allowed,
+        allowed_staff_keys=allowed_staff_keys,
+        actor_user_id=actor_user_id,
+        portal_account_id=portal_account_id,
     )
     return await fetch_manual_review_facts(
         db,
@@ -8149,6 +8340,8 @@ async def save_manual_review_facts(
         int(staff_id) if staff_id is not None else None,
         allowed_company_ids=allowed_company_ids,
         force_allowed=force_allowed,
+        allowed_staff_keys=allowed_staff_keys,
+        portal_account_id=portal_account_id,
     )
 
 
@@ -8160,6 +8353,10 @@ async def save_manual_opz_facts(
     items: list[dict[str, Any]],
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
+    allowed_staff_keys: Optional[frozenset[tuple[int, int]]] = None,
+    *,
+    actor_user_id: Optional[int],
+    portal_account_id: Optional[int],
 ) -> dict[str, Any]:
     await _write_manual_facts(
         db,
@@ -8170,6 +8367,9 @@ async def save_manual_opz_facts(
         items,
         allowed_company_ids=allowed_company_ids,
         force_allowed=force_allowed,
+        allowed_staff_keys=allowed_staff_keys,
+        actor_user_id=actor_user_id,
+        portal_account_id=portal_account_id,
     )
     return await fetch_manual_opz_facts(
         db,
@@ -8178,6 +8378,8 @@ async def save_manual_opz_facts(
         int(staff_id) if staff_id is not None else None,
         allowed_company_ids=allowed_company_ids,
         force_allowed=force_allowed,
+        allowed_staff_keys=allowed_staff_keys,
+        portal_account_id=portal_account_id,
     )
 
 

@@ -744,6 +744,9 @@ class ManualFactMetric(Base):
     value = Column(Float, nullable=False)
     source = Column(String, default='dashboard')
     updated_at = Column(DateTime, nullable=False)
+    # No FK: portal users live in the `system` schema, manual facts in the tenant one —
+    # the same reason `Staff.portal_user_id` is a bare integer.
+    updated_by_user_id = Column(Integer, nullable=True)
 
     __table_args__ = (
         Index(
@@ -785,7 +788,10 @@ class PortalBranch(Base):
     company_id = Column(Integer, ForeignKey('companies.id'), nullable=False)
 
 
-PORTAL_ROLES = ('platform_admin', 'owner', 'branch_admin', 'manager', 'viewer')
+# `admin` and `barber` are one level of access under two names: the person adding the
+# account picks the one that matches the job, so a front-desk login is not mistaken for
+# a chair. Ranks live in auth_hierarchy.ROLE_LEVEL, where the two share a rank.
+PORTAL_ROLES = ('platform_admin', 'owner', 'branch_admin', 'manager', 'admin', 'barber')
 
 
 class PortalMetricVisibility(Base):
@@ -819,7 +825,7 @@ class PortalUser(Base):
     email = Column(String(255), nullable=False, unique=True)
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(255))
-    role = Column(String(32), nullable=False, default='viewer', index=True)
+    role = Column(String(32), nullable=False, default='barber', index=True)
     is_active = Column(Boolean, nullable=False, default=True)
     is_demo = Column(Boolean, nullable=False, default=False)
     email_verified_at = Column(DateTime)

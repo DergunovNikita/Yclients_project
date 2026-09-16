@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from copy import deepcopy
 from datetime import date, datetime
 from typing import Annotated, Any
@@ -19,6 +20,7 @@ from auth_scope import (
     can_view_financials,
     effective_staff_id,
     hidden_money_codes,
+    manual_fact_staff_keys,
     query_scope,
     require_financial_access,
     require_tenant_context,
@@ -26,6 +28,7 @@ from auth_scope import (
 )
 import dashboard_service
 from dashboard_service import (
+    ManualFactRowNotOpen,
     OverviewPeriodPreset,
     fetch_branches,
     fetch_extra_services,
@@ -61,6 +64,7 @@ from database import get_async_db
 from models import Company, PortalAccount, PortalMetricVisibility, Staff
 from plan_config import (
     ALL_MONEY_CODES,
+    AVERAGE_CHECK_REVENUE_FIELDS,
     CONFIGURABLE_MONEY_ROLES,
     MONEY_METRICS,
     default_money_codes_for_role,
@@ -69,6 +73,8 @@ from plan_config import (
 from portal_audit import log_portal_audit
 from sync_jobs import SyncJobService
 from sync_orchestrator import get_sync_status
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -222,13 +228,71 @@ def _parse_range(start: date, end: date) -> tuple[date, date]:
 
 def _require_settings_admin(ctx: AccessContext) -> None:
     if not (ctx.full_access or ctx.role in USER_ADMIN_ROLES):
-        raise HTTPException(status_code=403, detail='Settings require admin role')
+        raise HTTPException(status_code=403, detail='Settings are not allowed for this role')
+
+
+def _require_manual_fact_access(ctx: AccessContext) -> frozenset[tuple[int, int]] | None:
+    """Rows the caller may see and edit in the reviews / additional-OPZ editors.
+
+    ``None`` is the branch-wide scope the settings admins and branch managers get. A set is
+    the self-service scope: a staff member enters their own value and nobody else's; 403 is
+    for a portal user owning no staff row at all.
+
+    Which of those rows the editors actually show is decided per requested month downstream,
+    by the same administrator rule the write path applies — so a barber reaches this far and
+    gets an empty table, while the portal keeps the tabs off their screen entirely
+    (`manual_fact_entry_keys`).
+    """
+    staff_keys = manual_fact_staff_keys(ctx)
+    if staff_keys is not None and not staff_keys:
+        raise HTTPException(status_code=403, detail='Manual facts are not available')
+    return staff_keys
+
+
+def _assert_manual_fact_staff_allowed(
+    staff_keys: frozenset[tuple[int, int]] | None,
+    staff_id: int | None,
+) -> None:
+    """The «Работник» filter, which carries no company of its own — hence the id-only match.
+
+    Its sibling `_assert_manual_fact_rows_allowed` matches the whole pair, because payload rows
+    do carry one. `Staff.id` is a global primary key, so the id alone still identifies the row.
+    """
+    if staff_keys is None or staff_id is None:
+        return
+    if not any(staff_id == owned_staff_id for _, owned_staff_id in staff_keys):
+        raise HTTPException(status_code=403, detail='Staff member not allowed')
+
+
+def _assert_manual_fact_rows_allowed(
+    staff_keys: frozenset[tuple[int, int]] | None,
+    items: list[Any],
+) -> None:
+    """A row the caller does not own is an access denial, not a malformed payload.
+
+    The service repeats the check as a safety net for any other caller, but it can only
+    answer with a `ValueError` → 400 carrying an internal English sentence, which the SPA
+    shows verbatim. Denying here keeps the status honest for the access log too.
+    """
+    if staff_keys is None:
+        return
+    for item in items:
+        if (item.company_id, item.staff_id) not in staff_keys:
+            raise HTTPException(status_code=403, detail='Staff member not allowed')
 
 
 def _hide_summary_financials(summary: dict[str, Any], hidden_codes: frozenset[str]) -> dict[str, Any]:
     payload = deepcopy(summary)
     for key in money_payload_keys(hidden_codes, 'summary'):
         payload.pop(key, None)
+    if 'revenue' in hidden_codes:
+        # The whole `average_check` block survives on `avg_check`, but it carries the income it
+        # was divided from. Hiding revenue at the top level and shipping it one key deeper is
+        # not hiding it.
+        average_check = payload.get('average_check')
+        if isinstance(average_check, dict):
+            for field in AVERAGE_CHECK_REVENUE_FIELDS:
+                average_check.pop(field, None)
     payload['financials_hidden'] = True
     return payload
 
@@ -271,6 +335,34 @@ def _strip_plan_fact_financials(
     return value
 
 
+def _strip_extra_service_revenue(leaderboards: Any) -> None:
+    """Drop the ruble `sum` from the extra-service boards.
+
+    No money metric claims these keys, so neither the per-code nor the drop-all net reaches
+    them; the ratings report strips the same field by hand
+    (`_hide_staff_leaderboard_financials`). Today the widget leaves the field at zero — it
+    calls `fetch_plan_fact` without `include_extra_service_revenue`, which only the report
+    sets — so this guards the flag, not a live leak: flip it on for the widget and the boards
+    would carry every barber's extra-service revenue to a role with revenue hidden.
+    """
+    if not isinstance(leaderboards, dict):
+        return
+    for key, value in leaderboards.items():
+        if not key.startswith('extra_services'):
+            continue
+        if isinstance(value, dict):
+            # The board ranked *by* `sum` is the revenue order itself — emptying its rows would
+            # still answer "who earns most", so the bucket goes with the values.
+            value.pop('sum', None)
+            row_lists = list(value.values())
+        else:
+            row_lists = [value]
+        for rows in row_lists:
+            for row in rows or []:
+                if isinstance(row, dict):
+                    row.pop('sum', None)
+
+
 def _hide_plan_fact_financials(plan_fact: dict[str, Any], hidden_codes: frozenset[str]) -> dict[str, Any]:
     hidden_plan_codes = money_payload_keys(hidden_codes, 'plan')
     hidden_leaderboard_keys = money_payload_keys(hidden_codes, 'leaderboard')
@@ -278,6 +370,8 @@ def _hide_plan_fact_financials(plan_fact: dict[str, Any], hidden_codes: frozense
     payload = _strip_plan_fact_financials(
         plan_fact, hidden_plan_codes, hidden_leaderboard_keys, drop_all_money
     ) or {}
+    if 'revenue' in hidden_codes:
+        _strip_extra_service_revenue(payload.get('staff_leaderboards'))
     payload['financials_hidden'] = True
     return payload
 
@@ -600,9 +694,15 @@ async def dashboard_service_kpi_assignment_save(
 
 
 @router.get('/reports')
-async def dashboard_reports(is_demo: bool = Depends(is_demo_request)):
-    """Full report catalog for the product reports SPA."""
-    return {'success': True, 'data': fetch_report_registry(is_demo)}
+async def dashboard_reports(
+    ctx: AccessContext = Depends(get_dashboard_access),
+    is_demo: bool = Depends(is_demo_request),
+):
+    """Report catalog for the product reports SPA, narrowed to what the role may open."""
+    return {
+        'success': True,
+        'data': fetch_report_registry(is_demo, hide_financials=not can_view_financials(ctx)),
+    }
 
 
 @router.get('/reports/data')
@@ -892,9 +992,9 @@ async def dashboard_plan_reviews_fact(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    _require_settings_admin(ctx)
+    staff_keys = _require_manual_fact_access(ctx)
     scope = query_scope(ctx, company_id)
-    staff_id = effective_staff_id(ctx, staff_id)
+    _assert_manual_fact_staff_allowed(staff_keys, staff_id)
     await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
     branch_ids, force_allowed = user_branch_ids(ctx)
     try:
@@ -905,6 +1005,8 @@ async def dashboard_plan_reviews_fact(
             staff_id,
             allowed_company_ids=branch_ids,
             force_allowed=force_allowed,
+            allowed_staff_keys=staff_keys,
+            portal_account_id=ctx.portal_account_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -917,20 +1019,29 @@ async def dashboard_plan_reviews_fact_save(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    _require_settings_admin(ctx)
+    staff_keys = _require_manual_fact_access(ctx)
     scope = query_scope(ctx, payload.company_id)
-    payload_staff_id = effective_staff_id(ctx, payload.staff_id)
+    _assert_manual_fact_staff_allowed(staff_keys, payload.staff_id)
+    _assert_manual_fact_rows_allowed(staff_keys, payload.items)
     branch_ids, force_allowed = user_branch_ids(ctx)
     try:
         data = await save_manual_review_facts(
             db,
             payload.month,
             scope['company_id'],
-            payload_staff_id,
+            payload.staff_id,
             [item.model_dump() for item in payload.items],
             allowed_company_ids=branch_ids,
             force_allowed=force_allowed,
+            allowed_staff_keys=staff_keys,
+            actor_user_id=ctx.user_id,
+            portal_account_id=ctx.portal_account_id,
         )
+    except ManualFactRowNotOpen as exc:
+        # The reason names staff and branch ids, and the SPA prints `detail` verbatim —
+        # the editors are open to rank-and-file staff now, so it belongs in the log.
+        logger.info('manual fact row not open for entry: %s', exc)
+        raise HTTPException(status_code=400, detail='Manual fact row is not open for entry') from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}
@@ -944,9 +1055,9 @@ async def dashboard_plan_opz_fact(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    _require_settings_admin(ctx)
+    staff_keys = _require_manual_fact_access(ctx)
     scope = query_scope(ctx, company_id)
-    staff_id = effective_staff_id(ctx, staff_id)
+    _assert_manual_fact_staff_allowed(staff_keys, staff_id)
     await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
     branch_ids, force_allowed = user_branch_ids(ctx)
     try:
@@ -957,6 +1068,8 @@ async def dashboard_plan_opz_fact(
             staff_id,
             allowed_company_ids=branch_ids,
             force_allowed=force_allowed,
+            allowed_staff_keys=staff_keys,
+            portal_account_id=ctx.portal_account_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -969,20 +1082,29 @@ async def dashboard_plan_opz_fact_save(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    _require_settings_admin(ctx)
+    staff_keys = _require_manual_fact_access(ctx)
     scope = query_scope(ctx, payload.company_id)
-    payload_staff_id = effective_staff_id(ctx, payload.staff_id)
+    _assert_manual_fact_staff_allowed(staff_keys, payload.staff_id)
+    _assert_manual_fact_rows_allowed(staff_keys, payload.items)
     branch_ids, force_allowed = user_branch_ids(ctx)
     try:
         data = await save_manual_opz_facts(
             db,
             payload.month,
             scope['company_id'],
-            payload_staff_id,
+            payload.staff_id,
             [item.model_dump() for item in payload.items],
             allowed_company_ids=branch_ids,
             force_allowed=force_allowed,
+            allowed_staff_keys=staff_keys,
+            actor_user_id=ctx.user_id,
+            portal_account_id=ctx.portal_account_id,
         )
+    except ManualFactRowNotOpen as exc:
+        # The reason names staff and branch ids, and the SPA prints `detail` verbatim —
+        # the editors are open to rank-and-file staff now, so it belongs in the log.
+        logger.info('manual fact row not open for entry: %s', exc)
+        raise HTTPException(status_code=400, detail='Manual fact row is not open for entry') from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}

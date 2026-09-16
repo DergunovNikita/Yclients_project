@@ -46,6 +46,8 @@ import { inputDateValue, monthOfRange, monthRange, monthValue } from './period.j
 // i18n's formatDate parses a date-only string as UTC midnight, which renders a day early
 // for any viewer west of UTC. This one pins it to local midnight.
 import { formatDate } from './reports/format.js';
+import { canEnterManualFacts, entersManualFactsForSelf } from './manualFactAccess.js';
+import { BRANCH_TIME_ZONE, parseServerInstant } from './timestamps.js';
 import { initReports } from './reports/index.js';
 import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
 import {
@@ -99,9 +101,11 @@ const els = {
   planColumnsShowAll: document.getElementById('plan-columns-show-all'),
   reviewFactEditor: document.getElementById('review-fact-editor'),
   reviewFactMeta: document.getElementById('review-fact-meta'),
+  reviewFactSelfHint: document.getElementById('review-fact-self-hint'),
   reviewFactSave: document.getElementById('review-fact-save'),
   opzFactEditor: document.getElementById('opz-fact-editor'),
   opzFactMeta: document.getElementById('opz-fact-meta'),
+  opzFactSelfHint: document.getElementById('opz-fact-self-hint'),
   opzFactSave: document.getElementById('opz-fact-save'),
   servicesTable: document.getElementById('services-table'),
   extraServicesTable: document.getElementById('extra-services-table'),
@@ -422,14 +426,26 @@ window.addEventListener('portal:session-transition', () => {
 });
 
 const SETTINGS_ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
-const SETTINGS_VIEWS = new Set(['planSettings', 'serviceManagement', 'reviewFacts', 'opzFacts']);
+const SETTINGS_VIEWS = new Set(['planSettings', 'serviceManagement']);
+// Manual facts are not settings: a staff member enters their own value and the branch
+// manager corrects it, so these two tabs follow the server-side scope instead of the role.
+const MANUAL_FACT_VIEWS = new Set(['reviewFacts', 'opzFacts']);
 
 function hasSettingsAdminAccess() {
   if (apiKey && !currentUser) return true;
   return SETTINGS_ADMIN_ROLES.has(currentUser?.role);
 }
 
+function manualFactAccessOptions() {
+  return { hasApiKey: Boolean(apiKey) };
+}
+
+function hasManualFactAccess() {
+  return canEnterManualFacts(currentUser, manualFactAccessOptions());
+}
+
 function canAccessView(view) {
+  if (MANUAL_FACT_VIEWS.has(view)) return hasManualFactAccess();
   return !SETTINGS_VIEWS.has(view) || hasSettingsAdminAccess();
 }
 
@@ -450,8 +466,22 @@ function applyDashboardPermissions() {
   SETTINGS_VIEWS.forEach((view) => setViewLinksHidden(view, hideSettings));
   els.planSettingsView.hidden = hideSettings;
   els.serviceManagementView.hidden = hideSettings;
-  els.reviewFactsView.hidden = hideSettings;
-  els.opzFactsView.hidden = hideSettings;
+  const hideManualFacts = !hasManualFactAccess();
+  MANUAL_FACT_VIEWS.forEach((view) => setViewLinksHidden(view, hideManualFacts));
+  els.reviewFactsView.hidden = hideManualFacts;
+  els.opzFactsView.hidden = hideManualFacts;
+  applyManualFactSelfScope();
+}
+
+// Reporting for yourself leaves nobody to pick from, so the worker filter goes away.
+function applyManualFactSelfScope() {
+  const selfOnly = entersManualFactsForSelf(currentUser, manualFactAccessOptions());
+  [filterEls.reviewFacts, filterEls.opzFacts].forEach((filter) => {
+    const label = filter.staff.closest('label');
+    if (label) label.hidden = selfOnly;
+  });
+  els.reviewFactSelfHint.hidden = !selfOnly;
+  els.opzFactSelfHint.hidden = !selfOnly;
 }
 
 function setOverviewSectionHidden(section, hidden) {
@@ -505,11 +535,10 @@ function formatInputNumber(value) {
 
 function formatMoscowDateTime(value) {
   if (!value) return null;
-  const isoValue = /(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`;
-  const date = new Date(isoValue);
-  if (Number.isNaN(date.getTime())) return value;
+  const date = parseServerInstant(value);
+  if (date === null) return value;
   return new Intl.DateTimeFormat('ru-RU', {
-    timeZone: 'Europe/Moscow',
+    timeZone: BRANCH_TIME_ZONE,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -2494,6 +2523,23 @@ async function addServiceKpiGroup() {
   );
 }
 
+function manualFactSavedOn(value) {
+  const instant = parseServerInstant(value);
+  if (instant === null) return '';
+  // Branch time, like every other business timestamp — the viewer's own zone would make the
+  // same instant read as two different dates on two screens of the same dashboard.
+  return new Intl.DateTimeFormat(intlLocale(), { timeZone: BRANCH_TIME_ZONE }).format(instant);
+}
+
+// Two people may edit one row, so the row says which of them touched it last. Values saved
+// before the author column existed have a date and no name — keep the half we do have.
+function manualFactAuthorCell(row) {
+  const parts = [row.updated_by_name ? escapeHtml(row.updated_by_name) : '—'];
+  const savedOn = manualFactSavedOn(row.updated_at);
+  if (savedOn) parts.push(escapeHtml(savedOn));
+  return parts.join(' · ');
+}
+
 function renderReviewFactEditor(data) {
   reviewFactRows = data?.rows || [];
   const totalValue = data?.total_value || 0;
@@ -2510,6 +2556,7 @@ function renderReviewFactEditor(data) {
               <th>${t('dash.branch')}</th>
               <th>${t('dash.administrator')}</th>
               <th class="number">${t('dash.reviewsFact')}</th>
+              <th>${t('dash.manualFactAuthor')}</th>
             </tr>
           </thead>
           <tbody>
@@ -2533,6 +2580,7 @@ function renderReviewFactEditor(data) {
                         value="${escapeHtml(formatInputNumber(row.value))}"
                       />
                     </td>
+                    <td class="meta">${manualFactAuthorCell(row)}</td>
                   </tr>
                 `;
               })
@@ -2677,6 +2725,7 @@ function renderOpzFactEditor(data) {
               <th class="number">${t('dash.currentOpz')}</th>
               <th class="number">${t('dash.additionalOpz')}</th>
               <th class="number">${t('dash.opzFactTotal')}</th>
+              <th>${t('dash.manualFactAuthor')}</th>
             </tr>
           </thead>
           <tbody>
@@ -2706,6 +2755,7 @@ function renderOpzFactEditor(data) {
                       />
                     </td>
                     <td class="number" data-total-cell>${escapeHtml(formatNumber(row.total_value ?? current))}</td>
+                    <td class="meta">${manualFactAuthorCell(row)}</td>
                   </tr>
                 `;
               })
@@ -3234,7 +3284,8 @@ const ROLE_LABELS = {
   owner: t('dash.roleOwner'),
   branch_admin: t('dash.roleBranchAdmin'),
   manager: t('dash.roleManager'),
-  viewer: t('dash.roleViewer'),
+  admin: t('dash.roleAdmin'),
+  barber: t('dash.roleBarber'),
 };
 
 function accountDisplayName(user) {

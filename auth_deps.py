@@ -9,12 +9,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import jwt
-from auth_scope import AccessContext
-from auth_service import decode_access_token, load_portal_account_branch_ids, load_user_access_branch_ids
+from auth_scope import AccessContext, BRANCH_SCOPE_ROLES
+from auth_service import (
+    decode_access_token,
+    load_portal_account_branch_ids,
+    load_portal_user_staff_rows,
+    load_user_access_branch_ids,
+)
 from auth_sessions import ACCESS_COOKIE_NAME, enforce_csrf
 from config import API_KEY, AUTH_REQUIRE_LOGIN, IS_PRODUCTION
 from database import get_async_db
-from models import PortalMetricVisibility, PortalRefreshToken, PortalUser, Staff
+from models import PortalMetricVisibility, PortalRefreshToken, PortalUser
 from plan_config import ALL_MONEY_CODES, CONFIGURABLE_MONEY_ROLES, default_money_codes_for_role
 
 OPEN_PATH_PREFIXES = (
@@ -90,14 +95,27 @@ async def _user_from_token(
         return AccessContext.from_user(user.id, user.role, None, None)
 
     branch_ids = await load_user_access_branch_ids(db, user)
+    staff_keys: tuple[tuple[int, int], ...] = ()
     staff_id = None
-    if user.role == 'viewer':
-        staff_id = await db.scalar(
-            select(Staff.id)
-            .where(Staff.portal_user_id == user.id, Staff.fired == 0)
-            .order_by(Staff.id.asc())
-            .limit(1)
+    if user.role not in BRANCH_SCOPE_ROLES:
+        # One staff row per branch, so someone working in two points owns two of them.
+        staff_rows = await load_portal_user_staff_rows(db, user.id)
+        staff_keys = tuple(
+            (company_id, row_staff_id)
+            for company_id, row_staff_id in staff_rows
+            if company_id is not None
         )
+        # The `effective_staff_id` clamp must land inside the assigned branches. A provisioned
+        # employee keeps the CRM row of the branch they left (portal_staff_sync keeps it alive
+        # on purpose) and that row always has the lower id, so taking the first one blindly
+        # made every dashboard query answer `unknown staff_id`. Falling back to any row still
+        # clamps — an unclamped context would open the whole branch instead.
+        in_scope = [
+            row_staff_id
+            for company_id, row_staff_id in staff_keys
+            if company_id in (branch_ids or ())
+        ]
+        staff_id = in_scope[0] if in_scope else (staff_rows[0][1] if staff_rows else None)
     money_metrics = await _resolve_money_metrics(db, user.portal_account_id, user.role)
     return AccessContext.from_user(
         user.id,
@@ -106,6 +124,7 @@ async def _user_from_token(
         branch_ids,
         staff_id=staff_id,
         money_metrics=money_metrics,
+        staff_keys=staff_keys,
     )
 
 

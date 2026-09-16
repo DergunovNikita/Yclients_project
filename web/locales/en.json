@@ -110,7 +110,8 @@
     "owner": "Network owner",
     "branch_admin": "Network manager",
     "manager": "Branch manager",
-    "viewer": "Branch employee"
+    "admin": "Branch administrator",
+    "barber": "Barber"
   },
   "onboarding": {
     "brandSuffix": "Onboarding",
@@ -486,6 +487,8 @@
     "opzFactTotal": "Total actual",
     "ariaOpzFilters": "Additional OPZ filters",
     "reviewFactInactive": "no longer an administrator",
+    "manualFactAuthor": "Entered by",
+    "manualFactSelfHint": "You report for yourself only; the branch manager can correct the value.",
     "daysCount": "{count} days",
     "appointmentsCount": "{count} appointments",
     "noExactData": "No exact data",
@@ -504,7 +507,8 @@
     "roleOwner": "Owner — network owner",
     "roleBranchAdmin": "Network manager",
     "roleManager": "Branch manager",
-    "roleViewer": "Branch employee",
+    "roleAdmin": "Branch administrator",
+    "roleBarber": "Barber",
     "noBusinessNetworks": "No business networks created",
     "noPlatformTenants": "No business tenants available for platform admin.",
     "selectedNetworkData": "Dashboard shows data for the selected network",
@@ -609,7 +613,8 @@
     "selectRole": "Select role",
     "selectBranches": "Select branches",
     "selectBranch": "Select branch",
-    "roleViewer": "viewer — branch employee",
+    "roleAdmin": "admin — branch administrator",
+    "roleBarber": "barber — barber",
     "roleManager": "manager — branch manager",
     "roleBranchAdmin": "branch_admin — network manager",
     "roleOwner": "owner — network owner",

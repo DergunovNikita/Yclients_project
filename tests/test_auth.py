@@ -1783,7 +1783,7 @@ async def test_owner_can_assign_multiple_branches_to_manager_and_viewer(auth_db,
                 'email': 'multibranch.viewer@example.com',
                 'password': 'Viewer12345!',
                 'full_name': 'Multi Branch Viewer',
-                'role': 'viewer',
+                'role': 'barber',
                 'company_ids': [1, 2],
             },
         )
@@ -1876,12 +1876,12 @@ async def test_branch_admin_creates_viewer_in_own_branch(auth_db, monkeypatch):
             json={
                 'email': 'viewer@example.com',
                 'password': 'Viewer12345!',
-                'role': 'viewer',
+                'role': 'barber',
                 'company_ids': [1],
             },
         )
         assert created.status_code == 200
-        assert created.json()['data']['role'] == 'viewer'
+        assert created.json()['data']['role'] == 'barber'
 
     app.dependency_overrides.clear()
 
@@ -1929,7 +1929,7 @@ async def test_branch_admin_cannot_create_user_in_foreign_branch(auth_db, monkey
             json={
                 'email': 'foreign@example.com',
                 'password': 'Viewer12345!',
-                'role': 'viewer',
+                'role': 'barber',
                 'company_ids': [2],
             },
         )
@@ -1977,7 +1977,7 @@ async def test_manager_cannot_create_or_update_users(auth_db, monkeypatch):
             json={
                 'email': 'blocked@example.com',
                 'password': 'Viewer12345!',
-                'role': 'viewer',
+                'role': 'barber',
                 'company_ids': [1],
             },
         )
@@ -2597,7 +2597,7 @@ async def test_provision_staff_account(auth_db, monkeypatch):
         created = await client.post(
             '/auth/admin/staff/9003/create-account',
             headers={'Authorization': f'Bearer {token}'},
-            json={'role': 'viewer'},
+            json={'role': 'barber'},
         )
         assert created.status_code == 409
         assert 'Real email is required' in created.json()['detail']
@@ -2605,7 +2605,7 @@ async def test_provision_staff_account(auth_db, monkeypatch):
         created = await client.post(
             '/auth/admin/staff/9003/create-account',
             headers={'Authorization': f'Bearer {token}'},
-            json={'role': 'viewer', 'email': 'worker9003@example.com', 'company_ids': [1, 2]},
+            json={'role': 'barber', 'email': 'worker9003@example.com', 'company_ids': [1, 2]},
         )
         assert created.status_code == 200
         data = created.json()['data']
@@ -2688,6 +2688,15 @@ async def test_initial_passwords_endpoint_lists_pending_invites_without_password
     )
     auth_db.add(
         Staff(
+            id=9008,
+            name='Branch Administrator',
+            email='branch.administrator@example.com',
+            position='Администратор',
+            company_id=1,
+            fired=0,
+            bookable=True,
+        ),
+        Staff(
             id=9005,
             name='Other Branch Worker',
             email='other.branch.worker@example.com',
@@ -2732,6 +2741,75 @@ async def test_initial_passwords_endpoint_lists_pending_invites_without_password
         assert branch_row['password_reset_sent_at'] is None
 
     app.dependency_overrides.clear()
+
+    # Bulk provisioning asks nobody, so the label has to come from the CRM position — it is
+    # what the user list shows and the only thing per-role money visibility can key on.
+    roles = {
+        row.id: row.role
+        for row in (await auth_db.execute(select(PortalUser).where(PortalUser.id.in_([9004, 9008])))).scalars().all()
+    }
+    assert roles == {9004: 'barber', 9008: 'admin'}
+
+
+@pytest.mark.asyncio
+async def test_create_account_without_a_role_takes_it_from_the_crm_position(auth_db, monkeypatch):
+    """The row-menu shortcut skips the modal, so nobody picks a role — the server must.
+
+    Deriving it in the browser instead would make the answer depend on which button was
+    pressed: the two implementations cannot agree on a mixed title like «Барбер-администратор».
+    """
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add_all([
+        Staff(
+            id=9101,
+            name='Front Desk',
+            email='front.desk@example.com',
+            position='Администратор',
+            company_id=1,
+            fired=0,
+            bookable=True,
+        ),
+        Staff(
+            id=9102,
+            name='Chair',
+            email='chair@example.com',
+            position='Барбер',
+            company_id=1,
+            fired=0,
+            bookable=True,
+        ),
+    ])
+    await auth_db.commit()
+    token = create_access_token(1, 'owner')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    roles = {}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        # The modal preselects from this rather than deriving the role a second time.
+        listing = await client.get('/auth/admin/users', headers={'Authorization': f'Bearer {token}'})
+        assert listing.status_code == 200
+        suggested = {
+            row['staff_id']: row['suggested_role']
+            for row in listing.json()['data']
+            if row.get('staff_id') in (9101, 9102) and not row['is_portal_user']
+        }
+        assert suggested == {9101: 'admin', 9102: 'barber'}
+
+        for staff_id in (9101, 9102):
+            created = await client.post(
+                f'/auth/admin/staff/{staff_id}/create-account',
+                headers={'Authorization': f'Bearer {token}'},
+                json={'company_ids': [1]},
+            )
+            assert created.status_code == 200, created.text
+            roles[staff_id] = created.json()['data']['role']
+    app.dependency_overrides.clear()
+
+    assert roles == {9101: 'admin', 9102: 'barber'}
 
 
 @pytest.mark.asyncio
@@ -2798,7 +2876,7 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
             email='real.user@example.com',
             password_hash=hash_password('RealUser123!'),
             full_name='Real User',
-            role='viewer',
+            role='barber',
             is_active=True,
             email_verified_at=datetime.utcnow(),
             created_at=datetime.utcnow(),
@@ -2812,7 +2890,7 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
             email='fake.worker.99@portal.local',
             password_hash=hash_password('FakeWorker123!'),
             full_name='Fake Worker',
-            role='viewer',
+            role='barber',
             is_active=True,
             email_verified_at=datetime.utcnow(),
             created_at=datetime.utcnow(),
@@ -2854,7 +2932,7 @@ async def test_distribute_credentials_reports_invite_failures_after_rollback(aut
             email='rollback.invite@example.com',
             password_hash=hash_password('Rollback123!'),
             full_name='Rollback Invite',
-            role='viewer',
+            role='barber',
             is_active=True,
             email_verified_at=datetime.utcnow(),
             created_at=datetime.utcnow(),
@@ -3108,10 +3186,17 @@ def test_access_context_money_metric_helpers():
     assert can_view_financials(api_ctx) is True
     assert hidden_money_codes(api_ctx) == frozenset()
 
+    # A manager gets the average check by default, but never the branch revenue — and
+    # `can_view_financials` asks about revenue, so it stays False.
     manager = AccessContext.from_user(1, 'manager', 1, [1])
-    assert manager.money_metrics == frozenset()
+    assert manager.money_metrics == frozenset({'avg_check'})
     assert can_view_financials(manager) is False
-    assert hidden_money_codes(manager) == ALL_MONEY_CODES
+    assert hidden_money_codes(manager) == ALL_MONEY_CODES - {'avg_check'}
+
+    barber = AccessContext.from_user(4, 'barber', 1, [1])
+    admin = AccessContext.from_user(5, 'admin', 1, [1])
+    assert barber.money_metrics == frozenset()
+    assert admin.money_metrics == barber.money_metrics
 
     branch_admin = AccessContext.from_user(2, 'branch_admin', 1, [1])
     assert branch_admin.money_metrics == ALL_MONEY_CODES
@@ -3122,6 +3207,126 @@ def test_access_context_money_metric_helpers():
     assert can_view_money_metric(partial, 'revenue') is False
     assert can_view_financials(partial) is False
     assert hidden_money_codes(partial) == ALL_MONEY_CODES - {'avg_check'}
+
+
+@pytest.mark.asyncio
+async def test_admin_and_barber_are_one_rank_under_two_names(auth_db, monkeypatch):
+    """Two labels, one level of access: the picker names the job, it does not grant anything."""
+    from auth_hierarchy import ROLE_LEVEL, assignable_roles
+    from auth_scope import BRANCH_SCOPE_ROLES
+    from plan_config import DEFAULT_ROLE_MONEY_CODES
+
+    assert ROLE_LEVEL['admin'] == ROLE_LEVEL['barber']
+    # A tie means neither can create the other — `assignable_roles` is strictly-lower only.
+    assert assignable_roles('admin') == [] and assignable_roles('barber') == []
+    assert assignable_roles('manager') == ['admin', 'barber']
+    assert DEFAULT_ROLE_MONEY_CODES['admin'] == DEFAULT_ROLE_MONEY_CODES['barber']
+    assert 'admin' not in BRANCH_SCOPE_ROLES and 'barber' not in BRANCH_SCOPE_ROLES
+
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    token = create_access_token(1, 'owner')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    created = {}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        for role in ('admin', 'barber'):
+            response = await client.post(
+                '/auth/admin/users',
+                headers={'Authorization': f'Bearer {token}'},
+                json={
+                    'email': f'{role}.pair@example.com',
+                    'password': 'PairTest12345!',
+                    'full_name': f'Pair {role}',
+                    'role': role,
+                    'company_ids': [1],
+                },
+            )
+            assert response.status_code == 200, response.text
+            created[role] = response.json()['data']
+
+        # The rank tie is what makes the pair equal, so nothing about the name `admin` may
+        # read as an administrator: the gates are membership in USER_ADMIN_ROLES, not a string.
+        admin_headers = {
+            'Authorization': f'Bearer {create_access_token(created["admin"]["id"], "admin")}'
+        }
+        refusals = {
+            '/auth/admin/users': (await client.get('/auth/admin/users', headers=admin_headers)).status_code,
+            '/auth/admin/meta': (await client.get('/auth/admin/meta', headers=admin_headers)).status_code,
+            '/dashboard/plan/settings': (
+                await client.get(
+                    '/dashboard/plan/settings',
+                    params={'month': '2025-01', 'company_id': 1},
+                    headers=admin_headers,
+                )
+            ).status_code,
+        }
+    app.dependency_overrides.clear()
+
+    assert created['admin']['company_ids'] == created['barber']['company_ids'] == [1]
+    # Both appear in the «Работник» filter; only the label they carry differs.
+    positions = {
+        row.position: row.portal_user_id
+        for row in (
+            await auth_db.execute(
+                select(Staff).where(Staff.portal_user_id.in_([created['admin']['id'], created['barber']['id']]))
+            )
+        ).scalars().all()
+    }
+    assert set(positions) == {'admin', 'barber'}
+    assert refusals == {
+        '/auth/admin/users': 403,
+        '/auth/admin/meta': 403,
+        '/dashboard/plan/settings': 403,
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_label_is_what_opens_the_manual_fact_tabs(auth_db, monkeypatch):
+    """The pair's only asymmetry, end to end.
+
+    The role lands in `staff.position` (portal_staff_sync), `normalize_staff_category` reads
+    `admin` as administrator, and that is what `manual_fact_scope` answers from. The chain runs
+    through three modules and none of them mentions the other two, so it is exactly the kind of
+    rule a readability cleanup — "write a human label into `position`" — breaks in silence.
+    """
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    owner_token = create_access_token(1, 'owner')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    scopes = {}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        for role in ('admin', 'barber'):
+            created = await client.post(
+                '/auth/admin/users',
+                headers={'Authorization': f'Bearer {owner_token}'},
+                json={
+                    'email': f'{role}.tabs@example.com',
+                    'password': 'TabsTest12345!',
+                    'full_name': f'Tabs {role}',
+                    'role': role,
+                    'company_ids': [1],
+                },
+            )
+            assert created.status_code == 200, created.text
+            user_id = created.json()['data']['id']
+            me = await client.get(
+                '/auth/me',
+                headers={'Authorization': f'Bearer {create_access_token(user_id, role)}'},
+            )
+            assert me.status_code == 200
+            scopes[role] = me.json()['data']['manual_fact_scope']
+    app.dependency_overrides.clear()
+
+    # Same rank, same gates, same money — and still only one of them may enter reviews / OPZ.
+    assert scopes == {'admin': 'self', 'barber': 'none'}
 
 
 @pytest.mark.asyncio
@@ -3158,3 +3363,126 @@ async def test_portal_staff_sync_keeps_yclients_row_of_out_of_scope_branch(auth_
         await auth_db.execute(select(Staff).where(Staff.portal_user_id == 9101).order_by(Staff.id))
     ).scalars().all()
     assert [(row.id, row.fired) for row in rows] == [(9101, 0), (9102, 1)]
+
+
+@pytest.mark.asyncio
+async def test_me_reports_the_manual_fact_scope(auth_db, monkeypatch):
+    """The portal draws the reviews / additional-OPZ tabs from this field alone."""
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    for user_id, position in ((9101, 'Администратор'), (9102, 'Барбер')):
+        auth_db.add(
+            PortalUser(
+                id=user_id,
+                portal_account_id=1,
+                email=f'staff{user_id}@example.com',
+                password_hash=hash_password('Staff12345!'),
+                full_name=f'Staff {user_id}',
+                role='barber',
+                is_active=True,
+                email_verified_at=datetime.utcnow(),
+                created_at=datetime.utcnow(),
+            )
+        )
+        auth_db.add(
+            Staff(
+                id=user_id,
+                name=f'Staff {user_id}',
+                position=position,
+                company_id=1,
+                fired=0,
+                portal_user_id=user_id,
+            )
+        )
+    auth_db.add(PortalUserBranch(user_id=9101, company_id=1))
+    auth_db.add(PortalUserBranch(user_id=9102, company_id=1))
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        payloads = {}
+        for user_id, role in (
+            (1, 'owner'),
+            (2, 'manager'),
+            (3, 'branch_admin'),
+            (9101, 'admin'),
+            (9102, 'barber'),
+        ):
+            response = await client.get(
+                '/auth/me',
+                headers={'Authorization': f'Bearer {create_access_token(user_id, role)}'},
+            )
+            assert response.status_code == 200
+            payloads[user_id] = response.json()['data']
+    app.dependency_overrides.clear()
+
+    # Every branch-level role answers the same way, without touching the staff tables.
+    assert [payloads[user_id]['manual_fact_scope'] for user_id in (1, 2, 3)] == ['branch'] * 3
+    assert [payloads[user_id]['staff_id'] for user_id in (1, 2, 3)] == [None] * 3
+    assert payloads[9101]['manual_fact_scope'] == 'self'
+    assert payloads[9101]['staff_id'] == 9101
+    # A barber has nothing to enter: both manual metrics are administrator ones.
+    assert payloads[9102]['manual_fact_scope'] == 'none'
+
+
+@pytest.mark.asyncio
+async def test_me_ignores_a_staff_row_outside_the_assigned_branches(auth_db, monkeypatch):
+    """The tabs and the endpoints must answer the same question.
+
+    A provisioned employee keeps the CRM staff row of a branch they were moved away from
+    (portal_staff_sync keeps it alive on purpose). That row is out of their branch scope, so
+    it may not open a tab the editors would then refuse to fill.
+    """
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(
+        PortalUser(
+            id=9103,
+            portal_account_id=1,
+            email='moved@example.com',
+            password_hash=hash_password('Staff12345!'),
+            full_name='Moved administrator',
+            role='barber',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    # The CRM row of the branch they left: still an administrator, still not fired.
+    auth_db.add(
+        Staff(id=9103, name='Moved', position='Администратор', company_id=1, fired=0, portal_user_id=9103)
+    )
+    # The row the portal created in the branch they were moved to.
+    auth_db.add(
+        Staff(id=9203, name='Moved', position='barber', company_id=2, fired=0, portal_user_id=9103)
+    )
+    auth_db.add(PortalUserBranch(user_id=9103, company_id=2))
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        headers = {'Authorization': f'Bearer {create_access_token(9103, "barber")}'}
+        me = await client.get('/auth/me', headers=headers)
+        editor = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01'}, headers=headers)
+        summary = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+            headers=headers,
+        )
+    app.dependency_overrides.clear()
+
+    assert me.status_code == 200
+    assert me.json()['data']['manual_fact_scope'] == 'none'
+    # The self-scope clamp must land on the row inside the assigned branch, not on the
+    # stale one the CRM keeps alive — otherwise the whole dashboard answers 'unknown staff_id'.
+    assert me.json()['data']['staff_id'] == 9203
+    assert summary.status_code == 200
+    # Whatever /auth/me promises, the editor must agree: no rows out of branch scope.
+    assert editor.status_code == 200
+    assert editor.json()['data']['rows'] == []

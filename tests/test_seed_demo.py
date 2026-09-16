@@ -411,7 +411,7 @@ def test_seed_demo_refuses_to_reuse_non_demo_user_email():
                 id=1,
                 email=seed_demo.DEMO_EMAIL,
                 password_hash='hash',
-                role='viewer',
+                role='barber',
                 is_active=True,
                 is_demo=False,
                 portal_account_id=1,
@@ -433,4 +433,4 @@ def test_seed_demo_refuses_to_reuse_non_demo_user_email():
         real_user = db.get(PortalUser, 1)
         assert real_user.is_demo is False
         assert real_user.portal_account_id == 1
-        assert real_user.role == 'viewer'
+        assert real_user.role == 'barber'

@@ -245,6 +245,12 @@
       text-decoration: none;
     }
 
+    /* `display` here outranks the UA rule for [hidden], so a tab the role may not open
+       stayed on screen until this said otherwise. */
+    .tab[hidden] {
+      display: none;
+    }
+
     .tab.active {
       border-color: #0f766e;
       background: #e6fffb;
@@ -282,6 +288,10 @@
       font-size: 12px;
       font-weight: 600;
       text-transform: uppercase;
+    }
+
+    label[hidden] {
+      display: none;
     }
 
     input,
@@ -2173,6 +2183,7 @@
           <span class="meta" id="review-fact-meta"></span>
         </div>
         <p class="meta" data-i18n="dash.reviewFactMonthHint">Il valore vale per tutto il mese.</p>
+        <p class="meta" id="review-fact-self-hint" hidden data-i18n="dash.manualFactSelfHint">Compili solo i tuoi dati; il responsabile della filiale può correggerli.</p>
         <div id="review-fact-editor"></div>
         <div class="manual-fact-actions">
           <button type="button" id="review-fact-save" data-i18n="dash.saveFact">Salva consuntivo</button>
@@ -2207,6 +2218,7 @@
           <span class="meta" id="opz-fact-meta"></span>
         </div>
         <p class="meta" data-i18n="dash.opzFactMonthHint">Il valore vale per tutto il mese.</p>
+        <p class="meta" id="opz-fact-self-hint" hidden data-i18n="dash.manualFactSelfHint">Compili solo i tuoi dati; il responsabile della filiale può correggerli.</p>
         <div id="opz-fact-editor"></div>
         <div class="manual-fact-actions">
           <button type="button" id="opz-fact-save" data-i18n="dash.saveFact">Salva consuntivo</button>

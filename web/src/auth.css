@@ -905,7 +905,7 @@ textarea {
   color: #4338ca;
 }
 
-.role-badge--viewer {
+.role-badge--staff {
   background: transparent;
   color: var(--muted);
   border: 1px solid var(--border);

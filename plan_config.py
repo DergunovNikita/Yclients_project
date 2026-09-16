@@ -57,17 +57,32 @@ MONEY_METRICS: tuple[dict[str, Any], ...] = (
 
 ALL_MONEY_CODES: frozenset[str] = frozenset(metric['code'] for metric in MONEY_METRICS)
 
+# Absolute-currency fields living inside the `average_check` summary block. The block as a
+# whole is governed by `avg_check`, but these four are the branch's income, so they follow
+# `revenue` instead: without them a role holding `avg_check` and not `revenue` — the manager
+# default — is handed `numerator`, the period's income, in a payload marked financials_hidden.
+# This removes the sum as a ready number, not the arithmetic: an average check times the visit
+# count the role legitimately sees is still the income. See AGENTS.md on that trade.
+AVERAGE_CHECK_REVENUE_FIELDS: frozenset[str] = frozenset({
+    'service_revenue',
+    'goods_revenue',
+    'topup_revenue',
+    'numerator',
+})
+
 # Roles allowed to configure subordinate visibility always see every money metric.
 DEFAULT_ROLE_MONEY_CODES: dict[str, frozenset[str]] = {
     'platform_admin': ALL_MONEY_CODES,
     'owner': ALL_MONEY_CODES,
     'branch_admin': ALL_MONEY_CODES,
-    'manager': frozenset(),
-    'viewer': frozenset(),
+    # Средний чек менеджеру нужен для разговора со сменой, выручка филиала — нет.
+    'manager': frozenset({'avg_check'}),
+    'admin': frozenset(),
+    'barber': frozenset(),
 }
 
 # Roles whose money visibility is configurable per tenant (rest are fixed at ALL).
-CONFIGURABLE_MONEY_ROLES: tuple[str, ...] = ('branch_admin', 'manager', 'viewer')
+CONFIGURABLE_MONEY_ROLES: tuple[str, ...] = ('branch_admin', 'manager', 'admin', 'barber')
 
 
 def default_money_codes_for_role(role: str | None) -> frozenset[str]:
@@ -136,6 +151,10 @@ ADMIN_METRIC_SCOPE_BY_CODE = {
     'extra_services_pct': 'administrator_shift',
 }
 
+# Order is load-bearing: `normalize_staff_category()` returns the first alias found in the
+# text, so a mixed title like «Барбер-администратор» resolves to `barber` because the barber
+# aliases are listed first. Sorting this dict would silently reclassify such staff — and with
+# them the portal role `role_for_staff()` hands out. Covered by tests/test_staff_roles.py.
 STAFF_CATEGORY_ALIASES = {
     'barber': 'barber',
     'barbers': 'barber',

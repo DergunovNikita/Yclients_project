@@ -9,6 +9,11 @@ from fastapi import HTTPException
 
 from plan_config import ALL_MONEY_CODES, default_money_codes_for_role
 
+# Roles scoped to a whole branch rather than to one staff row. The complement is what
+# `AccessContext.staff_id` / `staff_keys` are resolved for, so this decides both the
+# manual-fact editors and the `effective_staff_id` clamp on every dashboard endpoint.
+BRANCH_SCOPE_ROLES = ('platform_admin', 'owner', 'branch_admin', 'manager')
+
 
 @dataclass(frozen=True)
 class AccessContext:
@@ -22,6 +27,7 @@ class AccessContext:
     full_access: bool
     company_ids: list[int] | None  # None = all branches; [] = none
     money_metrics: frozenset[str] = ALL_MONEY_CODES  # visible money metric codes
+    staff_keys: tuple[tuple[int, int], ...] = ()  # (company_id, staff_id) rows the user owns
 
     @classmethod
     def api_key(cls) -> AccessContext:
@@ -45,6 +51,7 @@ class AccessContext:
         company_ids: list[int] | None,
         staff_id: int | None = None,
         money_metrics: frozenset[str] | None = None,
+        staff_keys: tuple[tuple[int, int], ...] = (),
     ) -> AccessContext:
         is_platform_admin = role == 'platform_admin'
         if money_metrics is None:
@@ -58,6 +65,7 @@ class AccessContext:
             full_access=False,
             company_ids=company_ids or [],
             money_metrics=frozenset(money_metrics),
+            staff_keys=tuple(staff_keys),
         )
 
 
@@ -108,12 +116,39 @@ def query_scope(ctx: AccessContext, requested_company_id: int | None) -> dict[st
 
 
 def effective_staff_id(ctx: AccessContext, requested_staff_id: int | None) -> int | None:
-    """Apply staff-level user scope when the current viewer is linked to a staff row."""
-    if ctx.full_access or ctx.staff_id is None:
+    """Clamp a personal role to its own staff row.
+
+    A role outside `BRANCH_SCOPE_ROLES` is personal by definition, so an unresolved staff row
+    is a refusal, not a pass. YClients can fire an employee while their portal login stays
+    active — `load_portal_user_staff_rows` then returns nothing — and falling through would
+    hand that stale login the whole branch instead of one row.
+    """
+    if ctx.full_access:
         return requested_staff_id
+    if ctx.staff_id is None:
+        if ctx.role in BRANCH_SCOPE_ROLES:
+            return requested_staff_id
+        raise HTTPException(status_code=403, detail='No staff row assigned')
     if requested_staff_id is not None and int(requested_staff_id) != int(ctx.staff_id):
         raise HTTPException(status_code=403, detail='Staff member not allowed')
     return int(ctx.staff_id)
+
+
+def manual_fact_staff_keys(ctx: AccessContext) -> frozenset[tuple[int, int]] | None:
+    """Rows the principal may enter manual facts for.
+
+    ``None`` means the whole branch scope, the way plan settings already work. A set means
+    only these ``(company_id, staff_id)`` pairs — a staff member reporting for themselves owns
+    one row per branch they work in, so the answer is a set and not a single staff id.
+    """
+    if ctx.full_access or ctx.role in BRANCH_SCOPE_ROLES:
+        return None
+    allowed_companies = ctx.company_ids
+    return frozenset(
+        (company_id, staff_id)
+        for company_id, staff_id in ctx.staff_keys
+        if allowed_companies is None or company_id in allowed_companies
+    )
 
 
 def can_view_money_metric(ctx: AccessContext, code: str) -> bool:

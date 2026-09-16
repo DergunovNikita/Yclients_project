@@ -17,6 +17,7 @@ from auth_service import (
     set_user_branches,
 )
 from models import PortalBranch, PortalUser, Staff
+from plan_config import normalize_staff_category
 
 
 @dataclass
@@ -69,7 +70,7 @@ async def provision_staff_account(
     staff: Staff,
     *,
     email: str | None = None,
-    role: str = 'viewer',
+    role: str = 'barber',
     password: str | None = None,
     company_ids: list[int] | None = None,
 ) -> ProvisionedAccount:
@@ -141,6 +142,15 @@ async def list_unlinked_staff_for_provision(
     return (await db.execute(stmt)).scalars().all()
 
 
+def role_for_staff(staff: Staff) -> str:
+    """Label the account the way the CRM already labels the person.
+
+    `admin` and `barber` grant the same access; the label is what lets the user list tell a
+    counter from a chair, and it is the only thing per-role money visibility can key on.
+    """
+    return 'admin' if normalize_staff_category(staff.position) == 'administrator' else 'barber'
+
+
 async def provision_all_unlinked_staff(
     db: AsyncSession,
     allowed_company_ids: list[int] | None,
@@ -150,7 +160,7 @@ async def provision_all_unlinked_staff(
     errors: list[str] = []
     for staff in staff_rows:
         try:
-            created.append(await provision_staff_account(db, staff))
+            created.append(await provision_staff_account(db, staff, role=role_for_staff(staff)))
         except ValueError as exc:
             errors.append(str(exc))
     return created, errors

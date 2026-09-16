@@ -78,6 +78,7 @@ const editStaffPosition = document.getElementById('edit-staff-position');
 const editStaffBranchSelect = document.getElementById('edit-staff-branch-select');
 const createStaffAccountName = document.getElementById('create-staff-account-name');
 const createStaffAccountEmail = document.getElementById('create-staff-account-email');
+const createStaffAccountRoleSelect = document.getElementById('create-staff-account-role');
 const createStaffAccountBranchSelect = document.getElementById('create-staff-account-branches');
 const saveBtn = document.getElementById('save-user');
 const saveStaffBtn = document.getElementById('save-staff');
@@ -92,18 +93,28 @@ const createBranchDropdown = enhanceSelect(createBranchSelect, { placeholder: t(
 const editRoleDropdown = enhanceSelect(editRoleSelect, { placeholder: t('admin.selectRole') });
 const editBranchDropdown = enhanceSelect(editBranchSelect, { placeholder: t('admin.selectBranches') });
 const editStaffBranchDropdown = enhanceSelect(editStaffBranchSelect, { placeholder: t('admin.selectBranch') });
+const createStaffAccountRoleDropdown = enhanceSelect(createStaffAccountRoleSelect, { placeholder: t('admin.selectRole') });
 const createStaffAccountBranchDropdown = enhanceSelect(createStaffAccountBranchSelect, { placeholder: t('admin.selectBranches') });
 const yclientsCredentialBranchDropdown = enhanceSelect(yclientsCredentialBranchSelect, { placeholder: t('admin.selectBranches') });
 
 const ROLE_LABELS = {
-  viewer: t('admin.roleViewer'),
+  admin: t('admin.roleAdmin'),
+  barber: t('admin.roleBarber'),
   manager: t('admin.roleManager'),
   branch_admin: t('admin.roleBranchAdmin'),
   owner: t('admin.roleOwner'),
   platform_admin: t('admin.rolePlatformAdmin'),
 };
 
-const MANAGER_ROLES = new Set(['platform_admin', 'owner', 'branch_admin', 'manager']);
+// One level of access under two names. On this screen the account is provisioned from an
+// existing CRM staff row, so the label drives the badge and the per-role money override —
+// administrator status keeps coming from the YClients position, which the portal never
+// overwrites for a row it did not create.
+const STAFF_ACCOUNT_ROLES = ['admin', 'barber'];
+
+// Exactly the roles `/auth/admin/*` accepts. A `manager` used to pass this gate and then get
+// 403 from every request on the page, leaving the chrome — search box, "Create user" — on
+// screen above an error banner, because `applyAdminMeta()` never ran to hide it.
 const ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
 
 let users = [];
@@ -393,6 +404,9 @@ function openCreateStaffAccountModal(staff) {
   createStaffAccountForm.reset();
   createStaffAccountName.value = staff.full_name || '';
   createStaffAccountEmail.value = staff.can_create_account ? staff.email : '';
+  renderRoleOptions(createStaffAccountRoleSelect, createStaffAccountRoleDropdown, STAFF_ACCOUNT_ROLES);
+  createStaffAccountRoleSelect.value = staff.suggested_role || 'barber';
+  createStaffAccountRoleDropdown.syncFromNative();
   renderBranchOptions(createStaffAccountBranchSelect, createStaffAccountBranchDropdown, staff.company_ids || []);
   createStaffAccountModal.hidden = false;
   document.body.classList.add('admin-modal-open');
@@ -554,7 +568,8 @@ function roleBadge(role) {
   const classes = {
     platform_admin: 'role-badge role-badge--super',
     owner: 'role-badge role-badge--super',
-    viewer: 'role-badge role-badge--viewer',
+    admin: 'role-badge role-badge--staff',
+    barber: 'role-badge role-badge--staff',
   };
   const cls = classes[role] || 'role-badge';
   return `<span class="${escapeHtml(cls)}">${escapeHtml(ROLE_LABELS[role] || role)}</span>`;
@@ -935,17 +950,23 @@ async function provisionAllAccounts() {
   }
 }
 
-async function createStaffAccount(staffId, email = null) {
+// Role and branches are always passed in: a staff member whose email is already on file is
+// created straight from the row menu without opening the modal, and reading the modal's
+// controls there would hand them whatever the last opened modal happened to leave behind.
+async function createStaffAccount(staffId, { email = null, role, companyIds } = {}) {
   const selected = users.find((user) => user.staff_id === staffId);
   if (!selected?.manageable) return;
-  const company_ids = Array.from(createStaffAccountBranchSelect.selectedOptions)
-    .map((option) => Number(option.value));
 
   hideAlerts();
   try {
     const payload = await authFetch(`/auth/admin/staff/${staffId}/create-account`, {
       method: 'POST',
-      body: JSON.stringify({ role: 'viewer', email: email || selected.email, company_ids }),
+      body: JSON.stringify({
+        // Omitted on the quick path — the server derives it from the CRM position.
+        role: role || null,
+        email: email || selected.email,
+        company_ids: companyIds || [],
+      }),
     });
     closeCreateStaffAccountModal();
     showCredentialsModal([payload.data]);
@@ -1063,7 +1084,9 @@ tableBody.addEventListener('click', async (event) => {
     const staffId = Number(createAccountBtn.dataset.createAccount);
     const staff = users.find((item) => item.staff_id === staffId);
     if (staff?.can_create_account) {
-      await createStaffAccount(staffId);
+      // No modal on this path, so nobody picked a role: leave it out and let the server
+      // derive it from the CRM position, the same rule bulk provisioning uses.
+      await createStaffAccount(staffId, { companyIds: staff.company_ids || [] });
     } else {
       openCreateStaffAccountModal(staff);
     }
@@ -1121,7 +1144,11 @@ createStaffAccountForm?.addEventListener('submit', async (event) => {
     showFieldError(createStaffAccountErrorEl, t('admin.realStaffEmailRequired'));
     return;
   }
-  await createStaffAccount(pendingStaffAccountId, email);
+  await createStaffAccount(pendingStaffAccountId, {
+    email,
+    role: createStaffAccountRoleSelect.value,
+    companyIds: Array.from(createStaffAccountBranchSelect.selectedOptions).map((option) => Number(option.value)),
+  });
 });
 
 editForm.addEventListener('submit', async (event) => {
@@ -1351,7 +1378,7 @@ async function init() {
     const me = await authFetch('/auth/me');
     currentUserId = me.data.id;
     currentUserRole = me.data.role;
-    if (!MANAGER_ROLES.has(me.data.role)) {
+    if (!ADMIN_ROLES.has(me.data.role)) {
       window.location.href = '/profile.html';
       return;
     }

@@ -1,4 +1,4 @@
-"""Backfill staff rows for existing manager/viewer portal users."""
+"""Backfill staff rows for existing branch-scoped portal users."""
 from __future__ import annotations
 
 import asyncio

@@ -31,6 +31,7 @@ from models import (
     Group,
     ManualFactMetric,
     PortalAccount,
+    PortalAuditEvent,
     PortalBranch,
     PortalUser,
     PortalUserBranch,
@@ -97,6 +98,74 @@ def _paid_service_revenue_filter_rows() -> list[FinancialTransaction]:
             company_id=1,
         ),
     ]
+
+
+# Everything `average_check` may still carry once `revenue` is hidden: per-visit averages,
+# counts and status strings. Kept as an allow-list on purpose — a new currency field in
+# `_average_check_block` must be classified before it can reach a revenue-restricted role, and
+# a deny-list of today's four names would not notice a fifth.
+MONEY_FREE_AVERAGE_CHECK_KEYS = {
+    'appointments',
+    'appointments_without_client',
+    'completed_appointments',
+    'denominator',
+    'extra_service_appointments',
+    'extra_services',
+    'extra_services_change_pct',
+    'formula',
+    'goods',
+    'goods_change_pct',
+    'goods_checks',
+    'missing_components',
+    'services',
+    'services_change_pct',
+    'source_status',
+    'specialized_formulas',
+    'total',
+    'total_change_pct',
+    'unclassified_operations',
+    'unique_clients',
+}
+
+
+@pytest.mark.asyncio
+async def test_dashboard_reports_catalog_hides_what_the_role_cannot_open(async_session):
+    """A card whose report answers 403 is worse than no card — it only leads to an error page."""
+    async def override_db():
+        yield async_session
+
+    money_blind = AccessContext.from_user(
+        user_id=11,
+        role='manager',
+        portal_account_id=1,
+        company_ids=[1],
+        money_metrics=frozenset(),
+    )
+
+    async def override_access():
+        return money_blind
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        narrowed = await client.get('/dashboard/reports')
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = lambda: AccessContext.api_key()
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        full = await client.get('/dashboard/reports')
+    app.dependency_overrides.clear()
+
+    assert narrowed.status_code == 200 and full.status_code == 200
+    narrowed_ids = {item['id'] for item in narrowed.json()['data']}
+    full_ids = {item['id'] for item in full.json()['data']}
+    assert 'financial_overview' not in narrowed_ids
+    assert 'financial_overview' in full_ids
+    assert narrowed_ids < full_ids
+    # Mixed reports stay: their money columns are filtered per column, not per report.
+    assert 'staff_leaderboard' in narrowed_ids
+    assert 'peak_load' in narrowed_ids
+    for report_id in narrowed_ids:
+        assert not dashboard_reports.report_requires_financials(report_id), report_id
 
 
 @pytest.mark.asyncio
@@ -3752,7 +3821,7 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             portal_account_id=1,
             email='viewer@example.com',
             password_hash=hash_password('Viewer12345!'),
-            role='viewer',
+            role='barber',
             is_active=True,
             email_verified_at=datetime.utcnow(),
             created_at=datetime.utcnow(),
@@ -3843,7 +3912,7 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     async def override_db():
         yield async_session
 
-    viewer_token = create_access_token(100, 'viewer')
+    viewer_token = create_access_token(100, 'barber')
     manager_token = create_access_token(101, 'manager')
     owner_token = create_access_token(102, 'owner')
     branch_admin_token = create_access_token(103, 'branch_admin')
@@ -3945,6 +4014,9 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     assert manager_revenue_daily.status_code == 403
     assert manager_bundle.status_code == 200
     manager_bundle_data = manager_bundle.json()['data']
+    # The bundle is what the dashboard loads, so the same guard has to hold on this route.
+    bundle_average_check = manager_bundle_data['summary'].get('average_check') or {}
+    assert set(bundle_average_check) <= MONEY_FREE_AVERAGE_CHECK_KEYS, sorted(set(bundle_average_check))
     assert manager_bundle_data['financials_hidden'] is True
     assert 'revenue' not in manager_bundle_data['summary']
     assert manager_bundle_data['top_services'] == []
@@ -3958,10 +4030,12 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     assert manager_services.status_code == 403
     assert manager_service_label.status_code == 403
     assert manager_service_batch.status_code == 403
-    assert manager_review_facts.status_code == 403
+    # Settings stay shut for a manager, but the manual-fact editors are its own tab:
+    # branch reporting is what a branch manager controls.
+    assert manager_review_facts.status_code == 200
     assert owner_revenue_daily.status_code == 200
     assert sum(row['revenue'] for row in owner_revenue_daily.json()['data']) == 3000.0
-    # branch_admin sees revenue by default (only manager/viewer are hidden out of the box).
+    # branch_admin sees every money metric by default; a manager gets the average check only.
     assert branch_admin_bundle.status_code == 200
     assert branch_admin_bundle.json()['data'].get('financials_hidden') is not True
     assert branch_admin_bundle.json()['data']['revenue_daily'] != []
@@ -4031,6 +4105,9 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
         manager_revenue_default = await client.get(
             '/dashboard/widget/revenue_daily', params=summary_params, headers=manager_headers
         )
+        manager_plan_fact = await client.get(
+            '/dashboard/widget/plan_fact', params=summary_params, headers=manager_headers
+        )
         config = await client.get('/dashboard/metric-visibility', headers=owner_headers)
         manager_put_forbidden = await client.put(
             '/dashboard/metric-visibility',
@@ -4060,18 +4137,50 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
     app.dependency_overrides.clear()
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
 
-    # Default: manager sees no money metrics.
+    # Default: a manager sees the average check but not the branch revenue.
     assert manager_default.status_code == 200
     assert manager_default.json()['data']['financials_hidden'] is True
     assert 'revenue' not in manager_default.json()['data']
-    assert 'average_check' not in manager_default.json()['data']
+    average_check = manager_default.json()['data']['average_check']
+    assert average_check['total'] is not None
+    # Nothing inside the block may be an absolute sum. Asserted as a closed set rather than a
+    # list of forbidden names: `average_check` carries the income it was divided from, so a new
+    # field in `_average_check_block` has to be classified before it can ship to this role.
+    assert set(average_check) <= MONEY_FREE_AVERAGE_CHECK_KEYS, sorted(set(average_check))
     assert manager_revenue_default.status_code == 403
+
+    # Holding `avg_check` retires the blanket "drop everything formatted as money" net, so the
+    # per-code path is now the only guard on Plan/fact. Nothing priced in rubles may survive it.
+    assert manager_plan_fact.status_code == 200
+    plan_fact_data = manager_plan_fact.json()['data']
+    assert plan_fact_data['financials_hidden'] is True
+
+    def _money_codes(node):
+        if isinstance(node, dict):
+            if node.get('code') in {'revenue', 'cosmo_sum'}:
+                yield node['code']
+            for value in node.values():
+                yield from _money_codes(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from _money_codes(item)
+
+    assert list(_money_codes(plan_fact_data)) == []
+    # The extra-service boards price their rows in rubles under a key no money metric claims.
+    leaderboards = plan_fact_data.get('staff_leaderboards') or {}
+    for key, value in leaderboards.items():
+        if not key.startswith('extra_services'):
+            continue
+        row_lists = value.values() if isinstance(value, dict) else [value]
+        for rows in row_lists:
+            for row in rows or []:
+                assert 'sum' not in row, (key, row)
 
     # Config surface reports money metrics, per-role state and defaults.
     assert config.status_code == 200
     config_data = config.json()['data']
     assert {m['code'] for m in config_data['money_metrics']} == {'revenue', 'avg_check', 'cosmo_sum'}
-    assert config_data['roles']['manager'] == []
+    assert config_data['roles']['manager'] == ['avg_check']
     assert set(config_data['defaults']['branch_admin']) == {'revenue', 'avg_check', 'cosmo_sum'}
 
     # Only owner/platform_admin can configure; codes and roles are validated.
@@ -6599,11 +6708,12 @@ async def test_manual_opz_facts_add_to_calculated_opz(async_session):
         )
     app.dependency_overrides.clear()
 
-    # Without a manual value the editor and Plan/fact show the calculated OPZ alone.
+    # Without a manual value the editor and Plan/fact show the calculated OPZ alone. The manual
+    # cell comes back empty, not zero — nothing entered is not a value.
     assert baseline_editor.status_code == 200
     baseline_rows = baseline_editor.json()['data']['rows']
     assert [(row['staff_id'], row['current_value'], row['value'], row['total_value']) for row in baseline_rows] == [
-        (2, 1.0, 0.0, 1.0)
+        (2, 1.0, None, 1.0)
     ]
     baseline_cells = {
         cell['code']: cell
@@ -6762,7 +6872,8 @@ async def test_manual_opz_facts_cleared_value_restores_calculated_fact(async_ses
     assert not_a_number_response.status_code == 400
     assert cleared_response.status_code == 200
     cleared_row = cleared_response.json()['data']['rows'][0]
-    assert (cleared_row['current_value'], cleared_row['value'], cleared_row['total_value']) == (1.0, 0.0, 1.0)
+    # Cleared means the row is gone, so the cell is empty again — as if nothing was ever typed.
+    assert (cleared_row['current_value'], cleared_row['value'], cleared_row['total_value']) == (1.0, None, 1.0)
     assert summary_response.json()['data']['visit_metrics']['opz_qty'] == 1.0
 
     remaining = (
@@ -7230,7 +7341,7 @@ async def test_manual_opz_daily_series_stays_calculated(async_session):
 
 
 @pytest.mark.asyncio
-async def test_manual_opz_fact_write_is_scoped_to_the_user_branches_and_role(async_session):
+async def test_manual_opz_fact_write_is_scoped_to_the_user_branches(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add_all([
         Company(id=1, title='Salon', group_id=1),
@@ -7289,19 +7400,873 @@ async def test_manual_opz_fact_write_is_scoped_to_the_user_branches_and_role(asy
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 1}],
             },
         )
+        manager_foreign_branch = await client.post(
+            '/dashboard/plan/opz_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 2,
+                'items': [{'company_id': 2, 'staff_id': 3, 'value': 1}],
+            },
+        )
     app.dependency_overrides.clear()
 
     # A branch outside the user scope must not be writable through the payload.
-    assert foreign_branch.status_code in (400, 403)
-    assert manager_read.status_code == 403
-    assert manager_write.status_code == 403
+    assert foreign_branch.status_code == 403
+    assert manager_foreign_branch.status_code == 403
+    # A branch manager controls the reporting of its own branch — that is the point of the tab.
+    assert manager_read.status_code == 200
+    assert [row['staff_id'] for row in manager_read.json()['data']['rows']] == [2]
+    assert manager_write.status_code == 200
 
     stored = (
         await async_session.execute(
             select(ManualFactMetric).where(ManualFactMetric.metric_code == 'opz_qty')
         )
     ).scalars().all()
-    assert stored == []
+    assert [(row.company_id, row.staff_id, row.value) for row in stored] == [(1, 2, 1.0)]
+
+
+@pytest.mark.asyncio
+async def test_a_personal_role_without_a_staff_row_sees_nothing(async_session):
+    """A stale login must fail closed, not fall back to the whole branch.
+
+    YClients can fire an employee while the portal account stays active; the staff row is then
+    filtered out and `AccessContext.staff_id` resolves to `None`. Passing that through would
+    hand the branch aggregate — and any colleague's `staff_id` — to an account whose whole
+    point is that it only ever sees itself.
+    """
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=2, name='Colleague', position='Барбер', company_id=1, fired=0))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return AccessContext.from_user(
+            user_id=500,
+            role='barber',
+            portal_account_id=1,
+            company_ids=[1],
+            staff_id=None,
+            staff_keys=(),
+        )
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    params = {'start_date': '2025-01-01', 'end_date': '2025-01-31'}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        branch_wide = await client.get('/dashboard/widget/summary', params=params)
+        colleague = await client.get('/dashboard/widget/summary', params={**params, 'staff_id': 2})
+        editor = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01'})
+    app.dependency_overrides.clear()
+
+    assert branch_wide.status_code == 403
+    assert colleague.status_code == 403
+    # The manual-fact editors already refused this context; now the rest of the dashboard agrees.
+    assert editor.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_manual_facts_are_self_scoped_for_a_staff_member(async_session):
+    """A staff member reports for themselves and sees nobody else."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0, portal_user_id=2),
+        Staff(id=3, name='Colleague', position='Администратор', company_id=1, fired=0),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return AccessContext.from_user(
+            user_id=2,
+            role='barber',
+            portal_account_id=1,
+            company_ids=[1],
+            staff_id=2,
+            staff_keys=((1, 2),),
+        )
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        own_rows = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01'})
+        colleague_rows = await client.get(
+            '/dashboard/plan/reviews_fact',
+            params={'month': '2025-01', 'staff_id': 3},
+        )
+        own_write = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 4}],
+            },
+        )
+        colleague_write = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 3, 'value': 9}],
+            },
+        )
+        # The staff filter of the payload is checked too, not only the rows it carries.
+        colleague_filter_write = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'staff_id': 3,
+                'items': [{'company_id': 1, 'staff_id': 3, 'value': 9}],
+            },
+        )
+        # The additional-OPZ editor runs its own enrichment over the same filtered rows.
+        own_opz_rows = await client.get('/dashboard/plan/opz_fact', params={'month': '2025-01'})
+        own_opz_write = await client.post(
+            '/dashboard/plan/opz_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 2}],
+            },
+        )
+        colleague_opz_write = await client.post(
+            '/dashboard/plan/opz_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 3, 'value': 2}],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert own_rows.status_code == 200
+    assert [row['staff_id'] for row in own_rows.json()['data']['rows']] == [2]
+    assert colleague_rows.status_code == 403
+    assert own_write.status_code == 200
+    assert colleague_write.status_code == 403
+    assert colleague_filter_write.status_code == 403
+    assert own_opz_rows.status_code == 200
+    assert [row['staff_id'] for row in own_opz_rows.json()['data']['rows']] == [2]
+    assert own_opz_write.status_code == 200
+    assert own_opz_write.json()['data']['rows'][0]['staff_id'] == 2
+    assert colleague_opz_write.status_code == 403
+
+    stored = {
+        (row.metric_code, row.staff_id): row.value
+        for row in (await async_session.execute(select(ManualFactMetric))).scalars().all()
+    }
+    assert stored == {('reviews_qty', 2): 4.0, ('opz_qty', 2): 2.0}
+
+
+@pytest.mark.asyncio
+async def test_manual_facts_cover_every_branch_a_staff_member_works_in(async_session):
+    """One staff row per branch, so someone working in two points owns two rows."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add_all([
+        Company(id=1, title='A salon', group_id=1),
+        Company(id=2, title='B salon', group_id=1),
+    ])
+    async_session.add_all([
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0, portal_user_id=2),
+        Staff(id=5, name='Admin', position='Администратор', company_id=2, fired=0, portal_user_id=2),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return AccessContext.from_user(
+            user_id=2,
+            role='barber',
+            portal_account_id=1,
+            company_ids=[1, 2],
+            staff_id=2,
+            staff_keys=((1, 2), (2, 5)),
+        )
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        rows = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01'})
+    app.dependency_overrides.clear()
+
+    assert rows.status_code == 200
+    assert sorted(
+        (row['company_id'], row['staff_id']) for row in rows.json()['data']['rows']
+    ) == [(1, 2), (2, 5)]
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_write_records_the_author(async_session):
+    """Who entered the value is the whole point of letting two people edit one row."""
+    async_session.add(PortalAccount(id=1, label='tenant', created_at=datetime(2025, 1, 1)))
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(PortalBranch(id=1, portal_account_id=1, company_id=1))
+    async_session.add(
+        PortalUser(
+            id=10,
+            portal_account_id=1,
+            email='manager@example.com',
+            password_hash='x',
+            full_name='Branch manager',
+            role='manager',
+            is_active=True,
+            created_at=datetime(2025, 1, 1),
+        )
+    )
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return AccessContext.from_user(
+            user_id=10,
+            role='manager',
+            portal_account_id=1,
+            company_ids=[1],
+        )
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        saved = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 6}],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert saved.status_code == 200
+    row = saved.json()['data']['rows'][0]
+    assert row['updated_by'] == 10
+    assert row['updated_by_name'] == 'Branch manager'
+
+    stored = (
+        await async_session.execute(select(ManualFactMetric))
+    ).scalars().all()
+    assert [item.updated_by_user_id for item in stored] == [10]
+
+    events = (
+        await async_session.execute(
+            select(PortalAuditEvent).where(PortalAuditEvent.action == 'manual_fact.updated')
+        )
+    ).scalars().all()
+    assert len(events) == 1
+    assert events[0].actor_user_id == 10
+    assert events[0].target_type == 'manual_fact'
+    assert events[0].target_id == '2025-01'
+    assert events[0].metadata_json['metric_code'] == 'reviews_qty'
+    assert events[0].metadata_json['rows'] == [[1, 2]]
+    assert events[0].metadata_json['cleared'] == []
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_save_keeps_the_author_of_an_untouched_row(async_session):
+    """The editor posts every row it renders, so an untouched one must not change hands.
+
+    Otherwise the branch manager's first save relabels everybody's value as their own and the
+    author column stops answering the question it exists for.
+    """
+    async_session.add(PortalAccount(id=1, label='tenant', created_at=datetime(2025, 1, 1)))
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(PortalBranch(id=1, portal_account_id=1, company_id=1))
+    async_session.add_all([
+        PortalUser(
+            id=100,
+            portal_account_id=1,
+            email='anna@example.com',
+            password_hash='x',
+            full_name='Anna',
+            role='barber',
+            is_active=True,
+            created_at=datetime(2025, 1, 1),
+        ),
+        PortalUser(
+            id=300,
+            portal_account_id=1,
+            email='boss@example.com',
+            password_hash='x',
+            full_name='Boss',
+            role='manager',
+            is_active=True,
+            created_at=datetime(2025, 1, 1),
+        ),
+    ])
+    async_session.add_all([
+        Staff(id=2, name='Anna', position='Администратор', company_id=1, fired=0, portal_user_id=100),
+        Staff(id=3, name='Bella', position='Администратор', company_id=1, fired=0),
+        # Nobody ever entered anything for Clara — her cell is the one a blind re-save claims.
+        Staff(id=4, name='Clara', position='Администратор', company_id=1, fired=0),
+    ])
+    await async_session.commit()
+
+    contexts = {
+        'anna': AccessContext.from_user(
+            user_id=100,
+            role='barber',
+            portal_account_id=1,
+            company_ids=[1],
+            staff_id=2,
+            staff_keys=((1, 2),),
+        ),
+        'boss': AccessContext.from_user(
+            user_id=300,
+            role='manager',
+            portal_account_id=1,
+            company_ids=[1],
+        ),
+    }
+    active = {'who': 'anna'}
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return contexts[active['who']]
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        own = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 5}],
+            },
+        )
+        assert own.status_code == 200
+        stored_before = (
+            await async_session.execute(
+                select(ManualFactMetric).where(ManualFactMetric.staff_id == 2)
+            )
+        ).scalars().one()
+        written_at = stored_before.updated_at
+
+        active['who'] = 'boss'
+        # The whole branch editor comes back, Anna's row among it — she is not being edited.
+        branch_save = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [
+                    {'company_id': 1, 'staff_id': 2, 'value': 5},
+                    {'company_id': 1, 'staff_id': 3, 'value': 9},
+                ],
+            },
+        )
+        # Press Save again with exactly what the editor renders — the payload the SPA builds
+        # from every row it drew, untouched cells included. Nothing may reach the journal.
+        reloaded = await client.get(
+            '/dashboard/plan/reviews_fact', params={'month': '2025-01', 'company_id': 1}
+        )
+        noop_save = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [
+                    {'company_id': row['company_id'], 'staff_id': row['staff_id'], 'value': row['value']}
+                    for row in reloaded.json()['data']['rows']
+                ],
+            },
+        )
+        # Clearing is a change, and the journal says which row lost its value.
+        clear_save = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [
+                    {'company_id': 1, 'staff_id': 2, 'value': 5},
+                    {'company_id': 1, 'staff_id': 3, 'value': None},
+                ],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert branch_save.status_code == 200
+    assert noop_save.status_code == 200
+    assert clear_save.status_code == 200
+    authors = {
+        row['staff_id']: (row['updated_by'], row['updated_by_name'])
+        for row in branch_save.json()['data']['rows']
+    }
+    assert authors[2] == (100, 'Anna')
+    assert authors[3] == (300, 'Boss')
+    # Never filled in, so nothing to sign and nothing stored.
+    assert authors[4] == (None, None)
+    assert reloaded.status_code == 200
+    assert {row['staff_id']: row['value'] for row in reloaded.json()['data']['rows']} == {
+        2: 5.0, 3: 9.0, 4: None,
+    }
+
+    stored = {
+        row.staff_id: row
+        for row in (await async_session.execute(select(ManualFactMetric))).scalars().all()
+    }
+    assert stored[2].updated_by_user_id == 100
+    assert stored[2].updated_at == written_at
+    assert 3 not in stored  # cleared by the last save
+    assert 4 not in stored  # a blind re-save must not invent a row for an empty cell
+
+    events = (
+        await async_session.execute(
+            select(PortalAuditEvent)
+            .where(PortalAuditEvent.action == 'manual_fact.updated')
+            .order_by(PortalAuditEvent.id.asc())
+        )
+    ).scalars().all()
+    # Three saves reached the journal, not four: the one that changed nothing is not an edit.
+    assert [(event.actor_user_id, event.metadata_json['rows'], event.metadata_json['cleared'])
+            for event in events] == [
+        (100, [[1, 2]], []),
+        (300, [[1, 3]], []),
+        (300, [[1, 3]], [[1, 3]]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_manual_facts_are_closed_to_a_user_without_a_staff_row(async_session):
+    """The fail-closed side of the scope: no own row, no editors at all."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return AccessContext.from_user(
+            user_id=42,
+            role='barber',
+            portal_account_id=1,
+            company_ids=[1],
+            staff_keys=(),
+        )
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    responses = {}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        for metric in ('reviews_fact', 'opz_fact'):
+            responses[f'get {metric}'] = await client.get(
+                f'/dashboard/plan/{metric}', params={'month': '2025-01'}
+            )
+            responses[f'post {metric}'] = await client.post(
+                f'/dashboard/plan/{metric}',
+                json={
+                    'month': '2025-01',
+                    'company_id': 1,
+                    'items': [{'company_id': 1, 'staff_id': 2, 'value': 1}],
+                },
+            )
+    app.dependency_overrides.clear()
+
+    assert {name: response.status_code for name, response in responses.items()} == {
+        'get reviews_fact': 403,
+        'post reviews_fact': 403,
+        'get opz_fact': 403,
+        'post opz_fact': 403,
+    }
+    assert (await async_session.execute(select(ManualFactMetric))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_write_matches_the_branch_of_the_owned_row(async_session):
+    """Own rows are pairs: an owned staff id under another branch is still not own."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add_all([
+        Company(id=1, title='A salon', group_id=1),
+        Company(id=2, title='B salon', group_id=1),
+    ])
+    async_session.add_all([
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0, portal_user_id=2),
+        Staff(id=5, name='Admin', position='Администратор', company_id=2, fired=0, portal_user_id=2),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return AccessContext.from_user(
+            user_id=2,
+            role='barber',
+            portal_account_id=1,
+            company_ids=[1, 2],
+            staff_id=2,
+            staff_keys=((1, 2), (2, 5)),
+        )
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        crossed = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 5, 'value': 3}],
+            },
+        )
+        own = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 2,
+                'items': [{'company_id': 2, 'staff_id': 5, 'value': 3}],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert crossed.status_code == 403
+    assert own.status_code == 200
+    stored = (await async_session.execute(select(ManualFactMetric))).scalars().all()
+    assert [(row.company_id, row.staff_id, row.value) for row in stored] == [(2, 5, 3.0)]
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_write_without_a_portal_user_keeps_the_branch_scope(async_session):
+    """The API-key principal owns no staff row, so it writes the whole branch and signs nothing."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return AccessContext.api_key()
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        saved = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 3}],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert saved.status_code == 200
+    row = saved.json()['data']['rows'][0]
+    assert (row['staff_id'], row['value'], row['updated_by'], row['updated_by_name']) == (2, 3, None, None)
+
+    stored = (await async_session.execute(select(ManualFactMetric))).scalars().one()
+    assert stored.updated_by_user_id is None
+    event = (
+        await async_session.execute(
+            select(PortalAuditEvent).where(PortalAuditEvent.action == 'manual_fact.updated')
+        )
+    ).scalars().one()
+    assert event.actor_user_id is None
+    assert event.metadata_json['rows'] == [[1, 2]]
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_entry_keys_follow_the_branch_month(async_session, monkeypatch):
+    """Tab visibility turns over at the branch's midnight, not at UTC midnight.
+
+    `factual_now()` is UTC, so between 00:00 and 03:00 MSK on the 1st a UTC date still reads
+    as the previous month and the tabs would advertise its row set for three hours.
+    """
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    # Not an administrator by position — only the October plan makes them one.
+    async_session.add(Staff(id=9, name='October admin', position='Барбер', company_id=1, fired=0))
+    async_session.add(
+        PlanStaffInput(
+            period_start=date(2025, 10, 1),
+            period_end=date(2025, 10, 31),
+            company_id=1,
+            staff_id=9,
+            staff_category='administrator',
+            updated_at=datetime(2025, 9, 1),
+        )
+    )
+    await async_session.commit()
+
+    # 23:30 Moscow on 30 September: still September everywhere.
+    monkeypatch.setattr(dashboard_service, 'factual_now', lambda: datetime(2025, 9, 30, 20, 30))
+    assert dashboard_service.factual_branch_date() == date(2025, 9, 30)
+    assert await dashboard_service.manual_fact_entry_keys(async_session, ((1, 9),)) == frozenset()
+
+    # 01:30 Moscow on 1 October, which UTC still calls 30 September.
+    monkeypatch.setattr(dashboard_service, 'factual_now', lambda: datetime(2025, 9, 30, 22, 30))
+    assert dashboard_service.factual_branch_date() == date(2025, 10, 1)
+    assert await dashboard_service.manual_fact_entry_keys(async_session, ((1, 9),)) == frozenset({(1, 9)})
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_author_of_another_tenant_stays_anonymous(async_session):
+    """`updated_by_user_id` is a bare integer with no FK — the tenant filter is the only guard."""
+    async_session.add_all([
+        PortalAccount(id=1, label='ours', created_at=datetime(2025, 1, 1)),
+        PortalAccount(id=2, label='theirs', created_at=datetime(2025, 1, 1)),
+    ])
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(PortalBranch(id=1, portal_account_id=1, company_id=1))
+    async_session.add(
+        PortalUser(
+            id=500,
+            portal_account_id=2,
+            email='stranger@example.com',
+            password_hash='x',
+            full_name='Foreign tenant user',
+            role='manager',
+            is_active=True,
+            created_at=datetime(2025, 1, 1),
+        )
+    )
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    async_session.add(
+        ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=2,
+            metric_code='reviews_qty',
+            value=3.0,
+            source='dashboard',
+            updated_at=datetime(2025, 2, 1),
+            updated_by_user_id=500,
+        )
+    )
+    await async_session.commit()
+
+    scoped = await dashboard_service.fetch_manual_review_facts(
+        async_session, '2025-01', company_id=1, portal_account_id=1
+    )
+    assert [(row['updated_by'], row['updated_by_name']) for row in scoped['rows']] == [(500, None)]
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_author_resolves_for_a_platform_admin(async_session):
+    """A platform admin holds no tenant of their own, so the tenant filter must still find them."""
+    async_session.add(PortalAccount(id=1, label='tenant', created_at=datetime(2025, 1, 1)))
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(PortalBranch(id=1, portal_account_id=1, company_id=1))
+    async_session.add(
+        PortalUser(
+            id=7,
+            portal_account_id=None,
+            email='platform@example.com',
+            password_hash='x',
+            full_name='Platform admin',
+            role='platform_admin',
+            is_active=True,
+            created_at=datetime(2025, 1, 1),
+        )
+    )
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return AccessContext.from_user(
+            user_id=7,
+            role='platform_admin',
+            portal_account_id=1,
+            company_ids=[1],
+        )
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        saved = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 4}],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert saved.status_code == 200
+    row = saved.json()['data']['rows'][0]
+    assert (row['updated_by'], row['updated_by_name']) == (7, 'Platform admin')
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_route_hides_the_reason_a_row_is_closed(async_session):
+    """`ManualFactRowNotOpen` subclasses ValueError, so the handler order is load-bearing.
+
+    Reorder the two `except` clauses and a barber pressing Save gets the internal sentence
+    with staff and branch ids — the SPA prints `detail` verbatim.
+    """
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=4, name='Barber', position='Барбер', company_id=1, fired=0, portal_user_id=4))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return AccessContext.from_user(
+            user_id=4,
+            role='barber',
+            portal_account_id=1,
+            company_ids=[1],
+            staff_id=4,
+            staff_keys=((1, 4),),
+        )
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    responses = {}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        for metric in ('reviews_fact', 'opz_fact'):
+            responses[metric] = await client.post(
+                f'/dashboard/plan/{metric}',
+                json={
+                    'month': '2025-01',
+                    'company_id': 1,
+                    'items': [{'company_id': 1, 'staff_id': 4, 'value': 1}],
+                },
+            )
+    app.dependency_overrides.clear()
+
+    for metric, response in responses.items():
+        assert response.status_code == 400, metric
+        assert response.json()['detail'] == 'Manual fact row is not open for entry', metric
+        assert 'administrator' not in response.text, metric
+    assert (await async_session.execute(select(ManualFactMetric))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_service_refuses_a_foreign_row_without_the_router(async_session):
+    """The service guard exists for callers that skip the router — so test it without one."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0),
+        Staff(id=3, name='Colleague', position='Администратор', company_id=1, fired=0),
+    ])
+    await async_session.commit()
+
+    with pytest.raises(ValueError, match='not editable by this user'):
+        await dashboard_service.save_manual_review_facts(
+            async_session,
+            '2025-01',
+            1,
+            None,
+            [{'company_id': 1, 'staff_id': 3, 'value': 9}],
+            allowed_company_ids=[1],
+            force_allowed=True,
+            allowed_staff_keys=frozenset({(1, 2)}),
+            actor_user_id=100,
+            portal_account_id=None,
+        )
+    assert (await async_session.execute(select(ManualFactMetric))).scalars().all() == []
+
+    saved = await dashboard_service.save_manual_review_facts(
+        async_session,
+        '2025-01',
+        1,
+        None,
+        [{'company_id': 1, 'staff_id': 2, 'value': 9}],
+        allowed_company_ids=[1],
+        force_allowed=True,
+        allowed_staff_keys=frozenset({(1, 2)}),
+        actor_user_id=100,
+        portal_account_id=None,
+    )
+    assert [row['staff_id'] for row in saved['rows']] == [2]
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_service_refuses_a_row_that_is_not_open(async_session):
+    """A row of one's own that nobody may fill this month is its own refusal type."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(Staff(id=4, name='Barber', position='Барбер', company_id=1, fired=0))
+    await async_session.commit()
+
+    with pytest.raises(dashboard_service.ManualFactRowNotOpen):
+        await dashboard_service.save_manual_review_facts(
+            async_session,
+            '2025-01',
+            1,
+            None,
+            [{'company_id': 1, 'staff_id': 4, 'value': 1}],
+            allowed_company_ids=[1],
+            force_allowed=True,
+            allowed_staff_keys=frozenset({(1, 4)}),
+            actor_user_id=None,
+            portal_account_id=None,
+        )
+    assert (await async_session.execute(select(ManualFactMetric))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_entry_keys_skip_a_barber(async_session):
+    """Tab visibility: a barber has nothing to enter, both manual metrics are administrator ones."""
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0, portal_user_id=2),
+        Staff(id=3, name='Barber', position='Барбер', company_id=1, fired=0, portal_user_id=3),
+    ])
+    await async_session.commit()
+
+    assert await dashboard_service.manual_fact_entry_keys(async_session, ((1, 2),)) == frozenset({(1, 2)})
+    assert await dashboard_service.manual_fact_entry_keys(async_session, ((1, 3),)) == frozenset()
+    assert await dashboard_service.manual_fact_entry_keys(async_session, ()) == frozenset()
+
+    # A value left behind by someone who is no longer an administrator keeps the tabs open,
+    # otherwise it could never be seen or cleared. Either metric counts — the flag is one.
+    async_session.add(
+        ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=3,
+            metric_code='opz_qty',
+            value=2.0,
+            source='dashboard',
+            updated_at=datetime(2025, 2, 1),
+        )
+    )
+    await async_session.commit()
+    assert await dashboard_service.manual_fact_entry_keys(async_session, ((1, 3),)) == frozenset({(1, 3)})
 
 
 @pytest.mark.asyncio
@@ -7869,7 +8834,7 @@ async def test_manual_review_facts_use_one_value_per_month(async_session):
     assert full_data['month'] == '2025-06'
     assert full_data['total_value'] == 12.0
     assert full_data['rows'][0]['value'] == 12.0
-    assert other_month_response.json()['data']['rows'][0]['value'] == 0.0
+    assert other_month_response.json()['data']['rows'][0]['value'] is None
 
     # Any period inside the month sees the whole month, and only that month.
     partial_data = partial_response.json()['data']
@@ -10918,6 +11883,7 @@ async def test_plan_fact_uses_standalone_input_category_for_former_admin(async_s
         async_session,
         '2025-01',
         company_id=1,
+        portal_account_id=None,
     )
 
     admin = next(group for group in result['groups'] if group['staff_id'] == 2)

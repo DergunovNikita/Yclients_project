@@ -6,7 +6,20 @@ from fastapi import HTTPException
 
 from models import PORTAL_ROLES
 
-ROLE_LEVEL = {role: index for index, role in enumerate(PORTAL_ROLES)}
+# Ranks, not positions: `admin` and `barber` share one, because they are the same access
+# under two names. Everything that compares roles — who may create whom, who may list whom —
+# reads this map, so a tie here is what makes the two indistinguishable.
+ROLE_LEVEL = {
+    'platform_admin': 0,
+    'owner': 1,
+    'branch_admin': 2,
+    'manager': 3,
+    'admin': 4,
+    'barber': 4,
+}
+
+if set(ROLE_LEVEL) != set(PORTAL_ROLES):  # a role added in one place and not the other
+    raise RuntimeError('ROLE_LEVEL and PORTAL_ROLES disagree')
 
 PLATFORM_ADMIN_ROLE = 'platform_admin'
 TENANT_OWNER_ROLE = 'owner'

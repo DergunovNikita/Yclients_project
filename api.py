@@ -1129,15 +1129,14 @@ STAFF_SCOPED_EXPORT_COLUMNS = {
 }
 
 
-async def async_stream_csv_rows(db: AsyncSession, model, ctx: AccessContext | None = None):
-    columns = [column.key for column in model.__table__.columns]
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(columns)
-    yield buffer.getvalue()
-    buffer.seek(0)
-    buffer.truncate(0)
+def csv_export_stmt(model, ctx: AccessContext | None):
+    """Scope the export query, outside the streaming body.
 
+    The staff clamp can refuse — a fired employee keeps their portal login, and
+    `effective_staff_id` answers 403 rather than opening the branch. Resolved inside the
+    generator that refusal would land after `http.response.start`, and the caller would get a
+    200 with a lone header row and a dropped connection instead of a status code.
+    """
     stmt = select(model)
     company_column = getattr(model, 'company_id', None)
     if company_column is not None:
@@ -1149,7 +1148,18 @@ async def async_stream_csv_rows(db: AsyncSession, model, ctx: AccessContext | No
     staff_column = STAFF_SCOPED_EXPORT_COLUMNS.get(model)
     if staff_column is not None:
         stmt = apply_staff_scope(stmt, staff_column, None, ctx)
-    stmt = stmt.order_by(*model.__table__.primary_key.columns)
+    return stmt.order_by(*model.__table__.primary_key.columns)
+
+
+async def async_stream_csv_rows(db: AsyncSession, model, stmt):
+    columns = [column.key for column in model.__table__.columns]
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(columns)
+    yield buffer.getvalue()
+    buffer.seek(0)
+    buffer.truncate(0)
+
     result = await db.stream(stmt)
     async for row in result.scalars():
         writer.writerow([serialize_value(getattr(row, column)) for column in columns])
@@ -1182,7 +1192,7 @@ async def export_csv(table_name: str, request: Request, db: AsyncSession = Depen
         await db.commit()
 
     return StreamingResponse(
-        async_stream_csv_rows(db, model, ctx),
+        async_stream_csv_rows(db, model, csv_export_stmt(model, ctx)),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename={table_name}.csv"},
     )

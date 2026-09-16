@@ -110,7 +110,8 @@
     "owner": "Владелец сети",
     "branch_admin": "Менеджер сети",
     "manager": "Менеджер филиала",
-    "viewer": "Сотрудник филиала"
+    "admin": "Администратор филиала",
+    "barber": "Барбер"
   },
   "onboarding": {
     "brandSuffix": "Подключение",
@@ -486,6 +487,8 @@
     "opzFactTotal": "Итого в факт",
     "ariaOpzFilters": "Фильтры дополнительных ОПЗ",
     "reviewFactInactive": "уже не администратор",
+    "manualFactAuthor": "Кто внёс",
+    "manualFactSelfHint": "Вы вносите данные только за себя; изменить их может менеджер филиала.",
     "daysCount": "{count} дней",
     "appointmentsCount": "{count} записей",
     "noExactData": "Нет точных данных",
@@ -504,7 +507,8 @@
     "roleOwner": "Owner — владелец сети",
     "roleBranchAdmin": "Менеджер сети",
     "roleManager": "Менеджер филиала",
-    "roleViewer": "Сотрудник филиала",
+    "roleAdmin": "Администратор филиала",
+    "roleBarber": "Барбер",
     "noBusinessNetworks": "Нет созданных бизнес-сетей",
     "noPlatformTenants": "Для platform admin нет доступных business tenants.",
     "selectedNetworkData": "Dashboard показывает данные выбранной сети",
@@ -609,7 +613,8 @@
     "selectRole": "Выберите роль",
     "selectBranches": "Выберите филиалы",
     "selectBranch": "Выберите филиал",
-    "roleViewer": "viewer — сотрудник филиала",
+    "roleAdmin": "admin — администратор филиала",
+    "roleBarber": "barber — барбер",
     "roleManager": "manager — менеджер филиала",
     "roleBranchAdmin": "branch_admin — менеджер сети",
     "roleOwner": "owner — владелец сети",

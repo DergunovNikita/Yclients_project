@@ -502,11 +502,17 @@ REPORT_REGISTRY = _build_registry()
 DEMO_UNAVAILABLE_REPORTS = frozenset({'year_over_year'})
 
 
-def fetch_report_registry(is_demo: bool = False) -> list[dict[str, Any]]:
+def fetch_report_registry(is_demo: bool = False, *, hide_financials: bool = False) -> list[dict[str, Any]]:
+    """Catalog of reports the caller can actually open.
+
+    A card the role may not open is worse than no card: `/reports/data` answers 403 for it,
+    so the only thing it can do is take the user to an error page.
+    """
     return [
         REPORT_REGISTRY[report_id].to_payload()
         for report_id in REPORT_ORDER
         if not (is_demo and report_id in DEMO_UNAVAILABLE_REPORTS)
+        and not (hide_financials and report_requires_financials(report_id))
     ]
 
 

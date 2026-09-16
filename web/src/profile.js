@@ -6,8 +6,9 @@ document.documentElement.lang = getLocale();
 applyTranslations();
 mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListener('change', () => location.reload());
 
+// Exactly the roles `/auth/admin/*` accepts (USER_ADMIN_ROLES). Offering the page to anyone
+// else only leads to a 403 behind a button that looks like it works.
 const ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
-const MANAGER_ROLES = new Set(['platform_admin', 'owner', 'branch_admin', 'manager']);
 
 const changePasswordModal = document.getElementById('change-password-modal');
 const passwordErrorEl = document.getElementById('password-error');
@@ -104,12 +105,10 @@ async function init() {
     document.getElementById('profile-email').textContent = user.email;
     document.getElementById('profile-role').textContent = roleLabel(user.role) || user.role;
 
-    if (MANAGER_ROLES.has(user.role)) {
+    if (ADMIN_ROLES.has(user.role)) {
       const manageUsersBtn = document.getElementById('manage-users');
       manageUsersBtn.hidden = false;
-      manageUsersBtn.textContent = ADMIN_ROLES.has(user.role)
-        ? t('profile.manageUsers')
-        : t('profile.viewUsers');
+      manageUsersBtn.textContent = t('profile.manageUsers');
     }
   } catch {
     if (!hasSessionHint()) {

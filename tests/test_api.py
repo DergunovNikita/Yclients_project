@@ -212,7 +212,7 @@ async def test_raw_api_staff_scopes_linked_viewer_and_exports(async_session, mon
             email='linked-viewer@example.com',
             password_hash=hash_password('Viewer123!'),
             full_name='Linked Viewer',
-            role='viewer',
+            role='barber',
             is_active=True,
             email_verified_at=datetime.utcnow(),
             created_at=datetime.utcnow(),
@@ -234,7 +234,7 @@ async def test_raw_api_staff_scopes_linked_viewer_and_exports(async_session, mon
     async def override_db():
         yield async_session
 
-    token = create_access_token(120, 'viewer')
+    token = create_access_token(120, 'barber')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -258,6 +258,66 @@ async def test_raw_api_staff_scopes_linked_viewer_and_exports(async_session, mon
     assert schedules_csv.status_code == 200
     assert ',10,' in schedules_csv.text
     assert ',11,' not in schedules_csv.text
+
+
+@pytest.mark.asyncio
+async def test_raw_api_export_refuses_a_personal_role_with_no_staff_row(async_session, monkeypatch):
+    """A refusal has to arrive as a status code, not as a truncated 200.
+
+    The staff clamp can say no — YClients fires an employee while the portal login stays
+    alive — so the scoped query must be built before the response starts. Resolved inside the
+    streaming body it would raise after `http.response.start`, and the caller would read a
+    header row followed by a dropped connection.
+    """
+    import auth_deps
+
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    async_session.add(Group(id=1, title='Group'))
+    async_session.add(Company(id=1, title='Branch', group_id=1))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    async_session.add(PortalBranch(portal_account_id=1, company_id=1))
+    async_session.add(
+        PortalUser(
+            id=130,
+            portal_account_id=1,
+            email='fired-barber@example.com',
+            password_hash=hash_password('Barber123!'),
+            full_name='Fired Barber',
+            role='barber',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    async_session.add(PortalUserBranch(user_id=130, company_id=1))
+    async_session.add_all([
+        Staff(id=12, name='Fired Barber', company_id=1, portal_user_id=130, fired=1),
+        Staff(id=13, name='Working Staff', company_id=1),
+        Appointment(id=13, company_id=1, staff_id=13, client_id=3, date=date(2025, 1, 10)),
+        StaffSchedule(id=13, company_id=1, staff_id=13, date=date(2025, 1, 10)),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(130, 'barber')
+    headers = {'Authorization': f'Bearer {token}'}
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        listing = await client.get('/appointments', headers=headers)
+        appointments_csv = await client.get('/export/csv/appointments', headers=headers)
+        schedules_csv = await client.get('/export/csv/staff_schedules', headers=headers)
+
+    app.dependency_overrides.clear()
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
+
+    assert listing.status_code == 403
+    assert appointments_csv.status_code == 403
+    assert schedules_csv.status_code == 403
+    # Not a single row of the branch leaked into the body ahead of the refusal.
+    assert 'company_id' not in appointments_csv.text
 
 
 @pytest.mark.asyncio
@@ -354,7 +414,7 @@ async def _seed_client_pii_scope(async_session):
             email='viewer@example.com',
             password_hash=hash_password('Viewer123!'),
             full_name='Viewer',
-            role='viewer',
+            role='barber',
             is_active=True,
             email_verified_at=datetime.utcnow(),
             created_at=datetime.utcnow(),
@@ -421,7 +481,7 @@ async def test_clients_endpoint_rejects_viewer_role(async_session):
     async def override_db():
         yield async_session
 
-    token = create_access_token(202, 'viewer')
+    token = create_access_token(202, 'barber')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -581,7 +641,7 @@ async def test_clients_csv_export_rejects_non_user_or_viewer_access(async_sessio
 
     monkeypatch.setattr(api, 'API_KEY', 'legacy-api-key')
     monkeypatch.setattr(auth_deps, 'API_KEY', 'legacy-api-key')
-    viewer_token = create_access_token(202, 'viewer')
+    viewer_token = create_access_token(202, 'barber')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:

@@ -28,7 +28,7 @@ from config import (
     SMTP_USER,
     smtp_is_configured,
 )
-from models import PortalBranch, PortalEmailToken, PortalUser, PortalUserBranch
+from models import PortalBranch, PortalEmailToken, PortalUser, PortalUserBranch, Staff
 
 TOKEN_PURPOSE_VERIFY = 'verify'
 TOKEN_PURPOSE_RESET = 'reset'
@@ -150,6 +150,25 @@ async def load_user_access_branch_ids(db: AsyncSession, user: PortalUser) -> lis
     if user.role == 'owner':
         return await load_portal_account_branch_ids(db, user.portal_account_id)
     return await load_user_branch_ids(db, user.id)
+
+
+async def load_portal_user_staff_rows(db: AsyncSession, user_id: int) -> list[tuple[int | None, int]]:
+    """(company_id, staff_id) rows a portal user owns — one per branch they work in.
+
+    Rows without a branch are kept: they cannot belong to a branch-scoped pair, but they
+    still count as "this user is a staff member" for the self-scope clamp.
+    """
+    rows = (
+        await db.execute(
+            select(Staff.company_id, Staff.id)
+            .where(Staff.portal_user_id == user_id, Staff.fired == 0)
+            .order_by(Staff.id.asc())
+        )
+    ).all()
+    return [
+        (int(row.company_id) if row.company_id is not None else None, int(row.id))
+        for row in rows
+    ]
 
 
 async def set_user_branches(db: AsyncSession, user_id: int, company_ids: list[int]) -> None:
