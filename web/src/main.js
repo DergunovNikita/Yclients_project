@@ -3052,8 +3052,11 @@ async function loadStaff(filter, { force = false } = {}) {
   const request = requestScopeForStaff(filter).start();
   const selected = filter.staff.value;
   try {
+    const { start, end } = filterPeriod(filter);
     const payload = await fetchJson('/dashboard/staff', {
       company_id: filter.branch.value,
+      start_date: start,
+      end_date: end,
     }, {
       retry: () => loadStaff(filter, { force: true }),
       signal: request.signal,
@@ -3633,7 +3636,12 @@ els.planSettingsLoad.addEventListener('click', () => reloadPlanSettingsMonth());
 Object.values(filterEls).forEach((filter) => {
   [filter.month, filter.start, filter.end]
     .filter(Boolean)
-    .forEach((input) => input.addEventListener('change', () => renderBranchOptions(filter)));
+    .forEach((input) => input.addEventListener('change', () => {
+      renderBranchOptions(filter);
+      // The employee list is scoped by the same window, so it is stale the moment the
+      // period moves: a branch that left takes its people out of the filter with it.
+      loadStaff(filter, { force: true });
+    }));
 });
 
 els.planSettingsMonth.addEventListener('change', () => reloadPlanSettingsMonth());

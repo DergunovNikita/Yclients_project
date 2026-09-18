@@ -25,6 +25,7 @@ from models import (
     ServiceCatalog,
     Staff,
     StaffSchedule,
+    Transaction,
 )
 
 
@@ -1119,3 +1120,58 @@ def test_only_dashboard_paths_are_timed():
     assert api._timed_request_fields(
         FakeRequest('/dashboard/reports/data', {'report_id': 'seasonality'})
     ) == ('/dashboard/reports/data', 'seasonality')
+
+
+@pytest.mark.asyncio
+async def test_csv_export_respects_the_branch_reporting_window(async_session):
+    """The export is raw tables, but raw tables of a branch the tenant no longer has.
+
+    Facts are cut by the day they carry; a reference row has no day, so it is cut by
+    whether the branch is the tenant's today — the same question the service catalogue asks.
+    """
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Stays', group_id=1),
+        Company(id=2, title='Left', group_id=1, reporting_end_date=date(2026, 8, 31)),
+        Staff(id=1, name='Stays Barber', company_id=1),
+        Staff(id=2, name='Left Barber', company_id=2),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2026, 9, 5)),
+        Appointment(id=2, company_id=2, staff_id=2, date=date(2026, 9, 5)),
+        Appointment(id=3, company_id=2, staff_id=2, date=date(2026, 8, 20)),
+    ])
+    await async_session.flush()
+    # `transactions` carries no day of its own — it is cut by the visit it hangs off.
+    async_session.add_all([
+        Transaction(id=1, appointment_id=1, company_id=1, service_id=10, cost=100.0),
+        Transaction(id=2, appointment_id=2, company_id=2, service_id=20, cost=200.0),
+        Transaction(id=3, appointment_id=3, company_id=2, service_id=30, cost=300.0),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        appointments = await client.get('/export/csv/appointments')
+        transactions = await client.get('/export/csv/transactions')
+        staff = await client.get('/export/csv/staff')
+        companies = await client.get('/export/csv/companies')
+    app.dependency_overrides.clear()
+
+    appointment_ids = {row.split(',')[0] for row in appointments.text.strip().splitlines()[1:]}
+    # The visit after the handover is gone; the one before it stays, history intact.
+    assert appointment_ids == {'1', '3'}
+    transaction_ids = {row.split(',')[0] for row in transactions.text.strip().splitlines()[1:]}
+    # The service line of the post-handover visit goes with it; the branch's own history of
+    # service lines survives, which a broken correlation would have wiped out entirely.
+    assert transaction_ids == {'1', '3'}
+    # The departed branch's staff is a reference row with no day: it goes by "ours today".
+    assert 'Left Barber' not in staff.text
+    assert 'Stays Barber' in staff.text
+    # `companies` documents the cut instead of being subject to it.
+    assert 'Left' in companies.text

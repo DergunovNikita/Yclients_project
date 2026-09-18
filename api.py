@@ -19,8 +19,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select, text
+from sqlalchemy import exists, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from config import (
     API_HOST,
@@ -78,6 +79,11 @@ from models import (
     Storage,
     StorageCatalog,
     Transaction,
+)
+from dashboard_service import (
+    branch_window_overlap_clause,
+    factual_branch_date,
+    reporting_window_clause,
 )
 from sync_jobs import SyncJobService
 from sync_orchestrator import get_sync_status
@@ -1127,6 +1133,46 @@ STAFF_SCOPED_EXPORT_COLUMNS = {
     Comment: Comment.master_id,
     StaffSchedule: StaffSchedule.staff_id,
 }
+# A fact carries the day it belongs to, so the export cuts it by the branch's reporting
+# window exactly as every dashboard query does.
+EXPORT_WINDOW_DAY_COLUMNS = {
+    Appointment: lambda: Appointment.date,
+    FinancialTransaction: lambda: FinancialTransaction.date,
+    GoodTransaction: lambda: GoodTransaction.date,
+    Comment: lambda: Comment.date,
+    StaffSchedule: lambda: StaffSchedule.date,
+}
+
+
+def transaction_window_clause():
+    """`transactions` has no day of its own — it hangs off the visit and is cut by its day.
+
+    A correlated scalar subquery does not survive being nested inside the window clause's own
+    EXISTS: SQLAlchemy re-adds `transactions` to the inner FROM, the subquery stops referring
+    to the row being filtered, and the export silently loses the branch's whole history. An
+    explicit EXISTS over the visit keeps the correlation where it belongs.
+    """
+    visit = aliased(Appointment)
+    branch = aliased(Company)
+    return ~exists(
+        select(1)
+        .select_from(visit)
+        .join(branch, branch.id == visit.company_id)
+        .where(
+            visit.id == Transaction.appointment_id,
+            or_(
+                branch.reporting_start_date.is_not(None),
+                branch.reporting_end_date.is_not(None),
+            ),
+            or_(
+                visit.date < branch.reporting_start_date,
+                visit.date > branch.reporting_end_date,
+            ),
+        )
+    )
+# `companies` is the one table that documents the cut instead of being subject to it: it
+# carries the window dates, and dropping the row would hide why the rest is trimmed.
+EXPORT_WINDOW_EXEMPT_MODELS = frozenset({Company})
 
 
 def csv_export_stmt(model, ctx: AccessContext | None):
@@ -1145,6 +1191,17 @@ def csv_export_stmt(model, ctx: AccessContext | None):
         stmt = apply_company_scope(stmt, Company.id, None, ctx)
     elif ctx is not None and not ctx.full_access:
         stmt = stmt.where(False)
+    if company_column is not None and model not in EXPORT_WINDOW_EXEMPT_MODELS:
+        day_expr = EXPORT_WINDOW_DAY_COLUMNS.get(model)
+        if model is Transaction:
+            stmt = stmt.where(transaction_window_clause())
+        elif day_expr is not None:
+            stmt = stmt.where(reporting_window_clause(company_column, day_expr()))
+        else:
+            # A reference row — a service, an employee, a client — carries no day, so the
+            # question is the one the service catalogue asks: is the branch ours today.
+            today = factual_branch_date()
+            stmt = stmt.where(branch_window_overlap_clause(company_column, today, today))
     staff_column = STAFF_SCOPED_EXPORT_COLUMNS.get(model)
     if staff_column is not None:
         stmt = apply_staff_scope(stmt, staff_column, None, ctx)

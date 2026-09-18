@@ -1873,6 +1873,9 @@ async def test_reporting_end_drops_the_plan_of_a_departed_branch(async_session):
         )
     app.dependency_overrides.clear()
 
+    def groups(response):
+        return {g['title'] for g in response.json()['data']['groups']}
+
     def revenue_plan(response, title):
         group = next(g for g in response.json()['data']['groups'] if g['title'] == title)
         return next(c['plan'] for c in group['metrics'] if c['code'] == 'revenue')
@@ -1880,9 +1883,53 @@ async def test_reporting_end_drops_the_plan_of_a_departed_branch(async_session):
     # The month the branch was still ours keeps both plans and the network sum of them.
     assert revenue_plan(august, 'Leaves') == 500.0
     assert revenue_plan(august, 'Сеть') == 1500.0
-    # After the handover its plan is gone and the network counts only the branch that stayed.
-    assert revenue_plan(september, 'Leaves') is None
+    # After the handover the branch has no row at all, and the network counts only the
+    # branch that stayed: an empty line under the network total is not worth showing.
+    assert 'Leaves' not in groups(september)
     assert revenue_plan(september, 'Сеть') == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_reporting_end_takes_the_branch_out_of_the_staff_and_service_lists(async_session):
+    """The employee filter sits next to the branch filter and has to agree with it.
+
+    The service catalogue has no period of its own, so it asks the other half of the same
+    question: is the branch the tenant's today.
+    """
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Stays', group_id=1),
+        Company(id=2, title='Left', group_id=1, reporting_end_date=date(2025, 8, 31)),
+        Staff(id=1, name='Stays Barber', position='Барбер', company_id=1, fired=0),
+        Staff(id=2, name='Left Barber', position='Барбер', company_id=2, fired=0),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        ServiceCatalog(
+            company_id=1, service_id=10, title='Stays Haircut', is_active=True,
+            updated_at=datetime(2025, 8, 1, 10, 0, 0),
+        ),
+        ServiceCatalog(
+            company_id=2, service_id=20, title='Left Haircut', is_active=True,
+            updated_at=datetime(2025, 8, 1, 10, 0, 0),
+        ),
+    ])
+    await async_session.commit()
+
+    august = await dashboard_service.fetch_staff(
+        async_session, start=date(2025, 8, 1), end=date(2025, 8, 31)
+    )
+    september = await dashboard_service.fetch_staff(
+        async_session, start=date(2025, 9, 1), end=date(2025, 9, 30)
+    )
+    unscoped = await dashboard_service.fetch_staff(async_session)
+    services = await dashboard_service.fetch_dashboard_services(async_session)
+
+    assert {row['name'] for row in august} == {'Stays Barber', 'Left Barber'}
+    assert {row['name'] for row in september} == {'Stays Barber'}
+    # Without a period the whole scope is listed: staff administration is not a report.
+    assert {row['name'] for row in unscoped} == {'Stays Barber', 'Left Barber'}
+    assert {row['title'] for row in services['rows']} == {'Stays Haircut'}
 
 
 @pytest.mark.asyncio
@@ -9018,9 +9065,10 @@ async def test_manual_facts_respect_the_branch_reporting_end(async_session):
     assert after_handover.json()['data']['visit_metrics']['opz_qty'] == 0.0
 
     assert editor_before.json()['data']['manual_total'] == 4.0
+    # The branch is gone from the editor: months after the handover are not ours to enter.
+    # Unlike a month before the opening, which stays editable with `counted: false`.
     after_rows = editor_after.json()['data']
-    assert after_rows['rows'][0]['value'] == 6.0
-    assert after_rows['rows'][0]['counted'] is False
+    assert after_rows['rows'] == []
     assert after_rows['manual_total'] == 0.0
 
 

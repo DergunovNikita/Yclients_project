@@ -374,7 +374,11 @@ export function initReports({
     state.staffIds = [];
     const request = staffRequests.start();
     try {
-      const payload = await fetchJson('/dashboard/staff', { company_id: els.branch.value }, {
+      const payload = await fetchJson('/dashboard/staff', {
+        company_id: els.branch.value,
+        start_date: els.start.value,
+        end_date: els.end.value,
+      }, {
         signal: request.signal,
         slowState: false,
       });
@@ -739,6 +743,7 @@ export function initReports({
       syncCompareDefaults();
       syncMonthPicker();
       renderBranches();
+      loadStaff();
       reloadActiveReport();
     });
   });
@@ -752,6 +757,7 @@ export function initReports({
     state.periodPreset = 'month';
     syncCompareDefaults();
     renderBranches();
+    loadStaff();
     reloadActiveReport();
   });
   // A half-written window asks for nothing until its other bound is typed in;

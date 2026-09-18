@@ -500,9 +500,14 @@ async def dashboard_branches(
 @router.get('/staff')
 async def dashboard_staff(
     company_id: int | None = Query(None, description='Optional YClients company (salon) id'),
+    start_date: date | None = Query(None),
+    end_date: date | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
+    # The dates are optional so that callers which only administer staff keep the whole
+    # scope; the dashboard filters pass them and get the branches that period can report on.
+    start, end = (None, None) if start_date is None or end_date is None else _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
     return {
         'success': True,
@@ -511,6 +516,8 @@ async def dashboard_staff(
             scope['company_id'],
             allowed_company_ids=scope['branch_ids'],
             force_allowed=scope['force_allowed'],
+            start=start,
+            end=end,
         ),
     }
 

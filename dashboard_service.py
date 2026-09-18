@@ -745,6 +745,55 @@ def reporting_window_clause(company_column, day_expr):
     )
 
 
+async def branches_not_yet_left(
+    db: AsyncSession,
+    branches: list[dict[str, Any]],
+    start: date,
+) -> list[dict[str, Any]]:
+    """Branches the tenant had not yet lost by the start of the period.
+
+    Editors cut on the upper bound only. A month before a branch opened still belongs to
+    the tenant, and a value typed there has to stay visible to be corrected — that is what
+    the `counted` flag is for. A branch that left is a different case: those months are not
+    the tenant's to edit at all, so the branch leaves the editor entirely.
+    """
+    windows = await fetch_reporting_windows(db, [int(branch['id']) for branch in branches])
+    return [
+        branch
+        for branch in branches
+        if (window := windows.get(int(branch['id']))) is None
+        or window.end is None
+        or window.end >= start
+    ]
+
+
+def branch_window_overlap_clause(company_column, start: date, end: date):
+    """Keep rows whose branch belonged to the tenant at some point inside [start, end].
+
+    `reporting_window_clause` asks the question of a fact — is this day inside the window.
+    This asks it of the branch itself, which is what the listings need: the employee filter,
+    the service catalogue and the plan editors are lists of branches, not of dated facts.
+    Passing the same day twice answers "is the branch ours on that day", which is how a
+    listing with no period of its own (a catalogue) decides.
+    """
+    branch = aliased(Company)
+    return ~exists(
+        select(1)
+        .select_from(branch)
+        .where(
+            branch.id == company_column,
+            or_(
+                branch.reporting_start_date.is_not(None),
+                branch.reporting_end_date.is_not(None),
+            ),
+            or_(
+                branch.reporting_start_date > end,
+                branch.reporting_end_date < start,
+            ),
+        )
+    )
+
+
 async def fetch_reporting_windows(
     db: AsyncSession,
     company_ids: list[int],
@@ -2945,7 +2994,14 @@ async def fetch_dashboard_services(
         .outerjoin(ServiceKpiAssignment, assignment_join)
         .outerjoin(ServiceKpiGroup, ServiceKpiGroup.id == ServiceKpiAssignment.group_id)
     )
-    filters = [ServiceCatalog.is_active.is_(True)]
+    # The catalogue is a setting, not a report, so there is no period to cut against: the
+    # question is whether the branch is the tenant's today. A branch that has left keeps its
+    # history in the reports, but its services stop being ours to edit.
+    today = factual_branch_date()
+    filters = [
+        ServiceCatalog.is_active.is_(True),
+        branch_window_overlap_clause(ServiceCatalog.company_id, today, today),
+    ]
     if company_id is not None:
         filters.append(ServiceCatalog.company_id == company_id)
     elif allowed_company_ids is not None:
@@ -7071,7 +7127,16 @@ async def fetch_staff(
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
     include_staff_ids: Optional[list[int]] = None,
+    start: Optional[date] = None,
+    end: Optional[date] = None,
 ) -> list[dict[str, Any]]:
+    """Staff of the branches in scope, optionally narrowed to one reporting period.
+
+    The employee filter sits next to the branch filter and has to agree with it: a period
+    the branch cannot report on must not offer its people either. Without a period the
+    whole scope is listed, which is what the callers that only administer staff want.
+    """
+
     if force_allowed:
         allowed = allowed_company_ids or []
     elif allowed_company_ids is not None:
@@ -7102,6 +7167,8 @@ async def fetch_staff(
         stmt = stmt.where(Company.id.in_(allowed))
     if company_id is not None:
         stmt = stmt.where(Company.id == company_id)
+    if start is not None and end is not None:
+        stmt = stmt.where(branch_window_overlap_clause(Staff.company_id, start, end))
 
     rows = (await db.execute(stmt)).all()
     return [
@@ -7435,6 +7502,9 @@ async def fetch_plan_settings(
     period_start, period_end = _plan_month_range(month)
     source_start, source_end = _plan_month_range(copy_from) if copy_from else (period_start, period_end)
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
+    # A branch that left the tenant has no plan to set for the months after it went; a month
+    # before it opened stays editable, like any value the `counted` flag marks as ignored.
+    branches = await branches_not_yet_left(db, branches, period_start)
     company_ids = [int(branch['id']) for branch in branches]
     branch_settings, staff_inputs = await _plan_settings_snapshot(
         db,
@@ -7442,6 +7512,8 @@ async def fetch_plan_settings(
         source_end,
         company_ids,
     )
+    # No period here: the payload below already keeps only staff of the branches that
+    # survived the cut above, and a period would disagree with it on months before opening.
     staff_rows = await fetch_staff(
         db,
         allowed_company_ids=allowed_company_ids,
@@ -7978,6 +8050,9 @@ async def _fetch_manual_facts(
 ) -> dict[str, Any]:
     month_start, month_end = _plan_month_range(month)
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
+    # A branch that left the tenant is not ours to enter facts for; a month before it opened
+    # still is, and its stored value keeps showing with `counted: false` so it can be fixed.
+    branches = await branches_not_yet_left(db, branches, month_start)
     if company_id is not None:
         branches = [branch for branch in branches if int(branch['id']) == company_id]
     if allowed_staff_keys is not None:
@@ -8456,6 +8531,10 @@ async def fetch_plan_fact(
 ) -> dict[str, Any]:
     factual_at = factual_at or factual_now()
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
+    # A branch that left the tenant contributes neither plan nor fact, so its row could only
+    # ever read "0 of nothing" under the network total. A branch that has not opened yet is
+    # left alone: its zeroes are the tenant's own history and tests pin that shape.
+    branches = await branches_not_yet_left(db, branches, start)
     selected_staff: dict[str, Any] | None = None
     if staff_id is not None:
         staff_rows = await fetch_staff(
