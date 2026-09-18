@@ -21,6 +21,7 @@ import {
 import { GROUP_LABELS, STATUS_LABELS, sourceLabel } from './registry.js';
 import { renderReportData } from './renderers/generic.js';
 import { intlLocale, t } from '../i18n.js';
+import { branchesForPeriod } from '../reportingWindow.js';
 import {
   DEFAULT_GRANULARITY,
   REPORT_FILTER_KEYS,
@@ -357,8 +358,12 @@ export function initReports({
 
   function renderBranches() {
     const selected = els.branch.value;
+    const options = branchesForPeriod(state.branches, els.start.value, els.end.value);
     els.branch.innerHTML = optionHtml('', t('dash.allBranches'), selected)
-      + state.branches.map((branch) => optionHtml(branch.id, branch.title, selected)).join('');
+      + options.map((branch) => optionHtml(branch.id, branch.title, selected)).join('');
+    // A branch the new period cannot reach falls back to the whole scope: leaving it
+    // selected would filter the report by a branch that is no longer in the list.
+    if (selected && !options.some((branch) => String(branch.id) === selected)) els.branch.value = '';
   }
 
   // The selection is passed in rather than read back off the select: a staff id that
@@ -733,6 +738,7 @@ export function initReports({
       state.periodPreset = '';
       syncCompareDefaults();
       syncMonthPicker();
+      renderBranches();
       reloadActiveReport();
     });
   });
@@ -745,6 +751,7 @@ export function initReports({
     // preset, a 30-day window would step back 30 days and start on the 2nd.
     state.periodPreset = 'month';
     syncCompareDefaults();
+    renderBranches();
     reloadActiveReport();
   });
   // A half-written window asks for nothing until its other bound is typed in;

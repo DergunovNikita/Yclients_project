@@ -43,6 +43,7 @@ import {
   setPlanMetricHidden,
 } from './planMetricVisibility.js';
 import { inputDateValue, monthOfRange, monthRange, monthValue } from './period.js';
+import { branchesForPeriod } from './reportingWindow.js';
 // i18n's formatDate parses a date-only string as UTC midnight, which renders a day early
 // for any viewer west of UTC. This one pins it to local midnight.
 import { formatDate } from './reports/format.js';
@@ -2184,14 +2185,19 @@ async function reloadPlanSettingsMonth() {
 
 function renderServiceBranchOptions() {
   const selected = els.serviceFilterBranch.value;
+  // The catalogue is a setting, not a report, so there is no period to cut against and the
+  // question is simply whether the branch is ours *now*: one that has left keeps its history
+  // in the reports, but its services are no longer the tenant's to edit.
+  const today = inputDateValue(new Date(pageOpenedAt));
+  const options = branchesForPeriod(branchOptions, today, today);
   els.serviceFilterBranch.innerHTML = `<option value="">${t('dash.allBranches')}</option>`;
-  branchOptions.forEach((branch) => {
+  options.forEach((branch) => {
     const option = document.createElement('option');
     option.value = branch.id;
     option.textContent = branch.title;
     els.serviceFilterBranch.appendChild(option);
   });
-  els.serviceFilterBranch.value = branchOptions.some((branch) => String(branch.id) === selected) ? selected : '';
+  els.serviceFilterBranch.value = options.some((branch) => String(branch.id) === selected) ? selected : '';
 }
 
 function renderServiceFilterOptions(data) {
@@ -3017,16 +3023,26 @@ async function loadBranches() {
   }
 }
 
+function filterPeriod(filter) {
+  if (filter.start && filter.end) return { start: filter.start.value, end: filter.end.value };
+  const range = monthRange(filter.month?.value, new Date(pageOpenedAt));
+  return range || { start: '', end: '' };
+}
+
 function renderBranchOptions(filter) {
   const selected = filter.branch.value;
+  const { start, end } = filterPeriod(filter);
+  const options = branchesForPeriod(branchOptions, start, end);
   filter.branch.innerHTML = `<option value="">${t('dash.allBranches')}</option>`;
-  branchOptions.forEach((branch) => {
+  options.forEach((branch) => {
     const option = document.createElement('option');
     option.value = branch.id;
     option.textContent = branch.title;
     filter.branch.appendChild(option);
   });
-  filter.branch.value = branchOptions.some((branch) => String(branch.id) === selected) ? selected : '';
+  // A branch the new period cannot reach falls back to the whole scope, the same way an
+  // unknown id always has: keeping it selected would filter by a branch that is not listed.
+  filter.branch.value = options.some((branch) => String(branch.id) === selected) ? selected : '';
   customFilterDropdowns[filter.branch.id]?.refresh();
 }
 
@@ -3612,6 +3628,14 @@ els.opzFactEditor.addEventListener('input', () => {
   updateOpzFactDirtyFromForm();
 });
 els.planSettingsLoad.addEventListener('click', () => reloadPlanSettingsMonth());
+// The branch list depends on the period, so every filter re-renders its own options when
+// its dates move. Registered after the month handlers above, which set start/end first.
+Object.values(filterEls).forEach((filter) => {
+  [filter.month, filter.start, filter.end]
+    .filter(Boolean)
+    .forEach((input) => input.addEventListener('change', () => renderBranchOptions(filter)));
+});
+
 els.planSettingsMonth.addEventListener('change', () => reloadPlanSettingsMonth());
 els.planSettingsCopy.addEventListener('click', () => copyPreviousPlanSettings());
 els.planSettingsReset.addEventListener('click', () => {
