@@ -1663,6 +1663,275 @@ async def test_year_over_year_without_reporting_start_keeps_full_history(
 
 
 @pytest.mark.asyncio
+async def test_reporting_end_keeps_history_and_drops_facts_after_the_handover(
+    async_session,
+    monkeypatch,
+):
+    """A branch that left the tenant keeps its history and stops contributing new facts.
+
+    Deleting the branch would take the history with it, so the cutoff has to be a date —
+    and it has to reach Обзор and the year-over-year report alike, or the same year reads
+    differently on two screens.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(
+            id=1,
+            title='Salon',
+            group_id=1,
+            reporting_start_date=date(2025, 5, 1),
+            reporting_end_date=date(2025, 8, 31),
+        ),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 6, 10), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, date=date(2025, 9, 5), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2025, 6, 10, 12), amount=700.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=2, date=datetime(2025, 9, 5, 12), amount=900.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
+    ])
+    async_session.add_all(
+        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+    )
+    await async_session.commit()
+
+    summary = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    history = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 6, 1),
+        date(2025, 6, 30),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+    year_2025 = next(row for row in report['raw']['years'] if row['year'] == 2025)
+
+    assert summary['revenue']['total'] == 700.0
+    assert summary['revenue']['appointments'] == 1
+    assert year_2025['revenue'] == summary['revenue']['total']
+    # The months the branch did belong to the tenant still report exactly what they did.
+    assert history['revenue']['total'] == 700.0
+    assert history['revenue']['appointments'] == 1
+
+
+@pytest.mark.asyncio
+async def test_reporting_end_cuts_service_revenue_paid_across_the_boundary(
+    async_session,
+    monkeypatch,
+):
+    """A service fact needs both its visit and its payment on or before the last day.
+
+    Same two anchors as the opening cutoff: revenue is bucketed by payment date and the
+    average check is divided by visits, so a payment settled after the handover must not
+    keep a visit that the handover already dropped, or the reverse.
+    """
+    report_now = datetime(2026, 8, 1, 12, 0)
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: report_now)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1, reporting_end_date=date(2025, 8, 31)),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        # Visit before the handover, settled after it — only the payment anchor drops this.
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 8, 20), attendance=1),
+        # Visit after the handover, prepaid before it — only the visit anchor drops this.
+        Appointment(id=2, company_id=1, staff_id=1, date=date(2025, 9, 10), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, date=date(2025, 7, 10), attendance=1),
+        Appointment(id=4, company_id=1, staff_id=1, date=date(2025, 8, 31), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2025, 9, 20, 12), amount=300.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=2, date=datetime(2025, 8, 15, 12), amount=500.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=3, date=datetime(2025, 7, 10, 12), amount=700.0, record_id=3, sold_item_type='service', master_id=1, company_id=1),
+        # Payment columns are timestamps: an afternoon on the closing day is still inside
+        # a window whose bound is that same day.
+        FinancialTransaction(id=4, date=datetime(2025, 8, 31, 14, 30), amount=400.0, record_id=4, sold_item_type='service', master_id=1, company_id=1),
+    ])
+    async_session.add_all(
+        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+    )
+    await async_session.commit()
+
+    summary = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+        include_appointments_breakdown=False,
+    )
+    daily = await dashboard_service.fetch_revenue_daily(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        company_id=1,
+    )
+
+    # Both boundary rows are dropped; the pre-handover 700 and the closing day's 400 stay.
+    assert summary['revenue']['total'] == 1100.0
+    assert sum(float(row.get('revenue') or 0) for row in daily) == 1100.0
+    # Visits follow the same rule, so the average check divides 1100 by three visits.
+    assert summary['revenue']['appointments'] == 3
+    assert round(summary['average_check']['services'], 2) == 366.67
+
+
+@pytest.mark.asyncio
+async def test_reporting_end_cuts_each_branch_separately(async_session):
+    """One branch leaving must not trim the branches that stayed."""
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Stays', group_id=1),
+        Company(id=2, title='Leaves', group_id=1, reporting_end_date=date(2025, 8, 31)),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Staff(id=2, name='Other', position='Барбер', company_id=2),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 9, 5), attendance=1),
+        Appointment(id=2, company_id=2, staff_id=2, date=date(2025, 9, 5), attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        FinancialTransaction(id=1, date=datetime(2025, 9, 5, 12), amount=700.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
+        FinancialTransaction(id=2, date=datetime(2025, 9, 5, 12), amount=900.0, record_id=2, sold_item_type='service', master_id=2, company_id=2),
+    ])
+    await async_session.commit()
+
+    network = await dashboard_service.fetch_summary(
+        async_session,
+        date(2025, 9, 1),
+        date(2025, 9, 30),
+        allowed_company_ids=[1, 2],
+        include_appointments_breakdown=False,
+    )
+
+    assert network['revenue']['total'] == 700.0
+    assert network['revenue']['appointments'] == 1
+
+
+@pytest.mark.asyncio
+async def test_reporting_end_drops_the_plan_of_a_departed_branch(async_session):
+    """The plan is trimmed with the facts, or the network reads a miss it never made.
+
+    Facts after the handover stop counting; a plan left standing for the same month would
+    be measured against zero and pull the whole network's execution down with it.
+    """
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Stays', group_id=1),
+        Company(id=2, title='Leaves', group_id=1, reporting_end_date=date(2025, 8, 31)),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        PlanMetric(
+            period_start=date(2025, month, 1),
+            period_end=date(2025, month, monthrange(2025, month)[1]),
+            company_id=company_id,
+            metric_code='revenue',
+            value=value,
+            updated_at=datetime(2025, month, 1, 10, 0, 0),
+        )
+        for company_id, month, value in (
+            (1, 8, 1000.0), (2, 8, 500.0), (1, 9, 1000.0), (2, 9, 500.0)
+        )
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        august = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-08-01', 'end_date': '2025-08-31'},
+        )
+        september = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-09-01', 'end_date': '2025-09-30'},
+        )
+    app.dependency_overrides.clear()
+
+    def revenue_plan(response, title):
+        group = next(g for g in response.json()['data']['groups'] if g['title'] == title)
+        return next(c['plan'] for c in group['metrics'] if c['code'] == 'revenue')
+
+    # The month the branch was still ours keeps both plans and the network sum of them.
+    assert revenue_plan(august, 'Leaves') == 500.0
+    assert revenue_plan(august, 'Сеть') == 1500.0
+    # After the handover its plan is gone and the network counts only the branch that stayed.
+    assert revenue_plan(september, 'Leaves') is None
+    assert revenue_plan(september, 'Сеть') == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_reporting_end_does_not_demand_sync_coverage_past_the_handover(async_session):
+    """Syncing stops when the branch leaves, so coverage must stop being demanded there.
+
+    Without the clamp the period straddling the handover reads partial forever: the state
+    can never grow past the last day the branch was synced.
+    """
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1, reporting_end_date=date(2025, 8, 31)),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add(
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 8, 10), attendance=1)
+    )
+    await async_session.flush()
+    async_session.add(SyncSourceState(
+        company_id=1,
+        source=dashboard_service.PERSONAL_ACCOUNT_SOURCE,
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 8, 31),
+        synced_at=datetime(2025, 9, 1, 3, 0),
+    ))
+    await async_session.commit()
+
+    assert await dashboard_service._source_coverage_status(
+        async_session, date(2025, 8, 1), date(2025, 9, 30), 1, None,
+    ) == ('ready', [])
+
+    # A period entirely past the handover certifies nothing: its zeroes are not facts.
+    assert await dashboard_service._source_coverage_status(
+        async_session, date(2025, 9, 1), date(2025, 9, 30), 1, None,
+    ) == ('partial', ['personal_account_topups'])
+
+    # The clamp must not degenerate into "always ready": a gap inside the window is a gap.
+    state = (await async_session.execute(
+        select(SyncSourceState).where(SyncSourceState.company_id == 1)
+    )).scalars().one()
+    state.period_end = date(2025, 7, 31)
+    await async_session.commit()
+    assert await dashboard_service._source_coverage_status(
+        async_session, date(2025, 8, 1), date(2025, 9, 30), 1, None,
+    ) == ('partial', ['personal_account_topups'])
+
+
+@pytest.mark.asyncio
 async def test_year_over_year_history_can_start_with_direct_revenue_only(
     async_session,
     monkeypatch,
@@ -8681,6 +8950,78 @@ async def test_manual_opz_respects_the_branch_reporting_start(async_session):
         for cell in plan_before.json()['data']['parent_group']['metrics']
     }
     assert plan_cells['opz_qty']['fact'] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_manual_facts_respect_the_branch_reporting_end(async_session):
+    """A month after the branch left counts nowhere, and the editor says so up front.
+
+    The stored value stays visible and editable: the branch was still ours when somebody
+    typed it, and hiding it would leave a number nobody can see or correct.
+    """
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(
+        id=1,
+        title='Salon',
+        group_id=1,
+        reporting_end_date=date(2025, 8, 31),
+    ))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.flush()
+    async_session.add_all([
+        ManualFactMetric(
+            period_start=date(2025, 7, 1),
+            period_end=date(2025, 7, 31),
+            company_id=1,
+            staff_id=2,
+            metric_code='opz_qty',
+            value=4.0,
+            updated_at=datetime(2025, 7, 20, 10, 0, 0),
+        ),
+        ManualFactMetric(
+            period_start=date(2025, 9, 1),
+            period_end=date(2025, 9, 30),
+            company_id=1,
+            staff_id=2,
+            metric_code='opz_qty',
+            value=6.0,
+            updated_at=datetime(2025, 9, 20, 10, 0, 0),
+        ),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        before_handover = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-07-01', 'end_date': '2025-07-31', 'company_id': 1},
+        )
+        after_handover = await client.get(
+            '/dashboard/widget/summary',
+            params={'start_date': '2025-09-01', 'end_date': '2025-09-30', 'company_id': 1},
+        )
+        editor_before = await client.get(
+            '/dashboard/plan/opz_fact',
+            params={'month': '2025-07', 'company_id': 1},
+        )
+        editor_after = await client.get(
+            '/dashboard/plan/opz_fact',
+            params={'month': '2025-09', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
+
+    assert before_handover.json()['data']['visit_metrics']['opz_qty'] == 4.0
+    assert after_handover.json()['data']['visit_metrics']['opz_qty'] == 0.0
+
+    assert editor_before.json()['data']['manual_total'] == 4.0
+    after_rows = editor_after.json()['data']
+    assert after_rows['rows'][0]['value'] == 6.0
+    assert after_rows['rows'][0]['counted'] is False
+    assert after_rows['manual_total'] == 0.0
 
 
 @pytest.mark.asyncio

@@ -58,6 +58,9 @@ class Company(Base):
     # Upstream keeps records that predate the branch opening (test bookings, a previous
     # location on the same YClients id). Reports must not treat them as branch history.
     reporting_start_date = Column(Date)
+    # Last day the branch belongs to this tenant, inclusive. A branch that leaves keeps its
+    # history here — deleting the `portal_branches` row would take the history with it.
+    reporting_end_date = Column(Date)
 
     __table_args__ = (
         Index(

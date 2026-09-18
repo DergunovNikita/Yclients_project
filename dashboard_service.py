@@ -15,6 +15,7 @@ from typing import Any, Literal, Optional, get_args
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import Date as SQLDate
+from sqlalchemy import DateTime as SQLDateTime
 from sqlalchemy import (
     String,
     Time as SQLTime,
@@ -342,7 +343,7 @@ async def _local_appointments_breakdown(
         Appointment.date >= start,
         Appointment.date <= end,
         business_appointment_condition(),
-        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
     if factual_at is not None:
         filters.append(_appointment_factual_at_condition(factual_at))
@@ -448,13 +449,13 @@ async def _fetch_appointments_breakdown(
             factual_at,
         )
 
-    # Upstream record stats know nothing about the reporting start, so a scope with a
+    # Upstream record stats know nothing about the reporting window, so a scope with a
     # cutoff would show untrimmed record cards next to trimmed KPIs and charts. The local
-    # counts are not simply "upstream minus pre-cutoff rows" — they also drop waitlist and
-    # administrator records — so switching per period would put two periods of the same
+    # counts are not simply "upstream minus out-of-window rows" — they also drop waitlist
+    # and administrator records — so switching per period would put two periods of the same
     # scope on different definitions and let a subset report more records than its
     # superset. The choice is therefore made per scope, not per period.
-    if db is not None and await fetch_reporting_start_dates(db, company_ids):
+    if db is not None and await fetch_reporting_windows(db, company_ids):
         return await _local_appointments_breakdown(
             db, company_ids, start, end, staff_id, factual_at
         )
@@ -676,64 +677,109 @@ def day_window(column, start: date, end: date):
     return (column >= start, column < end + timedelta(days=1))
 
 
-def reporting_start_clause(company_column, day_expr):
-    """Drop facts dated before the branch's configured reporting start.
+@dataclass(frozen=True)
+class ReportingWindow:
+    """Days a branch's facts belong to its tenant. Both bounds are inclusive, both optional.
 
-    Branches without `reporting_start_date` keep their full upstream history. The
-    floor is per branch, so a multi-branch scope still cuts each branch at its own
-    opening instead of at the earliest one in the scope.
+    `start` trims records that predate the branch opening (test bookings, a previous
+    location on the same YClients id). `end` trims a branch that left the tenant: the
+    history stays readable, everything after the handover stops counting.
+    """
+
+    start: date | None = None
+    end: date | None = None
+
+    def covers(self, day: date) -> bool:
+        return not (
+            (self.start is not None and day < self.start)
+            or (self.end is not None and day > self.end)
+        )
+
+    def intersect(self, start: date, end: date) -> tuple[date, date] | None:
+        """The part of [start, end] this branch reports on, or None when they do not meet."""
+        low = max(start, self.start) if self.start is not None else start
+        high = min(end, self.end) if self.end is not None else end
+        return (low, high) if low <= high else None
+
+
+def _reporting_day(day_expr):
+    """The calendar day of a fact, for comparing against an inclusive window bound.
+
+    Half the call sites pass a `timestamp` column. The lower bound survives that by luck —
+    an instant on the opening day is still not before midnight of that day — but the upper
+    bound would drop the closing day whole: 31.08 14:30 is greater than 31.08. Normalising
+    here rather than at every call site is what keeps a new query from forgetting it.
+    """
+    return func.date(day_expr) if isinstance(day_expr.type, SQLDateTime) else day_expr
+
+
+def reporting_window_clause(company_column, day_expr):
+    """Drop facts dated outside the branch's configured reporting window.
+
+    Branches without a window keep their full upstream history. The window is per branch,
+    so a multi-branch scope still cuts each branch at its own opening and its own departure
+    instead of at one date for the whole scope. Both bounds are inclusive days.
     """
     branch = aliased(Company)
+    day = _reporting_day(day_expr)
     # NOT EXISTS lets PostgreSQL plan an anti-join against the tiny companies table
-    # instead of re-running a scalar subquery for every fact row. Both a missing
-    # reporting start and a NULL fact date make the inner comparison NULL, so the
-    # row is kept rather than silently dropped. The IS NOT NULL test is redundant for
-    # correctness but lets the planner discard branches without a cutoff up front, so
-    # tenants that never configure one probe an empty anti-join.
+    # instead of re-running a scalar subquery for every fact row. A missing bound and a
+    # NULL fact date both make the comparison NULL, so the row is kept rather than silently
+    # dropped. The IS NOT NULL test is redundant for correctness but is a filter on
+    # `companies` alone, so the planner can drop branches without any cutoff before the
+    # join and tenants that never configure one probe an empty anti-join.
     return ~exists(
         select(1)
         .select_from(branch)
         .where(
             branch.id == company_column,
-            branch.reporting_start_date.is_not(None),
-            day_expr < branch.reporting_start_date,
+            or_(
+                branch.reporting_start_date.is_not(None),
+                branch.reporting_end_date.is_not(None),
+            ),
+            or_(
+                day < branch.reporting_start_date,
+                day > branch.reporting_end_date,
+            ),
         )
     )
 
 
-async def fetch_reporting_start_dates(
+async def fetch_reporting_windows(
     db: AsyncSession,
     company_ids: list[int],
-) -> dict[int, date]:
-    """Configured reporting start per branch, omitting branches without one.
+) -> dict[int, ReportingWindow]:
+    """Configured reporting window per branch, omitting branches without one.
 
     Cached on the session, which lives for one request: plan/fact asks per branch and
     would otherwise pay a round trip each time for a table of a few rows.
     """
     if not company_ids:
         return {}
-    cache: dict[int, date | None] = db.info.setdefault('reporting_start_dates', {})
+    cache: dict[int, ReportingWindow] = db.info.setdefault('reporting_windows', {})
     unknown = [int(company_id) for company_id in company_ids if int(company_id) not in cache]
     if unknown:
         rows = (
             await db.execute(
-                select(Company.id, Company.reporting_start_date).where(Company.id.in_(unknown))
+                select(Company.id, Company.reporting_start_date, Company.reporting_end_date)
+                .where(Company.id.in_(unknown))
             )
         ).all()
         found = {
-            int(row.id): (
-                _coerce_date(row.reporting_start_date)
-                if row.reporting_start_date is not None
-                else None
+            int(row.id): ReportingWindow(
+                start=_coerce_date(row.reporting_start_date) if row.reporting_start_date else None,
+                end=_coerce_date(row.reporting_end_date) if row.reporting_end_date else None,
             )
             for row in rows
         }
         # Cache the misses too, so branches without a cutoff stop being re-queried.
-        cache.update({company_id: found.get(company_id) for company_id in unknown})
+        cache.update(
+            {company_id: found.get(company_id, ReportingWindow()) for company_id in unknown}
+        )
     return {
         int(company_id): cache[int(company_id)]
         for company_id in company_ids
-        if cache.get(int(company_id)) is not None
+        if cache[int(company_id)] != ReportingWindow()
     }
 
 
@@ -806,7 +852,7 @@ def _appt_revenue_filters(
         Appointment.date >= start,
         Appointment.date <= end,
         business_appointment_condition(),
-        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -832,7 +878,7 @@ def _goods_revenue_filters(
         GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
         *day_window(GoodTransaction.date, start, end),
         _business_staff_id_condition(GoodTransaction.master_id),
-        reporting_start_clause(GoodTransaction.company_id, GoodTransaction.date),
+        reporting_window_clause(GoodTransaction.company_id, GoodTransaction.date),
     ]
     scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -910,8 +956,8 @@ def _service_paid_filters(
         # numerator and denominator on the same side of the cutoff; the payment clause
         # keeps revenue — which is bucketed by payment date — out of years the branch
         # predates. Every path that sums service revenue must apply both.
-        reporting_start_clause(Appointment.company_id, Appointment.date),
-        reporting_start_clause(FinancialTransaction.company_id, FinancialTransaction.date),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(FinancialTransaction.company_id, FinancialTransaction.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -941,7 +987,7 @@ def _goods_paid_filters(
         FinancialTransaction.amount > 0,
         *day_window(FinancialTransaction.date, start, end),
         _business_financial_master_condition(factual_at),
-        reporting_start_clause(FinancialTransaction.company_id, FinancialTransaction.date),
+        reporting_window_clause(FinancialTransaction.company_id, FinancialTransaction.date),
     ]
     scope = _company_scope_clause(FinancialTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -1053,7 +1099,7 @@ async def _source_coverage_status(
     )
     if not company_ids:
         return 'partial', ['personal_account_topups']
-    reporting_starts = await fetch_reporting_start_dates(db, company_ids)
+    reporting_windows = await fetch_reporting_windows(db, company_ids)
     covered_ranges = {
         int(row.company_id): (_coerce_date(row.period_start), _coerce_date(row.period_end))
         for row in (
@@ -1071,18 +1117,20 @@ async def _source_coverage_status(
     }
     reportable = 0
     for item_company_id in company_ids:
-        # A branch contributes no facts before its reporting start, so demanding sync
-        # coverage from earlier would degrade a period the branch simply predates.
-        branch_start = reporting_starts.get(item_company_id)
-        if branch_start is not None and branch_start > end:
+        # A branch contributes no facts outside its reporting window, so demanding sync
+        # coverage there would degrade a period the branch simply predates — or one that
+        # runs past its departure, where syncing stopped on purpose.
+        window = reporting_windows.get(item_company_id)
+        required = window.intersect(start, end) if window is not None else (start, end)
+        if required is None:
             continue
         reportable += 1
-        required_start = max(start, branch_start) if branch_start is not None else start
+        required_start, required_end = required
         covered = covered_ranges.get(item_company_id)
-        if covered is None or covered[0] > required_start or covered[1] < end:
+        if covered is None or covered[0] > required_start or covered[1] < required_end:
             return 'partial', ['personal_account_topups']
     if not reportable:
-        # Every branch in scope opened after this period; there is nothing to certify,
+        # Every branch in scope is outside this period; there is nothing to certify,
         # so do not present the resulting zeroes as factual.
         return 'partial', ['personal_account_topups']
     return 'ready', []
@@ -1102,7 +1150,7 @@ async def _average_check_block(
         Appointment.date >= dr.start,
         Appointment.date <= dr.end,
         business_appointment_condition(),
-        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, company_ids)
     if scope is not None:
@@ -1132,7 +1180,7 @@ async def _average_check_block(
         GoodTransaction.document_id.is_not(None),
         *day_window(GoodTransaction.date, dr.start, dr.end),
         _business_staff_id_condition(GoodTransaction.master_id),
-        reporting_start_clause(GoodTransaction.company_id, GoodTransaction.date),
+        reporting_window_clause(GoodTransaction.company_id, GoodTransaction.date),
     ]
     scope = _company_scope_clause(GoodTransaction.company_id, company_id, company_ids)
     if scope is not None:
@@ -1152,7 +1200,7 @@ async def _average_check_block(
         FinancialTransaction.amount > 0,
         *day_window(FinancialTransaction.date, dr.start, dr.end),
         _physical_account_condition(),
-        reporting_start_clause(FinancialTransaction.company_id, FinancialTransaction.date),
+        reporting_window_clause(FinancialTransaction.company_id, FinancialTransaction.date),
     ]
     if factual_at is not None:
         base_payment_filters.append(FinancialTransaction.date <= factual_at)
@@ -1164,7 +1212,7 @@ async def _average_check_block(
         business_appointment_condition(),
         # Visit anchor on top of the payment anchor already in base_payment_filters,
         # so this matches _service_paid_filters exactly.
-        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, company_ids)
     if scope is not None:
@@ -1316,7 +1364,7 @@ async def _client_visit_frequency_block(
         Appointment.attendance == COMPLETED_ATTENDANCE,
         Appointment.client_id.is_not(None),
         business_appointment_condition(),
-        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -1405,7 +1453,7 @@ async def _client_recency_block(
         Appointment.attendance == COMPLETED_ATTENDANCE,
         Appointment.client_id.is_not(None),
         business_appointment_condition(),
-        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
     if scope is not None:
         scope_filters.append(scope)
@@ -2413,7 +2461,7 @@ async def fetch_year_over_year_facts(
         _physical_account_condition(),
         _business_financial_master_condition(factual_at),
         direct_component,
-        reporting_start_clause(FinancialTransaction.company_id, payment_day_expr),
+        reporting_window_clause(FinancialTransaction.company_id, payment_day_expr),
     ]
     direct_scope = _company_scope_clause(
         FinancialTransaction.company_id, company_id, allowed_company_ids
@@ -2481,8 +2529,8 @@ async def fetch_year_over_year_facts(
         # Both anchors, matching _service_paid_filters. Without the visit anchor a
         # payment this report already excludes would still widen the appointment
         # coverage this year demands, blanking the branch's opening year.
-        reporting_start_clause(FinancialTransaction.company_id, payment_day_expr),
-        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(FinancialTransaction.company_id, payment_day_expr),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
     dependency_scope = _company_scope_clause(
         FinancialTransaction.company_id, company_id, allowed_company_ids
@@ -2708,7 +2756,7 @@ async def fetch_revenue_daily(
             _physical_account_condition(),
             _business_financial_master_condition(factual_at),
             _personal_account_condition(),
-            reporting_start_clause(FinancialTransaction.company_id, payment_day),
+            reporting_window_clause(FinancialTransaction.company_id, payment_day),
         ]
         topup_scope = _company_scope_clause(
             FinancialTransaction.company_id, company_id, allowed_company_ids
@@ -3937,7 +3985,7 @@ async def _opz_events(
         # OPZ event whose denominator visit is excluded, inflating opz_pct. Cutting the
         # anchor is enough: a rebooking made before the reporting start can only anchor
         # on an earlier visit, which this same clause already removes.
-        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
     if factual_at is not None:
         visit_filters.append(_appointment_factual_at_condition(factual_at))
@@ -4864,9 +4912,9 @@ async def _staff_schedule_coverage_info(
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
     factual_at = factual_at or factual_now()
-    reporting_start, state = (
+    reporting_start, reporting_end, state = (
         await db.execute(
-            select(Company.reporting_start_date, SyncSourceState)
+            select(Company.reporting_start_date, Company.reporting_end_date, SyncSourceState)
             .outerjoin(
                 SyncSourceState,
                 and_(
@@ -4882,8 +4930,13 @@ async def _staff_schedule_coverage_info(
             select(func.min(Appointment.date)).where(Appointment.company_id == company_id)
         ) or date.today()
     first_reportable_date = max(start, _coerce_date(reporting_start))
+    # A branch that left the tenant stops being synced, so schedule coverage must not be
+    # demanded past its last day — it would never arrive and the period would read partial.
+    last_reportable_date = (
+        min(end, _coerce_date(reporting_end)) if reporting_end is not None else end
+    )
     required_start = first_reportable_date - timedelta(days=1)
-    no_reportable_period = _coerce_date(reporting_start) > end
+    no_reportable_period = first_reportable_date > last_reportable_date
     invalid_event_timestamps = False
     if not no_reportable_period:
         invalid_event_timestamps = bool(
@@ -4893,7 +4946,7 @@ async def _staff_schedule_coverage_info(
                         select(1).where(
                             _appt_revenue_filters(
                                 first_reportable_date,
-                                end,
+                                last_reportable_date,
                                 company_id,
                                 factual_at=factual_at,
                             ),
@@ -4906,7 +4959,7 @@ async def _staff_schedule_coverage_info(
     covered = (no_reportable_period or (
         state is not None
         and _coerce_date(state.period_start) <= required_start
-        and _coerce_date(state.period_end) >= end
+        and _coerce_date(state.period_end) >= last_reportable_date
     )) and not invalid_event_timestamps
     missing_sources = []
     if invalid_event_timestamps:
@@ -4914,13 +4967,13 @@ async def _staff_schedule_coverage_info(
     if not no_reportable_period and (
         state is None
         or _coerce_date(state.period_start) > required_start
-        or _coerce_date(state.period_end) < end
+        or _coerce_date(state.period_end) < last_reportable_date
     ):
         missing_sources.append(STAFF_SCHEDULE_SOURCE)
     return {
         'ready': covered,
         'required_start': required_start,
-        'required_end': end,
+        'required_end': last_reportable_date,
         'covered_start': _coerce_date(state.period_start) if state is not None else None,
         'covered_end': _coerce_date(state.period_end) if state is not None else None,
         'missing_sources': missing_sources,
@@ -5269,7 +5322,7 @@ async def _admin_clients_by_finished_appointments(
         Appointment.date >= start,
         Appointment.date <= end,
         Appointment.attendance == COMPLETED_ATTENDANCE,
-        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
     if barber_staff_ids:
         appointment_filters.append(Appointment.staff_id.in_(barber_staff_ids))
@@ -5468,7 +5521,7 @@ async def _staff_fact_components_by_branch(
                 FinancialTransaction.company_id == company_id,
                 _physical_account_condition(),
                 _business_financial_master_condition(factual_at),
-                reporting_start_clause(FinancialTransaction.company_id, FinancialTransaction.date),
+                reporting_window_clause(FinancialTransaction.company_id, FinancialTransaction.date),
                 or_(
                     FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
                     _personal_account_condition(),
@@ -5618,6 +5671,10 @@ async def _plan_metric_components_by_company(
             PlanMetric.company_id.in_(company_ids),
             PlanMetric.staff_id.is_(None),
             PlanMetric.metric_code.in_(metric_codes),
+            # A plan for a period outside the branch's window is not the tenant's to meet:
+            # its facts are trimmed, so counting the plan alone would read as a total miss
+            # and drag the whole network's execution down with it.
+            reporting_window_clause(PlanMetric.company_id, PlanMetric.period_end),
         )
     )
     rows = (await db.execute(stmt)).all()
@@ -5648,6 +5705,7 @@ async def _plan_metric_components_by_staff(
             PlanMetric.company_id == company_id,
             PlanMetric.staff_id.in_(staff_ids),
             PlanMetric.metric_code.in_(metric_codes),
+            reporting_window_clause(PlanMetric.company_id, PlanMetric.period_end),
         )
     )
     rows = (await db.execute(stmt)).all()
@@ -5772,7 +5830,7 @@ async def _manual_fact_values(
             ManualFactMetric.period_end <= window_end,
             tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(pairs),
             ManualFactMetric.metric_code == metric_code,
-            reporting_start_clause(ManualFactMetric.company_id, ManualFactMetric.period_end),
+            reporting_window_clause(ManualFactMetric.company_id, ManualFactMetric.period_end),
         )
         .group_by(ManualFactMetric.company_id, ManualFactMetric.staff_id)
     )
@@ -5844,7 +5902,7 @@ async def _manual_fact_rows_for_role_periods(
                 ManualFactMetric.period_end >= period_start,
                 tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(pairs),
                 ManualFactMetric.metric_code == metric_code,
-                reporting_start_clause(
+                reporting_window_clause(
                     ManualFactMetric.company_id,
                     ManualFactMetric.period_end,
                 ),
@@ -8056,21 +8114,22 @@ async def _countable_manual_opz_keys(
 ) -> set[tuple[int, int]]:
     """(branch, staff) pairs whose value for this month would reach the reports.
 
-    Answered from the roles and the reporting-start date alone, without looking at what is
+    Answered from the roles and the reporting window alone, without looking at what is
     stored: the editor has to warn before a value is typed, not after it is saved.
     """
     if not company_ids:
         return set()
-    # Same cut as `reporting_start_clause(company_id, period_end)`, in Python: the flag is
-    # answered before a row exists, so there is nothing to filter in SQL.
-    reporting_starts = await fetch_reporting_start_dates(db, company_ids)
+    # Same cut as `reporting_window_clause(company_id, period_end)`, in Python: the flag is
+    # answered before a row exists, so there is nothing to filter in SQL. The month is
+    # anchored on its last day on both sides, exactly as that clause anchors the stored row.
+    reporting_windows = await fetch_reporting_windows(db, company_ids)
     role_periods = await _administrator_role_periods_by_company(
         db, month_start, month_end, company_ids
     )
     keys: set[tuple[int, int]] = set()
     for company_id, staff_periods in role_periods.items():
-        reporting_start = reporting_starts.get(int(company_id))
-        if reporting_start is not None and month_end < reporting_start:
+        window = reporting_windows.get(int(company_id))
+        if window is not None and not window.covers(month_end):
             continue
         for staff_id, periods in staff_periods.items():
             if any(
@@ -8699,8 +8758,8 @@ async def fetch_branches(
     if allowed is not None:
         stmt = stmt.where(Company.id.in_(allowed))
     rows = (await db.execute(stmt)).scalars().all()
-    # reporting_start_date is read-only here, but without it a trimmed branch looks
-    # identical to an untrimmed one and the cutoff is only visible in the database.
+    # Both dates are read-only here, but without them a trimmed branch looks identical to
+    # an untrimmed one and the cutoff is only visible in the database.
     return [
         {
             'id': c.id,
@@ -8708,6 +8767,9 @@ async def fetch_branches(
             'group_id': c.group_id,
             'reporting_start_date': (
                 c.reporting_start_date.isoformat() if c.reporting_start_date else None
+            ),
+            'reporting_end_date': (
+                c.reporting_end_date.isoformat() if c.reporting_end_date else None
             ),
         }
         for c in rows

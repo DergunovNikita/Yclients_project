@@ -39,11 +39,12 @@ from dashboard_service import (
     fetch_plan_fact,
     fetch_revenue_daily,
     fetch_summary,
-    fetch_reporting_start_dates,
+    fetch_reporting_windows,
     fetch_top_services,
     fetch_year_over_year_facts,
     day_window,
-    reporting_start_clause,
+    ReportingWindow,
+    reporting_window_clause,
 )
 from models import (
     AccountCatalog,
@@ -860,7 +861,7 @@ def _appointment_conditions(
     conditions = [
         Appointment.date <= end,
         business_appointment_condition(),
-        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
     if start is not None:
         conditions.append(Appointment.date >= start)
@@ -961,7 +962,7 @@ async def _year_over_year_activity_bounds(
             ),
         ),
         business_appointment_condition(),
-        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -989,8 +990,8 @@ async def _year_over_year_activity_bounds(
         _physical_account_condition(),
         # Both anchors, matching _service_paid_filters — the payment clause is what
         # stops this bound from opening a year the branch predates.
-        reporting_start_clause(Appointment.company_id, Appointment.date),
-        reporting_start_clause(FinancialTransaction.company_id, payment_day),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(FinancialTransaction.company_id, payment_day),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -1037,7 +1038,7 @@ async def _year_over_year_activity_bounds(
         _business_financial_master_condition(now),
         _physical_account_condition(),
         direct_component,
-        reporting_start_clause(FinancialTransaction.company_id, payment_day),
+        reporting_window_clause(FinancialTransaction.company_id, payment_day),
     ]
     scope = _company_scope_clause(FinancialTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -1066,7 +1067,7 @@ async def _year_over_year_activity_bounds(
         GoodTransaction.date <= now,
         GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
         _business_staff_id_condition(GoodTransaction.master_id),
-        reporting_start_clause(GoodTransaction.company_id, goods_day),
+        reporting_window_clause(GoodTransaction.company_id, goods_day),
     ]
     scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -1151,26 +1152,29 @@ def _year_over_year_missing_sources(
     period_end: date,
     required_sources: tuple[str, ...] = YOY_ANNUAL_SOURCES,
     appointment_dependencies: dict[int, tuple[date, date]] | None = None,
-    reporting_starts: dict[int, date] | None = None,
+    reporting_windows: dict[int, ReportingWindow] | None = None,
 ) -> list[str]:
     missing = set()
     for item_company_id in scope_company_ids:
-        # A branch contributes no facts before its reporting start, so demanding sync
-        # coverage from earlier would blank a year the branch simply predates — and a
+        # A branch contributes no facts outside its reporting window, so demanding sync
+        # coverage there would blank a year the branch simply predates or has left — and a
         # branch that did not exist yet has no coverage to demand at all.
         # Unlike _source_coverage_status, which answers for a user-chosen range and calls
-        # a fully predating period uncertifiable, the years here are derived from already
-        # trimmed facts — a year every branch predates never reaches this function.
-        branch_start = (reporting_starts or {}).get(item_company_id)
-        if branch_start is not None and branch_start > period_end:
-            continue
-        branch_period_start = (
-            max(period_start, branch_start) if branch_start is not None else period_start
+        # a fully unreportable period uncertifiable, the years here are derived from already
+        # trimmed facts — a year outside every branch's window never reaches this function.
+        window = (reporting_windows or {}).get(item_company_id)
+        reportable = (
+            window.intersect(period_start, period_end)
+            if window is not None
+            else (period_start, period_end)
         )
+        if reportable is None:
+            continue
+        branch_period_start, branch_period_end = reportable
         for source in required_sources:
             state = state_by_key.get((item_company_id, source))
             required_start = branch_period_start
-            required_end = period_end
+            required_end = branch_period_end
             if source == 'appointments_detail' and appointment_dependencies:
                 dependency = appointment_dependencies.get(item_company_id)
                 if dependency is not None:
@@ -1305,7 +1309,7 @@ def _monthly_yoy_rows(
     state_by_key: dict[tuple[int, str], SyncSourceState],
     scope_company_ids: list[int],
     appointment_dependencies: dict[int, dict[int, tuple[date, date]]] | None = None,
-    reporting_starts: dict[int, date] | None = None,
+    reporting_windows: dict[int, ReportingWindow] | None = None,
 ) -> list[dict[str, Any]]:
     months = list(range(1, 13))
     monthly = {
@@ -1341,7 +1345,7 @@ def _monthly_yoy_rows(
                 slice_end,
                 YOY_MONTHLY_SOURCES,
                 (appointment_dependencies or {}).get(month),
-                reporting_starts,
+                reporting_windows,
             )
             if in_activity_period
             else []
@@ -1472,7 +1476,7 @@ async def _year_over_year_payload(
         latest_fact_year=activity_end.year,
     )
     state_by_key = await _year_over_year_source_states(db, scope_company_ids)
-    reporting_starts = await fetch_reporting_start_dates(db, scope_company_ids)
+    reporting_windows = await fetch_reporting_windows(db, scope_company_ids)
     fact_rows = await fetch_year_over_year_facts(
         db,
         activity_start,
@@ -1538,7 +1542,7 @@ async def _year_over_year_payload(
             period_start,
             period_end,
             appointment_dependencies=fact_rows['appointment_dependencies']['annual'].get(year),
-            reporting_starts=reporting_starts,
+            reporting_windows=reporting_windows,
         )
         opz_missing = _year_over_year_missing_sources(
             state_by_key,
@@ -1547,7 +1551,7 @@ async def _year_over_year_payload(
             period_end,
             required_sources=('appointments_detail',),
             appointment_dependencies=opz_dependencies_by_year.get(year),
-            reporting_starts=reporting_starts,
+            reporting_windows=reporting_windows,
         )
         year_row['missing_components'] = sorted({
             *year_row['missing_components'],
@@ -1576,7 +1580,7 @@ async def _year_over_year_payload(
             state_by_key,
             scope_company_ids,
             fact_rows['appointment_dependencies']['monthly'].get(year),
-            reporting_starts,
+            reporting_windows,
         )
 
     year_rows = _with_year_changes(year_rows)
@@ -2622,7 +2626,7 @@ async def _last_staff_by_client(
         _appointment_factual_at_condition(factual_at),
         # This query has no date floor of its own, so it guards itself: today's callers
         # only pass clients that already have a reportable visit, but nothing enforces it.
-        reporting_start_clause(Appointment.company_id, Appointment.date),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -2784,7 +2788,7 @@ async def _goods_payload(
         *day_window(GoodTransaction.date, start, end),
         GoodTransaction.date <= factual_at,
         _business_staff_id_condition(GoodTransaction.master_id),
-        reporting_start_clause(GoodTransaction.company_id, GoodTransaction.date),
+        reporting_window_clause(GoodTransaction.company_id, GoodTransaction.date),
     ]
     scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
     if scope is not None:
@@ -3318,7 +3322,7 @@ async def _nps_payload(
     base['missing_sources'] = ['telegram_nps']
     conditions = [
         *day_window(Comment.date, start, end),
-        reporting_start_clause(Comment.company_id, Comment.date),
+        reporting_window_clause(Comment.company_id, Comment.date),
     ]
     scope = _company_scope_clause(Comment.company_id, company_id, allowed_company_ids)
     if scope is not None:
