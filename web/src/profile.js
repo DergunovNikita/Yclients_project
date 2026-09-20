@@ -1,5 +1,5 @@
 import './auth.css';
-import { authFetch, hasSessionHint, logout, requireAuthRedirect } from './auth.js';
+import { authFetch, hasSessionHint, logout, requireAuthRedirect, USER_ADMIN_ROLES } from './auth.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 document.documentElement.lang = getLocale();
@@ -8,7 +8,7 @@ mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListene
 
 // Exactly the roles `/auth/admin/*` accepts (USER_ADMIN_ROLES). Offering the page to anyone
 // else only leads to a 403 behind a button that looks like it works.
-const ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
+const ADMIN_ROLES = new Set(USER_ADMIN_ROLES);
 
 const changePasswordModal = document.getElementById('change-password-modal');
 const passwordErrorEl = document.getElementById('password-error');

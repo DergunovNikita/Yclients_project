@@ -17,14 +17,6 @@ from yclients_credentials import YClientsCredentialValue, load_credentials_for_c
 YCLIENTS_BASE_URL = 'https://api.yclients.com/api/v1'
 MAX_CONCURRENT_ANALYTICS_REQUESTS = 4
 
-# Backward-compatible test hooks. Runtime analytics credentials are loaded from
-# system.yclients_credentials.
-PARTNER_TOKEN = ''
-LOGIN = ''
-PASSWORD = ''
-USER_LOGIN = ''
-USER_PASSWORD = ''
-
 
 class YClientsAnalyticsError(RuntimeError):
     """Raised when exact appointment analytics cannot be loaded or validated."""

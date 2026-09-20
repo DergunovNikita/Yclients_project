@@ -7,6 +7,7 @@ import {
   logout,
   requireAuthRedirect,
   setSelectedPortalAccountId,
+  USER_ADMIN_ROLES,
 } from './auth.js';
 import { buildCsv } from './adminSecurity.js';
 import { escapeHtml } from './html.js';
@@ -115,7 +116,7 @@ const STAFF_ACCOUNT_ROLES = ['admin', 'barber'];
 // Exactly the roles `/auth/admin/*` accepts. A `manager` used to pass this gate and then get
 // 403 from every request on the page, leaving the chrome — search box, "Create user" — on
 // screen above an error banner, because `applyAdminMeta()` never ran to hide it.
-const ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
+const ADMIN_ROLES = new Set(USER_ADMIN_ROLES);
 
 let users = [];
 let branches = [];
@@ -156,6 +157,20 @@ function showSuccess(message) {
   hideAlerts();
   successEl.textContent = message;
   successEl.hidden = false;
+}
+
+// Busy state is identical everywhere a button drives one async action; error display is not
+// (each caller shows it in a different place), so that part stays in the caller's own try/catch
+// around this call.
+async function withBusyButton(button, action) {
+  button.disabled = true;
+  button.classList.add('is-loading');
+  try {
+    return await action();
+  } finally {
+    button.disabled = false;
+    button.classList.remove('is-loading');
+  }
 }
 
 function rolesForEdit(user) {
@@ -510,33 +525,30 @@ async function distributeCredentials() {
     return;
   }
 
-  distributeCredentialsBtn.disabled = true;
-  distributeCredentialsBtn.classList.add('is-loading');
   try {
-    const payload = await authFetch('/auth/admin/distribute-credentials', {
-      method: 'POST',
-      body: JSON.stringify({ user_ids: userIds }),
+    await withBusyButton(distributeCredentialsBtn, async () => {
+      const payload = await authFetch('/auth/admin/distribute-credentials', {
+        method: 'POST',
+        body: JSON.stringify({ user_ids: userIds }),
+      });
+      const { sent_count: sentCount, skipped, errors } = payload.data || {};
+      const parts = [t('admin.sentEmailsCount', { count: sentCount || 0 })];
+      if (skipped?.length) {
+        parts.push(t('admin.skippedEmailsCount', { count: skipped.length }));
+      }
+      if (errors?.length) {
+        parts.push(t('admin.errorsCount', { count: errors.length }));
+      }
+      credentialsSuccessEl.textContent = parts.join('. ');
+      credentialsSuccessEl.hidden = false;
+      if (errors?.length) {
+        credentialsErrorEl.textContent = errors.map((item) => `${item.email}: ${item.reason}`).join('; ');
+        credentialsErrorEl.hidden = false;
+      }
     });
-    const { sent_count: sentCount, skipped, errors } = payload.data || {};
-    const parts = [t('admin.sentEmailsCount', { count: sentCount || 0 })];
-    if (skipped?.length) {
-      parts.push(t('admin.skippedEmailsCount', { count: skipped.length }));
-    }
-    if (errors?.length) {
-      parts.push(t('admin.errorsCount', { count: errors.length }));
-    }
-    credentialsSuccessEl.textContent = parts.join('. ');
-    credentialsSuccessEl.hidden = false;
-    if (errors?.length) {
-      credentialsErrorEl.textContent = errors.map((item) => `${item.email}: ${item.reason}`).join('; ');
-      credentialsErrorEl.hidden = false;
-    }
   } catch (error) {
     credentialsErrorEl.textContent = error.message;
     credentialsErrorEl.hidden = false;
-  } finally {
-    distributeCredentialsBtn.disabled = false;
-    distributeCredentialsBtn.classList.remove('is-loading');
   }
 }
 
@@ -740,25 +752,22 @@ async function loadInitialPasswords() {
 
 async function resendInvite(userId, button) {
   if (!userId) return;
-  button.disabled = true;
-  button.classList.add('is-loading');
   try {
-    const payload = await authFetch('/auth/admin/distribute-credentials', {
-      method: 'POST',
-      body: JSON.stringify({ user_ids: [userId] }),
+    await withBusyButton(button, async () => {
+      const payload = await authFetch('/auth/admin/distribute-credentials', {
+        method: 'POST',
+        body: JSON.stringify({ user_ids: [userId] }),
+      });
+      const { sent_count: sentCount, errors } = payload.data || {};
+      if (errors?.length) {
+        showError(errors.map((item) => `${item.email || item.user_id}: ${item.reason}`).join('; '));
+      } else {
+        showSuccess(t('admin.sentEmailsCount', { count: sentCount || 0 }));
+      }
+      await loadInitialPasswords();
     });
-    const { sent_count: sentCount, errors } = payload.data || {};
-    if (errors?.length) {
-      showError(errors.map((item) => `${item.email || item.user_id}: ${item.reason}`).join('; '));
-    } else {
-      showSuccess(t('admin.sentEmailsCount', { count: sentCount || 0 }));
-    }
-    await loadInitialPasswords();
   } catch (error) {
     showError(error.message);
-  } finally {
-    button.disabled = false;
-    button.classList.remove('is-loading');
   }
 }
 
@@ -931,22 +940,19 @@ async function loadUsers() {
 async function provisionAllAccounts() {
   if (!canManageUsers()) return;
   hideAlerts();
-  provisionAccountsBtn.disabled = true;
-  provisionAccountsBtn.classList.add('is-loading');
   try {
-    const payload = await authFetch('/auth/admin/provision-accounts', { method: 'POST' });
-    const { created_count: count, created, errors } = payload.data || {};
-    if (created?.length) {
-      showCredentialsModal(created);
-    }
-    const skippedCount = errors?.length || 0;
-    showSuccess(t('admin.accountsCreated', { count: count || 0, skipped: skippedCount ? t('admin.skippedNoRealEmail', { count: skippedCount }) : '' }));
-    await Promise.all([loadUsers(), loadInitialPasswords()]);
+    await withBusyButton(provisionAccountsBtn, async () => {
+      const payload = await authFetch('/auth/admin/provision-accounts', { method: 'POST' });
+      const { created_count: count, created, errors } = payload.data || {};
+      if (created?.length) {
+        showCredentialsModal(created);
+      }
+      const skippedCount = errors?.length || 0;
+      showSuccess(t('admin.accountsCreated', { count: count || 0, skipped: skippedCount ? t('admin.skippedNoRealEmail', { count: skippedCount }) : '' }));
+      await Promise.all([loadUsers(), loadInitialPasswords()]);
+    });
   } catch (error) {
     showError(error.message);
-  } finally {
-    provisionAccountsBtn.disabled = false;
-    provisionAccountsBtn.classList.remove('is-loading');
   }
 }
 
@@ -1113,25 +1119,22 @@ editStaffForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!editingStaffId) return;
   hideFieldError(editStaffErrorEl);
-  saveStaffBtn.disabled = true;
-  saveStaffBtn.classList.add('is-loading');
   try {
-    await authFetch(`/auth/admin/staff/${editingStaffId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        full_name: editStaffName.value.trim(),
-        position: editStaffPosition.value.trim() || null,
-        company_id: Number(editStaffBranchSelect.value),
-      }),
+    await withBusyButton(saveStaffBtn, async () => {
+      await authFetch(`/auth/admin/staff/${editingStaffId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          full_name: editStaffName.value.trim(),
+          position: editStaffPosition.value.trim() || null,
+          company_id: Number(editStaffBranchSelect.value),
+        }),
+      });
+      closeEditStaffModal();
+      showSuccess(t('admin.changesSaved'));
+      await loadUsers();
     });
-    closeEditStaffModal();
-    showSuccess(t('admin.changesSaved'));
-    await loadUsers();
   } catch (error) {
     showFieldError(editStaffErrorEl, error.message);
-  } finally {
-    saveStaffBtn.disabled = false;
-    saveStaffBtn.classList.remove('is-loading');
   }
 });
 
@@ -1155,100 +1158,91 @@ editForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!editingUserId) return;
   hideFieldError(editErrorEl);
-  saveBtn.disabled = true;
-  saveBtn.classList.add('is-loading');
   try {
-    const company_ids = Array.from(editBranchSelect.selectedOptions).map((option) => Number(option.value));
-    await authFetch(`/auth/admin/users/${editingUserId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        email: editEmail.value.trim(),
-        full_name: editName.value.trim() || null,
-        role: editRoleSelect.value,
-        company_ids,
-      }),
+    await withBusyButton(saveBtn, async () => {
+      const company_ids = Array.from(editBranchSelect.selectedOptions).map((option) => Number(option.value));
+      await authFetch(`/auth/admin/users/${editingUserId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          email: editEmail.value.trim(),
+          full_name: editName.value.trim() || null,
+          role: editRoleSelect.value,
+          company_ids,
+        }),
+      });
+      closeEditModal();
+      showSuccess(t('admin.changesSaved'));
+      await loadUsers();
     });
-    closeEditModal();
-    showSuccess(t('admin.changesSaved'));
-    await loadUsers();
   } catch (error) {
     showFieldError(editErrorEl, error.message);
-  } finally {
-    saveBtn.disabled = false;
-    saveBtn.classList.remove('is-loading');
   }
 });
 
 async function testDraftYclientsCredential() {
   hideYclientsCredentialsError();
-  testYclientsCredentialDraftBtn.disabled = true;
-  testYclientsCredentialDraftBtn.classList.add('is-loading');
   try {
-    await authFetch('/auth/admin/yclients-credentials/test', {
-      method: 'POST',
-      body: JSON.stringify({
-        partner_token: yclientsCredentialPartnerToken.value.trim(),
-        login: yclientsCredentialLogin.value.trim(),
-        password: yclientsCredentialPassword.value,
-      }),
+    await withBusyButton(testYclientsCredentialDraftBtn, async () => {
+      await authFetch('/auth/admin/yclients-credentials/test', {
+        method: 'POST',
+        body: JSON.stringify({
+          partner_token: yclientsCredentialPartnerToken.value.trim(),
+          login: yclientsCredentialLogin.value.trim(),
+          password: yclientsCredentialPassword.value,
+        }),
+      });
+      showSuccess(t('admin.credentialsValid'));
     });
-    showSuccess(t('admin.credentialsValid'));
   } catch (error) {
     showYclientsCredentialsError(error.message);
-  } finally {
-    testYclientsCredentialDraftBtn.disabled = false;
-    testYclientsCredentialDraftBtn.classList.remove('is-loading');
   }
 }
 
 async function saveYclientsCredential(event) {
   event.preventDefault();
   hideYclientsCredentialsError();
-  saveYclientsCredentialBtn.disabled = true;
-  saveYclientsCredentialBtn.classList.add('is-loading');
   try {
-    const company_ids = Array.from(yclientsCredentialBranchSelect.selectedOptions)
-      .map((option) => Number(option.value));
-    const body = {
-      title: yclientsCredentialTitle.value.trim(),
-      is_active: yclientsCredentialActive.checked,
-      company_ids,
-    };
-    if (isPlatformAdmin()) {
-      const portalAccountId = selectedPortalAccountId();
-      if (!portalAccountId) {
-        throw new Error(t('admin.selectTenantForCredentials'));
+    await withBusyButton(saveYclientsCredentialBtn, async () => {
+      const company_ids = Array.from(yclientsCredentialBranchSelect.selectedOptions)
+        .map((option) => Number(option.value));
+      const body = {
+        title: yclientsCredentialTitle.value.trim(),
+        is_active: yclientsCredentialActive.checked,
+        company_ids,
+      };
+      if (isPlatformAdmin()) {
+        const portalAccountId = selectedPortalAccountId();
+        if (!portalAccountId) {
+          throw new Error(t('admin.selectTenantForCredentials'));
+        }
+        body.portal_account_id = Number(portalAccountId);
       }
-      body.portal_account_id = Number(portalAccountId);
-    }
-    if (yclientsCredentialPartnerToken.value.trim()) {
-      body.partner_token = yclientsCredentialPartnerToken.value.trim();
-    }
-    if (yclientsCredentialLogin.value.trim()) {
-      body.login = yclientsCredentialLogin.value.trim();
-    }
-    if (yclientsCredentialPassword.value) {
-      body.password = yclientsCredentialPassword.value;
-    }
-    if (!editingYclientsCredentialId && (!body.partner_token || !body.login || !body.password)) {
-      throw new Error(t('admin.newCredentialsRequired'));
-    }
-    const editedCredentialId = editingYclientsCredentialId;
-    const url = editedCredentialId
-      ? `/auth/admin/yclients-credentials/${editedCredentialId}`
-      : '/auth/admin/yclients-credentials';
-    await authFetch(url, {
-      method: editedCredentialId ? 'PATCH' : 'POST',
-      body: JSON.stringify(body),
+      if (yclientsCredentialPartnerToken.value.trim()) {
+        body.partner_token = yclientsCredentialPartnerToken.value.trim();
+      }
+      if (yclientsCredentialLogin.value.trim()) {
+        body.login = yclientsCredentialLogin.value.trim();
+      }
+      if (yclientsCredentialPassword.value) {
+        body.password = yclientsCredentialPassword.value;
+      }
+      if (!editingYclientsCredentialId && (!body.partner_token || !body.login || !body.password)) {
+        throw new Error(t('admin.newCredentialsRequired'));
+      }
+      const editedCredentialId = editingYclientsCredentialId;
+      const url = editedCredentialId
+        ? `/auth/admin/yclients-credentials/${editedCredentialId}`
+        : '/auth/admin/yclients-credentials';
+      await authFetch(url, {
+        method: editedCredentialId ? 'PATCH' : 'POST',
+        body: JSON.stringify(body),
+      });
+      resetYclientsCredentialForm();
+      showSuccess(editedCredentialId ? t('admin.credentialsUpdated') : t('admin.credentialsSaved'));
+      await loadYclientsCredentials();
     });
-    resetYclientsCredentialForm();
-    showSuccess(editedCredentialId ? t('admin.credentialsUpdated') : t('admin.credentialsSaved'));
-    await loadYclientsCredentials();
   } catch (error) {
     showYclientsCredentialsError(error.message);
-  } finally {
-    saveYclientsCredentialBtn.disabled = false;
-    saveYclientsCredentialBtn.classList.remove('is-loading');
   }
 }
 
@@ -1294,31 +1288,28 @@ yclientsCredentialsBody?.addEventListener('click', async (event) => {
 createForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   hideFieldError(createErrorEl);
-  createBtn.disabled = true;
-  createBtn.classList.add('is-loading');
   try {
-    const company_ids = Array.from(createBranchSelect.selectedOptions).map((option) => Number(option.value));
-    const portal_account_id = selectedPortalAccountId();
-    const payload = await authFetch('/auth/admin/users', {
-      method: 'POST',
-      body: JSON.stringify({
-        email: createEmail.value.trim(),
-        password: createPassword.value || null,
-        full_name: createName.value.trim() || null,
-        role: createRoleSelect.value,
-        portal_account_id: portal_account_id ? Number(portal_account_id) : null,
-        company_ids,
-      }),
+    await withBusyButton(createBtn, async () => {
+      const company_ids = Array.from(createBranchSelect.selectedOptions).map((option) => Number(option.value));
+      const portal_account_id = selectedPortalAccountId();
+      const payload = await authFetch('/auth/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: createEmail.value.trim(),
+          password: createPassword.value || null,
+          full_name: createName.value.trim() || null,
+          role: createRoleSelect.value,
+          portal_account_id: portal_account_id ? Number(portal_account_id) : null,
+          company_ids,
+        }),
+      });
+      closeCreateModal();
+      showCredentialsModal([payload.data]);
+      showSuccess(t('admin.userCreated', { email: payload.data.email }));
+      await Promise.all([loadUsers(), loadInitialPasswords()]);
     });
-    closeCreateModal();
-    showCredentialsModal([payload.data]);
-    showSuccess(t('admin.userCreated', { email: payload.data.email }));
-    await Promise.all([loadUsers(), loadInitialPasswords()]);
   } catch (error) {
     showFieldError(createErrorEl, error.message);
-  } finally {
-    createBtn.disabled = false;
-    createBtn.classList.remove('is-loading');
   }
 });
 

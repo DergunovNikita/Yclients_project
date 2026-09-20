@@ -100,11 +100,19 @@ async def deactivate_portal_user_staff(db: AsyncSession, portal_user_id: int) ->
     )
 
 
-async def sync_all_portal_users_staff(db: AsyncSession) -> None:
-    """Ensure staff rows exist for all portal users that should appear in worker filters."""
+async def sync_all_portal_users_staff(db: AsyncSession, portal_account_id: int | None = None) -> None:
+    """Ensure staff rows exist for all portal users that should appear in worker filters.
+
+    Pass `portal_account_id` to scope the walk to one tenant — every caller with a resolved
+    tenant should, so a request against tenant A never writes and commits Staff rows for
+    tenant B. Leave it unscoped only for a deliberate cross-tenant repair (e.g. a backfill).
+    """
     from auth_service import load_user_branch_ids
 
-    users = (await db.execute(select(PortalUser).order_by(PortalUser.id.asc()))).scalars().all()
+    stmt = select(PortalUser).order_by(PortalUser.id.asc())
+    if portal_account_id is not None:
+        stmt = stmt.where(PortalUser.portal_account_id == portal_account_id)
+    users = (await db.execute(stmt)).scalars().all()
     for user in users:
         if not portal_user_syncs_to_staff(user):
             continue

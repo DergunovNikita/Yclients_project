@@ -1,9 +1,10 @@
 from datetime import datetime
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
-from data_sources import YClientsDataSourceAdapter
+from data_sources import SOURCE_YCLIENTS, YClientsDataSourceAdapter, normalize_source_type
 from models import Company, Group, PortalAccount, PortalBranch
 
 
@@ -131,3 +132,20 @@ async def test_yclients_materialize_branches_scopes_external_ids_by_tenant(async
         (1, tenant_a_ids[0]),
         (2, tenant_b_ids[0]),
     ]
+
+
+def test_normalize_source_type_rejects_an_unsupported_source():
+    """`SUPPORTED_SOURCE_TYPES` is the gate every onboarding path goes through.
+
+    This assertion used to live in tests/test_file_import.py, which named `file_import`
+    specifically; that module is gone, but the gate it guarded still is the only thing
+    stopping an unknown `source_type` from reaching an adapter that cannot serve it.
+    """
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_source_type('gestionale_csv')
+    assert excinfo.value.status_code == 400
+    assert 'Unsupported source_type' in excinfo.value.detail
+
+    # The default and the only supported value both resolve without raising.
+    assert normalize_source_type(None) == SOURCE_YCLIENTS
+    assert normalize_source_type(' YClients ') == SOURCE_YCLIENTS

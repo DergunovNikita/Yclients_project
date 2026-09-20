@@ -1,4 +1,6 @@
 from datetime import date, datetime
+import csv
+import io
 import json
 import sys
 
@@ -14,6 +16,7 @@ from models import (
     Appointment,
     Comment,
     Company,
+    Good,
     GoodCatalog,
     GoodTransaction,
     Group,
@@ -22,6 +25,7 @@ from models import (
     PortalBranch,
     PortalUser,
     PortalUserBranch,
+    Service,
     ServiceCatalog,
     Staff,
     StaffSchedule,
@@ -195,6 +199,104 @@ async def test_groups_endpoint_scopes_jwt_users_to_accessible_branches(async_ses
 
     assert response.status_code == 200
     assert response.json()['data'] == [{'id': 1, 'title': 'Tenant A Group', 'companies_count': 1}]
+
+
+@pytest.mark.asyncio
+async def test_apply_company_scope_rejects_a_principal_with_no_branches(async_session, monkeypatch):
+    """apply_company_scope must refuse like its three siblings (build_company_scope,
+    require_sync_company_ids, require_client_pii_access) instead of compiling `column IN ()`
+    and silently answering 200 with an empty page for a portal user assigned to no branch."""
+    import auth_deps
+
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    async_session.add(Group(id=1, title='Group'))
+    async_session.add(Company(id=1, title='Branch', group_id=1))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    async_session.add(
+        PortalUser(
+            id=140,
+            portal_account_id=1,
+            email='branchless-manager@example.com',
+            password_hash=hash_password('Manager123!'),
+            full_name='Branchless Manager',
+            role='manager',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    # Deliberately no PortalUserBranch row: this user has zero assigned branches.
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(140, 'manager')
+    headers = {'Authorization': f'Bearer {token}'}
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        companies = await client.get('/companies', headers=headers)
+        staff = await client.get('/staff', headers=headers)
+        csv_export = await client.get('/export/csv/companies', headers=headers)
+        # /groups hand-rolls its own branch scoping instead of calling apply_company_scope
+        # and must refuse the same way, not fall through to a silent empty 200.
+        groups = await client.get('/groups', headers=headers)
+
+    app.dependency_overrides.clear()
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
+
+    for response in (companies, staff, csv_export, groups):
+        assert response.status_code == 403
+        assert response.json()['detail'] == 'No branch access assigned'
+
+
+@pytest.mark.asyncio
+async def test_stats_rejects_a_principal_with_no_branches(async_session, monkeypatch):
+    """/stats scopes most models through a local count_of() helper instead of calling
+    apply_company_scope directly. That helper must still refuse a zero-branch principal
+    instead of compiling `company_id IN ()` and returning zeroed counts as a 200 — the
+    same rule apply_company_scope itself enforces for every other listing endpoint.
+
+    Uses branch_admin (full money access by default) so the assertion isolates the branch
+    check from the separate financial-access gate /stats also enforces.
+    """
+    import auth_deps
+
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    async_session.add(Group(id=1, title='Group'))
+    async_session.add(Company(id=1, title='Branch', group_id=1))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    async_session.add(
+        PortalUser(
+            id=141,
+            portal_account_id=1,
+            email='branchless-branch-admin@example.com',
+            password_hash=hash_password('BranchAdmin123!'),
+            full_name='Branchless Branch Admin',
+            role='branch_admin',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    # Deliberately no PortalUserBranch row: this user has zero assigned branches.
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(141, 'branch_admin')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        stats = await client.get('/stats', headers={'Authorization': f'Bearer {token}'})
+
+    app.dependency_overrides.clear()
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
+
+    assert stats.status_code == 403
+    assert stats.json()['detail'] == 'No branch access assigned'
 
 
 @pytest.mark.asyncio
@@ -385,6 +487,88 @@ async def test_catalog_money_fields_are_hidden_from_non_financial_roles(async_se
     assert goods.json()['data'][0]['cost'] is None
     assert goods.json()['data'][0]['actual_cost'] is None
     assert filtered.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_csv_export_blanks_money_columns_for_non_financial_roles(async_session):
+    """/services and /goods (JSON) already redact price/cost by role; the CSV export of the
+    same four models did not, dumping every column to any authenticated role. Prices are
+    seeded NON-NULL here — the old CSV test used NULL prices, which is exactly why a leak of
+    an already-empty cell went unnoticed. The money column must survive in the CSV header;
+    only the value may be blanked, or a column-position parser downstream would break."""
+    async_session.add(Group(id=1, title='Group'))
+    async_session.add(Company(id=1, title='Branch', group_id=1))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    async_session.add(PortalBranch(portal_account_id=1, company_id=1))
+    async_session.add_all([
+        PortalUser(
+            id=151,
+            portal_account_id=1,
+            email='manager-csv@example.com',
+            password_hash=hash_password('Manager123!'),
+            full_name='Manager',
+            role='manager',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+        PortalUser(
+            id=152,
+            portal_account_id=1,
+            email='owner-csv@example.com',
+            password_hash=hash_password('Owner123!'),
+            full_name='Owner',
+            role='owner',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+    ])
+    async_session.add_all([
+        PortalUserBranch(user_id=151, company_id=1),
+        PortalUserBranch(user_id=152, company_id=1),
+    ])
+    async_session.add(Service(id=1, title='Haircut', price_min=1500.0, company_id=1))
+    async_session.add(
+        ServiceCatalog(company_id=1, service_id=10, title='Cut', price_min=1500.0, updated_at=datetime.utcnow())
+    )
+    async_session.add(Good(good_id=1, title='Wax', cost=100.0, actual_cost=80.0, company_id=1))
+    async_session.add(
+        GoodCatalog(company_id=1, good_id=20, title='Wax', cost=100.0, actual_cost=80.0, updated_at=datetime.utcnow())
+    )
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    manager_headers = {'Authorization': f'Bearer {create_access_token(151, "manager")}'}
+    owner_headers = {'Authorization': f'Bearer {create_access_token(152, "owner")}'}
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    cases = [
+        ('services', ['price_min']),
+        ('service_catalog', ['price_min']),
+        ('goods', ['cost', 'actual_cost']),
+        ('good_catalog', ['cost', 'actual_cost']),
+    ]
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        for table_name, money_columns in cases:
+            hidden = await client.get(f'/export/csv/{table_name}', headers=manager_headers)
+            visible = await client.get(f'/export/csv/{table_name}', headers=owner_headers)
+
+            assert hidden.status_code == 200, table_name
+            hidden_row = next(csv.DictReader(io.StringIO(hidden.text)))
+            for column in money_columns:
+                assert column in hidden_row, table_name  # header survives, column not dropped
+                assert hidden_row[column] == '', table_name  # value blanked, not the seeded number
+            assert hidden_row['title'] != '', table_name  # non-money columns unaffected
+
+            assert visible.status_code == 200, table_name
+            visible_row = next(csv.DictReader(io.StringIO(visible.text)))
+            for column in money_columns:
+                assert visible_row[column] != '', table_name
+
+    app.dependency_overrides.clear()
 
 
 async def _seed_client_pii_scope(async_session):
@@ -660,6 +844,57 @@ async def test_clients_csv_export_rejects_non_user_or_viewer_access(async_sessio
     assert api_key_only.json()['detail'] == 'Authentication required'
     assert viewer.status_code == 403
     assert viewer.json()['detail'] == 'Insufficient permissions'
+
+
+@pytest.mark.asyncio
+async def test_stats_scopes_group_count_to_accessible_branches(async_session):
+    """/stats re-implements tenant scoping ad hoc instead of going through apply_company_scope
+    for every model, and missed Group: it has no company_id of its own (a group is the parent
+    of several companies), so a restricted principal got the count of every tenant's groups,
+    not just their own. Compare against the unscoped (full-access) count to prove the fix
+    narrows the number rather than always returning the same total."""
+    async_session.add_all([
+        Group(id=1, title='Tenant A Group'),
+        Group(id=2, title='Tenant B Group'),
+        Company(id=1, title='Tenant A Branch', group_id=1),
+        Company(id=2, title='Tenant B Branch', group_id=2),
+        PortalAccount(id=1, label='Tenant A', created_at=datetime.utcnow()),
+        PortalBranch(portal_account_id=1, company_id=1),
+        PortalUser(
+            id=161,
+            portal_account_id=1,
+            email='branch-admin-stats@example.com',
+            password_hash=hash_password('BranchAdmin123!'),
+            full_name='Branch Admin',
+            role='branch_admin',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+        PortalUserBranch(user_id=161, company_id=1),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    token = create_access_token(161, 'branch_admin')
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        full_access = await client.get('/stats')
+        scoped = await client.get('/stats', headers={'Authorization': f'Bearer {token}'})
+
+    app.dependency_overrides.clear()
+
+    assert full_access.status_code == 200
+    assert full_access.json()['groups'] == 2
+    assert full_access.json()['companies'] == 2
+
+    assert scoped.status_code == 200
+    payload = scoped.json()
+    assert payload['groups'] == 1
+    assert payload['companies'] == 1
 
 
 @pytest.mark.asyncio

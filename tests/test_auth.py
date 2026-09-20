@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 import api
 import auth_routes
 import auth_sessions
+import yclients_credential_routes
 from api import app
 from auth_sessions import ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME
 from auth_service import TOKEN_PURPOSE_RESET, create_access_token, create_email_token, hash_password
@@ -2018,15 +2019,17 @@ async def test_create_yclients_credential_failures_are_sanitized_and_audited(
         def fail_credential_test(*_args, **_kwargs):
             raise failure
 
-        monkeypatch.setattr(auth_routes, '_test_source_credentials', fail_credential_test)
+        monkeypatch.setattr(yclients_credential_routes, '_test_source_credentials', fail_credential_test)
         company_ids = [1]
     else:
-        monkeypatch.setattr(auth_routes, '_test_source_credentials', lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(yclients_credential_routes, '_test_source_credentials', lambda *_args, **_kwargs: None)
 
         async def fail_company_discovery(*_args, **_kwargs):
             raise failure
 
-        monkeypatch.setattr(auth_routes, '_sync_credential_companies_from_yclients', fail_company_discovery)
+        monkeypatch.setattr(
+            yclients_credential_routes, '_sync_credential_companies_from_yclients', fail_company_discovery
+        )
         company_ids = []
 
     async def override_db():
@@ -3486,3 +3489,278 @@ async def test_me_ignores_a_staff_row_outside_the_assigned_branches(auth_db, mon
     # Whatever /auth/me promises, the editor must agree: no rows out of branch scope.
     assert editor.status_code == 200
     assert editor.json()['data']['rows'] == []
+
+
+@pytest.mark.asyncio
+async def test_unonboarded_owner_sees_no_users_from_other_tenants(auth_db, monkeypatch):
+    """`portal_account_id IS NULL` must not become a shared bucket for every fresh owner.
+
+    An owner who registered but has not onboarded yet has `portal_account_id = None`. A tenant
+    filter pushed into SQL as a plain `== active_portal_account_id` would compile to `IS NULL`
+    for this actor and match every other not-yet-onboarded owner across every tenant — the leak
+    this test pins closed for both admin listing endpoints.
+    """
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(
+        PortalUser(
+            id=55,
+            portal_account_id=None,
+            email='fresh.owner@example.com',
+            password_hash=hash_password('Fresh12345!'),
+            full_name='Fresh Owner',
+            role='owner',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add(
+        PortalUser(
+            id=56,
+            portal_account_id=None,
+            email='other.fresh.owner@example.com',
+            password_hash=hash_password('OtherFresh12345!'),
+            full_name='Other Fresh Owner',
+            role='owner',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    token = create_access_token(55, 'owner')
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        headers = {'Authorization': f'Bearer {token}'}
+        users = await client.get('/auth/admin/users', headers=headers)
+        passwords = await client.get('/auth/admin/initial-passwords', headers=headers)
+
+    app.dependency_overrides.clear()
+
+    assert users.status_code == 200
+    assert users.json()['data'] == []
+    assert passwords.status_code == 200
+    assert passwords.json()['data'] == []
+
+
+@pytest.mark.asyncio
+async def test_admin_list_users_staff_repair_is_scoped_to_its_own_tenant(auth_db, monkeypatch):
+    """The Staff mirror-row repair on GET /admin/users must not reach across tenants.
+
+    `provision_staff_account` can assign a staff member to multiple branches without syncing
+    the synthetic Staff mirror rows itself (see portal_account_provision.py); today that drift
+    is repaired by GET /admin/users. Scoping the repair to the caller's own tenant must not
+    strand tenant B's drift unrepaired forever — it stays reachable the next time tenant B's
+    own admin opens tenant B's own Users page.
+    """
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(Company(id=3, title='Branch 3', group_id=1))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
+    auth_db.add(
+        PortalUser(
+            id=60,
+            portal_account_id=2,
+            email='tenant-b-owner@example.com',
+            password_hash=hash_password('TenantBOwner12345!'),
+            full_name='Tenant B Owner',
+            role='owner',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add(
+        PortalUser(
+            id=62,
+            portal_account_id=2,
+            email='tenant-b-manager@example.com',
+            password_hash=hash_password('TenantBManager12345!'),
+            full_name='Tenant B Manager',
+            role='manager',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    # No Staff row yet — the drift `provision_staff_account` leaves behind for a
+    # multi-branch assignment, waiting on the next sync to create the mirror row.
+    auth_db.add(PortalUserBranch(user_id=62, company_id=3))
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    tenant_a_token = create_access_token(1, 'owner')
+    tenant_b_token = create_access_token(60, 'owner')
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        from_tenant_a = await client.get(
+            '/auth/admin/users',
+            headers={'Authorization': f'Bearer {tenant_a_token}'},
+        )
+        repaired_by_a = await auth_db.scalar(
+            select(func.count()).select_from(Staff).where(Staff.portal_user_id == 62)
+        )
+
+        from_tenant_b = await client.get(
+            '/auth/admin/users',
+            headers={'Authorization': f'Bearer {tenant_b_token}'},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert from_tenant_a.status_code == 200
+    # Tenant A's admin opening their own page must not write tenant B's Staff mirror row.
+    assert repaired_by_a == 0
+
+    assert from_tenant_b.status_code == 200
+    repaired_row = (
+        await auth_db.execute(select(Staff).where(Staff.portal_user_id == 62))
+    ).scalar_one()
+    # Tenant B's own admin opening their own page still repairs tenant B's own drift.
+    assert repaired_row.company_id == 3
+    assert repaired_row.fired == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_session_is_scoped_to_the_owning_user(auth_db, monkeypatch):
+    """DELETE /sessions/{id} must not let one user revoke another user's session."""
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    now = datetime.utcnow()
+    victim_session = PortalRefreshToken(
+        id=501,
+        user_id=1,
+        token_hash='victim-session-hash',
+        expires_at=now + timedelta(days=10),
+        last_used_at=now,
+        created_at=now,
+    )
+    auth_db.add(victim_session)
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    attacker_token = create_access_token(2, 'manager')  # a different user
+    owner_token = create_access_token(1, 'owner')  # the session's actual owner
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        attack = await client.delete('/auth/sessions/501', headers={'Authorization': f'Bearer {attacker_token}'})
+        still_present = await auth_db.scalar(
+            select(func.count()).select_from(PortalRefreshToken).where(PortalRefreshToken.id == 501)
+        )
+        own_delete = await client.delete('/auth/sessions/501', headers={'Authorization': f'Bearer {owner_token}'})
+
+    app.dependency_overrides.clear()
+
+    assert attack.status_code == 404
+    assert still_present == 1
+    assert own_delete.status_code == 200
+    removed = await auth_db.scalar(
+        select(func.count()).select_from(PortalRefreshToken).where(PortalRefreshToken.id == 501)
+    )
+    assert removed == 0
+
+
+@pytest.mark.asyncio
+async def test_logout_others_revokes_only_the_callers_own_other_sessions(auth_db, monkeypatch):
+    """POST /logout-others must only ever touch the caller's own sessions."""
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    now = datetime.utcnow()
+    other_own_session = PortalRefreshToken(
+        id=602,
+        user_id=1,
+        token_hash='other-own-device-hash',
+        expires_at=now + timedelta(days=10),
+        last_used_at=now,
+        created_at=now,
+    )
+    other_users_session = PortalRefreshToken(
+        id=603,
+        user_id=2,
+        token_hash='other-user-hash',
+        expires_at=now + timedelta(days=10),
+        last_used_at=now,
+        created_at=now,
+    )
+    auth_db.add_all([other_own_session, other_users_session])
+    await auth_db.commit()
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        login = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})
+        assert login.status_code == 200
+        csrf = client.cookies.get(AUTH_CSRF_COOKIE_NAME)
+        response = await client.post('/auth/logout-others', headers={'X-CSRF-Token': csrf})
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    remaining_ids = set((await auth_db.scalars(select(PortalRefreshToken.id))).all())
+    # The session /auth/login just created survives (it is "current"); the pre-existing other
+    # device belonging to the same user is revoked; user 2's unrelated session is untouched.
+    assert 602 not in remaining_ids
+    assert 603 in remaining_ids
+    assert len(remaining_ids) == 2
+
+
+@pytest.mark.asyncio
+async def test_resend_verification_only_emails_pending_unverified_accounts(auth_db, monkeypatch):
+    """POST /resend-verification must not leak whether an account exists or is verified."""
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    pending = PortalUser(
+        id=70,
+        portal_account_id=1,
+        email='pending@example.com',
+        password_hash=hash_password('Pending12345!'),
+        full_name='Pending User',
+        role='owner',
+        is_active=True,
+        email_verified_at=None,
+        created_at=datetime.utcnow(),
+    )
+    auth_db.add(pending)
+    await auth_db.commit()
+
+    sent = []
+
+    def _capture_email(to_email, subject, body):
+        sent.append(to_email)
+
+    monkeypatch.setattr('auth_service.send_auth_email', _capture_email)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        first = await client.post('/auth/resend-verification', json={'email': 'pending@example.com'})
+        second = await client.post('/auth/resend-verification', json={'email': 'pending@example.com'})
+        already_verified = await client.post('/auth/resend-verification', json={'email': 'admin@example.com'})
+        unknown = await client.post('/auth/resend-verification', json={'email': 'nobody@example.com'})
+
+    app.dependency_overrides.clear()
+
+    responses = [first, second, already_verified, unknown]
+    assert [r.status_code for r in responses] == [200, 200, 200, 200]
+    # Same generic message every time: the response must not reveal whether the account
+    # exists, is already verified, or was skipped by the resend cooldown.
+    messages = {r.json()['message'] for r in responses}
+    assert len(messages) == 1
+    # Only the first call for the pending account actually sends: the second is inside the
+    # resend cooldown, the verified account has nothing to verify, and the unknown email
+    # does not exist.
+    assert sent == ['pending@example.com']

@@ -114,7 +114,6 @@
     "barber": "Барбер"
   },
   "onboarding": {
-    "brandSuffix": "Подключение",
     "aside": {
       "title": "Подключите YClients",
       "subtitle": "2 шага: добавьте токены доступа и выберите филиалы для синхронизации."
@@ -195,7 +194,6 @@
     "credCreated2": "Интеграция создана. Филиалы подтянутся из YClients автоматически."
   },
   "profile": {
-    "brandSuffix": "Личный кабинет",
     "logout": "Выйти из аккаунта",
     "eyebrow": "Личный кабинет",
     "greeting": "Здравствуйте",
@@ -405,7 +403,6 @@
     "scaleCount": "количество",
     "scalePercent": "проценты",
     "topRevenue": "Топ-5 по выручке",
-    "topAverageCheck": "Топ-5 по СЧ",
     "goodsKpiCompletion": "Выполнение товарных KPI",
     "completionTooltip": "Выполнение: {value}",
     "diagnosticBarbers": "визиты барберов: {count}",
@@ -418,7 +415,6 @@
     "dataCheck": "Проверка данных",
     "noPlanForPeriod": "Нет плана за выбранный период",
     "noStaffForBranch": "Нет сотрудников для выбранного филиала",
-    "noStaffForPeriod": "Нет сотрудников за выбранный период",
     "planPeriodMeta": " · план {start} .. {end}",
     "staffPlural": "сотрудники",
     "networkAndBranches": "сеть и филиалы",
@@ -456,7 +452,6 @@
     "unsavedChangesMessage": "Вы точно хотите уйти с этой страницы? Все несохраненные изменения будут потеряны",
     "unsavedChangesLeave": "Перейти",
     "unsavedChangesStay": "Остаться",
-    "confirmDiscardPlanSettings": "Есть несохранённые изменения. Перейти без сохранения?",
     "confirmDiscardServiceManagement": "Есть несохранённые изменения в услугах. Перейти без сохранения?",
     "archivedName": "{name} (архив)",
     "noGroup": "Без группы",
@@ -571,7 +566,6 @@
     "search": "Поиск",
     "initialPasswordsSearchPlaceholder": "Email, имя, филиал, роль…",
     "colLoginEmail": "Логин (email)",
-    "colPassword": "Пароль",
     "colInviteSentAt": "Последнее приглашение",
     "credentialsTitle": "YClients credentials",
     "credentialsHint": "Секреты сохраняются в зашифрованном виде. После сохранения токены и пароли не отображаются.",
@@ -628,7 +622,6 @@
     "deleteIrreversible": "Это действие нельзя отменить — восстановить запись будет невозможно.",
     "loginLabel": "Логин",
     "saveCredentialsHint": "Используйте эти email для отправки безопасных ссылок задания пароля. Пароли в открытом виде не сохраняются.",
-    "passwordsSheet": "Приглашения",
     "noUserIdsForDistribution": "Нет идентификаторов пользователей для рассылки",
     "sentEmailsCount": "Отправлено писем: {count}",
     "resendInvite": "Повторить приглашение",

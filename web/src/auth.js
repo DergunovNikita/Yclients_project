@@ -1,5 +1,10 @@
 import { t } from './i18n.js';
 
+// Mirrors the backend's USER_ADMIN_ROLES (auth_hierarchy.py:26) — the only roles
+// `/auth/admin/*` accepts. Keep the two lists in sync by hand; nothing enforces that
+// automatically across the Python/JS boundary.
+export const USER_ADMIN_ROLES = ['platform_admin', 'owner', 'branch_admin'];
+
 const PORTAL_ACCOUNT_KEY = 'portal_account_id';
 const USER_EMAIL_KEY = 'portal_user_email';
 const CSRF_COOKIE_NAME = 'portal_csrf';

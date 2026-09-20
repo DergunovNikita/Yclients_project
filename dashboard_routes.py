@@ -6,7 +6,7 @@ import asyncio
 import logging
 from copy import deepcopy
 from datetime import date, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, BeforeValidator, Field, model_validator
@@ -669,7 +669,7 @@ async def dashboard_service_label_save(
             service_id,
             is_extra=payload.is_extra,
             allowed_company_ids=scope['branch_ids'],
-            portal_account_id=await _kpi_portal_account_id(db, ctx),
+            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -693,7 +693,7 @@ async def dashboard_service_kpi_assignment_save(
             service_id,
             group_id=payload.group_id,
             allowed_company_ids=scope['branch_ids'],
-            portal_account_id=await _kpi_portal_account_id(db, ctx),
+            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -991,21 +991,27 @@ async def dashboard_plan_settings_save(
     return {'success': True, 'data': data}
 
 
-@router.get('/plan/reviews_fact')
-async def dashboard_plan_reviews_fact(
-    month: str = Query(..., description='Reviews fact month in YYYY-MM format'),
-    company_id: int | None = Query(None),
-    staff_id: int | None = Query(None),
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
+async def _manual_fact_get(
+    db: AsyncSession,
+    ctx: AccessContext,
+    fetch_fn: Callable[..., Any],
+    month: str,
+    company_id: int | None,
+    staff_id: int | None,
+) -> dict[str, Any]:
+    """Shared read path for the reviews / additional-OPZ editors — only `fetch_fn` differs.
+
+    Scope is checked against the database (`_validate_dashboard_scope`) because the editor
+    must be able to say "unknown branch" before anyone types a value, unlike the save path
+    below, which validates rows against the staff/company keys it already owns.
+    """
     staff_keys = _require_manual_fact_access(ctx)
     scope = query_scope(ctx, company_id)
     _assert_manual_fact_staff_allowed(staff_keys, staff_id)
     await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
     branch_ids, force_allowed = user_branch_ids(ctx)
     try:
-        data = await fetch_manual_review_facts(
+        data = await fetch_fn(
             db,
             month,
             scope['company_id'],
@@ -1020,24 +1026,33 @@ async def dashboard_plan_reviews_fact(
     return {'success': True, 'data': data}
 
 
-@router.post('/plan/reviews_fact', dependencies=[Depends(forbid_demo)])
-async def dashboard_plan_reviews_fact_save(
-    payload: ManualReviewFactsPayload,
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
+async def _manual_fact_post(
+    db: AsyncSession,
+    ctx: AccessContext,
+    save_fn: Callable[..., Any],
+    month: str,
+    company_id: int | None,
+    staff_id: int | None,
+    items: list[Any],
+) -> dict[str, Any]:
+    """Shared write path for the reviews / additional-OPZ editors — only `save_fn` differs.
+
+    Deliberately does not call `_validate_dashboard_scope`, unlike `_manual_fact_get` above:
+    `save_fn` rejects any row whose (company_id, staff_id) is not a currently open one via
+    `ManualFactRowNotOpen`, so an unknown company or staff id is already refused downstream.
+    """
     staff_keys = _require_manual_fact_access(ctx)
-    scope = query_scope(ctx, payload.company_id)
-    _assert_manual_fact_staff_allowed(staff_keys, payload.staff_id)
-    _assert_manual_fact_rows_allowed(staff_keys, payload.items)
+    scope = query_scope(ctx, company_id)
+    _assert_manual_fact_staff_allowed(staff_keys, staff_id)
+    _assert_manual_fact_rows_allowed(staff_keys, items)
     branch_ids, force_allowed = user_branch_ids(ctx)
     try:
-        data = await save_manual_review_facts(
+        data = await save_fn(
             db,
-            payload.month,
+            month,
             scope['company_id'],
-            payload.staff_id,
-            [item.model_dump() for item in payload.items],
+            staff_id,
+            [item.model_dump() for item in items],
             allowed_company_ids=branch_ids,
             force_allowed=force_allowed,
             allowed_staff_keys=staff_keys,
@@ -1052,6 +1067,28 @@ async def dashboard_plan_reviews_fact_save(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}
+
+
+@router.get('/plan/reviews_fact')
+async def dashboard_plan_reviews_fact(
+    month: str = Query(..., description='Reviews fact month in YYYY-MM format'),
+    company_id: int | None = Query(None),
+    staff_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    return await _manual_fact_get(db, ctx, fetch_manual_review_facts, month, company_id, staff_id)
+
+
+@router.post('/plan/reviews_fact', dependencies=[Depends(forbid_demo)])
+async def dashboard_plan_reviews_fact_save(
+    payload: ManualReviewFactsPayload,
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    return await _manual_fact_post(
+        db, ctx, save_manual_review_facts, payload.month, payload.company_id, payload.staff_id, payload.items
+    )
 
 
 @router.get('/plan/opz_fact')
@@ -1062,25 +1099,7 @@ async def dashboard_plan_opz_fact(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    staff_keys = _require_manual_fact_access(ctx)
-    scope = query_scope(ctx, company_id)
-    _assert_manual_fact_staff_allowed(staff_keys, staff_id)
-    await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
-    branch_ids, force_allowed = user_branch_ids(ctx)
-    try:
-        data = await fetch_manual_opz_facts(
-            db,
-            month,
-            scope['company_id'],
-            staff_id,
-            allowed_company_ids=branch_ids,
-            force_allowed=force_allowed,
-            allowed_staff_keys=staff_keys,
-            portal_account_id=ctx.portal_account_id,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {'success': True, 'data': data}
+    return await _manual_fact_get(db, ctx, fetch_manual_opz_facts, month, company_id, staff_id)
 
 
 @router.post('/plan/opz_fact', dependencies=[Depends(forbid_demo)])
@@ -1089,32 +1108,9 @@ async def dashboard_plan_opz_fact_save(
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    staff_keys = _require_manual_fact_access(ctx)
-    scope = query_scope(ctx, payload.company_id)
-    _assert_manual_fact_staff_allowed(staff_keys, payload.staff_id)
-    _assert_manual_fact_rows_allowed(staff_keys, payload.items)
-    branch_ids, force_allowed = user_branch_ids(ctx)
-    try:
-        data = await save_manual_opz_facts(
-            db,
-            payload.month,
-            scope['company_id'],
-            payload.staff_id,
-            [item.model_dump() for item in payload.items],
-            allowed_company_ids=branch_ids,
-            force_allowed=force_allowed,
-            allowed_staff_keys=staff_keys,
-            actor_user_id=ctx.user_id,
-            portal_account_id=ctx.portal_account_id,
-        )
-    except ManualFactRowNotOpen as exc:
-        # The reason names staff and branch ids, and the SPA prints `detail` verbatim —
-        # the editors are open to rank-and-file staff now, so it belongs in the log.
-        logger.info('manual fact row not open for entry: %s', exc)
-        raise HTTPException(status_code=400, detail='Manual fact row is not open for entry') from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {'success': True, 'data': data}
+    return await _manual_fact_post(
+        db, ctx, save_manual_opz_facts, payload.month, payload.company_id, payload.staff_id, payload.items
+    )
 
 
 def _require_visibility_admin(ctx: AccessContext) -> None:

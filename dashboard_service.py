@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import re
 from bisect import bisect_right
@@ -34,7 +35,7 @@ from sqlalchemy import (
     tuple_,
     union_all,
 )
-from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError, SQLAlchemyError
+from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -77,6 +78,8 @@ from plan_config import (
     metrics_for_category,
     normalize_staff_category,
 )
+
+logger = logging.getLogger(__name__)
 
 GOODS_SALE_TYPE_ID = 1
 SERVICE_SOLD_ITEM_TYPE = 'service'
@@ -1133,6 +1136,33 @@ def _personal_account_condition():
     )
 
 
+def _topup_revenue_filters(
+    start: date,
+    end: date,
+    company_id: Optional[int],
+    staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
+    factual_at: Optional[datetime] = None,
+):
+    """Mirrors `_goods_paid_filters`: personal-account top-ups instead of goods sales."""
+    parts = [
+        FinancialTransaction.amount > 0,
+        *day_window(FinancialTransaction.date, start, end),
+        _physical_account_condition(),
+        _business_financial_master_condition(factual_at),
+        _personal_account_condition(),
+        reporting_window_clause(FinancialTransaction.company_id, FinancialTransaction.date),
+    ]
+    scope = _company_scope_clause(FinancialTransaction.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        parts.append(scope)
+    if staff_id is not None:
+        parts.append(_financial_staff_attribution_condition(staff_id))
+    if factual_at is not None:
+        parts.append(FinancialTransaction.date <= factual_at)
+    return and_(*parts)
+
+
 async def _source_coverage_status(
     db: AsyncSession,
     start: date,
@@ -1194,22 +1224,15 @@ async def _average_check_block(
     company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    visit_filters = [
-        Appointment.attendance == COMPLETED_ATTENDANCE,
-        Appointment.date >= dr.start,
-        Appointment.date <= dr.end,
-        business_appointment_condition(),
-        reporting_window_clause(Appointment.company_id, Appointment.date),
-    ]
-    scope = _company_scope_clause(Appointment.company_id, company_id, company_ids)
-    if scope is not None:
-        visit_filters.append(scope)
-    if created_user_id is not None:
-        visit_filters.append(Appointment.created_user_id == created_user_id)
-    elif staff_id is not None:
-        visit_filters.append(Appointment.staff_id == staff_id)
-    if factual_at is not None:
-        visit_filters.append(_appointment_factual_at_condition(factual_at))
+    visit_condition = _appt_revenue_filters(
+        dr.start,
+        dr.end,
+        company_id,
+        staff_id,
+        created_user_id=created_user_id,
+        allowed_company_ids=company_ids,
+        factual_at=factual_at,
+    )
 
     visit_row = (
         await db.execute(
@@ -1220,7 +1243,7 @@ async def _average_check_block(
                     func.sum(case((Appointment.client_id.is_(None), 1), else_=0)),
                     0,
                 ).label('appointments_without_client'),
-            ).where(*visit_filters)
+            ).where(visit_condition)
         )
     ).one()
 
@@ -1295,21 +1318,25 @@ async def _average_check_block(
     scope = _company_scope_clause(FinancialTransaction.company_id, company_id, company_ids)
     if scope is not None:
         direct_payment_filters.append(scope)
-    for name, condition, staff_condition in (
-        (
-            'goods_revenue',
-            FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
-            _financial_staff_attribution_condition(staff_id) if staff_id is not None else None,
-        ),
-        (
-            'topup_revenue',
-            _personal_account_condition(),
-            _financial_staff_attribution_condition(staff_id) if staff_id is not None else None,
-        ),
+    goods_metric_filters = [*direct_payment_filters, FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE]
+    if staff_id is not None and created_user_id is None:
+        goods_metric_filters.append(_financial_staff_attribution_condition(staff_id))
+    # _topup_revenue_filters is self-contained (it builds its own day window and scope), unlike
+    # the goods branch above which still shares direct_payment_filters with unclassified_filters.
+    topup_metric_filters = [
+        _topup_revenue_filters(
+            dr.start,
+            dr.end,
+            company_id,
+            staff_id if created_user_id is None else None,
+            company_ids,
+            factual_at,
+        )
+    ]
+    for name, metric_filters in (
+        ('goods_revenue', goods_metric_filters),
+        ('topup_revenue', topup_metric_filters),
     ):
-        metric_filters = [*direct_payment_filters, condition]
-        if staff_condition is not None and created_user_id is None:
-            metric_filters.append(staff_condition)
         classified_revenue[name] = float(
             await db.scalar(
                 select(func.coalesce(func.sum(FinancialTransaction.amount), 0.0))
@@ -1789,6 +1816,7 @@ async def _revenue_block(
     staff_id: Optional[int] = None,
     created_user_id: Optional[int] = None,
     include_goods: bool = True,
+    include_goods_revenue: bool = True,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
     extra_appointment_condition: Any = None,
@@ -1884,7 +1912,7 @@ async def _revenue_block(
         await _goods_paid_revenue_total(
             db, dr, company_id, staff_id, allowed_company_ids, factual_at
         )
-        if include_goods
+        if include_goods and include_goods_revenue
         else 0.0
     )
     goods_count = (
@@ -1964,6 +1992,7 @@ async def fetch_summary(
         current_dr,
         company_id,
         staff_id,
+        include_goods_revenue=False,
         allowed_company_ids=effective_company_ids,
         factual_at=factual_at,
     )
@@ -1972,6 +2001,7 @@ async def fetch_summary(
         prev_dr,
         company_id,
         staff_id,
+        include_goods_revenue=False,
         allowed_company_ids=effective_company_ids,
         factual_at=factual_at,
     )
@@ -2798,23 +2828,6 @@ async def fetch_revenue_daily(
             )
             .group_by(payment_day)
         )
-        topup_filters = [
-            FinancialTransaction.amount > 0,
-            payment_day >= start,
-            payment_day <= end,
-            _physical_account_condition(),
-            _business_financial_master_condition(factual_at),
-            _personal_account_condition(),
-            reporting_window_clause(FinancialTransaction.company_id, payment_day),
-        ]
-        topup_scope = _company_scope_clause(
-            FinancialTransaction.company_id, company_id, allowed_company_ids
-        )
-        if topup_scope is not None:
-            topup_filters.append(topup_scope)
-        if staff_id is not None:
-            topup_filters.append(_financial_staff_attribution_condition(staff_id))
-        topup_filters.append(FinancialTransaction.date <= factual_at)
         topup_stmt = (
             select(
                 payment_day.label('d'),
@@ -2828,7 +2841,7 @@ async def fetch_revenue_daily(
                     AccountCatalog.account_id == FinancialTransaction.account_id,
                 ),
             )
-            .where(*topup_filters)
+            .where(_topup_revenue_filters(start, end, company_id, staff_id, allowed_company_ids, factual_at))
             .group_by(payment_day)
         )
         svc_rows = (await db.execute(svc_stmt)).all()
@@ -3906,7 +3919,7 @@ async def _extra_service_revenue_by_staff(
     except SQLAlchemyError as error:
         # The other ranking variants are still usable, but a missing aggregate must
         # not be represented as a real zero.
-        print(f'extra-service revenue aggregation failed: {error}')
+        logger.warning('extra-service revenue aggregation failed: %s', error)
         await db.rollback()
         return None
     return {int(row.staff_id): float(row.revenue or 0.0) for row in rows}
@@ -4486,25 +4499,6 @@ def _merge_date_periods(periods: list[tuple[date, date]]) -> list[tuple[date, da
     return merged
 
 
-async def _administrator_role_periods_for_branch(
-    db: AsyncSession,
-    start: date,
-    end: date,
-    company_id: int,
-) -> list[tuple[date, date]]:
-    periods_by_company = await _administrator_role_periods_by_company(
-        db,
-        start,
-        end,
-        [company_id],
-    )
-    return _merge_date_periods([
-        period
-        for periods in periods_by_company.get(company_id, {}).values()
-        for period in periods
-    ])
-
-
 async def _administrator_role_periods_by_company(
     db: AsyncSession,
     start: date,
@@ -4935,29 +4929,6 @@ async def _administrator_service_scope(
     )
     cache[key] = result
     return result
-
-
-async def fetch_staff_service_attribution_status(
-    db: AsyncSession,
-    start: date,
-    end: date,
-    staff_id: Optional[int],
-    allowed_company_ids: Optional[list[int]] = None,
-    factual_at: Optional[datetime] = None,
-) -> dict[str, Any]:
-    scope = await _administrator_service_scope(
-        db,
-        start,
-        end,
-        staff_id,
-        allowed_company_ids,
-        factual_at,
-    )
-    return {
-        'mode': 'administrator_schedule' if scope.is_administrator else 'master',
-        'source_status': scope.source_status,
-        'missing_sources': list(scope.missing_sources),
-    }
 
 
 async def _staff_schedule_coverage_info(
@@ -6205,18 +6176,6 @@ async def _resolve_plan_period(
         if month_count:
             return month_start, month_end
 
-    exact_count = await db.scalar(
-        select(func.count())
-        .select_from(PlanMetric)
-        .where(
-            PlanMetric.period_start == start,
-            PlanMetric.period_end == end,
-            PlanMetric.company_id.in_(company_ids),
-        )
-    )
-    if exact_count:
-        return start, end
-
     return start, end
 
 
@@ -6876,6 +6835,25 @@ async def _branch_staff_role_context(
     return staff_rows, plans_by_staff, categories_by_staff_id, role_periods_by_staff
 
 
+def _segment_staff_by_category(
+    staff_ids: list[int],
+    segment_categories: dict[int, str],
+) -> tuple[list[int], list[int]]:
+    """Split one role segment's staff into administrators and barbers."""
+    admin_staff_ids = [sid for sid in staff_ids if segment_categories.get(sid) == 'administrator']
+    barber_staff_ids = [sid for sid in staff_ids if segment_categories.get(sid) == 'barber']
+    return admin_staff_ids, barber_staff_ids
+
+
+def _opz_events_in_window(
+    opz_events: list[OpzEvent],
+    window_start: date,
+    window_end: date,
+) -> list[OpzEvent]:
+    """OPZ events anchored inside one role segment's date window."""
+    return [event for event in opz_events if window_start <= event.event_date <= window_end]
+
+
 async def _admin_opz_by_staff_for_period(
     db: AsyncSession,
     start: date,
@@ -6908,18 +6886,10 @@ async def _admin_opz_by_staff_for_period(
         end,
         role_periods_by_staff,
     ):
-        admin_staff_ids = [
-            sid for sid in staff_ids if segment_categories.get(sid) == 'administrator'
-        ]
+        admin_staff_ids, barber_staff_ids = _segment_staff_by_category(staff_ids, segment_categories)
         if not admin_staff_ids:
             continue
-        barber_staff_ids = [
-            sid for sid in staff_ids if segment_categories.get(sid) == 'barber'
-        ]
-        segment_events = [
-            event for event in opz_events
-            if segment_start <= event.event_date <= segment_end
-        ]
+        segment_events = _opz_events_in_window(opz_events, segment_start, segment_end)
         counts = await _admin_opz_by_created_appointments(
             db,
             segment_start,
@@ -6977,14 +6947,7 @@ async def _staff_plan_groups_for_branch(
         end,
         role_periods_by_staff,
     ):
-        admin_staff_ids = [
-            sid for sid in staff_ids
-            if segment_categories.get(sid) == 'administrator'
-        ]
-        barber_staff_ids = [
-            sid for sid in staff_ids
-            if segment_categories.get(sid) == 'barber'
-        ]
+        admin_staff_ids, barber_staff_ids = _segment_staff_by_category(staff_ids, segment_categories)
         schedule_coverage = (
             await _staff_schedule_coverage_info(
                 db,
@@ -7008,10 +6971,7 @@ async def _staff_plan_groups_for_branch(
             barber_staff_ids or None,
             factual_at=factual_at,
         )
-        segment_opz_events = [
-            event for event in opz_events
-            if segment_start <= event.event_date <= segment_end
-        ]
+        segment_opz_events = _opz_events_in_window(opz_events, segment_start, segment_end)
         admin_opz_by_staff = await _admin_opz_by_created_appointments(
             db,
             segment_start,
@@ -7136,7 +7096,6 @@ async def fetch_staff(
     the branch cannot report on must not offer its people either. Without a period the
     whole scope is listed, which is what the callers that only administer staff want.
     """
-
     if force_allowed:
         allowed = allowed_company_ids or []
     elif allowed_company_ids is not None:
@@ -7792,7 +7751,10 @@ async def save_plan_settings(
         (row['company_id'], row['staff_id'], row['metric_code'])
         for row in legacy_plan_values
     }
-    now = datetime.now()
+    # factual_now(), not datetime.now(): updated_at feeds the newest-wins tie-break that
+    # decides a staff member's category (admin vs barber), and must use the same clock
+    # as the rest of the dashboard rather than the host's local time.
+    now = factual_now()
     await db.execute(
         delete(PlanBranchSetting).where(
             PlanBranchSetting.period_start == period_start,
@@ -8812,11 +8774,27 @@ async def fetch_plan_fact(
     }
 
 
+UNDEFINED_TABLE_SQLSTATE = '42P01'
+
+
 async def branch_company_ids(db: AsyncSession) -> Optional[list[int]]:
-    """If portal_branches has rows, return allowed company ids; else None (all companies)."""
+    """If portal_branches has rows, return allowed company ids; else None (all companies).
+
+    The catch is narrowed to a missing table (only a database stamped before migration 0004
+    lacks one) on purpose: two of this function's callers are POST paths that treat `None` as
+    "no restriction" and skip their own allow-check entirely, so swallowing a wider DBAPIError
+    (a dropped connection, a lock timeout) would silently turn a write-path authorization check
+    off instead of failing loudly. `ProgrammingError` alone is still Postgres's whole 42xxx
+    class — syntax errors and a revoked grant (`insufficient_privilege`) included, not just
+    undefined_table — so match the SQLSTATE and re-raise anything else in that class instead of
+    reading it as "no restriction" too.
+    """
     try:
         rows = await db.execute(select(PortalBranch.company_id).order_by(PortalBranch.id.asc()))
-    except (OperationalError, ProgrammingError, DBAPIError):
+    except ProgrammingError as exc:
+        if getattr(exc.orig, 'sqlstate', None) != UNDEFINED_TABLE_SQLSTATE:
+            raise
+        await db.rollback()
         return None
     company_ids = [row[0] for row in rows.all()]
     return company_ids or None

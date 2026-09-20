@@ -18,6 +18,7 @@ from auth_service import (
 )
 from models import PortalBranch, PortalUser, Staff
 from plan_config import normalize_staff_category
+from portal_staff_sync import list_unlinked_staff
 
 
 @dataclass
@@ -125,23 +126,6 @@ async def provision_staff_account(
     )
 
 
-async def list_unlinked_staff_for_provision(
-    db: AsyncSession,
-    allowed_company_ids: list[int] | None,
-) -> list[Staff]:
-    stmt = (
-        select(Staff)
-        .where(
-            Staff.fired == 0,
-            Staff.portal_user_id.is_(None),
-        )
-        .order_by(Staff.company_id.asc(), Staff.name.asc(), Staff.id.asc())
-    )
-    if allowed_company_ids is not None:
-        stmt = stmt.where(Staff.company_id.in_(allowed_company_ids))
-    return (await db.execute(stmt)).scalars().all()
-
-
 def role_for_staff(staff: Staff) -> str:
     """Label the account the way the CRM already labels the person.
 
@@ -155,7 +139,7 @@ async def provision_all_unlinked_staff(
     db: AsyncSession,
     allowed_company_ids: list[int] | None,
 ) -> tuple[list[ProvisionedAccount], list[str]]:
-    staff_rows = await list_unlinked_staff_for_provision(db, allowed_company_ids)
+    staff_rows = await list_unlinked_staff(db, allowed_company_ids)
     created: list[ProvisionedAccount] = []
     errors: list[str] = []
     for staff in staff_rows:

@@ -190,6 +190,25 @@ test('every protected page and report flow uses the shared session coordinator',
   assert.match(dashboardApiSource, /from ['"]\.\/auth\.js['"]/);
 });
 
+test('USER_ADMIN_ROLES pins the roles /auth/admin/* accepts and is shared, not re-copied', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  // Mirrors auth_hierarchy.py's USER_ADMIN_ROLES. Nothing enforces that automatically — this
+  // only pins the frontend side.
+  assert.deepEqual(auth.USER_ADMIN_ROLES, ['platform_admin', 'owner', 'branch_admin']);
+
+  const webRoot = new URL('..', import.meta.url);
+  for (const path of ['src/admin.js', 'src/profile.js', 'src/settings.js']) {
+    const source = await readFile(new URL(path, webRoot), 'utf8');
+    assert.ok(source.includes('USER_ADMIN_ROLES'), `${path} must reference the shared USER_ADMIN_ROLES constant`);
+    assert.ok(
+      !source.includes("['platform_admin', 'owner', 'branch_admin']"),
+      `${path} must not re-hardcode the admin role list`,
+    );
+  }
+});
+
 test('browser auth token detector catches split-string construction', () => {
   assert.deepEqual(
     forbiddenBrowserAuthTokens("headers[['Author', 'ization'].join('')] = ['Bear', 'er'].join('')"),

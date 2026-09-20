@@ -27,6 +27,14 @@
       font: inherit;
     }
 
+    /* Every other page loads auth.css, which carries this rule; the dashboard has no
+       <link> stylesheet at all, so any component class that sets its own `display`
+       (flex/grid/etc.) silently wins over the UA default for [hidden] unless this says
+       otherwise. Blanket rule instead of one patch per offending selector. */
+    [hidden] {
+      display: none !important;
+    }
+
     .shell {
       width: min(1180px, calc(100% - 32px));
       margin: 0 auto;
@@ -72,10 +80,6 @@
       margin-top: 2px;
     }
 
-    .user-profile[hidden] {
-      display: none !important;
-    }
-
     .user-profile__name {
       color: #334155;
       font-size: 12px;
@@ -108,10 +112,6 @@
       width: min(260px, 100%);
       margin-top: 4px;
       text-align: left;
-    }
-
-    .tenant-switcher[hidden] {
-      display: none !important;
     }
 
     .tenant-switcher label {
@@ -245,12 +245,6 @@
       text-decoration: none;
     }
 
-    /* `display` here outranks the UA rule for [hidden], so a tab the role may not open
-       stayed on screen until this said otherwise. */
-    .tab[hidden] {
-      display: none;
-    }
-
     .tab.active {
       border-color: #0f766e;
       background: #e6fffb;
@@ -288,10 +282,6 @@
       font-size: 12px;
       font-weight: 600;
       text-transform: uppercase;
-    }
-
-    label[hidden] {
-      display: none;
     }
 
     input,
@@ -1097,10 +1087,6 @@
       box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
     }
 
-    .floating-editor-save[hidden] {
-      display: none;
-    }
-
     .floating-editor-save__status {
       flex: 1 1 auto;
       min-width: 0;
@@ -1451,12 +1437,6 @@
       gap: 10px;
       grid-column: 1 / -1;
       align-items: end;
-    }
-
-    .report-compare-row[hidden],
-    .report-filter-row label[hidden],
-    .reports-toolbar[hidden] {
-      display: none !important;
     }
 
     .reports-metrics {

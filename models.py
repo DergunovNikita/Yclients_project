@@ -26,6 +26,15 @@ SYSTEM_SCHEMA = 'system'
 BigIntPK = BigInteger().with_variant(Integer, 'sqlite')
 
 
+def _source_type_column() -> Column:
+    """A fresh 'source_type' Column for one table.
+
+    A Column instance is bound to a single Table on assignment, so the 7 identical
+    columns below cannot share one module-level object — each call returns a new one.
+    """
+    return Column(String, nullable=False, default='yclients', server_default='yclients')
+
+
 class Group(Base):
     __tablename__ = 'groups'
 
@@ -50,7 +59,7 @@ class Company(Base):
     external_id = Column(Integer, index=True)
     title = Column(String, nullable=False)
     group_id = Column(Integer, ForeignKey('groups.id'), index=True)
-    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
+    source_type = _source_type_column()
     country = Column(String)
     locale = Column(String)
     currency = Column(String)
@@ -211,7 +220,7 @@ class Staff(Base):
 
     id = Column(Integer, primary_key=True)
     external_id = Column(Integer, index=True)
-    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
+    source_type = _source_type_column()
     name = Column(String, nullable=False)
     email = Column(String)
     specialization = Column(String)
@@ -237,7 +246,7 @@ class Client(Base):
 
     id = Column(Integer, primary_key=True)
     external_id = Column(Integer, index=True)
-    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
+    source_type = _source_type_column()
     name = Column(String, nullable=False)
     phone = Column(String, index=True)
     email = Column(String)
@@ -368,7 +377,7 @@ class Appointment(Base):
 
     id = Column(BigIntPK, primary_key=True)
     external_id = Column(BigInteger, index=True)
-    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
+    source_type = _source_type_column()
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
     staff_id = Column(Integer, index=True)
     client_id = Column(Integer, index=True)
@@ -412,7 +421,7 @@ class FinancialTransaction(Base):
 
     id = Column(BigIntPK, primary_key=True)
     external_id = Column(BigInteger, index=True)
-    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
+    source_type = _source_type_column()
     document_id = Column(BigInteger)
     expense_id = Column(Integer)
     expense_title = Column(String)
@@ -451,7 +460,7 @@ class GoodTransaction(Base):
 
     id = Column(BigIntPK, primary_key=True)
     external_id = Column(BigInteger, index=True)
-    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
+    source_type = _source_type_column()
     document_id = Column(BigInteger)
     type_id = Column(Integer)
     good_id = Column(BigInteger, index=True)
@@ -477,7 +486,7 @@ class Comment(Base):
 
     id = Column(BigIntPK, primary_key=True)
     external_id = Column(BigInteger, index=True)
-    source_type = Column(String, nullable=False, default='yclients', server_default='yclients')
+    source_type = _source_type_column()
     type = Column(String)
     master_id = Column(Integer, index=True)
     text = Column(Text)

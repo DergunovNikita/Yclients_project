@@ -12,7 +12,7 @@ from datetime import datetime
 
 from sqlalchemy import select
 
-from auth_service import hash_password, normalize_email
+from auth_service import PORTAL_PASSWORD_MIN_LENGTH, hash_password, normalize_email
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from database import init_database
 from models import PortalUser
@@ -29,8 +29,8 @@ def main() -> int:
     args = parse_args()
     email = normalize_email(args.email)
     password = args.password or getpass.getpass('New password: ')
-    if len(password) < 8:
-        print('Password must be at least 8 characters')
+    if len(password) < PORTAL_PASSWORD_MIN_LENGTH:
+        print(f'Password must be at least {PORTAL_PASSWORD_MIN_LENGTH} characters')
         return 2
 
     database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)

@@ -252,6 +252,10 @@ def collect_production_config_errors(
     errors: list[str] = []
     if _is_placeholder(auth_jwt_secret) or len(auth_jwt_secret.strip()) < 32:
         errors.append('AUTH_JWT_SECRET must be set to a strong non-default value')
+    # No length floor here, unlike AUTH_JWT_SECRET/PORTAL_CREDENTIALS_ENCRYPTION_KEY/API_KEY:
+    # the deployed token is shorter than 32 characters and the owner chose to keep it rather
+    # than rotate. Raising the floor would refuse to boot api, worker and migrate alike,
+    # since this runs at import time.
     if _is_placeholder(sync_api_token):
         errors.append('SYNC_API_TOKEN must be set to a non-default value')
     if _is_placeholder(db_password):

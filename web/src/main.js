@@ -262,6 +262,7 @@ const viewRequestScopes = {
   reviewFacts: createLatestRequestScope(),
   opzFacts: createLatestRequestScope(),
   branches: createLatestRequestScope(),
+  syncStatus: createLatestRequestScope(),
 };
 const viewsWithData = new Set();
 const HISTORY_POSITION_KEY = 'dashboardPosition';
@@ -2603,8 +2604,9 @@ function renderReviewFactEditor(data) {
   setReviewFactDirty(false);
 }
 
-function reviewFactFilters() {
-  const filter = filterEls.reviewFacts;
+// Shared bookkeeping for the review-fact and OPZ-fact editors: same filters (month/branch/
+// staff), same dirty-snapshot comparison against the input rows, same save-button rule.
+function manualFactFilterValues(filter) {
   return {
     month: filter.month.value,
     branch: filter.branch.value,
@@ -2612,28 +2614,56 @@ function reviewFactFilters() {
   };
 }
 
-function restoreReviewFactFilters() {
-  if (!reviewFactLoadedFilters) return;
-  const filter = filterEls.reviewFacts;
-  filter.month.value = reviewFactLoadedFilters.month;
-  filter.branch.value = reviewFactLoadedFilters.branch;
-  filter.staff.value = reviewFactLoadedFilters.staff;
+function restoreManualFactFilters(filter, loadedFilters) {
+  if (!loadedFilters) return;
+  filter.month.value = loadedFilters.month;
+  filter.branch.value = loadedFilters.branch;
+  filter.staff.value = loadedFilters.staff;
   customFilterDropdowns[filter.branch.id]?.refresh();
   customFilterDropdowns[filter.staff.id]?.refresh();
 }
 
-function reviewFactDraftSnapshot() {
-  return JSON.stringify([...els.reviewFactEditor.querySelectorAll('input[data-staff-id]')].map((input) => ({
+function manualFactDraftSnapshot(editorEl) {
+  return JSON.stringify([...editorEl.querySelectorAll('input[data-staff-id]')].map((input) => ({
     companyId: input.dataset.companyId,
     staffId: input.dataset.staffId,
     value: input.value.trim(),
   })));
 }
 
-function setReviewFactDirty(isDirty) {
-  reviewFactDirty = isDirty;
-  els.reviewFactSave.disabled = reviewFactSaving || !reviewFactRows.length;
+function setManualFactDirty(isDirty, { assignDirty, saveButton, saving, rows }) {
+  assignDirty(isDirty);
+  saveButton.disabled = saving || !rows.length;
   updateFloatingEditorSave();
+}
+
+function manualFactParams(filter) {
+  return {
+    month: filter.month.value,
+    company_id: filter.branch.value,
+    staff_id: filter.staff.value,
+  };
+}
+
+function reviewFactFilters() {
+  return manualFactFilterValues(filterEls.reviewFacts);
+}
+
+function restoreReviewFactFilters() {
+  restoreManualFactFilters(filterEls.reviewFacts, reviewFactLoadedFilters);
+}
+
+function reviewFactDraftSnapshot() {
+  return manualFactDraftSnapshot(els.reviewFactEditor);
+}
+
+function setReviewFactDirty(isDirty) {
+  setManualFactDirty(isDirty, {
+    assignDirty: (value) => { reviewFactDirty = value; },
+    saveButton: els.reviewFactSave,
+    saving: reviewFactSaving,
+    rows: reviewFactRows,
+  });
 }
 
 function updateReviewFactDirtyFromForm() {
@@ -2641,12 +2671,7 @@ function updateReviewFactDirtyFromForm() {
 }
 
 function reviewFactParams() {
-  const filter = filterEls.reviewFacts;
-  return {
-    month: filter.month.value,
-    company_id: filter.branch.value,
-    staff_id: filter.staff.value,
-  };
+  return manualFactParams(filterEls.reviewFacts);
 }
 
 async function loadReviewFactEditor({ signal = null } = {}) {
@@ -2807,36 +2832,24 @@ function refreshOpzFactTotals() {
 }
 
 function opzFactFilters() {
-  const filter = filterEls.opzFacts;
-  return {
-    month: filter.month.value,
-    branch: filter.branch.value,
-    staff: filter.staff.value,
-  };
+  return manualFactFilterValues(filterEls.opzFacts);
 }
 
 function restoreOpzFactFilters() {
-  if (!opzFactLoadedFilters) return;
-  const filter = filterEls.opzFacts;
-  filter.month.value = opzFactLoadedFilters.month;
-  filter.branch.value = opzFactLoadedFilters.branch;
-  filter.staff.value = opzFactLoadedFilters.staff;
-  customFilterDropdowns[filter.branch.id]?.refresh();
-  customFilterDropdowns[filter.staff.id]?.refresh();
+  restoreManualFactFilters(filterEls.opzFacts, opzFactLoadedFilters);
 }
 
 function opzFactDraftSnapshot() {
-  return JSON.stringify([...els.opzFactEditor.querySelectorAll('input[data-staff-id]')].map((input) => ({
-    companyId: input.dataset.companyId,
-    staffId: input.dataset.staffId,
-    value: input.value.trim(),
-  })));
+  return manualFactDraftSnapshot(els.opzFactEditor);
 }
 
 function setOpzFactDirty(isDirty) {
-  opzFactDirty = isDirty;
-  els.opzFactSave.disabled = opzFactSaving || !opzFactRows.length;
-  updateFloatingEditorSave();
+  setManualFactDirty(isDirty, {
+    assignDirty: (value) => { opzFactDirty = value; },
+    saveButton: els.opzFactSave,
+    saving: opzFactSaving,
+    rows: opzFactRows,
+  });
 }
 
 function updateOpzFactDirtyFromForm() {
@@ -2844,12 +2857,7 @@ function updateOpzFactDirtyFromForm() {
 }
 
 function opzFactParams() {
-  const filter = filterEls.opzFacts;
-  return {
-    month: filter.month.value,
-    company_id: filter.branch.value,
-    staff_id: filter.staff.value,
-  };
+  return manualFactParams(filterEls.opzFacts);
 }
 
 async function loadOpzFactEditor({ signal = null } = {}) {
@@ -3135,8 +3143,13 @@ function setFilterLoading(filter, isLoading) {
 }
 
 async function loadSyncStatus() {
+  const request = viewRequestScopes.syncStatus.start();
   try {
-    const payload = await fetchJson('/dashboard/widget/sync_status', undefined, { slowState: false });
+    const payload = await fetchJson('/dashboard/widget/sync_status', undefined, {
+      signal: request.signal,
+      slowState: false,
+    });
+    if (!request.isCurrent()) return;
     const sync = payload.data?.sync || {};
     const lastRun = sync.last_run;
     const lastSuccessfulAt = sync.last_successful_sync_at
@@ -3144,8 +3157,11 @@ async function loadSyncStatus() {
     els.syncState.textContent = lastSuccessfulAt
       ? t('dash.syncUpdatedAt', { value: formatMoscowDateTime(lastSuccessfulAt) })
       : t('dash.syncNoSuccessfulUpdates');
-  } catch {
+  } catch (error) {
+    if (isSupersededRequest(error) || !request.isCurrent()) return;
     els.syncState.textContent = t('dash.syncStatusUnavailable');
+  } finally {
+    if (request.isCurrent()) request.finish();
   }
 }
 
@@ -3164,7 +3180,7 @@ function setActiveView(view) {
   view = accessibleView(view);
   const previousView = activeView;
   Object.entries(viewRequestScopes).forEach(([requestView, scope]) => {
-    if (requestView !== 'branches' && requestView !== view) scope.abort();
+    if (requestView !== 'branches' && requestView !== 'syncStatus' && requestView !== view) scope.abort();
   });
   if (previousView === 'reports' && view !== 'reports') reportsController?.clear();
   activeView = view;

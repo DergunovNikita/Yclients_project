@@ -83,10 +83,18 @@ def main() -> int:
         return 1
 
     db = database.get_db()
+    # The advisory lock gets a connection of its own, for the same reason run_sync_job does:
+    # pg_advisory_lock belongs to a physical connection, and an ORM Session hands its
+    # connection back to the pool on every commit(). This script commits between acquiring
+    # and releasing (load_credentials_for_companies_sync and each sync_staff_schedules call),
+    # so a lock taken on `db` could be released on a different connection --
+    # pg_advisory_unlock() would answer false and the lock would stay held on an abandoned
+    # pooled connection, leaving every later sync reporting 'already_running'.
+    lock_conn = database.engine.connect().execution_options(isolation_level='AUTOCOMMIT')
     control = SyncControlService()
     lock_acquired = False
     try:
-        if not control.acquire_lock(db):
+        if not control.acquire_lock(lock_conn):
             print('Another synchronization is already running; backfill was not started.')
             return 1
         lock_acquired = True
@@ -158,9 +166,12 @@ def main() -> int:
         print(f'\nDone. Completed branches: {completed}; failed: {failed}.')
         return 1 if failed else 0
     finally:
-        if lock_acquired:
-            control.release_lock(db)
-        db.close()
+        try:
+            if lock_acquired:
+                control.release_lock(lock_conn)
+        finally:
+            lock_conn.close()
+            db.close()
 
 
 if __name__ == '__main__':

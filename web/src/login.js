@@ -1,5 +1,12 @@
 import './auth.css';
-import { authFetch, isTransientAuthError, safeReturnTo, setSelectedPortalAccountId, wait } from './auth.js';
+import {
+  authFetch,
+  ensureOnboardingComplete,
+  isTransientAuthError,
+  safeReturnTo,
+  setSelectedPortalAccountId,
+  wait,
+} from './auth.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 document.documentElement.lang = getLocale();
@@ -91,17 +98,7 @@ form.addEventListener('submit', async (event) => {
     const password = document.getElementById('password').value;
     const payload = await loginWithRetry(email, password);
     const user = payload.data.user;
-    if (user?.role === 'owner') {
-      try {
-        const state = await authFetch('/onboarding/state');
-        if (state?.data?.step && state.data.step !== 'done') {
-          window.location.href = '/onboarding.html';
-          return;
-        }
-      } catch {
-        /* fallback to dashboard on error — main.js will gate again */
-      }
-    }
+    if (!(await ensureOnboardingComplete(user))) return;
     window.location.href = loginDestination();
   } catch (error) {
     errorEl.textContent = error.message;

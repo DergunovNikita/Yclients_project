@@ -1,6 +1,6 @@
 import './auth.css';
 import './settings.css';
-import { authFetch, hasSessionHint, loadCurrentUser, logout, setToken } from './auth.js';
+import { authFetch, hasSessionHint, loadCurrentUser, logout, setToken, USER_ADMIN_ROLES } from './auth.js';
 import { escapeHtml } from './html.js';
 import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
 
@@ -84,7 +84,7 @@ async function loadProfile() {
 
     const ownerOrAdmin = currentUser.role === 'owner' || currentUser.role === 'platform_admin';
     document.querySelector('[data-tab="sources"]').hidden = !ownerOrAdmin;
-    document.querySelector('[data-tab="team"]').hidden = !['platform_admin', 'owner', 'branch_admin'].includes(currentUser.role);
+    document.querySelector('[data-tab="team"]').hidden = !USER_ADMIN_ROLES.includes(currentUser.role);
   } catch (error) {
     showError(els.passwordError, `${t('settings.profileLoadError')}: ${error.message}`);
   }

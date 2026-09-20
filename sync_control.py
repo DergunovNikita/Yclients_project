@@ -20,11 +20,19 @@ class SyncControlService:
         return bool(result)
 
     def release_lock(self, db) -> None:
-        db.execute(
+        released = db.execute(
             text('SELECT pg_advisory_unlock(:lock_id)'),
             {'lock_id': self._lock_id},
-        )
+        ).scalar()
         db.commit()
+        if not released:
+            # False means this connection did not hold the lock: acquire_lock() and
+            # release_lock() were called on different physical connections, so the real
+            # lock is still held elsewhere and every future sync will see "already
+            # running" until that connection is closed. Should not happen once the lock
+            # lives on its own dedicated connection (see run_sync_job) — print loudly if
+            # it ever does, instead of a discarded return value hiding it again.
+            print(f'⚠ pg_advisory_unlock({self._lock_id}) returned false — lock was not held on this connection')
 
     def cleanup_stale_runs(self, db) -> None:
         for run in db.query(SyncRun).filter(SyncRun.status == 'running').all():

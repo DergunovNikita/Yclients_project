@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
 
 import api
 import auth_deps
@@ -4414,6 +4414,37 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
     owner_headers = {'Authorization': f'Bearer {create_access_token(200, "owner")}'}
     manager_headers = {'Authorization': f'Bearer {create_access_token(201, "manager")}'}
     summary_params = {'start_date': '2025-01-01', 'end_date': '2025-01-31'}
+
+    # Sentinel money values, one per leaderboard board shape, distinct from every qty/pct
+    # already in these rows so a match can only mean the amount itself leaked.
+    identity = {'staff': 'Master', 'staff_id': 1, 'company_id': 1, 'company_title': 'Salon'}
+    leaderboard_money_values = {654321.0, 765432.0, 876543.0, 987651.0, 987652.0}
+    extra_row = {**identity, 'qty': 2.0, 'sum': 654321.0, 'pct': 20.0, 'share_pct': 100.0}
+    admin_extra_row = {**identity, 'staff': 'Admin', 'staff_id': 2, 'qty': 3.0, 'pct': 30.0}
+    cosmo_row = {**identity, 'qty': 1.0, 'sum': 765432.0, 'pct': 12.0, 'share_pct': 100.0}
+    opz_row = {**identity, 'qty': 1.0, 'pct': 10.0}
+    value_row = {**identity, 'value': 876543.0}
+    avg_row = {**identity, 'plan': 987651.0, 'fact': 987652.0, 'pct': 120.0}
+
+    async def fake_plan_fact_all_hidden(*args, **kwargs):
+        # Every board populated, money and non-money alike, so an unstripped table or an
+        # orphaned row value has something concrete to leak.
+        return {
+            'staff_leaderboards': {
+                'extra_services_barber_rankings': {'qty': [extra_row], 'sum': [extra_row], 'pct': [extra_row]},
+                'extra_services_admin_rankings': {'qty': [admin_extra_row], 'pct': [admin_extra_row]},
+                'cosmo_barber_rankings': {'qty': [cosmo_row], 'sum': [cosmo_row], 'pct': [cosmo_row]},
+                'cosmo_admin_rankings': {'qty': [cosmo_row], 'sum': [cosmo_row], 'pct': [cosmo_row]},
+                'opz_barber_rankings': {'qty': [opz_row], 'pct': [opz_row]},
+                'opz_admin_rankings': {'qty': [opz_row], 'pct': [opz_row]},
+                'reviews_admin': [{**identity, 'value': 3.0}],
+                'revenue_barber': [value_row],
+                'revenue_admin': [value_row],
+                'avg_check_plan_branch': [avg_row],
+                'avg_check_plan_staff': [avg_row],
+            }
+        }
+
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -4448,6 +4479,17 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
         manager_after = await client.get('/dashboard/widget/summary', params=summary_params, headers=manager_headers)
         manager_revenue_after = await client.get(
             '/dashboard/widget/revenue_daily', params=summary_params, headers=manager_headers
+        )
+        hide_all = await client.put(
+            '/dashboard/metric-visibility',
+            json={'role': 'manager', 'visible_codes': []},
+            headers=owner_headers,
+        )
+        monkeypatch.setattr(dashboard_reports, 'fetch_plan_fact', fake_plan_fact_all_hidden)
+        leaderboard_all_hidden = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'staff_leaderboard', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+            headers=manager_headers,
         )
 
     app.dependency_overrides.clear()
@@ -4511,6 +4553,29 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
     assert 'average_check' in manager_after.json()['data']
     assert 'revenue' not in manager_after.json()['data']
     assert manager_revenue_after.status_code == 403
+
+    # With every money code hidden, the staff_leaderboard report must not keep a single
+    # money-formatted column in any table, regardless of that table's id.
+    assert hide_all.status_code == 200
+    assert leaderboard_all_hidden.status_code == 200
+    leaderboard_data = leaderboard_all_hidden.json()['data']
+    assert leaderboard_data['financials_hidden'] is True
+    for table in leaderboard_data['tables']:
+        for column in table['columns']:
+            assert column['format'] != 'money', (table['id'], column)
+
+    # And no row anywhere in the payload may still carry one of the amounts the fake plan/fact
+    # seeded — a column stripped from `columns` but left behind on the row would be invisible
+    # to the check above but would still show up here.
+    def _contains_value(node, target):
+        if isinstance(node, dict):
+            return any(_contains_value(value, target) for value in node.values())
+        if isinstance(node, list):
+            return any(_contains_value(item, target) for item in node)
+        return node == target
+
+    leaked = {value for value in leaderboard_money_values if _contains_value(leaderboard_data, value)}
+    assert not leaked, leaked
 
 
 @pytest.mark.asyncio
@@ -5877,6 +5942,120 @@ async def test_dashboard_branch_scope_applies_to_plan_settings_write(async_sessi
         select(PlanStaffInput).where(PlanStaffInput.company_id == 2)
     )
     assert forbidden_staff_input is None
+
+
+@pytest.mark.asyncio
+async def test_plan_settings_save_rejects_foreign_company_when_branch_company_ids_raises(async_session):
+    """A full-access caller (no auth headers here) with no explicit scope falls back to
+    `branch_company_ids(db)` to learn which companies are configured portal branches. Drop
+    that table to force the one exception `branch_company_ids` still swallows on Postgres
+    (`ProgrammingError`, 'relation does not exist') on this SQLite engine instead, where a
+    missing table raises `OperationalError` — the exact class the old, wider catch used to
+    swallow too. It must now propagate instead of being read as "no restriction", or a
+    company with no portal branch at all would silently accept this write.
+    """
+    async_session.add(Group(id=1, title='G'))
+    async_session.add(Company(id=1, title='Foreign', group_id=1))
+    await async_session.commit()
+    await async_session.execute(text('DROP TABLE portal_branches'))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    # The unhandled-exception handler (api.py) is what turns this into a 500 for a real
+    # client; ASGITransport's default re-raises app exceptions instead of returning them,
+    # which is for debugging the app itself, not for observing what a caller gets back.
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/dashboard/plan/settings',
+            json={'month': '2025-05', 'branches': [{'company_id': 1, 'wax_pct': 10}], 'staff': []},
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 500
+    written = await async_session.scalar(
+        select(PlanBranchSetting).where(PlanBranchSetting.company_id == 1)
+    )
+    assert written is None
+
+
+@pytest.mark.asyncio
+async def test_manual_facts_save_rejects_foreign_company_when_branch_company_ids_raises(async_session):
+    """Same fallback and the same forced failure as the plan/settings sibling test above, but
+    through `_write_manual_facts`, the shared write path behind both the reviews and the extra
+    OPZ editors.
+    """
+    async_session.add(Group(id=1, title='G'))
+    async_session.add(Company(id=1, title='Foreign', group_id=1))
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.commit()
+    await async_session.execute(text('DROP TABLE portal_branches'))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-05',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 7}],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 500
+    written = await async_session.scalar(
+        select(ManualFactMetric).where(ManualFactMetric.company_id == 1)
+    )
+    assert written is None
+
+
+@pytest.mark.asyncio
+async def test_branch_company_ids_reraises_programming_error_other_than_undefined_table(
+    async_session, monkeypatch
+):
+    """`ProgrammingError` is Postgres's whole 42xxx class, not just undefined_table — it also
+    covers a syntax error and a revoked grant (`insufficient_privilege`, SQLSTATE 42501). Only
+    the exact SQLSTATE the migration-0004 carve-out needs may be read as "no restriction"; a
+    real Postgres/asyncpg exception's `.orig.sqlstate` for undefined_table is 42P01 (verified
+    against a live Postgres in review), so anything else must propagate instead of silently
+    turning off a write-path authorization check.
+    """
+    from sqlalchemy.exc import ProgrammingError
+
+    class FakeOrig:
+        sqlstate = '42501'  # insufficient_privilege — a revoked grant, not a missing table
+
+    async def fake_execute(*args, **kwargs):
+        raise ProgrammingError('SELECT 1', {}, FakeOrig())
+
+    monkeypatch.setattr(async_session, 'execute', fake_execute)
+    with pytest.raises(ProgrammingError):
+        await dashboard_service.branch_company_ids(async_session)
+
+
+@pytest.mark.asyncio
+async def test_branch_company_ids_swallows_undefined_table_only(async_session, monkeypatch):
+    """The intended carve-out: a database stamped before migration 0004 has no portal_branches
+    table, and only that specific error (SQLSTATE 42P01) may still mean "no restriction"."""
+    from sqlalchemy.exc import ProgrammingError
+
+    class FakeOrig:
+        sqlstate = '42P01'  # undefined_table
+
+    async def fake_execute(*args, **kwargs):
+        raise ProgrammingError('SELECT 1', {}, FakeOrig())
+
+    monkeypatch.setattr(async_session, 'execute', fake_execute)
+    assert await dashboard_service.branch_company_ids(async_session) is None
 
 
 @pytest.mark.asyncio

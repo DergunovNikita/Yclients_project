@@ -114,7 +114,6 @@
     "barber": "Barber"
   },
   "onboarding": {
-    "brandSuffix": "Onboarding",
     "aside": {
       "title": "Connect YClients",
       "subtitle": "2 steps: add your access tokens and pick the branches to sync."
@@ -195,7 +194,6 @@
     "credCreated2": "Integration created. Branches will be pulled from YClients automatically."
   },
   "profile": {
-    "brandSuffix": "Account",
     "logout": "Log out of account",
     "eyebrow": "Your account",
     "greeting": "Hello",
@@ -405,7 +403,6 @@
     "scaleCount": "count",
     "scalePercent": "percent",
     "topRevenue": "Top 5 by revenue",
-    "topAverageCheck": "Top 5 by average check",
     "goodsKpiCompletion": "Goods KPI completion",
     "completionTooltip": "Completion: {value}",
     "diagnosticBarbers": "barber visits: {count}",
@@ -418,7 +415,6 @@
     "dataCheck": "Data check",
     "noPlanForPeriod": "No plan for the selected period",
     "noStaffForBranch": "No employees for the selected branch",
-    "noStaffForPeriod": "No employees for the selected period",
     "planPeriodMeta": " · plan {start} .. {end}",
     "staffPlural": "employees",
     "networkAndBranches": "network and branches",
@@ -456,7 +452,6 @@
     "unsavedChangesMessage": "Are you sure you want to leave this page? All unsaved changes will be lost",
     "unsavedChangesLeave": "Leave",
     "unsavedChangesStay": "Stay",
-    "confirmDiscardPlanSettings": "There are unsaved changes. Leave without saving?",
     "confirmDiscardServiceManagement": "There are unsaved service changes. Leave without saving?",
     "archivedName": "{name} (archived)",
     "noGroup": "No group",
@@ -571,7 +566,6 @@
     "search": "Search",
     "initialPasswordsSearchPlaceholder": "Email, name, branch, role…",
     "colLoginEmail": "Login (email)",
-    "colPassword": "Password",
     "colInviteSentAt": "Last invite",
     "credentialsTitle": "YClients credentials",
     "credentialsHint": "Secrets are stored encrypted. After saving, tokens and passwords are not shown.",
@@ -628,7 +622,6 @@
     "deleteIrreversible": "This action cannot be undone; the record cannot be restored.",
     "loginLabel": "Login",
     "saveCredentialsHint": "Use these login emails to send secure password setup links. No plaintext passwords are stored.",
-    "passwordsSheet": "Invites",
     "noUserIdsForDistribution": "No user identifiers for distribution",
     "sentEmailsCount": "Emails sent: {count}",
     "resendInvite": "Resend invite",

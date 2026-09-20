@@ -25,7 +25,13 @@ from data_sources import (
 from models import Company, PortalAccount, PortalBranch, PortalUser, YClientsCredential, YClientsCredentialCompany
 from portal_audit import log_portal_audit
 from portal_tenant_ownership import can_reassign_branch_from_tenant
-from yclients_credentials import CredentialsConfigError, mark_credential_failure_async, mark_credential_success_async, new_credential
+from yclients_credentials import (
+    CREDENTIAL_STORAGE_FAILED_DETAIL,
+    CredentialsConfigError,
+    mark_credential_failure_async,
+    mark_credential_success_async,
+    new_credential,
+)
 from sync_jobs import SyncJobService
 
 router = APIRouter()
@@ -196,7 +202,7 @@ async def onboarding_credentials(
             password=body.password,
         )
     except CredentialsConfigError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=CREDENTIAL_STORAGE_FAILED_DETAIL) from exc
 
     db.add(credential)
     await db.flush()

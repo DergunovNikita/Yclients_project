@@ -10,8 +10,6 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from file_import import SOURCE_FILE_IMPORT, FileImportSyncClient, ImportPayload
-from mapping_profiles import get_profile
 from models import Company, Group, PortalBranch, YClientsCredential
 from portal_tenant_ownership import reassign_branch_from_admin_only_tenant
 from yclients_api import YClientsAPI
@@ -216,43 +214,6 @@ class YClientsDataSourceAdapter(DataSourceAdapter):
         return materialized_company_ids
 
 
-class FileImportDataSourceAdapter(DataSourceAdapter):
-    """Adapter for exports uploaded by the salon (no remote API).
-
-    Branch discovery does not apply — the company is created from the upload
-    form, not fetched remotely. Only `build_sync_client` participates in sync.
-    """
-
-    source_type = SOURCE_FILE_IMPORT
-
-    def __init__(self, profile_name: str, payload: ImportPayload):
-        self.profile = get_profile(profile_name)
-        self.payload = payload
-
-    def build_sync_client(self) -> FileImportSyncClient:
-        return FileImportSyncClient(self.profile, self.payload)
-
-    def authenticate(self) -> bool:
-        return True
-
-    def list_branches(self) -> list[DataSourceBranch]:
-        raise HTTPException(
-            status_code=400,
-            detail='file_import has no remote branches; create the company from the upload form',
-        )
-
-    async def materialize_branches(self, db: AsyncSession, portal_account_id: int,
-                                   company_ids: list[int]) -> list[int]:
-        raise HTTPException(
-            status_code=400,
-            detail='file_import branches are created via the upload flow, not discovered',
-        )
-
-
-def file_import_adapter(profile_name: str, payload: ImportPayload) -> FileImportDataSourceAdapter:
-    return FileImportDataSourceAdapter(profile_name, payload)
-
-
 def normalize_source_type(source_type: str | None) -> str:
     normalized = (source_type or SOURCE_YCLIENTS).strip().lower()
     if normalized not in SUPPORTED_SOURCE_TYPES:
@@ -274,11 +235,6 @@ def adapter_from_payload(
     normalized = normalize_source_type(source_type)
     if normalized == SOURCE_YCLIENTS:
         return YClientsDataSourceAdapter(partner_token, login, password, **api_kwargs)
-    if normalized == SOURCE_FILE_IMPORT:
-        raise HTTPException(
-            status_code=400,
-            detail='file_import is onboarded via file upload, not credentials',
-        )
     raise HTTPException(status_code=400, detail=f'Unsupported source_type: {normalized}')
 
 
@@ -311,9 +267,4 @@ def adapter_from_credential(
     normalized = normalize_source_type(source_type)
     if normalized == SOURCE_YCLIENTS:
         return YClientsDataSourceAdapter.from_credential(credential, **api_kwargs)
-    if normalized == SOURCE_FILE_IMPORT:
-        raise HTTPException(
-            status_code=400,
-            detail='file_import is onboarded via file upload, not credentials',
-        )
     raise HTTPException(status_code=400, detail=f'Unsupported source_type: {normalized}')

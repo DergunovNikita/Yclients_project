@@ -32,6 +32,7 @@ from sync_pipeline import (
     execute_sync,
     full_sync_start_date,
     print_sync_summary,
+    purge_appointment_window,
     purge_full_refresh_window,
     run_sync_step,
     purge_source_window,
@@ -632,6 +633,42 @@ def test_execute_sync_updates_company_scoped_checkpoint(monkeypatch):
         assert db.get(
             SyncState, sync_pipeline.historical_coverage_state_key(1)
         ).value == '2026-06-30'
+
+
+def test_execute_sync_reuses_caller_supplied_database(monkeypatch):
+    """sync_orchestrator.run_sync_job passes its own Database in; execute_sync must reuse it
+    rather than calling init_database() again, which would open a second engine/pool mid-run
+    (and, in production, silently repoint the module-level singleton other code reads from).
+    """
+    with sqlite_session_with_system([Group.__table__, Company.__table__, SyncState.__table__]) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.commit()
+
+        credential = YClientsCredentialValue(
+            id=11,
+            title='Tenant credential',
+            partner_token='partner',
+            login='login',
+            password='password',
+            company_ids=(1,),
+            portal_account_id=7,
+        )
+        patch_execute_sync_dependencies(monkeypatch, db, credential)
+
+        def _must_not_be_called(*_args, **_kwargs):
+            raise AssertionError('execute_sync must not call init_database() when database is supplied')
+
+        monkeypatch.setattr(sync_pipeline, 'init_database', _must_not_be_called)
+
+        result = execute_sync(
+            mode='incremental',
+            end_date=date(2026, 6, 30),
+            portal_account_id=7,
+            database=FakeSyncDatabase(db),
+        )
+
+        assert result['success'] is True
 
 
 def test_execute_sync_does_not_certify_incomplete_historical_coverage(monkeypatch):
@@ -1404,6 +1441,60 @@ def test_purge_source_window_keeps_goods_transactions_outside_requested_window()
 
         remaining = db.query(GoodTransaction).order_by(GoodTransaction.id).all()
         assert [(row.id, row.cost) for row in remaining] == [(1, 10)]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_purge_appointment_window_cascades_to_transactions():
+    """purge_appointment_window must delete the Transaction rows under each purged appointment.
+
+    purge_source_window (tested above) only ever clears the table it is pointed at; it has
+    no notion of a dependent row in another table. Transaction is exactly that for
+    Appointment, so the cascade is hand-written in purge_appointment_window and needs its
+    own coverage — rows outside the window, and a counter sale with no appointment at all
+    (see commit 6b5878d), must both survive untouched.
+    """
+    engine = create_engine('sqlite:///:memory:')
+    with engine.begin() as conn:
+        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Appointment.__table__,
+            Transaction.__table__,
+            SyncState.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add_all([
+            Appointment(id=1, company_id=1, date=date(2025, 1, 10), attendance=1),
+            Appointment(id=2, company_id=1, date=date(2025, 1, 15), attendance=1),
+            Appointment(id=3, company_id=1, date=date(2025, 2, 1), attendance=1),
+        ])
+        db.add_all([
+            Transaction(id=1, appointment_id=1, company_id=1, service_title='Haircut', cost=100.0),
+            Transaction(id=2, appointment_id=2, company_id=1, service_title='Color', cost=200.0),
+            Transaction(id=3, appointment_id=3, company_id=1, service_title='Beard', cost=50.0),
+            Transaction(id=4, appointment_id=None, company_id=1, service_title='Retail', cost=30.0),
+        ])
+        db.commit()
+
+        deleted_appointments, deleted_transactions = purge_appointment_window(
+            db, 1, '2025-01-01', '2025-01-31',
+        )
+        db.commit()
+
+        assert (deleted_appointments, deleted_transactions) == (2, 2)
+        assert {row.id for row in db.query(Appointment).all()} == {3}
+        assert {row.id for row in db.query(Transaction).all()} == {3, 4}
     finally:
         db.close()
         engine.dispose()

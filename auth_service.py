@@ -33,6 +33,7 @@ from models import PortalBranch, PortalEmailToken, PortalUser, PortalUserBranch,
 TOKEN_PURPOSE_VERIFY = 'verify'
 TOKEN_PURPOSE_RESET = 'reset'
 TOKEN_TTL_HOURS = {'verify': 48, 'reset': 2}
+PORTAL_PASSWORD_MIN_LENGTH = 8
 
 
 def hash_password(password: str) -> str:

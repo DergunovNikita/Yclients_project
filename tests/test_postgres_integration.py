@@ -8,8 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 import dashboard_service
+import sync_orchestrator
 import sync_worker
-from database import run_migrations
+from database import Database, run_migrations
 from sync_control import SyncControlService
 from sync_jobs import SyncJobService
 from models import (
@@ -112,6 +113,176 @@ def test_advisory_lock_prevents_parallel_runs(pg_session_factory):
     finally:
         session_one.close()
         session_two.close()
+
+
+def _bind_database_to_test_url() -> Database:
+    url = make_url(TEST_DATABASE_URL)
+    return Database(url.host, url.port or 5432, url.database, url.username, url.password or '')
+
+
+def _create_full_schema(engine) -> None:
+    """Fresh public+system schema via Base.metadata directly, not via Alembic.
+
+    Alembic's baseline migration (0001) rebuilds public/system in two separate
+    Base.metadata.create_all() calls filtered to a hardcoded table subset, against
+    whatever models.py looks like *today* -- pre-existing and unrelated to this fix, but
+    replaying the full migration chain against a genuinely empty database currently
+    fails (a public table gets an FK to a system table migration 0001 doesn't yet
+    create). Creating every table from the live models in one call sidesteps that: full
+    metadata graph, correctly ordered by SQLAlchemy across all tables at once.
+    """
+    from models import Base
+
+    with engine.begin() as conn:
+        conn.execute(text('DROP SCHEMA IF EXISTS public CASCADE'))
+        conn.execute(text('CREATE SCHEMA public'))
+        conn.execute(text('DROP SCHEMA IF EXISTS system CASCADE'))
+        conn.execute(text('CREATE SCHEMA system'))
+    Base.metadata.create_all(bind=engine)
+
+
+def test_advisory_lock_survives_commit_churn_on_a_shared_pool():
+    """pg_try_advisory_lock/pg_advisory_unlock are session-level: tied to one physical
+    connection, not to a transaction. An ORM Session returns its connection to the pool
+    on every commit(), so once a *second* session shares that same pool and holds a
+    transaction open across several statements before its own commit (exactly how
+    execute_sync's own pipeline session behaves now that it reuses run_sync_job's
+    Database/pool), the two sessions' checkouts can swap: the second session ends up
+    holding the exact connection that acquired the lock, and releasing the lock on the
+    first session's *current* connection silently unlocks nothing.
+
+    This reproduced 100% of the time against real Postgres before run_sync_job started
+    pinning the lock to its own dedicated Connection instead of the ORM Session used for
+    run/job bookkeeping. Assert the lock is actually gone afterward, not just that no
+    exception was raised.
+    """
+    database = _bind_database_to_test_url()
+    control = SyncControlService()
+    lock_conn = database.engine.connect().execution_options(isolation_level='AUTOCOMMIT')
+    control_db = database.get_db()
+    pipeline_db = database.get_db()  # mimics execute_sync's own session on the shared pool
+    try:
+        assert control.acquire_lock(lock_conn) is True
+
+        # Mimic run_sync_job's own churn (create_run + several set_state calls), then
+        # many cycles of the pipeline holding a transaction open across two statements
+        # before its commit, interleaved with more control_db commits in between (like
+        # progress_callback firing mid-step) -- the exact pattern that swapped
+        # connections when the lock lived on control_db instead of its own Connection.
+        for _ in range(5):
+            control_db.execute(text('SELECT 1'))
+            control_db.commit()
+        for _ in range(15):
+            pipeline_db.execute(text('SELECT 1'))
+            pipeline_db.execute(text('SELECT 1'))
+            for _ in range(3):
+                control_db.execute(text('SELECT 1'))
+                control_db.commit()
+            pipeline_db.commit()
+
+        control.release_lock(lock_conn)
+    finally:
+        lock_conn.close()
+        control_db.close()
+        pipeline_db.close()
+        database.engine.dispose()
+
+    verify_engine_db = _bind_database_to_test_url()
+    verify_session = verify_engine_db.get_db()
+    try:
+        assert control.acquire_lock(verify_session) is True, (
+            'advisory lock is still held after release_lock() -- it was unlocked on the '
+            'wrong connection'
+        )
+        control.release_lock(verify_session)
+    finally:
+        verify_session.close()
+        verify_engine_db.engine.dispose()
+
+
+def test_run_sync_job_releases_its_lock_when_execute_sync_shares_the_pool(monkeypatch, tmp_path):
+    """End-to-end guard for the same bug via the real orchestrator entry point: a queued
+    job (job_id set) is the routine automatic-schedule path, where progress_callback
+    fires on every pipeline step and commits control_db each time. Stub execute_sync to
+    do real multi-statement work on the *shared* database it receives, call
+    progress_callback repeatedly (as every real step does), and confirm run_sync_job
+    still hands back a clean lock afterward.
+    """
+    schema_db = _bind_database_to_test_url()
+    _create_full_schema(schema_db.engine)
+    schema_db.engine.dispose()
+
+    # Production keeps this Database alive: init_database() stores it in database.py's
+    # module-level `db_instance`, so its pooled connections are never closed. Hold a
+    # reference here too — without it the Database is garbage-collected the moment
+    # run_sync_job returns, the connections close, PostgreSQL drops the advisory lock with
+    # them, and this test passes even when the lock was released on the wrong connection.
+    held_databases = []
+
+    def _held_database(*args, **kwargs):
+        database = _bind_database_to_test_url()
+        held_databases.append(database)
+        return database
+
+    monkeypatch.setattr(sync_orchestrator, 'init_database', _held_database)
+    monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
+
+    def fake_execute_sync(*, progress_callback=None, database=None, **_kwargs):
+        pipeline_db = database.get_db()
+        try:
+            for step in range(12):
+                pipeline_db.execute(text('SELECT 1'))
+                pipeline_db.execute(text('SELECT 1'))
+                if progress_callback:
+                    progress_callback({
+                        'status': 'running',
+                        'current_stage': f'step-{step}',
+                        'progress_pct': step * 8,
+                    })
+                pipeline_db.commit()
+        finally:
+            pipeline_db.close()
+        return {
+            'success': True,
+            'step_results': [{'name': 'fake', 'success': True}],
+            'window_start': None,
+            'window_end': None,
+            'companies_count': 1,
+        }
+
+    monkeypatch.setattr(sync_orchestrator, 'execute_sync', fake_execute_sync)
+
+    setup_db = _bind_database_to_test_url()
+    setup_session = setup_db.get_db()
+    try:
+        job = SyncJobService().enqueue_job(setup_session, 'incremental', 'pytest')
+        job_id = job.id
+    finally:
+        setup_session.close()
+        setup_db.engine.dispose()
+
+    result = sync_orchestrator.run_sync_job(
+        mode='incremental',
+        trigger_type='queued',
+        initiator='pytest',
+        job_id=job_id,
+    )
+    assert result['status'] == 'success'
+
+    verify_db = _bind_database_to_test_url()
+    verify_session = verify_db.get_db()
+    control = SyncControlService()
+    try:
+        assert control.acquire_lock(verify_session) is True, (
+            'run_sync_job left the advisory lock stuck on a connection its own '
+            'release_lock() call never touched'
+        )
+        control.release_lock(verify_session)
+    finally:
+        verify_session.close()
+        verify_db.engine.dispose()
+        for database in held_databases:
+            database.engine.dispose()
 
 
 def test_worker_processes_queued_job(pg_session_factory, monkeypatch):

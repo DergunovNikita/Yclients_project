@@ -232,3 +232,615 @@ def test_auto_sync_skips_after_recent_global_sync(monkeypatch):
             'reason': 'recent_global_sync',
         }
         assert session.query(SyncJob).count() == 0
+
+
+def test_run_sync_job_locks_on_a_connection_no_pooled_session_can_take(monkeypatch, tmp_path):
+    """The advisory lock must live on its own connection, not on the bookkeeping Session.
+
+    pg_advisory_lock belongs to a physical connection, not to a transaction, and an ORM
+    Session returns its connection to the pool on every commit(). `run_sync_job` commits
+    repeatedly (create_run, set_state, every progress_callback) while the pipeline session
+    works on the same pool, so a lock taken on that Session gets released on whichever
+    connection it happens to hold at the end: pg_advisory_unlock() answers false, the lock
+    stays on an abandoned pooled connection that init_database's module-level global keeps
+    open, and every later run reports 'already_running' until the process dies.
+
+    Reproduced against real PostgreSQL. This test needs no database: it pins the structural
+    invariant that the acquire and the release target one dedicated connection, which is
+    what makes the reproduction impossible. tests/test_postgres_integration.py proves the
+    behaviour itself, but never runs in CI (it needs TEST_DATABASE_URL).
+    """
+    import sync_orchestrator
+
+    sessions = []
+    lock_calls = {}
+
+    class FakeConnection:
+        def __init__(self):
+            self.closed = False
+
+        def execution_options(self, **_kwargs):
+            return self
+
+        def close(self):
+            self.closed = True
+
+    class FakeSession:
+        def __init__(self):
+            self.committed = 0
+
+        def commit(self):
+            self.committed += 1
+
+        def close(self):
+            pass
+
+    class FakeEngine:
+        def __init__(self):
+            self.connections = []
+
+        def connect(self):
+            conn = FakeConnection()
+            self.connections.append(conn)
+            return conn
+
+    class FakeDatabase:
+        def __init__(self):
+            self.engine = FakeEngine()
+
+        def get_db(self):
+            session = FakeSession()
+            sessions.append(session)
+            return session
+
+    database = FakeDatabase()
+    monkeypatch.setattr(sync_orchestrator, 'init_database', lambda *a, **k: database)
+    monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'acquire_lock',
+                        lambda self, db: lock_calls.setdefault('acquire', db) and True or True)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'release_lock',
+                        lambda self, db: lock_calls.__setitem__('release', db))
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'cleanup_stale_runs',
+                        lambda self, db: None)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'create_run',
+                        lambda self, db, *a, **k: SyncRun(id=1, started_at=datetime.utcnow()))
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'set_state', lambda *a, **k: None)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'finish_run', lambda *a, **k: None)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'get_status_payload',
+                        lambda self, db: {})
+    monkeypatch.setattr(sync_orchestrator, 'execute_sync', lambda **kwargs: {
+        'success': True, 'step_results': [], 'window_start': None,
+        'window_end': None, 'companies_count': 0,
+    })
+    monkeypatch.setattr(sync_orchestrator.TelegramNotifier, 'send', lambda self, message: None)
+    monkeypatch.setattr(sync_orchestrator, 'build_log_path', lambda *a, **k: str(tmp_path / 'x.log'))
+
+    sync_orchestrator.run_sync_job(mode='incremental', trigger_type='manual', initiator='pytest')
+
+    assert 'acquire' in lock_calls and 'release' in lock_calls
+    assert lock_calls['acquire'] is lock_calls['release'], (
+        'the lock was acquired and released on different objects'
+    )
+    assert lock_calls['acquire'] not in sessions, (
+        'the lock lives on a pooled ORM Session: a commit hands that connection back to the '
+        'pool and the unlock lands on a different connection'
+    )
+    assert isinstance(lock_calls['acquire'], FakeConnection)
+    assert lock_calls['acquire'].closed, 'the dedicated lock connection was never closed'
+
+
+def test_run_sync_job_releases_lock_when_create_run_raises(monkeypatch, tmp_path):
+    """cleanup_stale_runs()/create_run() run after the lock is acquired but, before this
+    fix, before the try/finally that releases it. A DB error there (constraint violation,
+    dropped connection) used to leave lock_conn open and the advisory lock held on it
+    forever, exactly the 'every later run reports already_running' failure mode the
+    dedicated connection was introduced to fix -- just reached through a different trigger.
+    """
+    import sync_orchestrator
+
+    lock_calls = {}
+
+    class FakeConnection:
+        def __init__(self):
+            self.closed = False
+
+        def execution_options(self, **_kwargs):
+            return self
+
+        def close(self):
+            self.closed = True
+
+    class FakeSession:
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeEngine:
+        def connect(self):
+            return FakeConnection()
+
+    class FakeDatabase:
+        def __init__(self):
+            self.engine = FakeEngine()
+
+        def get_db(self):
+            return FakeSession()
+
+    database = FakeDatabase()
+    monkeypatch.setattr(sync_orchestrator, 'init_database', lambda *a, **k: database)
+    monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'acquire_lock',
+                        lambda self, db: lock_calls.setdefault('acquire', db) and True or True)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'release_lock',
+                        lambda self, db: lock_calls.__setitem__('release', db))
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'cleanup_stale_runs',
+                        lambda self, db: None)
+
+    def _raise_create_run(self, db, *a, **k):
+        raise RuntimeError('simulated DB error creating the run row')
+
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'create_run', _raise_create_run)
+    monkeypatch.setattr(sync_orchestrator, 'build_log_path', lambda *a, **k: str(tmp_path / 'x.log'))
+
+    with pytest.raises(RuntimeError):
+        sync_orchestrator.run_sync_job(mode='incremental', trigger_type='manual', initiator='pytest')
+
+    assert 'release' in lock_calls, 'create_run raised and the lock was never released'
+    assert lock_calls['acquire'].closed, 'create_run raised and the lock connection was never closed'
+
+
+def test_run_sync_job_releases_lock_when_build_log_path_raises(monkeypatch, tmp_path):
+    """build_log_path() used to run as a bare statement between the acquire and the
+    try/except that owns lock cleanup. Its mkdir(parents=True, exist_ok=True) raises on a
+    permissions problem, a read-only mount or a full disk -- with the lock already held at
+    that point, the exception used to escape with lock_conn (and control_db) still open,
+    leaking the advisory lock forever: every later sync would report 'already_running'.
+    """
+    import sync_orchestrator
+
+    lock_calls = {}
+
+    class FakeConnection:
+        def __init__(self):
+            self.closed = False
+
+        def execution_options(self, **_kwargs):
+            return self
+
+        def close(self):
+            self.closed = True
+
+    class FakeSession:
+        def __init__(self):
+            self.closed = False
+
+        def commit(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    class FakeEngine:
+        def connect(self):
+            return FakeConnection()
+
+    class FakeDatabase:
+        def __init__(self):
+            self.engine = FakeEngine()
+            self.control_db = FakeSession()
+
+        def get_db(self):
+            return self.control_db
+
+    database = FakeDatabase()
+    monkeypatch.setattr(sync_orchestrator, 'init_database', lambda *a, **k: database)
+    monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'acquire_lock',
+                        lambda self, db: lock_calls.setdefault('acquire', db) and True or True)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'release_lock',
+                        lambda self, db: lock_calls.__setitem__('release', db))
+
+    def _raise_build_log_path(*_a, **_k):
+        raise OSError("[Errno 30] Read-only file system: '/var/log/sync'")
+
+    monkeypatch.setattr(sync_orchestrator, 'build_log_path', _raise_build_log_path)
+
+    with pytest.raises(OSError):
+        sync_orchestrator.run_sync_job(mode='incremental', trigger_type='manual', initiator='pytest')
+
+    assert 'release' in lock_calls, 'build_log_path() raised and the lock was never released'
+    assert lock_calls['acquire'].closed, 'build_log_path() raised and the lock connection was never closed'
+    assert database.control_db.closed, 'build_log_path() raised and control_db was never closed'
+
+
+def test_run_sync_job_closes_connections_when_already_running_status_lookup_raises(monkeypatch, tmp_path):
+    """The already_running early return used to call get_status_payload(control_db) before
+    closing anything. That helper issues three queries; if any of them raised, neither
+    lock_conn nor control_db was closed. acquire_lock() returned False here, so no advisory
+    lock is at stake, but both pooled connections leaked -- and since init_database keeps the
+    engine alive in a module-level global, a long-running worker leaks one connection per
+    failed attempt until the pool is exhausted.
+    """
+    import sync_orchestrator
+
+    class FakeConnection:
+        def __init__(self):
+            self.closed = False
+
+        def execution_options(self, **_kwargs):
+            return self
+
+        def close(self):
+            self.closed = True
+
+    class FakeSession:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeEngine:
+        def connect(self):
+            return FakeConnection()
+
+    class FakeDatabase:
+        def __init__(self):
+            self.engine = FakeEngine()
+            self.control_db = FakeSession()
+            self.lock_conn = None
+
+        def get_db(self):
+            return self.control_db
+
+    database = FakeDatabase()
+    original_connect = database.engine.connect
+
+    def _tracking_connect():
+        conn = original_connect()
+        database.lock_conn = conn
+        return conn
+
+    monkeypatch.setattr(database.engine, 'connect', _tracking_connect)
+    monkeypatch.setattr(sync_orchestrator, 'init_database', lambda *a, **k: database)
+    monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'acquire_lock', lambda self, db: False)
+
+    def _raise_get_status_payload(self, db):
+        raise RuntimeError('simulated DB error reading sync status')
+
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'get_status_payload', _raise_get_status_payload)
+
+    with pytest.raises(RuntimeError):
+        sync_orchestrator.run_sync_job(mode='incremental', trigger_type='manual', initiator='pytest')
+
+    assert database.lock_conn is not None and database.lock_conn.closed, (
+        'get_status_payload() raised and lock_conn was never closed'
+    )
+    assert database.control_db.closed, 'get_status_payload() raised and control_db was never closed'
+
+
+def test_run_sync_job_closes_connections_when_acquire_lock_itself_raises(monkeypatch, tmp_path):
+    """acquire_lock() can raise on its own (dropped connection, statement timeout) before it
+    ever tells us whether the lock was taken. lock_conn and control_db were already checked
+    out of the pool at that point and must still be closed.
+    """
+    import sync_orchestrator
+
+    class FakeConnection:
+        def __init__(self):
+            self.closed = False
+
+        def execution_options(self, **_kwargs):
+            return self
+
+        def close(self):
+            self.closed = True
+
+    class FakeSession:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeEngine:
+        def connect(self):
+            return FakeConnection()
+
+    class FakeDatabase:
+        def __init__(self):
+            self.engine = FakeEngine()
+            self.control_db = FakeSession()
+            self.lock_conn = None
+
+        def get_db(self):
+            return self.control_db
+
+    database = FakeDatabase()
+    original_connect = database.engine.connect
+
+    def _tracking_connect():
+        conn = original_connect()
+        database.lock_conn = conn
+        return conn
+
+    monkeypatch.setattr(database.engine, 'connect', _tracking_connect)
+    monkeypatch.setattr(sync_orchestrator, 'init_database', lambda *a, **k: database)
+    monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
+
+    def _raise_acquire_lock(self, db):
+        raise RuntimeError('simulated connection drop during pg_try_advisory_lock')
+
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'acquire_lock', _raise_acquire_lock)
+
+    with pytest.raises(RuntimeError):
+        sync_orchestrator.run_sync_job(mode='incremental', trigger_type='manual', initiator='pytest')
+
+    assert database.lock_conn is not None and database.lock_conn.closed, (
+        'acquire_lock() raised and lock_conn was never closed'
+    )
+    assert database.control_db.closed, 'acquire_lock() raised and control_db was never closed'
+
+
+def test_run_sync_job_closes_connections_when_release_lock_raises_after_create_run_failure(monkeypatch, tmp_path):
+    """release_lock() itself can raise (lock_conn going stale is exactly the failure mode
+    it exists to guard against). The except-block after create_run()/build_log_path()
+    failure calls release_lock() then lock_conn.close()/control_db.close() as bare
+    sequential statements -- if release_lock() raises, both close() calls are skipped and
+    lock_conn leaks, the same failure mode this whole dedicated-connection fix targets,
+    just reached through a third trigger.
+    """
+    import sync_orchestrator
+
+    class FakeConnection:
+        def __init__(self):
+            self.closed = False
+
+        def execution_options(self, **_kwargs):
+            return self
+
+        def close(self):
+            self.closed = True
+
+    class FakeSession:
+        def __init__(self):
+            self.closed = False
+
+        def commit(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    class FakeEngine:
+        def connect(self):
+            return FakeConnection()
+
+    class FakeDatabase:
+        def __init__(self):
+            self.engine = FakeEngine()
+            self.control_db = FakeSession()
+            self.lock_conn = None
+
+        def get_db(self):
+            return self.control_db
+
+    database = FakeDatabase()
+    original_connect = database.engine.connect
+
+    def _tracking_connect():
+        conn = original_connect()
+        database.lock_conn = conn
+        return conn
+
+    monkeypatch.setattr(database.engine, 'connect', _tracking_connect)
+    monkeypatch.setattr(sync_orchestrator, 'init_database', lambda *a, **k: database)
+    monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'acquire_lock', lambda self, db: True)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'cleanup_stale_runs', lambda self, db: None)
+
+    def _raise_create_run(self, db, *a, **k):
+        raise RuntimeError('simulated DB error creating the run row')
+
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'create_run', _raise_create_run)
+    monkeypatch.setattr(sync_orchestrator, 'build_log_path', lambda *a, **k: str(tmp_path / 'x.log'))
+
+    def _raise_release_lock(self, db):
+        raise RuntimeError('simulated connection drop during pg_advisory_unlock')
+
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'release_lock', _raise_release_lock)
+
+    with pytest.raises(RuntimeError, match='pg_advisory_unlock'):
+        sync_orchestrator.run_sync_job(mode='incremental', trigger_type='manual', initiator='pytest')
+
+    assert database.lock_conn is not None and database.lock_conn.closed, (
+        'release_lock() raised during create_run cleanup and lock_conn was never closed'
+    )
+    assert database.control_db.closed, (
+        'release_lock() raised during create_run cleanup and control_db was never closed'
+    )
+
+
+def test_run_sync_job_closes_connections_when_release_lock_raises_at_normal_finish(monkeypatch, tmp_path):
+    """Same gap as above, at the far more common site: the final finally block that runs
+    after every sync, success or failure. lock_conn sits idle -- unused -- for the run's
+    whole duration, which for `full` mode is hours (see AGENTS.md), so a network
+    middlebox dropping an idle connection before release_lock() runs is a realistic way
+    to hit this, not just a contrived one.
+    """
+    import sync_orchestrator
+
+    class FakeConnection:
+        def __init__(self):
+            self.closed = False
+
+        def execution_options(self, **_kwargs):
+            return self
+
+        def close(self):
+            self.closed = True
+
+    class FakeSession:
+        def __init__(self):
+            self.closed = False
+
+        def commit(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    class FakeEngine:
+        def connect(self):
+            return FakeConnection()
+
+    class FakeDatabase:
+        def __init__(self):
+            self.engine = FakeEngine()
+            self.control_db = FakeSession()
+            self.lock_conn = None
+
+        def get_db(self):
+            return self.control_db
+
+    database = FakeDatabase()
+    original_connect = database.engine.connect
+
+    def _tracking_connect():
+        conn = original_connect()
+        database.lock_conn = conn
+        return conn
+
+    monkeypatch.setattr(database.engine, 'connect', _tracking_connect)
+    monkeypatch.setattr(sync_orchestrator, 'init_database', lambda *a, **k: database)
+    monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'acquire_lock', lambda self, db: True)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'cleanup_stale_runs', lambda self, db: None)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'create_run',
+                        lambda self, db, *a, **k: SyncRun(id=1, started_at=datetime.utcnow()))
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'set_state', lambda *a, **k: None)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'finish_run', lambda *a, **k: None)
+    monkeypatch.setattr(sync_orchestrator, 'execute_sync', lambda **kwargs: {
+        'success': True, 'step_results': [], 'window_start': None,
+        'window_end': None, 'companies_count': 0,
+    })
+    monkeypatch.setattr(sync_orchestrator.TelegramNotifier, 'send', lambda self, message: None)
+    monkeypatch.setattr(sync_orchestrator, 'build_log_path', lambda *a, **k: str(tmp_path / 'x.log'))
+
+    def _raise_release_lock(self, db):
+        raise RuntimeError('simulated connection drop during pg_advisory_unlock')
+
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'release_lock', _raise_release_lock)
+
+    with pytest.raises(RuntimeError, match='pg_advisory_unlock'):
+        sync_orchestrator.run_sync_job(mode='incremental', trigger_type='manual', initiator='pytest')
+
+    assert database.lock_conn is not None and database.lock_conn.closed, (
+        'release_lock() raised at normal finish and lock_conn was never closed'
+    )
+    assert database.control_db.closed, 'release_lock() raised at normal finish and control_db was never closed'
+
+
+def test_run_sync_job_releases_lock_even_when_notification_building_raises(monkeypatch, tmp_path):
+    """The lock must come back regardless of what happens while building/sending the
+    Telegram notification, and a notification failure must not turn a completed sync into
+    an unhandled exception for the caller.
+
+    Before the fix, the final `finally` built the message and sent it *before* releasing
+    the lock, using `run.started_at` -- and the ORM Session expires every object it holds on
+    each commit() (this function commits dozens of times via progress_callback), so that
+    attribute needed a fresh SELECT by the time `finally` ran. If control_db's transaction
+    was left aborted by an earlier failure (e.g. finish_run's own multi-statement commit
+    sequence failing partway through), that SELECT raised too -- directly inside `finally`,
+    before the release/close block, leaking the lock exactly like the windows already
+    closed elsewhere in this function. This test does not need to reproduce that exact
+    poisoned-session trigger (proven separately, against real PostgreSQL, in
+    tests/test_postgres_integration.py and by hand in this review); it pins the observable
+    behaviour that must hold regardless of *why* notification building fails: build_sync_message
+    raising for any reason must not prevent the release, and must not escape run_sync_job.
+    """
+    import sync_orchestrator
+
+    class FakeConnection:
+        def __init__(self):
+            self.closed = False
+
+        def execution_options(self, **_kwargs):
+            return self
+
+        def close(self):
+            self.closed = True
+
+    class FakeSession:
+        def __init__(self):
+            self.closed = False
+
+        def commit(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    class FakeEngine:
+        def connect(self):
+            return FakeConnection()
+
+    class FakeDatabase:
+        def __init__(self):
+            self.engine = FakeEngine()
+            self.control_db = FakeSession()
+            self.lock_conn = None
+
+        def get_db(self):
+            return self.control_db
+
+    database = FakeDatabase()
+    original_connect = database.engine.connect
+
+    def _tracking_connect():
+        conn = original_connect()
+        database.lock_conn = conn
+        return conn
+
+    monkeypatch.setattr(database.engine, 'connect', _tracking_connect)
+    monkeypatch.setattr(sync_orchestrator, 'init_database', lambda *a, **k: database)
+    monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'acquire_lock', lambda self, db: True)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'cleanup_stale_runs', lambda self, db: None)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'create_run',
+                        lambda self, db, *a, **k: SyncRun(id=1, started_at=datetime.utcnow()))
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'set_state', lambda *a, **k: None)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'finish_run', lambda *a, **k: None)
+    monkeypatch.setattr(sync_orchestrator, 'execute_sync', lambda **kwargs: {
+        'success': True, 'step_results': [], 'window_start': None,
+        'window_end': None, 'companies_count': 0,
+    })
+    monkeypatch.setattr(sync_orchestrator, 'build_log_path', lambda *a, **k: str(tmp_path / 'x.log'))
+
+    release_calls = []
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'release_lock',
+                        lambda self, db: release_calls.append(db))
+
+    def _raise_build_sync_message(**_kwargs):
+        raise RuntimeError('simulated: run.started_at lazy-load on a poisoned session')
+
+    monkeypatch.setattr(sync_orchestrator, 'build_sync_message', _raise_build_sync_message)
+
+    def _fail_if_called(self, message):
+        raise AssertionError('notifier.send() must not run when build_sync_message() already raised')
+
+    monkeypatch.setattr(sync_orchestrator.TelegramNotifier, 'send', _fail_if_called)
+
+    # Must return normally -- a notification-building failure is not a sync failure, and
+    # must not replace the already-computed, correct `result` with an unhandled exception.
+    result = sync_orchestrator.run_sync_job(mode='incremental', trigger_type='manual', initiator='pytest')
+
+    assert result['status'] == 'success'
+    assert release_calls, 'build_sync_message() raised and the lock was never released'
+    assert database.lock_conn is not None and database.lock_conn.closed, (
+        'build_sync_message() raised and lock_conn was never closed'
+    )
+    assert database.control_db.closed, 'build_sync_message() raised and control_db was never closed'

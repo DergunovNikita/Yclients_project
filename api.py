@@ -312,6 +312,10 @@ def apply_company_scope(stmt, column, company_id: Optional[int], ctx: AccessCont
         if company_id not in allowed:
             raise HTTPException(status_code=403, detail='Branch not allowed')
         return stmt.where(column == company_id)
+    # Match build_company_scope / require_sync_company_ids / require_client_pii_access: a
+    # principal with zero assigned branches gets refused, not a silent `IN ()` empty page.
+    if not allowed:
+        raise HTTPException(status_code=403, detail='No branch access assigned')
     return stmt.where(column.in_(allowed))
 
 
@@ -444,9 +448,13 @@ async def api_groups(
     stmt = select(Group)
     count_company_filter = []
     if ctx is not None and not ctx.full_access:
-        allowed = ctx.company_ids or []
-        stmt = stmt.join(Company, Company.group_id == Group.id).where(Company.id.in_(allowed)).distinct()
-        count_company_filter.append(Company.id.in_(allowed))
+        # Group has no company_id of its own, so the scope has to run through the Company
+        # join — but the empty-allowed-list refusal is the same rule as apply_company_scope's,
+        # and must raise the same 403 rather than silently answering 200 with an empty page.
+        stmt = apply_company_scope(
+            stmt.join(Company, Company.group_id == Group.id).distinct(), Company.id, None, ctx
+        )
+        count_company_filter.append(Company.id.in_(ctx.company_ids))
     stmt = stmt.order_by(Group.id.asc())
     total, groups = await fetch_page(db, stmt, limit, offset)
     counts_result = await db.execute(
@@ -455,14 +463,11 @@ async def api_groups(
         .group_by(Company.group_id)
     )
     counts = dict(counts_result.all())
-    data = [
-        {
-            "id": group.id,
-            "title": group.title,
-            "companies_count": counts.get(group.id, 0),
-        }
-        for group in groups
-    ]
+    data = serialize_rows(groups, lambda group: {
+        "id": group.id,
+        "title": group.title,
+        "companies_count": counts.get(group.id, 0),
+    })
     return build_page_response(total, limit, offset, data)
 
 
@@ -481,7 +486,7 @@ async def api_companies(
         stmt = stmt.where(Company.group_id == group_id)
     stmt = stmt.order_by(Company.id.asc())
     total, companies = await fetch_page(db, stmt, limit, offset)
-    data = [{"id": c.id, "title": c.title, "group_id": c.group_id} for c in companies]
+    data = serialize_rows(companies, lambda c: {"id": c.id, "title": c.title, "group_id": c.group_id})
     return build_page_response(total, limit, offset, data)
 
 
@@ -968,12 +973,30 @@ async def api_stats(request: Request, db: AsyncSession = Depends(get_async_db)):
     fin_income = fin_result.scalar_one_or_none() or 0
 
     async def count_of(model):
+        if model is Group:
+            # Group has no company_id of its own (it's the parent of several companies), so
+            # unlike every other model here it fell through both branches below and stayed
+            # unscoped — a restricted principal got every tenant's group count. Scope it the
+            # way /groups does: by the companies it contains. Full access stays join-free so
+            # the unscoped count is unchanged.
+            stmt = select(func.count(func.distinct(Group.id))).select_from(Group)
+            if allowed is not None:
+                stmt = apply_company_scope(
+                    stmt.join(Company, Company.group_id == Group.id), Company.id, None, ctx
+                )
+            r = await db.execute(stmt)
+            return r.scalar_one()
         stmt = select(func.count()).select_from(model)
         company_column = getattr(model, 'company_id', None)
-        if allowed is not None and company_column is not None:
-            stmt = stmt.where(company_column.in_(allowed))
-        elif allowed is not None and model is Company:
-            stmt = stmt.where(Company.id.in_(allowed))
+        if company_column is None and model is Company:
+            company_column = Company.id
+        if company_column is not None:
+            # Route through apply_company_scope like every other model here, instead of a
+            # hand-rolled `.in_(allowed)` that would compile `IN ()` and silently return 0 for
+            # a zero-branch principal. Currently masked by the revenue/fin_income/attended
+            # queries above raising first, but that ordering is incidental — this must not
+            # depend on it.
+            stmt = apply_company_scope(stmt, company_column, None, ctx)
         r = await db.execute(stmt)
         return r.scalar_one()
 
@@ -1173,6 +1196,15 @@ def transaction_window_clause():
 # `companies` is the one table that documents the cut instead of being subject to it: it
 # carries the window dates, and dropping the row would hide why the rest is trimmed.
 EXPORT_WINDOW_EXEMPT_MODELS = frozenset({Company})
+# Same fields /services and /goods redact for a role without financial access (api_services,
+# api_goods above). The CSV column must stay present — only the value is blanked, so a column
+# position parser doesn't break.
+MONEY_EXPORT_COLUMNS: dict[type, frozenset[str]] = {
+    Service: frozenset({Service.price_min.key}),
+    ServiceCatalog: frozenset({ServiceCatalog.price_min.key}),
+    Good: frozenset({Good.cost.key, Good.actual_cost.key}),
+    GoodCatalog: frozenset({GoodCatalog.cost.key, GoodCatalog.actual_cost.key}),
+}
 
 
 def csv_export_stmt(model, ctx: AccessContext | None):
@@ -1208,7 +1240,7 @@ def csv_export_stmt(model, ctx: AccessContext | None):
     return stmt.order_by(*model.__table__.primary_key.columns)
 
 
-async def async_stream_csv_rows(db: AsyncSession, model, stmt):
+async def async_stream_csv_rows(db: AsyncSession, model, stmt, blank_columns: frozenset[str] = frozenset()):
     columns = [column.key for column in model.__table__.columns]
     buffer = io.StringIO()
     writer = csv.writer(buffer)
@@ -1219,7 +1251,10 @@ async def async_stream_csv_rows(db: AsyncSession, model, stmt):
 
     result = await db.stream(stmt)
     async for row in result.scalars():
-        writer.writerow([serialize_value(getattr(row, column)) for column in columns])
+        writer.writerow([
+            None if column in blank_columns else serialize_value(getattr(row, column))
+            for column in columns
+        ])
         yield buffer.getvalue()
         buffer.seek(0)
         buffer.truncate(0)
@@ -1236,6 +1271,8 @@ async def export_csv(table_name: str, request: Request, db: AsyncSession = Depen
     ctx = request_access(request)
     if model in FINANCIAL_EXPORT_MODELS:
         require_request_financial_access(request)
+    show_financials = can_request_view_financials(request)
+    blank_columns = frozenset() if show_financials else MONEY_EXPORT_COLUMNS.get(model, frozenset())
     if model is Client:
         ctx, portal_account_id = require_client_pii_access(request)
         await log_portal_audit(
@@ -1249,7 +1286,7 @@ async def export_csv(table_name: str, request: Request, db: AsyncSession = Depen
         await db.commit()
 
     return StreamingResponse(
-        async_stream_csv_rows(db, model, csv_export_stmt(model, ctx)),
+        async_stream_csv_rows(db, model, csv_export_stmt(model, ctx), blank_columns),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename={table_name}.csv"},
     )

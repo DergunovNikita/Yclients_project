@@ -105,10 +105,22 @@ async def test_fetch_record_stats_aggregates_companies_and_passes_staff(async_se
 
 
 @pytest.mark.asyncio
-async def test_fetch_record_stats_requires_credentials(monkeypatch):
-    monkeypatch.setattr(yclients_analytics, 'PARTNER_TOKEN', '')
+async def test_fetch_record_stats_requires_credentials(async_session):
+    with pytest.raises(
+        yclients_analytics.YClientsAnalyticsError,
+        match='No YClients credentials configured for company 1',
+    ):
+        await yclients_analytics.fetch_record_stats(
+            [1],
+            date(2026, 6, 1),
+            date(2026, 6, 30),
+            db=async_session,
+        )
 
-    with pytest.raises(yclients_analytics.YClientsAnalyticsError):
+
+@pytest.mark.asyncio
+async def test_fetch_record_stats_requires_database_session():
+    with pytest.raises(yclients_analytics.YClientsAnalyticsError, match='Database session is required'):
         await yclients_analytics.fetch_record_stats(
             [1],
             date(2026, 6, 1),

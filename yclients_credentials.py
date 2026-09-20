@@ -22,6 +22,12 @@ class CredentialsConfigError(RuntimeError):
     """Raised when credentials encryption is not configured."""
 
 
+# Sanitized message for any router surfacing CredentialsConfigError to a client — the raw
+# exception text names the missing env var, which is an operational detail no caller (a
+# self-registering owner included) should see.
+CREDENTIAL_STORAGE_FAILED_DETAIL = 'Credential storage is not configured'
+
+
 @dataclass(frozen=True)
 class YClientsCredentialValue:
     id: int | None

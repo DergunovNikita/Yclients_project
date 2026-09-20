@@ -33,22 +33,71 @@ def run_sync_job(
     normalized_trigger = (trigger_type or 'manual').strip().lower()
     database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
     control_db = database.get_db()
+    # pg_advisory_lock is session-level: it belongs to one physical connection, not to a
+    # transaction. An ORM Session hands its connection back to the pool on every commit(),
+    # and this function commits many times (create_run, set_state, every progress_callback)
+    # while the pipeline session works on the same pool — so the lock and the unlock landed
+    # on different connections, pg_advisory_unlock() returned false, and the lock stayed
+    # held on an abandoned pooled connection that init_database's module-level global keeps
+    # alive forever. Every later run then reported 'already_running'. Reproduced against
+    # real PostgreSQL; the lock therefore gets a connection of its own that nothing else
+    # can check out.
+    lock_conn = database.engine.connect().execution_options(isolation_level='AUTOCOMMIT')
     control = SyncControlService()
     jobs = SyncJobService()
     notifier = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
 
-    if not control.acquire_lock(control_db):
-        status = control.get_status_payload(control_db)
+    try:
+        lock_acquired = control.acquire_lock(lock_conn)
+    except Exception:
+        # acquire_lock() itself can raise (dropped connection, statement timeout) before it
+        # ever tells us whether the lock was taken. Either way lock_conn and control_db were
+        # already checked out of the pool and must go back.
+        lock_conn.close()
         control_db.close()
+        raise
+
+    if not lock_acquired:
+        try:
+            status = control.get_status_payload(control_db)
+        finally:
+            # get_status_payload() issues three queries; if any of them raises, lock_conn and
+            # control_db must still be closed here. acquire_lock() returned False, so this
+            # connection never held the lock -- but both connections were already checked out
+            # of the pool, and init_database's module-level global keeps the engine (and its
+            # pool) alive, so a long-running worker leaks one connection per failed attempt
+            # until the pool is exhausted.
+            lock_conn.close()
+            control_db.close()
         return {
             'started': False,
             'status': 'already_running',
             'detail': status,
         }
 
-    log_path = build_log_path(SYNC_LOG_DIR, normalized_mode, normalized_trigger)
-    control.cleanup_stale_runs(control_db)
-    run = control.create_run(control_db, normalized_mode, normalized_trigger, initiator, log_path)
+    try:
+        log_path = build_log_path(SYNC_LOG_DIR, normalized_mode, normalized_trigger)
+        control.cleanup_stale_runs(control_db)
+        run = control.create_run(control_db, normalized_mode, normalized_trigger, initiator, log_path)
+        # Captured now, while control_db is known-good, and kept as a plain value rather than
+        # read off `run` later: the Session expires every object it holds on each commit()
+        # (see below), so a late `run.started_at` needs a fresh SELECT, and that SELECT is
+        # exactly what must not be allowed to stand between the lock and its release.
+        run_started_at = run.started_at
+    except Exception:
+        # These still run before the try/finally below that owns lock cleanup. Without this,
+        # a failure here (build_log_path()'s mkdir hitting a permissions problem, a read-only
+        # mount or a full disk; or a DB error in cleanup_stale_runs/create_run) leaves lock_conn
+        # open and the advisory lock held on it forever -- the same failure mode the dedicated
+        # connection above was introduced to fix, just reached before that block starts.
+        # release_lock() itself can raise (lock_conn went stale while idle) -- it must not
+        # skip the close() calls, or this collapses back into the same leak.
+        try:
+            control.release_lock(lock_conn)
+        finally:
+            lock_conn.close()
+            control_db.close()
+        raise
 
     result = {
         'started': True,
@@ -100,6 +149,7 @@ def run_sync_job(
                 credential_id=credential_id,
                 company_ids=company_ids,
                 progress_callback=progress_callback,
+                database=database,
             )
             step_results = list(sync_result.get('step_results', []))
 
@@ -144,19 +194,42 @@ def run_sync_job(
         })
     finally:
         finished_at = datetime.now()
-        message = build_sync_message(
-            mode=normalized_mode,
-            trigger_type=normalized_trigger,
-            status=finished_status,
-            started_at=run.started_at,
-            finished_at=finished_at,
-            log_path=log_path,
-            warning_count=warning_count,
-            error_message=None if finished_status == 'success' else finished_message,
-        )
-        notifier.send(message)
-        control.release_lock(control_db)
-        control_db.close()
+        # Lock release and connection cleanup come first, before any notification work, and
+        # nothing below is allowed to run ahead of it. The previous ordering built the Telegram
+        # message and sent it before releasing the lock; TelegramNotifier.send() catches
+        # requests.RequestException internally, so that call alone could not escape -- but
+        # build_sync_message() used to read run.started_at, and this Session expires every
+        # object it holds on each commit() (create_run, every set_state, every
+        # progress_callback), so that attribute needs a fresh SELECT by this point. If an
+        # earlier failure left control_db's transaction aborted (e.g. finish_run's own commit
+        # failing partway, then the except block's retry of finish_run failing again on the
+        # still-poisoned session), that SELECT raises too -- directly inside this finally,
+        # before the release/close block below, leaking the lock exactly like the windows
+        # already closed above. Keeping this block first makes that impossible regardless of
+        # what a future change to the notification path does.
+        try:
+            control.release_lock(lock_conn)
+        finally:
+            lock_conn.close()
+            control_db.close()
+        try:
+            message = build_sync_message(
+                mode=normalized_mode,
+                trigger_type=normalized_trigger,
+                status=finished_status,
+                started_at=run_started_at,
+                finished_at=finished_at,
+                log_path=log_path,
+                warning_count=warning_count,
+                error_message=None if finished_status == 'success' else finished_message,
+            )
+            notifier.send(message)
+        except Exception:
+            # Best-effort from here on: the lock is already released and `result` already
+            # holds the true outcome, so a notification failure must not raise out of this
+            # function and turn a successful sync into an unhandled exception for the caller.
+            with stream_run_output(log_path):
+                print(traceback.format_exc())
 
     return result
 

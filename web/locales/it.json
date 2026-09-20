@@ -114,7 +114,6 @@
     "barber": "Barbiere"
   },
   "onboarding": {
-    "brandSuffix": "Collegamento",
     "aside": {
       "title": "Collega YClients",
       "subtitle": "2 passaggi: aggiungi i token di accesso e scegli le filiali da sincronizzare."
@@ -195,7 +194,6 @@
     "credCreated2": "Integrazione creata. Le filiali verranno recuperate da YClients automaticamente."
   },
   "profile": {
-    "brandSuffix": "Area personale",
     "logout": "Esci dall'account",
     "eyebrow": "Area personale",
     "greeting": "Ciao",
@@ -405,7 +403,6 @@
     "scaleCount": "quantità",
     "scalePercent": "percentuali",
     "topRevenue": "Top 5 per ricavi",
-    "topAverageCheck": "Top 5 per scontrino medio",
     "goodsKpiCompletion": "Completamento KPI prodotti",
     "completionTooltip": "Completamento: {value}",
     "diagnosticBarbers": "visite dei barbieri: {count}",
@@ -418,7 +415,6 @@
     "dataCheck": "Controllo dati",
     "noPlanForPeriod": "Nessun piano nel periodo selezionato",
     "noStaffForBranch": "Nessun dipendente per la filiale selezionata",
-    "noStaffForPeriod": "Nessun dipendente nel periodo selezionato",
     "planPeriodMeta": " · piano {start} .. {end}",
     "staffPlural": "dipendenti",
     "networkAndBranches": "rete e filiali",
@@ -456,7 +452,6 @@
     "unsavedChangesMessage": "Vuoi davvero lasciare questa pagina? Tutte le modifiche non salvate andranno perse",
     "unsavedChangesLeave": "Esci",
     "unsavedChangesStay": "Rimani",
-    "confirmDiscardPlanSettings": "Ci sono modifiche non salvate. Uscire senza salvare?",
     "confirmDiscardServiceManagement": "Ci sono modifiche non salvate nei servizi. Uscire senza salvare?",
     "archivedName": "{name} (archiviato)",
     "noGroup": "Nessun gruppo",
@@ -571,7 +566,6 @@
     "search": "Cerca",
     "initialPasswordsSearchPlaceholder": "Email, nome, filiale, ruolo…",
     "colLoginEmail": "Login (email)",
-    "colPassword": "Password",
     "colInviteSentAt": "Ultimo invito",
     "credentialsTitle": "Credenziali YClients",
     "credentialsHint": "I segreti sono memorizzati cifrati. Dopo il salvataggio, token e password non vengono mostrati.",
@@ -628,7 +622,6 @@
     "deleteIrreversible": "Questa azione non può essere annullata: il record non potrà essere ripristinato.",
     "loginLabel": "Login",
     "saveCredentialsHint": "Usa queste email per inviare link sicuri di impostazione password. Le password in chiaro non vengono salvate.",
-    "passwordsSheet": "Inviti",
     "noUserIdsForDistribution": "Nessun identificatore utente per l’invio",
     "sentEmailsCount": "Email inviate: {count}",
     "resendInvite": "Reinvia invito",

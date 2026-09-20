@@ -24,7 +24,7 @@ from yclients_credentials import (
     mark_credential_failure_sync,
     mark_credential_success_sync,
 )
-from database import init_database
+from database import Database, init_database
 from models import (
     Group, Company,
     ServiceCategory, ServiceCategoryCatalog, Service,
@@ -47,6 +47,12 @@ INCREMENTAL_SYNC_MODE = 'incremental'
 REFRESH_SYNC_MODE = 'refresh'
 FULL_SYNC_MODE = 'full'
 FULL_REFRESH_CLEANUP_STEP = 'Full refresh cleanup'
+# Named once so checkpoint_step_names (below) and the per-company step list stay in sync —
+# a step renamed in one place used to silently stop counting toward the checkpoint.
+RECORDS_STEP = 'Записи'
+FINANCIAL_TRANSACTIONS_STEP = 'Финансовые транзакции'
+GOODS_TRANSACTIONS_STEP = 'Товарные транзакции'
+COMMENTS_STEP = 'Комментарии'
 PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
 APPOINTMENTS_SOURCE = 'appointments_detail'
 GOODS_TRANSACTIONS_SOURCE = 'goods_transactions_detail'
@@ -2529,12 +2535,16 @@ def execute_sync(
     credential_id: int | None = None,
     company_ids: Iterable[int] | None = None,
     progress_callback=None,
+    database: Database | None = None,
 ):
     print("=" * 60)
     print("  YClients → PostgreSQL: синхронизация")
     print("=" * 60)
 
-    database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
+    # A caller that already built a Database (sync_orchestrator's run_sync_job) passes it
+    # in so the run shares one engine/pool instead of opening a second one here.
+    if database is None:
+        database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
     empty_result = {
         'completed': False,
         'success': False,
@@ -2564,10 +2574,10 @@ def execute_sync(
     result_modes: set[str] = set()
     checkpoint_step_names = {
         FULL_REFRESH_CLEANUP_STEP,
-        'Записи',
-        'Финансовые транзакции',
-        'Товарные транзакции',
-        'Комментарии',
+        RECORDS_STEP,
+        FINANCIAL_TRANSACTIONS_STEP,
+        GOODS_TRANSACTIONS_STEP,
+        COMMENTS_STEP,
     }
 
     requested_company_ids = [int(item) for item in dict.fromkeys(company_ids or [])]
@@ -2814,21 +2824,21 @@ def execute_sync(
                     ("Категории товаров", sync_good_categories, {}),
                     ("Товары", sync_goods, {}),
                     (
-                        "Записи",
+                        RECORDS_STEP,
                         sync_records,
                         {'start_date': company_sd, 'end_date': schedule_end.isoformat(), **refresh},
                     ),
                     (
-                        "Финансовые транзакции",
+                        FINANCIAL_TRANSACTIONS_STEP,
                         sync_financial_transactions,
                         {'start_date': company_sd, 'end_date': ed, **refresh},
                     ),
                     (
-                        "Товарные транзакции",
+                        GOODS_TRANSACTIONS_STEP,
                         sync_goods_transactions,
                         {'start_date': company_sd, 'end_date': ed, **refresh},
                     ),
-                    ("Комментарии", sync_comments, {'start_date': company_sd, 'end_date': ed, **refresh}),
+                    (COMMENTS_STEP, sync_comments, {'start_date': company_sd, 'end_date': ed, **refresh}),
                     (
                         "Графики сотрудников",
                         sync_staff_schedules,
@@ -2934,18 +2944,13 @@ def execute_sync(
     }
 
 
-def main():
-    execute_sync(mode='incremental')
-
-
 if __name__ == "__main__":
-    start_time = time.time()
-    print(f"▶ Начало выполнения: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
-
-    main()
-
-    elapsed = time.time() - start_time
-    minutes, seconds = divmod(int(elapsed), 60)
-    print(f"\n▶ Конец выполнения:  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"⏱ Общее время: {minutes} мин {seconds} сек")
+    # This used to call execute_sync() directly — no advisory lock, no run tracking — right
+    # next to a detached production sync nobody watches (see main.py / sync_orchestrator.py).
+    # Nothing in docker-compose*.yml, docker/entrypoint.sh or sync.sh runs this file this
+    # way (the `sync` service runs main.py); nothing should. Route through the guarded
+    # entry point instead: `python main.py` or `./sync.sh`.
+    raise SystemExit(
+        "sync_pipeline.py must not be run directly: it skips the advisory lock and run "
+        "tracking. Use 'python main.py' or './sync.sh' instead."
+    )
