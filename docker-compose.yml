@@ -20,13 +20,20 @@ x-app-base: &app-base
 services:
   postgres:
     image: postgres:16-alpine
-    # The image ships stock defaults, which meant shared_buffers=128MB against a pg_data
-    # volume of ~640MB -- the working set could not stay resident, so the dashboard's repeated
-    # scans of the same fact tables kept going back to the page cache. 1GB holds the whole
-    # database with headroom; more would be spent on nothing, since there is not more database
-    # to cache. It is also ~13% of the VM's 7.9GB rather than the usual 25% rule (~2GB),
-    # deliberately: this box has NO SWAP and also runs the api, the worker and a second demo
-    # stack, so over-committing is an OOM kill rather than a slowdown.
+    # 1GB rather than the stock 128MB: it holds the whole ~640MB pg_data volume, and more
+    # would be spent on nothing since there is not more database to cache. ~13% of the VM's
+    # 7.9GB rather than the usual 25% rule, deliberately -- this box has NO SWAP and also runs
+    # the api, the worker and a second demo stack, so over-committing is an OOM kill rather
+    # than a slowdown.
+    #
+    # Do NOT expect this to have made the dashboard faster; measured on production, it did
+    # not. plan_fact over full history went 16.1-17.9s at 128MB to 15.5-17.0s at 1GB, and
+    # bundle 15.33s to 14.79s -- 3-5%, inside the noise. The reason is visible in `free -m`
+    # beforehand: ~5GB of buff/cache against a 640MB database, so the OS page cache already
+    # held all of it and this only moved the pages from one cache to another. Kept because it
+    # is still the right default (it is no longer at the mercy of page-cache eviction from the
+    # demo stack), but the dashboard's remaining cost is CPU on a 4-core VM, not I/O. Look
+    # there next, not at buffer sizing.
     # `postgres` must lead the list -- this replaces the image's CMD, and the entrypoint
     # expects the server command as its arguments. Verified booting with this exact flag on
     # postgres:16-alpine before it was applied here.
