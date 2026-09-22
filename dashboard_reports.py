@@ -2084,7 +2084,16 @@ async def _staff_rows(
             item['revenue'] / item['completed'] if item['completed'] else 0.0
         )
     rows = list(rows_by_staff.values())
-    rows.sort(key=lambda item: (item['revenue'], item['completed']), reverse=True)
+    # staff_id is a unique final tiebreaker: without it, staff tied on revenue and
+    # completed count swap places whenever the query plan changes (see _goods_payload).
+    rows.sort(
+        key=lambda item: (
+            item['revenue'],
+            item['completed'],
+            item['staff_id'] if item['staff_id'] is not None else -1,
+        ),
+        reverse=True,
+    )
     return rows
 
 
@@ -2279,7 +2288,16 @@ async def _clients_rows(
             'revenue': revenue,
             'avg_check': revenue / visits if visits else 0.0,
         })
-    rows.sort(key=lambda item: item['revenue'], reverse=True)
+    # client_id is a unique final tiebreaker (it can be None for the "no client" bucket,
+    # which sorts last): without it, clients tied on revenue swap places whenever the
+    # query plan changes (see _goods_payload).
+    rows.sort(
+        key=lambda item: (
+            item['revenue'],
+            item['client_id'] if item['client_id'] is not None else -1,
+        ),
+        reverse=True,
+    )
     return rows
 
 
@@ -2306,7 +2324,11 @@ def _client_segment_rows(rows: list[dict[str, Any]], avg_revenue: float) -> list
         item['avg_revenue_per_client'] = revenue / clients if clients else 0.0
         item['avg_visits_per_client'] = visits / clients if clients else 0.0
         out.append(item)
-    return sorted(out, key=lambda item: item['clients'], reverse=True)
+    # 'segment' is the dict key each bucket was grouped under, so it is already unique
+    # and makes a tie on client count deterministic instead of plan-order-dependent.
+    # Negated count rather than reverse=True: reverse would flip the text tiebreaker too and
+    # list tied segments Я-to-А, which reads as a bug. Count descending, name ascending.
+    return sorted(out, key=lambda item: (-int(item['clients'] or 0), item['segment']))
 
 
 def _client_visit_frequency_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2355,7 +2377,18 @@ def _client_pareto_rows(
 ) -> list[dict[str, Any]]:
     if not rows:
         return []
-    sorted_rows = sorted(rows, key=lambda item: float(item.get('revenue') or 0), reverse=True)
+    # client_id as the final tiebreaker only decides which of two equally-ranked clients
+    # lands on which side of a decile cut; since they are tied on revenue, every bucket's
+    # revenue/clients totals are unaffected either way (see _goods_payload for the same
+    # reasoning) — this only removes the plan-order dependence of *which* client that is.
+    sorted_rows = sorted(
+        rows,
+        key=lambda item: (
+            float(item.get('revenue') or 0),
+            item.get('client_id') if item.get('client_id') is not None else -1,
+        ),
+        reverse=True,
+    )
     revenue_denominator = (
         float(total_revenue)
         if total_revenue is not None
@@ -2704,14 +2737,20 @@ async def _churn_payload(
         segment_bucket['clients'] += 1
         segment_bucket['visits'] += int(row.get('visits') or 0)
         segment_bucket['revenue'] += float(row.get('revenue') or 0)
-    staff_rows = sorted(staff_losses.values(), key=lambda item: item['revenue'], reverse=True)
+    # staff_name is the dict key staff_losses was grouped under, so it is already unique
+    # and makes a tie on lost revenue deterministic instead of plan-order-dependent.
+    staff_rows = sorted(
+        staff_losses.values(),
+        key=lambda item: (-float(item['revenue'] or 0), item['staff_name']),
+    )
     segment_rows = []
     for item in segment_rows_by_name.values():
         clients_count = int(item['clients'] or 0)
         item['avg_revenue_per_client'] = float(item['revenue'] or 0) / clients_count if clients_count else 0.0
         item['avg_visits_per_client'] = float(item['visits'] or 0) / clients_count if clients_count else 0.0
         segment_rows.append(item)
-    segment_rows.sort(key=lambda item: item['clients'], reverse=True)
+    # Same reasoning: 'segment' is the grouping key, already unique among these rows.
+    segment_rows.sort(key=lambda item: (-int(item['clients'] or 0), item['segment']))
     at_risk = sum(1 for row in risk_rows if row['segment'] == 'Под риском')
     sleeping = sum(1 for row in risk_rows if row['segment'] == 'Спящие')
     lost = sum(1 for row in risk_rows if row['segment'] == 'Потерянные')
@@ -2860,8 +2899,26 @@ async def _goods_payload(
             by_period[period]['period'] = period
             by_period[period]['sales_count'] += 1
             by_period[period]['revenue'] += revenue
-    goods_rows = sorted(goods.values(), key=lambda item: item['revenue'], reverse=True)
-    staff_rows = sorted(by_staff.values(), key=lambda item: item['revenue'], reverse=True)
+    # Confirmed bug (golden-snapshot comparison): revenue-only sorting has no tiebreaker,
+    # so goods/sellers tied on revenue swap places whenever the query plan reorders the
+    # rows feeding `goods`/`by_staff` (e.g. a new index or plan_cache_mode). The dict key
+    # each row was grouped under (company:good_id / staff_id) is already unique, so using
+    # it as the final tiebreaker — after the meaningful title/name — makes the order
+    # depend only on the data, never on incidental scan order.
+    goods_rows = [
+        item
+        for _key, item in sorted(
+            goods.items(),
+            key=lambda pair: (-float(pair[1]['revenue'] or 0), pair[1]['good_title'], pair[0]),
+        )
+    ]
+    staff_rows = [
+        item
+        for _key, item in sorted(
+            by_staff.items(),
+            key=lambda pair: (-float(pair[1]['revenue'] or 0), pair[1]['staff_name'], pair[0]),
+        )
+    ]
     period_rows = [by_period[key] for key in sorted(by_period)]
     total_revenue = sum(row['revenue'] for row in goods_rows)
     total_units = sum(row['units'] for row in goods_rows)
@@ -2963,7 +3020,15 @@ async def _operations_payload(
             by_staff[staff_key]['cancelled'] += 1
     hour_rows = [by_hour[key] for key in sorted(by_hour)]
     period_rows = [by_period[key] for key in sorted(by_period)]
-    staff_rows = sorted(by_staff.values(), key=lambda item: item['records'], reverse=True)
+    # Same fix as _goods_payload: the grouping key (staff_id, as a string) is a unique
+    # final tiebreaker for staff tied on record count.
+    staff_rows = [
+        item
+        for _key, item in sorted(
+            by_staff.items(),
+            key=lambda pair: (-int(pair[1]['records'] or 0), pair[1]['staff_name'], pair[0]),
+        )
+    ]
     local_totals = {
         'available_records': sum(row['records'] for row in period_rows),
         'completed': sum(row['completed'] for row in period_rows),

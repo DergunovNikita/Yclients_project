@@ -478,6 +478,9 @@ class GoodTransaction(Base):
 
     __table_args__ = (
         Index('uq_goods_transactions_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
+        # Dashboard reads filter goods sales by one branch and a date window (mirrors
+        # appointments/financial_transactions in 0043).
+        Index('ix_goods_transactions_company_date', 'company_id', 'date'),
     )
 
 
@@ -499,6 +502,9 @@ class Comment(Base):
 
     __table_args__ = (
         Index('uq_comments_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
+        # Dashboard NPS reads filter comments by one branch and a date window (mirrors
+        # appointments/financial_transactions in 0043).
+        Index('ix_comments_company_date', 'company_id', 'date'),
     )
 
 
@@ -510,7 +516,10 @@ class StaffSchedule(Base):
     date = Column(Date, index=True)
     slot_from = Column(Time)
     slot_to = Column(Time)
-    company_id = Column(Integer, ForeignKey('companies.id'), index=True)
+    # No index=True here: every lookup goes through the composite below, which leads
+    # with this same column (ix_staff_schedules_company_id sat at 0 idx_scan while the
+    # composite carried 1M+; see migration 0048).
+    company_id = Column(Integer, ForeignKey('companies.id'))
 
     __table_args__ = (
         Index(

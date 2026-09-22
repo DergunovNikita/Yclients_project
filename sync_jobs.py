@@ -5,8 +5,16 @@ from typing import Any, Optional
 
 from sqlalchemy import func, select, text
 
+from config import SYNC_JOB_RETENTION_DAYS, SYNC_JOB_RETENTION_INTERVAL_HOURS
 from models import SyncJob, SyncJobEvent
-from sync_parsing import serialize_dt
+from sync_control import SyncControlService
+from sync_parsing import parse_datetime, serialize_dt
+
+# A job in one of these is still the queue's business: claim_next_job may pick it up and
+# get_active_job reports it as the current one. Retention must never delete such a row, so the
+# set lives in one place instead of being spelled out at each use.
+ACTIVE_JOB_STATUSES = ('running', 'queued')
+_RETENTION_STATE_KEY = 'last_job_retention_at'
 
 
 class SyncJobService:
@@ -133,6 +141,93 @@ class SyncJobService:
             db.commit()
         return len(stale)
 
+    def purge_old_jobs(
+        self,
+        db,
+        retention_days: int = SYNC_JOB_RETENTION_DAYS,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Delete finished sync_jobs older than retention_days, and their sync_job_events.
+
+        Nothing else ever deletes either table, and events are the higher-cardinality of the
+        two (record_event fires per pipeline stage and per company within a stage), so the
+        events go with the job that owns them.
+
+        Two rows are never touched, regardless of age:
+
+        - anything still queued or running, which is the queue's live state, not history;
+        - the most recent job of every tenant. get_latest_job() is scoped by
+          portal_account_id, so the tenant whose sync broke months ago is exactly the one
+          whose last_job matters -- purging it would blank the sync status payload instead of
+          showing the failure that needs looking at. The worker's per-tenant auto-enqueue
+          cooldown reads the same row.
+
+        Age is the job's last activity (finish, else start, else request), the same fallback
+        the worker uses to date a job.
+
+        Events are deleted explicitly rather than left to the ON DELETE CASCADE on
+        sync_job_events.job_id, so the sweep does the same thing wherever that FK is not
+        enforced, and so the row count it reports is not a half-truth.
+
+        No reference has to be cleared first: a job points outwards (at a run, a credential,
+        an account) and nothing but its own events points back at it.
+        """
+        if retention_days <= 0:
+            return 0
+
+        now = now or datetime.now()
+        cutoff = now - timedelta(days=retention_days)
+        # Subqueries rather than materialised id lists, for the same reason as
+        # SyncControlService.purge_old_runs: the stale set is unbounded after a long gap and
+        # would otherwise travel back and forth as bind parameters.
+        keep_select = (
+            db.query(func.max(SyncJob.id)).group_by(SyncJob.portal_account_id).scalar_subquery()
+        )
+        stale_select = (
+            db.query(SyncJob.id)
+            .filter(
+                SyncJob.status.not_in(ACTIVE_JOB_STATUSES),
+                func.coalesce(
+                    SyncJob.finished_at, SyncJob.started_at, SyncJob.requested_at
+                ) < cutoff,
+                SyncJob.id.not_in(keep_select),
+            )
+            .scalar_subquery()
+        )
+
+        db.query(SyncJobEvent).filter(SyncJobEvent.job_id.in_(stale_select)).delete(synchronize_session=False)
+        deleted = db.query(SyncJob).filter(SyncJob.id.in_(stale_select)).delete(synchronize_session=False)
+        db.commit()
+        if deleted:
+            print(f'✓ Purged {deleted} sync job(s) older than {retention_days}d')
+        return deleted
+
+    def purge_old_jobs_if_due(
+        self,
+        db,
+        *,
+        retention_days: int = SYNC_JOB_RETENTION_DAYS,
+        interval_hours: int = SYNC_JOB_RETENTION_INTERVAL_HOURS,
+        now: datetime | None = None,
+    ) -> int | None:
+        """Throttled purge_old_jobs(): runs at most once per interval_hours.
+
+        Meant to be called from the worker's idle branch, which is reached on every poll tick
+        (a few seconds) -- without this check the retention query would run far more often than
+        the cheap, infrequent maintenance task it is meant to be. Returns None when skipped.
+        """
+        now = now or datetime.now()
+        control = SyncControlService()
+        last_at = parse_datetime(control.get_state_values(db, [_RETENTION_STATE_KEY]).get(_RETENTION_STATE_KEY))
+        if last_at is not None and now - last_at < timedelta(hours=interval_hours):
+            return None
+        # Recorded (and committed) before the delete, not after — see the matching comment in
+        # SyncControlService.purge_old_runs_if_due. A deterministically failing sweep must back
+        # off to the normal interval instead of retrying a bulk DELETE on every poll tick.
+        control.set_state(db, _RETENTION_STATE_KEY, now)
+        return self.purge_old_jobs(db, retention_days=retention_days, now=now)
+
     def _scoped_query(self, query, portal_account_id: int | None = None):
         if portal_account_id is not None:
             query = query.filter(SyncJob.portal_account_id == portal_account_id)
@@ -141,7 +236,7 @@ class SyncJobService:
     def get_active_job(self, db, portal_account_id: int | None = None) -> Optional[SyncJob]:
         return (
             self._scoped_query(db.query(SyncJob), portal_account_id)
-            .filter(SyncJob.status.in_(('running', 'queued')))
+            .filter(SyncJob.status.in_(ACTIVE_JOB_STATUSES))
             .order_by(
                 SyncJob.status.desc(),
                 SyncJob.id.asc(),
@@ -296,7 +391,7 @@ class SyncJobService:
         return job
 
     async def async_get_status_payload(self, db, portal_account_id: int | None = None) -> dict[str, Any]:
-        active_stmt = select(SyncJob).where(SyncJob.status.in_(('running', 'queued')))
+        active_stmt = select(SyncJob).where(SyncJob.status.in_(ACTIVE_JOB_STATUSES))
         latest_stmt = select(SyncJob)
         queued_stmt = select(func.count()).where(SyncJob.status == 'queued')
         running_stmt = select(func.count()).where(SyncJob.status == 'running')

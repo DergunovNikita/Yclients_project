@@ -1,3 +1,12 @@
+import os
+
+# Before anything imports config: APP_ENV now fails CLOSED, so any value outside
+# NON_PRODUCTION_ENV_NAMES — including unset — is treated as production and
+# validate_production_config() raises at import time. A clone with no .env would otherwise
+# abort at collection, before a single test runs. setdefault, so an explicitly set APP_ENV
+# (CI, or a test that deliberately exercises the production path) still wins.
+os.environ.setdefault('APP_ENV', 'test')
+
 from collections.abc import AsyncGenerator
 
 import pytest

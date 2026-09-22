@@ -51,8 +51,17 @@ function hasDrawableSegment(data) {
  * single bucket, or a series whose months never touch, leaves bare markers that read as
  * a broken chart — those are shown as bars instead.
  */
+// Types charts.js actually registers. Chart.js no longer auto-registers everything (the
+// bundle imports controllers explicitly), so a type outside this set throws
+// `"x" is not a registered controller` in the browser — with no server-side signal, because
+// the type is chosen in Python by dashboard_reports._chart(). Falling back to 'bar' keeps a
+// new backend chart type rendering something real instead of blanking the report; widen the
+// set and the registration together when one is genuinely wanted.
+const RENDERABLE_TYPES = new Set(['bar', 'line', 'doughnut', 'pie']);
+
 export function chartRenderType(spec) {
-  const type = spec?.type || 'bar';
+  const requested = spec?.type || 'bar';
+  const type = RENDERABLE_TYPES.has(requested) ? requested : 'bar';
   if (type !== 'line') return type;
   return (spec.datasets || []).some((dataset) => hasDrawableSegment(dataset.data))
     ? 'line'

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,11 +12,14 @@ from typing import Iterable
 
 from cryptography.fernet import Fernet
 from sqlalchemy import delete, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from config import PORTAL_CREDENTIALS_ENCRYPTION_KEY, PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD
 from models import Company, YClientsCredential, YClientsCredentialCompany
+
+logger = logging.getLogger(__name__)
 
 
 class CredentialsConfigError(RuntimeError):
@@ -216,6 +220,46 @@ async def load_credentials_for_companies_async(
             result[int(company_id)] = decrypted_credential(credential, [int(company_id)])
         except Exception as exc:
             _record_decrypt_failure(credential, exc)
+    # decrypted_credential()/_record_decrypt_failure() stage in-place bookkeeping (rotated-key
+    # re-encryption, credential_fingerprint, needs_reauth) that is otherwise silently discarded:
+    # this is a request-scoped AsyncSession (get_async_db() only closes it, never commits), and
+    # its one caller chain (yclients_analytics.fetch_record_stats <- dashboard_service's
+    # appointments-breakdown/summary read path) never writes anything else on it, so committing
+    # here cannot flush unrelated pending state. Mirrors load_credentials_for_companies_sync below.
+    #
+    # Best-effort: this commit is the only write in this read path's call chain (see above), so
+    # a failure here has nothing else to take down with it. Catching it keeps a DB hiccup from
+    # turning fetch_record_stats's designed graceful degradation (falls back to local counts /
+    # "unavailable") into an unhandled 500 — losing the bookkeeping once is strictly no worse
+    # than the pre-fix behaviour, which never persisted it at all.
+    #
+    # A guard on db.new/db.dirty/db.deleted was tried here and does NOT work: this function
+    # runs its own select() first, whose autoflush moves any caller's pending object out of
+    # db.new before the check could see it, so the guard passes and commits the very thing it
+    # was meant to block (a test caught this). Detecting already-flushed foreign work needs a
+    # separate session for the bookkeeping, which is the real fix if a mutating caller ever
+    # appears. Until then the caller chain is pinned by
+    # tests/test_yclients_credentials.py::test_only_the_read_path_loads_credentials_async,
+    # so adding a caller is a conscious act rather than a silent one. Note what that pins and
+    # what it does not: it fixes the callers of this function and of fetch_record_stats, which
+    # stops a new entry point appearing unnoticed, but the property that actually makes the
+    # commit safe is that the whole REQUEST is write-free, and that is decided by the endpoint.
+    # A mutating endpoint that also renders a summary would still flush its partial work here.
+    try:
+        await db.commit()
+    except SQLAlchemyError as exc:
+        logger.warning('Credential bookkeeping commit failed: %s', exc.__class__.__name__)
+        try:
+            await db.rollback()
+        except SQLAlchemyError as rollback_exc:
+            # Guarded for the same reason sync_worker guards its retention rollback: the
+            # likeliest cause of the failed commit is a dead connection, which is also when
+            # rollback() raises. Unguarded it would escape this handler and turn
+            # fetch_record_stats's designed graceful degradation into a 500 -- exactly what
+            # catching the commit was for.
+            logger.warning(
+                'Credential bookkeeping rollback failed: %s', rollback_exc.__class__.__name__
+            )
     return result
 
 

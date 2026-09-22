@@ -1375,15 +1375,17 @@ async def test_reporting_start_trims_breakdown_cards_client_blocks_and_staff_fac
     )
     assert sum(row['clients'] for row in churn['raw']['staff']) == 1
 
-    # Goods revenue reaches plan/fact through its own helper, and admin attribution
-    # counts finished appointments directly — both must see the trimmed history.
-    goods_total = await dashboard_service._goods_paid_revenue_total(
+    # Goods revenue reaches the summary through _average_check_block's classification query,
+    # and admin attribution counts finished appointments directly — both must see the trimmed
+    # history. Asserted against the live path on purpose: the private helper this used to call
+    # lost its last production caller, so a passing assertion there would have proved nothing.
+    average_check = await dashboard_service._average_check_block(
         async_session,
         dashboard_service.DateRange(date(2025, 1, 1), date(2025, 12, 31)),
         1,
         factual_at=report_now,
     )
-    assert goods_total == 200.0
+    assert average_check['goods_revenue'] == 200.0
     admin_clients = await dashboard_service._admin_clients_by_finished_appointments(
         async_session, date(2025, 1, 1), date(2025, 12, 31), 1, [1], {1: None},
         factual_at=report_now,

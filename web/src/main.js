@@ -1,4 +1,16 @@
-import Chart from 'chart.js/auto';
+import {
+  BarController,
+  BarElement,
+  CategoryScale,
+  Chart,
+  Filler,
+  Legend,
+  LinearScale,
+  LineController,
+  LineElement,
+  PointElement,
+  Tooltip,
+} from 'chart.js';
 import { enhanceSelect } from './customSelect.js';
 import {
   acquireStartupSession,
@@ -46,7 +58,11 @@ import { inputDateValue, monthOfRange, monthRange, monthValue } from './period.j
 import { branchesForPeriod } from './reportingWindow.js';
 // i18n's formatDate parses a date-only string as UTC midnight, which renders a day early
 // for any viewer west of UTC. This one pins it to local midnight.
-import { formatDate } from './reports/format.js';
+// formatMoney/formatNumber/formatDecimal used to be defined locally here without a null
+// guard, so a financials_hidden field (e.g. revenue.service_revenue for the manager default,
+// see AGENTS.md) rendered as a misleading "0 ₽" instead of admitting it isn't shown. These
+// versions render "—" for null/undefined, same as Reports already did — see format.test.mjs.
+import { formatDate, formatDecimal, formatMoney, formatNumber } from './reports/format.js';
 import { canEnterManualFacts, entersManualFactsForSelf } from './manualFactAccess.js';
 import { BRANCH_TIME_ZONE, parseServerInstant } from './timestamps.js';
 import { initReports } from './reports/index.js';
@@ -57,6 +73,23 @@ import {
   historyNavigationDecision,
   shouldHandleSameTabNavigation,
 } from './unsavedChanges.js';
+
+// Only bar and line charts (line/bar controllers, mixed in the OPZ chart) are used here —
+// see reports/charts.js for the doughnut-capable registration the report viewer needs.
+// Filler backs the revenue chart's `fill: true`; Legend/Tooltip are relied on implicitly
+// (only renderServicesChart turns the legend off) by every chart built in this file.
+Chart.register(
+  BarController,
+  LineController,
+  BarElement,
+  LineElement,
+  PointElement,
+  CategoryScale,
+  LinearScale,
+  Legend,
+  Tooltip,
+  Filler,
+);
 
 document.documentElement.lang = getLocale();
 applyTranslations();
@@ -501,18 +534,6 @@ function applyFinancialVisibility(summary) {
   const financialsHidden = Boolean(summary?.financials_hidden);
   setOverviewSectionHidden('revenue', financialsHidden);
   setOverviewSectionHidden('services', financialsHidden);
-}
-
-function formatMoney(value) {
-  return `${Math.round(Number(value || 0)).toLocaleString(intlLocale())} ₽`;
-}
-
-function formatNumber(value) {
-  return Number(value || 0).toLocaleString(intlLocale());
-}
-
-function formatDecimal(value) {
-  return Number(value || 0).toLocaleString(intlLocale(), { maximumFractionDigits: 2 });
 }
 
 function formatPct(value) {
@@ -3469,12 +3490,19 @@ async function startSession() {
     setSelectedPortalAccountId('');
     applyDashboardPermissions();
   }
-  await loadBranches();
   setActiveView(viewFromLocation());
   const existingPosition = Number(history.state?.[HISTORY_POSITION_KEY]);
   historyPosition = Number.isFinite(existingPosition) ? existingPosition : 0;
   replaceDashboardHistory({ view: activeView });
-  await ensureStaffForView(activeView);
+  // Safe to run concurrently because loadStaff() reads filter.branch.value SYNCHRONOUSLY,
+  // before its first await, so the value it sends is deterministically '' regardless of
+  // which request resolves first. That synchronous read is the load-bearing part, not the
+  // emptiness of the select: the later read (after the /dashboard/staff await, where the
+  // label is built) IS order-dependent, and is benign today only because renderBranchOptions
+  // also resolves to '' on a cold start. Give loadBranches() a preselected branch — a
+  // restored selection, a single-branch tenant — and that later read becomes a
+  // network-timing race. Re-check it before adding any such preselection.
+  await Promise.all([loadBranches(), ensureStaffForView(activeView)]);
   await loadCurrentView();
 }
 

@@ -919,7 +919,9 @@ async def admin_update_user(
     if user.id == actor.id:
         raise HTTPException(status_code=403, detail='Cannot manage your own account here')
     if not _same_tenant(actor, user):
-        raise HTTPException(status_code=403, detail='Cannot manage user from another tenant')
+        # 404, not 403: matches _load_credential/_load_manageable_staff. A distinguishable
+        # status for "exists in another tenant" vs "does not exist" is an id-enumeration oracle.
+        raise HTTPException(status_code=404, detail='User not found')
 
     actor_branch_ids = await _actor_branch_ids(db, actor)
     current_branch_ids = await load_user_access_branch_ids(db, user)
@@ -992,7 +994,8 @@ async def admin_delete_user(
 
     actor_branch_ids = await _actor_branch_ids(db, actor)
     if not _same_tenant(actor, user):
-        raise HTTPException(status_code=403, detail='Cannot delete user from another tenant')
+        # 404, not 403: see the matching comment in admin_update_user.
+        raise HTTPException(status_code=404, detail='User not found')
     branch_ids = await load_user_access_branch_ids(db, user)
     assert_can_manage_user(actor.role, actor_branch_ids, user.role, branch_ids)
 
@@ -1170,9 +1173,10 @@ async def admin_distribute_credentials(
     active_portal_account_id = await _active_admin_portal_account_id(db, actor, x_portal_account_id)
     actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
     unique_ids = sorted(set(body.user_ids))
-    users = (
-        await db.execute(select(PortalUser).where(PortalUser.id.in_(unique_ids)))
-    ).scalars().all()
+    # Scoped to the active tenant, same as admin_list_users/admin_list_initial_passwords: a
+    # cross-tenant id must never even reach `users_by_id`, or its email leaks into `errors`
+    # below before the _same_tenant check further down gets a chance to reject it.
+    users = await _tenant_scoped_users(db, active_portal_account_id, PortalUser.id.in_(unique_ids))
     users_by_id = {user.id: user for user in users}
 
     sent: list[dict] = []

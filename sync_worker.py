@@ -13,7 +13,7 @@ from config import (
     SYNC_STALE_JOB_MINUTES,
     SYNC_WORKER_POLL_INTERVAL,
 )
-from database import init_database
+from database import Database, init_database
 from models import SyncJob, YClientsCredential
 from sync_control import SyncControlService
 from sync_jobs import SyncJobService
@@ -102,8 +102,16 @@ def enqueue_auto_sync_jobs_if_due(db, now: datetime | None = None) -> dict:
     return {'status': 'ok', 'enqueued': enqueued, 'skipped': skipped}
 
 
-def process_next_job() -> bool:
-    database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
+def process_next_job(database: Database | None = None) -> bool:
+    """Claim and run one queued sync job.
+
+    Args:
+        database: reused across poll ticks by main()'s loop, so a long-lived engine isn't
+            rebuilt every SYNC_WORKER_POLL_INTERVAL. Falls back to a fresh one so this stays
+            directly callable (tests, one-off invocations) without a caller-managed instance.
+    """
+    if database is None:
+        database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
     db = database.get_db()
     jobs = SyncJobService()
     try:
@@ -136,17 +144,66 @@ def process_next_job() -> bool:
 
 def main():
     args = parse_args()
+    # Built once and reused for the whole process below. process_next_job() and the idle
+    # branch both used to call init_database() on every poll tick (default
+    # SYNC_WORKER_POLL_INTERVAL=5s), building a brand new engine and pool each time and
+    # never disposing the old one.
+    #
+    # Measured rather than assumed, because the obvious guesses are both wrong. Constructing
+    # 200 throwaway engines back to back against the local copy of production: backends went
+    # from a baseline of 2 to a band of 9-20 and stayed there, with no upward trend. So this
+    # did NOT exhaust max_connections=100 on its own -- but the discarded engines are also
+    # not reclaimed promptly (SQLAlchemy's Engine/Pool hold reference cycles, so they wait on
+    # the cycle collector, not refcounting). What it cost was a standing tail of roughly
+    # 7-18 idle backends out of a 100-connection budget shared with the API, sized by GC
+    # timing rather than by anything the code controls, plus two fresh TCP+auth handshakes
+    # every 5 seconds -- on the order of 34k new backends a day for no benefit.
+    #
+    # pool_pre_ping/pool_recycle on Database exist precisely so one long-lived engine stays
+    # healthy across idle periods and DB restarts, which is what makes reusing it here safe.
+    database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
     while True:
-        processed = process_next_job()
+        processed = process_next_job(database)
         if not processed and not args.once:
-            database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
             db = database.get_db()
             try:
-                reaped = SyncJobService().reap_stale_jobs(db, max_running_minutes=SYNC_STALE_JOB_MINUTES)
+                jobs = SyncJobService()
+                reaped = jobs.reap_stale_jobs(db, max_running_minutes=SYNC_STALE_JOB_MINUTES)
                 if reaped:
                     print(f'✓ Reaped {reaped} stale running job(s)')
                 auto_result = enqueue_auto_sync_jobs_if_due(db)
                 processed = auto_result.get('enqueued', 0) > 0
+                # Retention runs LAST and cannot escape this handler, both deliberately.
+                # Scope note: this guard covers the two sweeps added here and nothing else.
+                # reap_stale_jobs and enqueue_auto_sync_jobs_if_due above remain unguarded, as
+                # they were before — a failure in either is still fatal to the worker. That is
+                # left alone rather than audited: a reaper that cannot run arguably should
+                # crash, whereas a retention sweep that cannot run must not take sync with it.
+                # main() has no except of its own, so an exception here would kill the worker;
+                # and anything placed before enqueue_auto_sync_jobs_if_due that can throw stops
+                # the sync cadence entirely, because every tick afterwards finds nothing queued
+                # and lands right back in this branch. These two sweeps only delete old
+                # bookkeeping rows -- losing a sweep is a cost worth paying to never lose sync.
+                # Two sweeps, two tables, two independent throttles: runs+step_runs here,
+                # jobs+job_events there. Neither is the other's cascade. Both sit inside
+                # the idle branch, so they never run under --once and never on a tick that
+                # claimed a job: a permanently backlogged worker simply never prunes. That
+                # is the right trade (draining the queue matters more than trimming logs),
+                # but it is why retention can look like it 'never ran'.
+                for sweep in (SyncControlService().purge_old_runs_if_due, jobs.purge_old_jobs_if_due):
+                    try:
+                        sweep(db)
+                    except Exception as exc:  # noqa: BLE001 - maintenance must never stop sync
+                        print(f'⚠ Retention sweep {sweep.__name__} failed: {exc}')
+                        try:
+                            db.rollback()
+                        except Exception as rollback_exc:  # noqa: BLE001
+                            # The likeliest reason a bulk DELETE failed is a dead connection,
+                            # which is also the case where rollback() raises — unguarded, it
+                            # would escape this handler, pass the finally below, leave main()
+                            # (which has no except of its own) and kill the worker. That turns
+                            # the designed degradation into a restart loop.
+                            print(f'⚠ Rollback after {sweep.__name__} failed: {rollback_exc}')
             finally:
                 db.close()
         if args.once:

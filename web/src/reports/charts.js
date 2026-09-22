@@ -1,4 +1,18 @@
-import Chart from 'chart.js/auto';
+import {
+  ArcElement,
+  BarController,
+  BarElement,
+  CategoryScale,
+  Chart,
+  DoughnutController,
+  Legend,
+  LinearScale,
+  LineController,
+  LineElement,
+  PieController,
+  PointElement,
+  Tooltip,
+} from 'chart.js';
 
 import { formatValue } from './format.js';
 import {
@@ -51,6 +65,24 @@ const dataLabelsPlugin = {
   },
 };
 
+// Report specs render as bar, line, or doughnut (dashboard_reports.py's _chart() calls) — see
+// main.js for the smaller bar/line-only registration its own hand-built charts need. Pie is
+// registered alongside doughnut: the arc-chart branches throughout this file and chartSpec.js
+// already treat the two as interchangeable, and ArcElement is shared by both.
+Chart.register(
+  BarController,
+  LineController,
+  DoughnutController,
+  PieController,
+  BarElement,
+  LineElement,
+  PointElement,
+  ArcElement,
+  CategoryScale,
+  LinearScale,
+  Legend,
+  Tooltip,
+);
 Chart.register(dataLabelsPlugin);
 Chart.defaults.animation = false;
 Chart.defaults.font.family = 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
@@ -71,8 +103,14 @@ export class ReportChartManager {
   setDataLabels(enabled) {
     this.dataLabels = enabled;
     this.instances.forEach((chart) => {
-      chart.options.plugins = chart.options.plugins || {};
-      chart.options.plugins.reportDataLabels = { display: enabled };
+      // Written to the plain options object optionsFor() built, never through
+      // chart.options. That one is Chart.js's resolved *view* of the options, and
+      // reading a branch of it hands back a proxy — so the guard line this replaces,
+      // `chart.options.plugins = chart.options.plugins || {}`, stored a proxy back into
+      // the config, and the write right after it then bounced between two proxy set
+      // traps until the stack blew. Every click of the toggle threw, on every 4.x.
+      // update() re-reads the config, so the resolved view is not needed here at all.
+      chart.config.options.plugins.reportDataLabels.display = enabled;
       chart.update();
     });
   }

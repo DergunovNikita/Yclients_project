@@ -3,6 +3,7 @@ import './settings.css';
 import { authFetch, hasSessionHint, loadCurrentUser, logout, setToken, USER_ADMIN_ROLES } from './auth.js';
 import { escapeHtml } from './html.js';
 import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
+import { BRANCH_TIME_ZONE, parseServerInstant } from './timestamps.js';
 
 if (!hasSessionHint()) {
   window.location.href = '/login.html';
@@ -150,8 +151,19 @@ async function loadSessions() {
 }
 
 function formatDate(value) {
-  if (!value) return '—';
-  return new Date(value).toLocaleString(intlLocale());
+  // Server timestamps are naive UTC (see timestamps.js) — parse as an instant and render in
+  // branch time, like formatMoscowDateTime() in main.js, instead of the viewer's own zone.
+  const instant = parseServerInstant(value);
+  if (instant === null) return '—';
+  return new Intl.DateTimeFormat(intlLocale(), {
+    timeZone: BRANCH_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(instant);
 }
 
 function credentialStatus(item) {

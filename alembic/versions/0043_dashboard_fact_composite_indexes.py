@@ -32,7 +32,12 @@ def upgrade() -> None:
     # a bound the migration would queue behind a running sync for as long as it takes, and
     # every write would queue behind the migration. Failing fast is the recoverable outcome:
     # the deploy stops before restarting the containers and the next tick retries.
-    op.execute("SET lock_timeout = '5s'")
+    # SET LOCAL scopes to the enclosing transaction, not to this script: env.py runs the
+    # whole pending batch as one transaction, so this 5s timeout also applies to every later
+    # migration in the same batch, not just the statements below. That is narrower than a
+    # bare SET only in that it cannot outlive the batch onto a connection reused afterward —
+    # a later migration in the same batch needing a different lock_timeout must set its own.
+    op.execute("SET LOCAL lock_timeout = '5s'")
     for name, table, columns in INDEXES:
         op.create_index(name, table, columns, schema='public')
 

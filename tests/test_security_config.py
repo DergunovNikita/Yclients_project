@@ -523,7 +523,9 @@ def test_vercel_configs_define_security_headers():
 
 
 def test_local_and_test_import_allow_local_defaults():
-    for app_env in ('local', 'test'):
+    # The full non-production allowlist (config.NON_PRODUCTION_ENV_NAMES): local dev, pytest,
+    # a shared dev deploy, CI, and the legacy standalone demo stack (.env.demo.example).
+    for app_env in ('local', 'test', 'dev', 'ci', 'demo'):
         result = _run_import_api({
             'APP_ENV': app_env,
             'AUTH_JWT_SECRET': 'change_me_local_jwt_secret',
@@ -534,6 +536,28 @@ def test_local_and_test_import_allow_local_defaults():
             'AUTH_CONSOLE_EMAIL': 'true',
         })
         assert result.returncode == 0, result.stderr
+
+
+def test_unrecognised_app_env_fails_closed_like_production():
+    """A forgotten, blank, or misspelled APP_ENV must be treated as production, not skip it.
+
+    The check used to only match the exact strings 'prod'/'production'; anything else —
+    including an empty APP_ENV or a plausible typo such as 'staging'/'preprod' — silently
+    skipped validate_production_config() and would boot with the placeholder secrets below.
+    """
+    for app_env in ('', 'staging', 'preprod', 'Production_typo'):
+        result = _run_import_api({
+            'APP_ENV': app_env,
+            'AUTH_JWT_SECRET': 'change_me_local_jwt_secret',
+            'SYNC_API_TOKEN': '',
+            'DB_PASSWORD': '',
+            'PORTAL_CREDENTIALS_ENCRYPTION_KEY': '',
+            'AUTH_COOKIE_SECURE': 'false',
+        })
+
+        assert result.returncode != 0, f'APP_ENV={app_env!r} must be treated as production'
+        assert 'Unsafe production configuration' in result.stderr
+        assert 'AUTH_JWT_SECRET' in result.stderr
 
 
 def test_public_registration_defaults_enabled_only_for_local_and_test():

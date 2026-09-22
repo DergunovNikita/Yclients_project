@@ -10,6 +10,9 @@ from sqlalchemy.pool import StaticPool
 
 from models import (
     Base,
+    AnalyticsDailyMetric,
+    AnalyticsSourceMetric,
+    AnalyticsStatusMetric,
     Appointment,
     Client,
     Comment,
@@ -36,6 +39,8 @@ from sync_pipeline import (
     purge_full_refresh_window,
     run_sync_step,
     purge_source_window,
+    sync_analytics_daily_charts,
+    sync_analytics_sources_and_statuses,
     sync_financial_transactions,
     sync_comments,
     sync_clients,
@@ -2347,6 +2352,162 @@ def test_sync_goods_transactions_preserves_embedded_titles():
         assert row.good_title == 'Archived pomade'
         assert row.storage_id == 300
         assert row.storage_title == 'Archive shelf'
+    finally:
+        db.close()
+        engine.dispose()
+
+
+class FakeAnalyticsChartsAPI:
+    """Each chart getter is independently empty/non-empty, like a real per-endpoint failure."""
+
+    def __init__(self, income=None, records=None, fullness=None):
+        self._income = income or []
+        self._records = records or []
+        self._fullness = fullness or []
+
+    def get_analytics_income_daily(self, company_id, date_from, date_to):
+        return self._income
+
+    def get_analytics_records_daily(self, company_id, date_from, date_to):
+        return self._records
+
+    def get_analytics_fullness_daily(self, company_id, date_from, date_to):
+        return self._fullness
+
+
+def test_sync_analytics_daily_charts_all_empty_keeps_existing_rows():
+    """Every getter empty in one cycle (a transient failure) must not wipe the table."""
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine, tables=[AnalyticsDailyMetric.__table__])
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(AnalyticsDailyMetric(
+            date=date(2026, 6, 1), metric_type='income', label='income', value=100.0, company_id=1,
+        ))
+        db.commit()
+
+        assert sync_analytics_daily_charts(
+            FakeAnalyticsChartsAPI(), db, '1', '2026-06-01', '2026-06-30', db_company_id=1,
+        ) is False
+
+        rows = db.query(AnalyticsDailyMetric).all()
+        assert len(rows) == 1
+        assert rows[0].value == 100.0
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_analytics_daily_charts_keeps_a_metric_type_whose_own_getter_came_back_empty():
+    """One getter failing empty must not delete a sibling metric_type's already-stored rows."""
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine, tables=[AnalyticsDailyMetric.__table__])
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(AnalyticsDailyMetric(
+            date=date(2026, 6, 1), metric_type='records', label='records', value=5.0, company_id=1,
+        ))
+        db.commit()
+
+        assert sync_analytics_daily_charts(
+            FakeAnalyticsChartsAPI(income=[{'label': 'income', 'data': [[1717286400000, 250.0]]}]),
+            db, '1', '2026-06-01', '2026-06-30', db_company_id=1,
+        ) is True
+
+        rows = {row.metric_type: row.value for row in db.query(AnalyticsDailyMetric).all()}
+        assert rows == {'records': 5.0, 'income': 250.0}
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_analytics_daily_charts_still_replaces_stale_points_when_data_present():
+    """The conditional delete must not regress the ordinary replace-on-refetch behaviour."""
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine, tables=[AnalyticsDailyMetric.__table__])
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(AnalyticsDailyMetric(
+            date=date(2026, 5, 1), metric_type='income', label='income', value=1.0, company_id=1,
+        ))
+        db.commit()
+
+        assert sync_analytics_daily_charts(
+            FakeAnalyticsChartsAPI(income=[{'label': 'income', 'data': [[1717286400000, 500.0]]}]),
+            db, '1', '2026-06-01', '2026-06-30', db_company_id=1,
+        ) is True
+
+        rows = db.query(AnalyticsDailyMetric).filter(AnalyticsDailyMetric.metric_type == 'income').all()
+        assert [row.value for row in rows] == [500.0]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+class FakeAnalyticsSourcesStatusesAPI:
+    def __init__(self, sources=None, statuses=None):
+        self._sources = sources or []
+        self._statuses = statuses or []
+
+    def get_analytics_record_source(self, company_id, date_from, date_to):
+        return self._sources
+
+    def get_analytics_record_status(self, company_id, date_from, date_to):
+        return self._statuses
+
+
+def test_sync_analytics_sources_and_statuses_all_empty_keeps_existing_rows():
+    """Every getter empty in one cycle must not wipe either table."""
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine, tables=[AnalyticsSourceMetric.__table__, AnalyticsStatusMetric.__table__],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(AnalyticsSourceMetric(
+            date_from=date(2026, 6, 1), date_to=date(2026, 6, 30), label='Site', value=10, company_id=1,
+        ))
+        db.add(AnalyticsStatusMetric(
+            date_from=date(2026, 6, 1), date_to=date(2026, 6, 30), label='Completed', value=20, company_id=1,
+        ))
+        db.commit()
+
+        assert sync_analytics_sources_and_statuses(
+            FakeAnalyticsSourcesStatusesAPI(), db, '1', '2026-06-01', '2026-06-30', db_company_id=1,
+        ) is False
+
+        assert db.query(AnalyticsSourceMetric).count() == 1
+        assert db.query(AnalyticsStatusMetric).count() == 1
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_analytics_sources_and_statuses_keeps_the_table_whose_own_fetch_came_back_empty():
+    """Statuses failing empty this cycle must not delete sources that were just fetched."""
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine, tables=[AnalyticsSourceMetric.__table__, AnalyticsStatusMetric.__table__],
+    )
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(AnalyticsStatusMetric(
+            date_from=date(2026, 6, 1), date_to=date(2026, 6, 30), label='Completed', value=20, company_id=1,
+        ))
+        db.commit()
+
+        assert sync_analytics_sources_and_statuses(
+            FakeAnalyticsSourcesStatusesAPI(sources=[{'label': 'Site', 'data': 99}]),
+            db, '1', '2026-06-01', '2026-06-30', db_company_id=1,
+        ) is True
+
+        assert [row.value for row in db.query(AnalyticsSourceMetric).all()] == [99]
+        assert [row.value for row in db.query(AnalyticsStatusMetric).all()] == [20]
     finally:
         db.close()
         engine.dispose()

@@ -2340,17 +2340,23 @@ def sync_analytics_daily_charts(api: YClientsAPI, db, company_id: str,
 
     cid = _db_company_id(company_id, db_company_id)
     total = 0
+    any_data = False
 
     try:
-        db.query(AnalyticsDailyMetric).filter(
-            AnalyticsDailyMetric.company_id == cid
-        ).delete()
-
         for metric_type, getter in charts.items():
             series_list = getter(company_id, date_from, date_to)
             if not series_list:
                 print(f"  {metric_type}: нет данных")
                 continue
+
+            any_data = True
+            # Delete only this metric_type's rows, and only now that its replacement
+            # data is in hand — an empty getter (transient failure) must not wipe out
+            # what a sibling metric_type already fetched this cycle.
+            db.query(AnalyticsDailyMetric).filter(
+                AnalyticsDailyMetric.company_id == cid,
+                AnalyticsDailyMetric.metric_type == metric_type,
+            ).delete()
 
             for series in series_list:
                 label = series.get('label', metric_type)
@@ -2370,6 +2376,25 @@ def sync_analytics_daily_charts(api: YClientsAPI, db, company_id: str,
                     total += 1
 
             print(f"  {metric_type}: ок")
+
+        # The delete is now per metric_type and conditional on that type having returned
+        # data, which fixes the transient-outage case but leaves the opposite one open: a
+        # metric_type that upstream stops returning for good, or one dropped from `charts`,
+        # keeps its old rows forever, where the previous company-wide delete cleared them.
+        # Accepted rather than fixed. Sweeping types absent from the current fetch is the
+        # real answer, but it has to be gated on at least one chart having returned data or
+        # it reintroduces exactly the wipe this change exists to prevent. Low stakes today:
+        # AnalyticsDailyMetric is written only here and read nowhere else in the repo, so a
+        # stale row reaches no dashboard.
+        if not any_data:
+            # False, matching sync_analytics_overall's existing convention, and chosen rather
+            # than inherited: a fetch that returned nothing for every chart is indistinguishable
+            # here from an upstream outage, and reporting it as success is how a silent stall
+            # starts. The cost is that a branch which structurally has no analytics — one that
+            # left the tenant but is still synced, say — logs a warning on every run. That is
+            # noisy but visible; the opposite error is quiet and is not.
+            print("  Нет данных")
+            return False
 
         db.commit()
         print(f"  ✓ Дневные метрики сохранены ({total} точек)")
@@ -2393,15 +2418,19 @@ def sync_analytics_sources_and_statuses(api: YClientsAPI, db, company_id: str,
     cid = _db_company_id(company_id, db_company_id)
 
     try:
-        db.query(AnalyticsSourceMetric).filter(
-            AnalyticsSourceMetric.company_id == cid
-        ).delete()
-        db.query(AnalyticsStatusMetric).filter(
-            AnalyticsStatusMetric.company_id == cid
-        ).delete()
-
         sources = api.get_analytics_record_source(company_id, date_from, date_to)
+        statuses = api.get_analytics_record_status(company_id, date_from, date_to)
+
+        if not sources and not statuses:
+            print("  Нет данных")
+            return False
+
+        # Each table is only cleared once its own replacement data is in hand — an
+        # empty fetch for one must not wipe out the other's already-fetched rows.
         if sources:
+            db.query(AnalyticsSourceMetric).filter(
+                AnalyticsSourceMetric.company_id == cid
+            ).delete()
             for s in sources:
                 db.add(AnalyticsSourceMetric(
                     date_from=parse_date(date_from),
@@ -2414,8 +2443,10 @@ def sync_analytics_sources_and_statuses(api: YClientsAPI, db, company_id: str,
         else:
             print("  Источники: нет данных")
 
-        statuses = api.get_analytics_record_status(company_id, date_from, date_to)
         if statuses:
+            db.query(AnalyticsStatusMetric).filter(
+                AnalyticsStatusMetric.company_id == cid
+            ).delete()
             for s in statuses:
                 db.add(AnalyticsStatusMetric(
                     date_from=parse_date(date_from),

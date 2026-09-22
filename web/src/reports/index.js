@@ -182,6 +182,10 @@ export function initReports({
     // exactly as the Overview's own preset buttons do.
     periodPreset: '',
     reportData: new Map(),
+    // The params `/dashboard/staff` was last fetched for. loadFromLocation() runs on every
+    // back/forward and every report-card link, so without this the list refetches on each
+    // one even when the branch and period it depends on have not moved.
+    staffParamsKey: null,
     filters: {
       search: '',
       group: '',
@@ -366,10 +370,21 @@ export function initReports({
     if (selected && !options.some((branch) => String(branch.id) === selected)) els.branch.value = '';
   }
 
+  function staffParamsKey() {
+    return `${els.branch.value}|${els.start.value}|${els.end.value}`;
+  }
+
   // The selection is passed in rather than read back off the select: a staff id that
   // belongs to another branch matches no option yet and the select reports '' for it,
   // which silently widened a per-employee link to the whole branch.
   async function loadStaff(desiredStaffId = els.staff.value) {
+    // The list itself depends only on branch + period. Unchanged since the last successful
+    // load (e.g. another report card in the same scope, or a back/forward that repeats it),
+    // it only needs the selection moved to whatever id this location asks for.
+    if (state.staffLoaded && state.staffParamsKey === staffParamsKey()) {
+      els.staff.value = staffSelectionForOptions(desiredStaffId, state.staffIds);
+      return 'ready';
+    }
     state.staffLoaded = false;
     state.staffIds = [];
     const request = staffRequests.start();
@@ -393,6 +408,7 @@ export function initReports({
         )).join('');
       state.staffLoaded = true;
       state.staffIds = staff.map((person) => person.id);
+      state.staffParamsKey = staffParamsKey();
       clearFilterWarning();
       return 'ready';
     } catch (error) {
@@ -779,6 +795,7 @@ export function initReports({
       state.branchesLoaded = false;
       state.staffLoaded = false;
       state.staffIds = [];
+      state.staffParamsKey = null;
       state.activeReportId = '';
       reportRequests.abort();
       staffRequests.abort();

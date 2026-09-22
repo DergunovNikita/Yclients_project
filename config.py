@@ -10,9 +10,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-PRODUCTION_ENV_NAMES = {'prod', 'production'}
-APP_ENV = os.getenv('APP_ENV', 'local').strip().lower() or 'local'
-IS_PRODUCTION = APP_ENV in PRODUCTION_ENV_NAMES
+# Fail closed: anything not explicitly listed here is production, including an unset,
+# blank, or misspelled APP_ENV. The check used to run the other way (only exact 'prod'/
+# 'production' counted as production), so a typo or a forgotten APP_ENV silently skipped
+# every check in validate_production_config() below with no error and no log.
+NON_PRODUCTION_ENV_NAMES = {'local', 'test', 'dev', 'ci', 'demo'}
+APP_ENV = os.getenv('APP_ENV', '').strip().lower()
+IS_PRODUCTION = APP_ENV not in NON_PRODUCTION_ENV_NAMES
 LOG_LEVEL = (os.getenv('LOG_LEVEL', 'INFO').strip() or 'INFO').upper()
 PLACEHOLDER_SECRET_VALUES = {
     'change_me_local_jwt_secret',
@@ -147,6 +151,16 @@ SYNC_AUTO_ENQUEUE_ENABLED = _get_bool('SYNC_AUTO_ENQUEUE_ENABLED', True)
 SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES = _get_int('SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
 # A 'running' job older than this is treated as orphaned (worker died mid-sync) and reaped.
 SYNC_STALE_JOB_MINUTES = _get_int('SYNC_STALE_JOB_MINUTES', 120)
+# Retention for the two bookkeeping pairs nothing else ever prunes: sync_runs + sync_step_runs
+# (SyncControlService.purge_old_runs) and sync_jobs + sync_job_events
+# (SyncJobService.purge_old_jobs). 30 days is troubleshooting history and nothing more — the
+# status payloads only ever read the latest row, and that one is kept whatever its age. Both
+# sweeps run from the worker's idle branch, which is reached every poll tick, hence the
+# separate interval throttle. 0 disables either sweep.
+SYNC_RUN_RETENTION_DAYS = _get_int('SYNC_RUN_RETENTION_DAYS', 30)
+SYNC_RUN_RETENTION_INTERVAL_HOURS = _get_int('SYNC_RUN_RETENTION_INTERVAL_HOURS', 24)
+SYNC_JOB_RETENTION_DAYS = _get_int('SYNC_JOB_RETENTION_DAYS', 30)
+SYNC_JOB_RETENTION_INTERVAL_HOURS = _get_int('SYNC_JOB_RETENTION_INTERVAL_HOURS', 24)
 
 # ============================================================================
 # API runtime

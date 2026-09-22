@@ -2439,6 +2439,65 @@ async def test_owner_deletes_manager(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cross_tenant_update_and_delete_match_not_found_response(auth_db, monkeypatch):
+    """A cross-tenant id must be indistinguishable from one that does not exist at all.
+
+    Before the fix, admin_update_user/admin_delete_user returned a distinguishable 403 ("Cannot
+    manage/delete user from another tenant") for a row that exists in another tenant, but a 404
+    ("User not found") for a genuinely missing id. That difference is an id-enumeration oracle:
+    any owner/branch_admin could binary-search the whole PortalUser table across every tenant.
+    `_load_credential`/`_load_manageable_staff` already return 404 uniformly for both cases —
+    these two endpoints must match that convention.
+    """
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(Company(id=3, title='Branch 3', group_id=1))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
+    auth_db.add(
+        PortalUser(
+            id=70,
+            portal_account_id=2,
+            email='tenant-b-target@example.com',
+            password_hash=hash_password('TenantBTarget123!'),
+            full_name='Tenant B Target',
+            role='manager',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    await auth_db.commit()
+
+    token = create_access_token(1, 'owner')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    headers = {'Authorization': f'Bearer {token}'}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        missing_patch = await client.patch(
+            '/auth/admin/users/999999', headers=headers, json={'full_name': 'Nobody'}
+        )
+        cross_tenant_patch = await client.patch(
+            '/auth/admin/users/70', headers=headers, json={'full_name': 'Hijacked'}
+        )
+        missing_delete = await client.delete('/auth/admin/users/999998', headers=headers)
+        cross_tenant_delete = await client.delete('/auth/admin/users/70', headers=headers)
+
+    app.dependency_overrides.clear()
+
+    assert missing_patch.status_code == 404
+    assert cross_tenant_patch.status_code == 404
+    assert cross_tenant_patch.json() == missing_patch.json()
+
+    assert missing_delete.status_code == 404
+    assert cross_tenant_delete.status_code == 404
+    assert cross_tenant_delete.json() == missing_delete.json()
+
+
+@pytest.mark.asyncio
 async def test_created_manager_appears_in_dashboard_staff(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     token = create_access_token(1, 'owner')
@@ -2972,6 +3031,59 @@ async def test_distribute_credentials_reports_invite_failures_after_rollback(aut
     assert data['errors'] == [
         {'user_id': 12, 'email': 'rollback.invite@example.com', 'reason': 'smtp unavailable'}
     ]
+
+
+@pytest.mark.asyncio
+async def test_distribute_credentials_does_not_leak_cross_tenant_email(auth_db, monkeypatch):
+    """The select behind distribute-credentials must be tenant-scoped.
+
+    Before the fix, PortalUser rows were fetched with no tenant filter at all, and the target's
+    email was read into the `errors` entry before the `_same_tenant` check rejected it. Any
+    owner/branch_admin could POST arbitrary ids (they are small sequential integers) and harvest
+    the email of every user in every other tenant from the response.
+    """
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(Company(id=3, title='Branch 3', group_id=1))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
+    auth_db.add(
+        PortalUser(
+            id=71,
+            portal_account_id=2,
+            email='tenant-b-secret@example.com',
+            password_hash=hash_password('TenantBSecret123!'),
+            full_name='Tenant B Secret',
+            role='manager',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    await auth_db.commit()
+
+    token = create_access_token(1, 'owner')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/auth/admin/distribute-credentials',
+            headers={'Authorization': f'Bearer {token}'},
+            json={'user_ids': [71]},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    # No trace of the tenant-B user's email anywhere in the payload, not just outside `errors`.
+    assert 'tenant-b-secret@example.com' not in response.text
+    data = response.json()['data']
+    assert data['errors'] == [{'user_id': 71, 'reason': 'User not found'}]
+    assert data['sent'] == []
+    assert data['skipped'] == []
 
 
 # --------------------------------------------------------------------------- #

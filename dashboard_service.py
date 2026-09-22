@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import math
 import re
@@ -530,7 +529,32 @@ def business_appointment_condition():
     return _business_staff_id_condition(Appointment.staff_id)
 
 
-def financial_appointment_match_condition():
+def _financial_appointment_direct_condition():
+    """Direct branch of financial_appointment_match_condition(): the payment's
+    record_id is the appointment's own external (YClients) id.
+
+    A plain equality on two columns each side, unlike the OR'd condition below, so
+    PostgreSQL can hash- or merge-join on it instead of falling back to a nested loop.
+    Split out so callers that need a hash-joinable UNION ALL of the two branches (see
+    e.g. fetch_top_services) can reuse the exact same conditions the OR is built from,
+    instead of re-deriving them and risking drift.
+    """
+    return and_(
+        FinancialTransaction.company_id == Appointment.company_id,
+        FinancialTransaction.record_id == Appointment.external_id,
+    )
+
+
+def _financial_appointment_fallback_condition():
+    """Fallback branch of financial_appointment_match_condition(): record_id matches
+    the appointment's internal id when the appointment has no external id and no other
+    appointment in the company claims this record_id as its own external id.
+
+    Mutually exclusive with the direct branch by construction: `external_id IS NULL`
+    here rules out every row the direct branch could have matched (which requires
+    `external_id` to equal a value `record_id` already holds). That is what makes it
+    safe to UNION ALL the two branches — see financial_appointment_match_condition().
+    """
     external_candidate = aliased(Appointment)
     has_external_match = exists(
         select(1)
@@ -542,15 +566,58 @@ def financial_appointment_match_condition():
     )
     return and_(
         FinancialTransaction.company_id == Appointment.company_id,
-        or_(
-            FinancialTransaction.record_id == Appointment.external_id,
-            and_(
-                Appointment.external_id.is_(None),
-                FinancialTransaction.record_id == Appointment.id,
-                ~has_external_match,
-            ),
-        ),
+        Appointment.external_id.is_(None),
+        FinancialTransaction.record_id == Appointment.id,
+        ~has_external_match,
     )
+
+
+def financial_appointment_match_condition():
+    """A payment (FinancialTransaction) belongs to an Appointment.
+
+    Two mutually exclusive branches (see _financial_appointment_fallback_condition()):
+    matched directly via the appointment's external id, or — only when no appointment
+    anywhere in the company claims this record_id as its external id — via the
+    appointment's own internal id. The OR across those two different columns defeats
+    PostgreSQL's hash/merge join for any caller that joins on this condition directly;
+    callers on a hot path instead UNION ALL _financial_appointment_direct_condition()
+    with _financial_appointment_fallback_condition(), which are hash-joinable on their
+    own and — because the branches never overlap — reproduce exactly the same rows.
+    """
+    return or_(
+        _financial_appointment_direct_condition(),
+        _financial_appointment_fallback_condition(),
+    )
+
+
+def _financial_appointment_branches_union(build_select):
+    """UNION ALL the two hash-joinable branches of financial_appointment_match_condition().
+
+    `build_select(join_condition)` must return a plain (unaggregated) Select that joins
+    Appointment to FinancialTransaction with the given condition and projects whatever
+    raw columns the caller's aggregation needs. Called once per branch. Because the two
+    branches never match the same (FinancialTransaction, Appointment) pair (see
+    _financial_appointment_fallback_condition()), concatenating their rows reproduces
+    exactly the row set `.join(Appointment, financial_appointment_match_condition())`
+    would have produced — just via two independent hash joins instead of one nested
+    loop with a BitmapOr probe per row.
+
+    Only a drop-in for callers that aggregate (SUM/COUNT/MIN/MAX/GROUP BY) the unioned
+    rows afterwards, not for callers that need a single joined row per input row (e.g.
+    an ORDER BY ... LIMIT 1 pick), and not for OUTER joins (splitting those would
+    duplicate the NULL-extended row for every branch that fails to match).
+
+    Three eligible sites are deliberately still on the plain OR join:
+    dashboard_reports.py's _year_over_year_activity_bounds, _staff_rows and _clients_rows.
+    They qualify by the rule above, but they sit in report builders outside the set whose
+    latency was actually measured, and each conversion carries the same risk as the nine
+    that were done. Converting them is a follow-up with its own before/after, not an
+    oversight — tests/test_financial_join_equivalence.py pins the invariant either way.
+    """
+    return union_all(
+        build_select(_financial_appointment_direct_condition()),
+        build_select(_financial_appointment_fallback_condition()),
+    ).subquery()
 
 
 def financial_goods_transaction_match_condition():
@@ -1056,31 +1123,6 @@ def _financial_staff_attribution_condition(staff_id: int):
     return _financial_attributed_staff_id() == staff_id
 
 
-async def _goods_paid_revenue_total(
-    db: AsyncSession,
-    dr: DateRange,
-    company_id: Optional[int],
-    staff_id: Optional[int] = None,
-    allowed_company_ids: Optional[list[int]] = None,
-    factual_at: Optional[datetime] = None,
-) -> float:
-    stmt = (
-        select(func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'))
-        .where(
-            _goods_paid_filters(
-                dr.start,
-                dr.end,
-                company_id,
-                staff_id,
-                allowed_company_ids,
-                factual_at,
-            )
-        )
-    )
-    row = (await db.execute(stmt)).one()
-    return float(row.revenue or 0)
-
-
 async def _goods_sold_count(
     db: AsyncSession,
     dr: DateRange,
@@ -1179,6 +1221,12 @@ async def _source_coverage_status(
     if not company_ids:
         return 'partial', ['personal_account_topups']
     reporting_windows = await fetch_reporting_windows(db, company_ids)
+    # Deliberately NOT cached like fetch_reporting_windows/_company_timezone_names: unlike
+    # those, sync_source_states can change between two calls on the same session (workers
+    # write it independently of a dashboard request, and tests exercise exactly that by
+    # mutating it mid-session), so a db.info cache here would read a stale coverage verdict
+    # instead of the current one. Cur/prev do pay for this query twice; that is the safer
+    # side of the tradeoff.
     covered_ranges = {
         int(row.company_id): (_coerce_date(row.period_start), _coerce_date(row.period_end))
         for row in (
@@ -1277,29 +1325,17 @@ async def _average_check_block(
     if factual_at is not None:
         base_payment_filters.append(FinancialTransaction.date <= factual_at)
 
-    service_filters = [
-        *base_payment_filters,
-        FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
-        Appointment.attendance == COMPLETED_ATTENDANCE,
-        business_appointment_condition(),
-        # Visit anchor on top of the payment anchor already in base_payment_filters,
-        # so this matches _service_paid_filters exactly.
-        reporting_window_clause(Appointment.company_id, Appointment.date),
-    ]
-    scope = _company_scope_clause(Appointment.company_id, company_id, company_ids)
-    if scope is not None:
-        service_filters.append(scope)
-    if created_user_id is not None:
-        service_filters.append(Appointment.created_user_id == created_user_id)
-    elif staff_id is not None:
-        service_filters.append(Appointment.staff_id == staff_id)
-    if factual_at is not None:
-        service_filters.append(_appointment_factual_at_condition(factual_at))
-    service_revenue = float(
-        await db.scalar(
-            select(func.coalesce(func.sum(FinancialTransaction.amount), 0.0))
+    # _service_paid_filters(...) + _physical_account_condition() is byte-for-byte what a
+    # hand-rolled service_filters list used to build here (sold_item_type == SERVICE,
+    # completed attendance, business_appointment_condition, the visit anchor on top of
+    # base_payment_filters' payment anchor, the same scope/staff/factual_at handling) —
+    # the exact filters fetch_top_services/fetch_revenue_daily/etc. already share. Calling
+    # the shared helper instead removes the second, hand-synced copy of the same rule.
+    service_revenue_branches = _financial_appointment_branches_union(
+        lambda join_condition: (
+            select(FinancialTransaction.amount.label('amount'))
             .select_from(FinancialTransaction)
-            .join(Appointment, financial_appointment_match_condition())
+            .join(Appointment, join_condition)
             .outerjoin(
                 AccountCatalog,
                 and_(
@@ -1307,63 +1343,85 @@ async def _average_check_block(
                     AccountCatalog.account_id == FinancialTransaction.account_id,
                 ),
             )
-            .where(*service_filters)
+            .where(
+                _service_paid_filters(
+                    dr.start,
+                    dr.end,
+                    company_id,
+                    staff_id,
+                    created_user_id=created_user_id,
+                    allowed_company_ids=company_ids,
+                    factual_at=factual_at,
+                ),
+                _physical_account_condition(),
+            )
+        )
+    )
+    service_revenue = float(
+        await db.scalar(
+            select(func.coalesce(func.sum(service_revenue_branches.c.amount), 0.0))
         )
         or 0
     )
 
-    classified_revenue = {}
+    # goods_revenue, topup_revenue and unclassified_operations all scan financial_transactions
+    # directly (no Appointment join, unlike service_revenue above) and share the exact same
+    # base row filter, direct_payment_filters; they used to run as three sequential scalar
+    # queries differing only in which condition classifies a row. Folding them into one scan
+    # with per-bucket CASE expressions is safe independent of whether the three classifying
+    # conditions can overlap for a given row (they are not asserted mutually exclusive here):
+    # each bucket is its own SUM(CASE ...)/COUNT(CASE ...) column, and AND is associative, so
+    # moving a condition from a query's WHERE into that same bucket's CASE cannot change what
+    # that bucket computes — it stays byte-identical to the separate query it replaces.
+    #
+    # service_revenue is deliberately NOT folded in: it requires an INNER JOIN to Appointment,
+    # which goods/topup/unclassified transactions mostly do not have (an INNER JOIN would
+    # silently drop them), and its base filter is a materially different rule — completed
+    # attendance, business_appointment_condition, the visit-side reporting window — rather
+    # than just one more classifying condition layered on direct_payment_filters.
     direct_payment_filters = list(base_payment_filters)
     direct_payment_filters.append(_business_financial_master_condition(factual_at))
     scope = _company_scope_clause(FinancialTransaction.company_id, company_id, company_ids)
     if scope is not None:
         direct_payment_filters.append(scope)
-    goods_metric_filters = [*direct_payment_filters, FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE]
-    if staff_id is not None and created_user_id is None:
-        goods_metric_filters.append(_financial_staff_attribution_condition(staff_id))
-    # _topup_revenue_filters is self-contained (it builds its own day window and scope), unlike
-    # the goods branch above which still shares direct_payment_filters with unclassified_filters.
-    topup_metric_filters = [
-        _topup_revenue_filters(
-            dr.start,
-            dr.end,
-            company_id,
-            staff_id if created_user_id is None else None,
-            company_ids,
-            factual_at,
-        )
-    ]
-    for name, metric_filters in (
-        ('goods_revenue', goods_metric_filters),
-        ('topup_revenue', topup_metric_filters),
-    ):
-        classified_revenue[name] = float(
-            await db.scalar(
-                select(func.coalesce(func.sum(FinancialTransaction.amount), 0.0))
-                .select_from(FinancialTransaction)
-                .outerjoin(
-                    AccountCatalog,
-                    and_(
-                        AccountCatalog.company_id == FinancialTransaction.company_id,
-                        AccountCatalog.account_id == FinancialTransaction.account_id,
-                    ),
-                )
-                .where(*metric_filters)
-            )
-            or 0
-        )
 
-    unclassified_filters = list(direct_payment_filters)
-    if staff_id is not None and created_user_id is None:
-        unclassified_filters.append(FinancialTransaction.master_id == staff_id)
+    staff_attribution_active = staff_id is not None and created_user_id is None
+    goods_condition = FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE
+    # _topup_revenue_filters is self-contained (it builds its own day window and scope), but
+    # its classifying half is exactly _personal_account_condition() layered on the same
+    # direct_payment_filters base as goods/unclassified — see the docstring there.
+    topup_condition = _personal_account_condition()
+    if staff_attribution_active:
+        staff_condition = _financial_staff_attribution_condition(staff_id)
+        goods_condition = and_(goods_condition, staff_condition)
+        topup_condition = and_(topup_condition, staff_condition)
     known_condition = or_(
         func.coalesce(FinancialTransaction.sold_item_type, '') == SERVICE_SOLD_ITEM_TYPE,
         func.coalesce(FinancialTransaction.sold_item_type, '') == GOODS_SOLD_ITEM_TYPE,
         _personal_account_condition(),
     )
-    unclassified_operations = int(
-        await db.scalar(
-            select(func.count(FinancialTransaction.id))
+    unclassified_condition = ~known_condition
+    if staff_attribution_active:
+        # Deliberately FinancialTransaction.master_id, not _financial_staff_attribution_condition:
+        # mirrors the pre-existing unclassified_filters rule, which used the raw column here.
+        unclassified_condition = and_(unclassified_condition, FinancialTransaction.master_id == staff_id)
+
+    classification_row = (
+        await db.execute(
+            select(
+                func.coalesce(
+                    func.sum(case((goods_condition, FinancialTransaction.amount), else_=0.0)),
+                    0.0,
+                ).label('goods_revenue'),
+                func.coalesce(
+                    func.sum(case((topup_condition, FinancialTransaction.amount), else_=0.0)),
+                    0.0,
+                ).label('topup_revenue'),
+                func.coalesce(
+                    func.sum(case((unclassified_condition, 1), else_=0)),
+                    0,
+                ).label('unclassified_operations'),
+            )
             .select_from(FinancialTransaction)
             .outerjoin(
                 AccountCatalog,
@@ -1372,10 +1430,14 @@ async def _average_check_block(
                     AccountCatalog.account_id == FinancialTransaction.account_id,
                 ),
             )
-            .where(*unclassified_filters, ~known_condition)
+            .where(*direct_payment_filters)
         )
-        or 0
-    )
+    ).one()
+    classified_revenue = {
+        'goods_revenue': float(classification_row.goods_revenue or 0),
+        'topup_revenue': float(classification_row.topup_revenue or 0),
+    }
+    unclassified_operations = int(classification_row.unclassified_operations or 0)
 
     unique_clients = int(visit_row.unique_clients or 0)
     completed_appointments = int(visit_row.completed_appointments or 0)
@@ -1816,11 +1878,19 @@ async def _revenue_block(
     staff_id: Optional[int] = None,
     created_user_id: Optional[int] = None,
     include_goods: bool = True,
-    include_goods_revenue: bool = True,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
     extra_appointment_condition: Any = None,
 ) -> dict[str, Any]:
+    """Appointment/extra-service counts and extra-service revenue for a period.
+
+    Deliberately does not compute service/goods/total revenue: fetch_summary's only
+    caller always overwrites those three fields with _average_check_block's right after
+    calling this (see the `for block, average_check in (...)` loop there), which is the
+    single implementation of "revenue for a period". Computing them here too used to mean
+    the same business rule lived in two places kept in sync by hand, for a value that was
+    thrown away on every call.
+    """
     cond = _appt_revenue_filters(
         dr.start,
         dr.end,
@@ -1868,53 +1938,47 @@ async def _revenue_block(
         .outerjoin(ServiceLabel, _transaction_service_label_join())
         .where(cond)
     )
-    paid_stmt = (
-        select(
-            func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (extra_condition, FinancialTransaction.amount),
-                        else_=0.0,
-                    )
+    # Only extra_amount is projected: the plain per-row amount would let us sum a
+    # "service revenue" here too, but every caller already gets that number from
+    # _average_check_block and discards this one (see the docstring above).
+    extra_branches = _financial_appointment_branches_union(
+        lambda join_condition: (
+            select(
+                case(
+                    (extra_condition, FinancialTransaction.amount),
+                    else_=0.0,
+                ).label('extra_amount'),
+            )
+            .select_from(FinancialTransaction)
+            .join(Appointment, join_condition)
+            .outerjoin(ServiceLabel, _financial_service_label_join())
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
                 ),
-                0.0,
-            ).label('extra_service_revenue'),
+            )
+            .where(
+                _service_paid_filters(
+                    dr.start,
+                    dr.end,
+                    company_id,
+                    staff_id,
+                    created_user_id=created_user_id,
+                    allowed_company_ids=allowed_company_ids,
+                    factual_at=factual_at,
+                ),
+                _physical_account_condition(),
+            )
         )
-        .select_from(FinancialTransaction)
-        .join(Appointment, financial_appointment_match_condition())
-        .outerjoin(ServiceLabel, _financial_service_label_join())
-        .outerjoin(
-            AccountCatalog,
-            and_(
-                AccountCatalog.company_id == FinancialTransaction.company_id,
-                AccountCatalog.account_id == FinancialTransaction.account_id,
-            ),
-        )
-        .where(
-            _service_paid_filters(
-                dr.start,
-                dr.end,
-                company_id,
-                staff_id,
-                created_user_id=created_user_id,
-                allowed_company_ids=allowed_company_ids,
-                factual_at=factual_at,
-            ),
-            _physical_account_condition(),
-        )
+    )
+    paid_stmt = select(
+        func.coalesce(func.sum(extra_branches.c.extra_amount), 0.0).label('extra_service_revenue'),
     )
     row = (await db.execute(counts_stmt)).one()
     paid_row = (await db.execute(paid_stmt)).one()
-    service_revenue = float(paid_row.revenue or 0)
     extra_service_revenue = float(paid_row.extra_service_revenue or 0)
-    goods_revenue = (
-        await _goods_paid_revenue_total(
-            db, dr, company_id, staff_id, allowed_company_ids, factual_at
-        )
-        if include_goods and include_goods_revenue
-        else 0.0
-    )
     goods_count = (
         await _goods_sold_count(
             db, dr, company_id, staff_id, allowed_company_ids, factual_at
@@ -1923,9 +1987,6 @@ async def _revenue_block(
         else 0.0
     )
     return {
-        'revenue': service_revenue + goods_revenue,
-        'service_revenue': service_revenue,
-        'goods_revenue': goods_revenue,
         'extra_service_revenue': extra_service_revenue,
         'service_count': float(row.service_count or 0),
         'goods_count': goods_count,
@@ -1972,27 +2033,11 @@ async def fetch_summary(
         effective_company_ids,
         factual_at,
     )
-    appointments_task = (
-        asyncio.create_task(
-            _fetch_appointments_breakdown(
-                db,
-                appointment_company_ids,
-                start,
-                end,
-                staff_id,
-                factual_at,
-            )
-        )
-        if include_appointments_breakdown
-        else None
-    )
-
     cur = await _revenue_block(
         db,
         current_dr,
         company_id,
         staff_id,
-        include_goods_revenue=False,
         allowed_company_ids=effective_company_ids,
         factual_at=factual_at,
     )
@@ -2001,7 +2046,6 @@ async def fetch_summary(
         prev_dr,
         company_id,
         staff_id,
-        include_goods_revenue=False,
         allowed_company_ids=effective_company_ids,
         factual_at=factual_at,
     )
@@ -2118,8 +2162,27 @@ async def fetch_summary(
         block['topup_revenue'] = average_check['topup_revenue']
         block['revenue'] = average_check['numerator']
     local_completed = int(cur['appointments'] or 0)
-    if appointments_task is not None:
-        appointments_breakdown = await appointments_task
+    # Awaited inline, deliberately. This used to be an asyncio.create_task() launched ~150
+    # lines above and joined here, so it ran while the revenue/average-check blocks were
+    # awaiting on the SAME AsyncSession. One AsyncSession is one connection: two coroutines
+    # using it at once raise
+    #   InvalidRequestError: this session is provisioning a new connection;
+    #   concurrent operations are not permitted
+    # — reproduced against a copy of production, where HEAD raised and this inline form did
+    # not. It bought nothing even when it did not raise: a single connection serialises the
+    # work regardless, so the "concurrent" task only absorbed the other statement's wait
+    # (measured 657ms attributed here vs 31ms run alone). The test suite runs on aiosqlite,
+    # which serialises internally, so no Python test can catch a regression here.
+    # Genuine overlap would need a second session/connection, not a task on this one.
+    if include_appointments_breakdown:
+        appointments_breakdown = await _fetch_appointments_breakdown(
+            db,
+            appointment_company_ids,
+            start,
+            end,
+            staff_id,
+            factual_at,
+        )
     else:
         appointments_breakdown = await _local_appointments_breakdown(
             db, appointment_company_ids, start, end, staff_id
@@ -2491,16 +2554,16 @@ async def fetch_year_over_year_facts(
         (ServiceLabel.is_extra.is_(True), FinancialTransaction.amount),
         else_=0.0,
     )
-    service_rows = (
-        await db.execute(
+    service_branches = _financial_appointment_branches_union(
+        lambda join_condition: (
             select(
                 payment_year.label('year'),
                 payment_month.label('month'),
-                func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('service_revenue'),
-                func.coalesce(func.sum(extra_revenue), 0.0).label('extra_service_revenue'),
+                FinancialTransaction.amount.label('amount'),
+                extra_revenue.label('extra_amount'),
             )
             .select_from(FinancialTransaction)
-            .join(Appointment, financial_appointment_match_condition())
+            .join(Appointment, join_condition)
             .outerjoin(ServiceLabel, _financial_service_label_join())
             .outerjoin(
                 AccountCatalog,
@@ -2510,7 +2573,17 @@ async def fetch_year_over_year_facts(
                 ),
             )
             .where(*service_filters)
-            .group_by(payment_year, payment_month)
+        )
+    )
+    service_rows = (
+        await db.execute(
+            select(
+                service_branches.c.year.label('year'),
+                service_branches.c.month.label('month'),
+                func.coalesce(func.sum(service_branches.c.amount), 0.0).label('service_revenue'),
+                func.coalesce(func.sum(service_branches.c.extra_amount), 0.0).label('extra_service_revenue'),
+            )
+            .group_by(service_branches.c.year, service_branches.c.month)
         )
     ).all()
     for row in service_rows:
@@ -2632,17 +2705,16 @@ async def fetch_year_over_year_facts(
             FinancialTransaction.date <= factual_at,
             _appointment_factual_at_condition(factual_at),
         ))
-    dependency_rows = (
-        await db.execute(
+    dependency_branches = _financial_appointment_branches_union(
+        lambda join_condition: (
             select(
                 FinancialTransaction.company_id.label('company_id'),
                 payment_year.label('year'),
                 payment_month.label('month'),
-                func.min(Appointment.date).label('appointment_start'),
-                func.max(Appointment.date).label('appointment_end'),
+                Appointment.date.label('appointment_date'),
             )
             .select_from(FinancialTransaction)
-            .join(Appointment, financial_appointment_match_condition())
+            .join(Appointment, join_condition)
             .outerjoin(
                 AccountCatalog,
                 and_(
@@ -2651,10 +2723,21 @@ async def fetch_year_over_year_facts(
                 ),
             )
             .where(*dependency_filters)
+        )
+    )
+    dependency_rows = (
+        await db.execute(
+            select(
+                dependency_branches.c.company_id.label('company_id'),
+                dependency_branches.c.year.label('year'),
+                dependency_branches.c.month.label('month'),
+                func.min(dependency_branches.c.appointment_date).label('appointment_start'),
+                func.max(dependency_branches.c.appointment_date).label('appointment_end'),
+            )
             .group_by(
-                FinancialTransaction.company_id,
-                payment_year,
-                payment_month,
+                dependency_branches.c.company_id,
+                dependency_branches.c.year,
+                dependency_branches.c.month,
             )
         )
     ).all()
@@ -2775,32 +2858,40 @@ async def fetch_revenue_daily(
 
     if include_financials:
         payment_day = func.date(FinancialTransaction.date)
+        svc_branches = _financial_appointment_branches_union(
+            lambda join_condition: (
+                select(
+                    payment_day.label('d'),
+                    FinancialTransaction.amount.label('amount'),
+                )
+                .select_from(FinancialTransaction)
+                .join(Appointment, join_condition)
+                .outerjoin(
+                    AccountCatalog,
+                    and_(
+                        AccountCatalog.company_id == FinancialTransaction.company_id,
+                        AccountCatalog.account_id == FinancialTransaction.account_id,
+                    ),
+                )
+                .where(
+                    _service_paid_filters(
+                        start,
+                        end,
+                        company_id,
+                        staff_id,
+                        allowed_company_ids=allowed_company_ids,
+                        factual_at=factual_at,
+                    ),
+                    _physical_account_condition(),
+                )
+            )
+        )
         svc_stmt = (
             select(
-                payment_day.label('d'),
-                func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+                svc_branches.c.d.label('d'),
+                func.coalesce(func.sum(svc_branches.c.amount), 0.0).label('revenue'),
             )
-            .select_from(FinancialTransaction)
-            .join(Appointment, financial_appointment_match_condition())
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
-            .where(
-                _service_paid_filters(
-                    start,
-                    end,
-                    company_id,
-                    staff_id,
-                    allowed_company_ids=allowed_company_ids,
-                    factual_at=factual_at,
-                ),
-                _physical_account_condition(),
-            )
-            .group_by(payment_day)
+            .group_by(svc_branches.c.d)
         )
         goods_stmt = (
             select(
@@ -3035,7 +3126,16 @@ async def fetch_dashboard_services(
         filters.append(ServiceKpiAssignment.group_id == kpi_group_id)
     if filters:
         stmt = stmt.where(*filters)
-    stmt = stmt.order_by(Company.title.asc(), ServiceCatalog.category_title.asc(), ServiceCatalog.title.asc())
+    # company_id/service_id (the table's own primary key) as the final tiebreaker: two
+    # services can otherwise share a company+category+title and swap places whenever the
+    # query plan changes.
+    stmt = stmt.order_by(
+        Company.title.asc(),
+        ServiceCatalog.category_title.asc(),
+        ServiceCatalog.title.asc(),
+        ServiceCatalog.company_id.asc(),
+        ServiceCatalog.service_id.asc(),
+    )
     rows = (await db.execute(stmt)).all()
 
     out_rows = [
@@ -3541,46 +3641,66 @@ async def fetch_top_services(
         )
     )
     paid_group_key = _service_group_key(paid_title_expr, FinancialTransaction.sold_item_id)
-    paid_revenue = func.coalesce(func.sum(FinancialTransaction.amount), 0.0)
+    # Row-level UNION ALL, like every other call site of the helper — it requires an
+    # unaggregated Select, so none of them pre-aggregate per branch. Spelled out here
+    # because this is the site where doing so would actually be wrong rather than merely
+    # unsupported: service_count/branch_count are COUNT(DISTINCT ...) over
+    # columns that are NOT exclusive to one branch (the same sold_item_id or company_id can
+    # legitimately appear via both branches), so pre-aggregating each branch and summing the
+    # partial counts would double-count. Projecting raw rows and aggregating once, on top of
+    # the union, is safe for every aggregate type because the union reproduces exactly the
+    # same (FinancialTransaction, Appointment) row pairs the OR-based join would have.
+    paid_branches = _financial_appointment_branches_union(
+        lambda join_condition: (
+            select(
+                paid_group_key.label('group_key'),
+                FinancialTransaction.sold_item_id.label('service_id'),
+                paid_title_expr.label('service_title'),
+                FinancialTransaction.amount.label('amount'),
+                Appointment.company_id.label('company_id'),
+            )
+            .select_from(FinancialTransaction)
+            .join(Appointment, join_condition)
+            .outerjoin(
+                tx_titles,
+                and_(
+                    tx_titles.c.record_id == FinancialTransaction.record_id,
+                    tx_titles.c.service_id == FinancialTransaction.sold_item_id,
+                ),
+            )
+            .outerjoin(ServiceCatalog, _financial_service_catalog_join())
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(
+                _service_paid_filters(
+                    start,
+                    end,
+                    company_id,
+                    effective_staff_id,
+                    allowed_company_ids=allowed_company_ids,
+                    factual_at=factual_at,
+                ),
+                *([administrator_filter] if administrator_filter is not None else []),
+                _physical_account_condition(),
+            )
+        )
+    )
+    paid_revenue = func.coalesce(func.sum(paid_branches.c.amount), 0.0)
     paid_stmt = (
         select(
-            paid_group_key.label('group_key'),
-            func.min(FinancialTransaction.sold_item_id).label('service_id'),
-            func.min(paid_title_expr).label('service_title'),
+            paid_branches.c.group_key.label('group_key'),
+            func.min(paid_branches.c.service_id).label('service_id'),
+            func.min(paid_branches.c.service_title).label('service_title'),
             paid_revenue.label('revenue'),
-            func.count(func.distinct(FinancialTransaction.sold_item_id)).label('service_count'),
-            func.count(func.distinct(Appointment.company_id)).label('branch_count'),
+            func.count(func.distinct(paid_branches.c.service_id)).label('service_count'),
+            func.count(func.distinct(paid_branches.c.company_id)).label('branch_count'),
         )
-        .select_from(FinancialTransaction)
-        .join(Appointment, financial_appointment_match_condition())
-        .outerjoin(
-            tx_titles,
-            and_(
-                tx_titles.c.record_id == FinancialTransaction.record_id,
-                tx_titles.c.service_id == FinancialTransaction.sold_item_id,
-            ),
-        )
-        .outerjoin(ServiceCatalog, _financial_service_catalog_join())
-        .outerjoin(
-            AccountCatalog,
-            and_(
-                AccountCatalog.company_id == FinancialTransaction.company_id,
-                AccountCatalog.account_id == FinancialTransaction.account_id,
-            ),
-        )
-        .where(
-            _service_paid_filters(
-                start,
-                end,
-                company_id,
-                effective_staff_id,
-                allowed_company_ids=allowed_company_ids,
-                factual_at=factual_at,
-            ),
-            *([administrator_filter] if administrator_filter is not None else []),
-            _physical_account_condition(),
-        )
-        .group_by(paid_group_key)
+        .group_by(paid_branches.c.group_key)
         .order_by(paid_revenue.desc())
     )
     count_rows = (await db.execute(count_stmt)).all()
@@ -3607,13 +3727,29 @@ async def fetch_top_services(
                 int((paid.branch_count if paid is not None else 0) or 0),
             ),
         })
+    # service_id as the final tiebreaker: two different groups can share a blank title
+    # (the fallback in _service_group_key uses the id itself once title is empty), so
+    # (revenue, sold, title) alone is not always total and ties would otherwise be
+    # ordered by whatever order the query plan happened to produce.
+    #
+    # The numerics are negated instead of passing reverse=True, and that CHANGES the tie
+    # order rather than only making it deterministic: reverse=True sorted the title
+    # descending too, so tied services listed Я before А. Ascending title is the intended
+    # reading. Because this ends in out[:limit], two services tied on both revenue and sold
+    # now resolve the opposite way at the cut, so a different one can take the last slot.
+    # Scope of that claim, precisely: the equivalent change on the goods reports WAS measured
+    # across the payload matrix, and every swap there sat exactly on the boundary value with
+    # the plotted numbers unchanged. This site was not re-measured after its own tiebreak
+    # flipped. It holds structurally for the same reason — only rows tied on every preceding
+    # key can move, and a tie means the numbers are equal — but treat it as reasoned, not
+    # measured.
     out.sort(
         key=lambda item: (
-            float(item['revenue']),
-            int(item['sold']),
+            -float(item['revenue']),
+            -int(item['sold']),
             str(item['title']),
+            item['service_id'] if item['service_id'] is not None else -1,
         ),
-        reverse=True,
     )
     return out[:limit] if limit is not None else out
 
@@ -3770,43 +3906,51 @@ async def fetch_extra_services(
         )
     )
     paid_group_key = _service_group_key(paid_title_expr, FinancialTransaction.sold_item_id)
+    paid_branches = _financial_appointment_branches_union(
+        lambda join_condition: (
+            select(
+                paid_group_key.label('group_key'),
+                FinancialTransaction.amount.label('amount'),
+            )
+            .select_from(FinancialTransaction)
+            .join(Appointment, join_condition)
+            .outerjoin(
+                tx_titles,
+                and_(
+                    tx_titles.c.record_id == FinancialTransaction.record_id,
+                    tx_titles.c.service_id == FinancialTransaction.sold_item_id,
+                ),
+            )
+            .join(ServiceLabel, _financial_service_label_join())
+            .outerjoin(ServiceCatalog, _financial_service_catalog_join())
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(
+                _service_paid_filters(
+                    start,
+                    end,
+                    company_id,
+                    effective_staff_id,
+                    allowed_company_ids=allowed_company_ids,
+                    factual_at=factual_at,
+                ),
+                *([administrator_filter] if administrator_filter is not None else []),
+                ServiceLabel.is_extra.is_(True),
+                _physical_account_condition(),
+            )
+        )
+    )
     paid_stmt = (
         select(
-            paid_group_key.label('group_key'),
-            func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+            paid_branches.c.group_key.label('group_key'),
+            func.coalesce(func.sum(paid_branches.c.amount), 0.0).label('revenue'),
         )
-        .select_from(FinancialTransaction)
-        .join(Appointment, financial_appointment_match_condition())
-        .outerjoin(
-            tx_titles,
-            and_(
-                tx_titles.c.record_id == FinancialTransaction.record_id,
-                tx_titles.c.service_id == FinancialTransaction.sold_item_id,
-            ),
-        )
-        .join(ServiceLabel, _financial_service_label_join())
-        .outerjoin(ServiceCatalog, _financial_service_catalog_join())
-        .outerjoin(
-            AccountCatalog,
-            and_(
-                AccountCatalog.company_id == FinancialTransaction.company_id,
-                AccountCatalog.account_id == FinancialTransaction.account_id,
-            ),
-        )
-        .where(
-            _service_paid_filters(
-                start,
-                end,
-                company_id,
-                effective_staff_id,
-                allowed_company_ids=allowed_company_ids,
-                factual_at=factual_at,
-            ),
-            *([administrator_filter] if administrator_filter is not None else []),
-            ServiceLabel.is_extra.is_(True),
-            _physical_account_condition(),
-        )
-        .group_by(paid_group_key)
+        .group_by(paid_branches.c.group_key)
     )
     count_rows = (await db.execute(count_stmt)).all()
     paid_by_key = {str(r.group_key): float(r.revenue or 0) for r in (await db.execute(paid_stmt)).all()}
@@ -3821,7 +3965,17 @@ async def fetch_extra_services(
         }
         for r in count_rows
     ]
-    rows.sort(key=lambda item: (item['sold'], item['revenue']), reverse=True)
+    # Related to fetch_top_services but not the same change: this sort had no title
+    # tiebreaker at all before, so ties were arbitrary rather than merely reversed: title can be blank for more than one group,
+    # so service_id is needed as the last, always-unique tiebreaker.
+    rows.sort(
+        key=lambda item: (
+            -float(item['sold'] or 0),
+            -float(item['revenue'] or 0),
+            item['title'],
+            item['service_id'] if item['service_id'] is not None else -1,
+        ),
+    )
     return rows[:limit] if limit is not None else rows
 
 
@@ -3884,35 +4038,43 @@ async def _extra_service_revenue_by_staff(
     """
     if company_ids is not None and not company_ids:
         return {}
+    branches = _financial_appointment_branches_union(
+        lambda join_condition: (
+            select(
+                Appointment.staff_id.label('staff_id'),
+                FinancialTransaction.amount.label('amount'),
+            )
+            .select_from(FinancialTransaction)
+            .join(Appointment, join_condition)
+            .join(ServiceLabel, _financial_service_label_join())
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(
+                _service_paid_filters(
+                    start,
+                    end,
+                    None,
+                    None,
+                    allowed_company_ids=company_ids,
+                    factual_at=factual_at,
+                ),
+                _physical_account_condition(),
+                ServiceLabel.is_extra.is_(True),
+                Appointment.staff_id.is_not(None),
+            )
+        )
+    )
     stmt = (
         select(
-            Appointment.staff_id.label('staff_id'),
-            func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+            branches.c.staff_id.label('staff_id'),
+            func.coalesce(func.sum(branches.c.amount), 0.0).label('revenue'),
         )
-        .select_from(FinancialTransaction)
-        .join(Appointment, financial_appointment_match_condition())
-        .join(ServiceLabel, _financial_service_label_join())
-        .outerjoin(
-            AccountCatalog,
-            and_(
-                AccountCatalog.company_id == FinancialTransaction.company_id,
-                AccountCatalog.account_id == FinancialTransaction.account_id,
-            ),
-        )
-        .where(
-            _service_paid_filters(
-                start,
-                end,
-                None,
-                None,
-                allowed_company_ids=company_ids,
-                factual_at=factual_at,
-            ),
-            _physical_account_condition(),
-            ServiceLabel.is_extra.is_(True),
-            Appointment.staff_id.is_not(None),
-        )
-        .group_by(Appointment.staff_id)
+        .group_by(branches.c.staff_id)
     )
     try:
         rows = (await db.execute(stmt)).all()
@@ -4271,6 +4433,61 @@ async def fetch_opz_year_facts(
     }
 
 
+async def _admin_event_context(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+    ordered_staff_ids: list[int],
+) -> tuple[ZoneInfo, dict[date, list[Any]]]:
+    """Branch timezone and StaffSchedule rows (bucketed by local date) for a staff segment.
+
+    Returns the CACHED structure itself, not a copy — read the buckets, or copy before
+    changing them (_admin_event_counts does `list(...)` for exactly this reason). Appending
+    to a bucket in place would corrupt every later caller in the same request. Same
+    read-only contract as _opz_events, stated because a dict of lists cannot enforce it.
+
+    _admin_clients_by_finished_appointments and _admin_opz_by_created_appointments both
+    call _admin_event_counts for the same (company, staff segment, period) but with
+    different event lists — this is the part of that call that does not depend on which
+    events are being assigned, so it is fetched once per request instead of twice.
+    Cached on the staff-id SET, not just company_id: a different admin roster (a
+    different role segment in the same company/period) needs its own schedule rows.
+    """
+    cache: dict[tuple[Any, ...], tuple[ZoneInfo, dict[date, list[Any]]]] = db.info.setdefault(
+        'admin_event_context', {}
+    )
+    cache_key = (company_id, tuple(ordered_staff_ids), start, end)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    timezone_name = (await _company_timezone_names(db, [company_id])).get(company_id)
+    timezone = _branch_timezone(timezone_name)
+    schedule_rows = (
+        await db.execute(
+            select(
+                StaffSchedule.staff_id,
+                StaffSchedule.date,
+                StaffSchedule.slot_from,
+                StaffSchedule.slot_to,
+            )
+            .where(
+                StaffSchedule.staff_id.in_(ordered_staff_ids),
+                StaffSchedule.company_id == company_id,
+                StaffSchedule.date >= start - timedelta(days=1),
+                StaffSchedule.date <= end + timedelta(days=1),
+            )
+            .order_by(StaffSchedule.date.asc(), StaffSchedule.slot_from.asc(), StaffSchedule.staff_id.asc())
+        )
+    ).all()
+    schedules_by_date: dict[date, list[Any]] = {}
+    for row in schedule_rows:
+        schedules_by_date.setdefault(_coerce_date(row.date), []).append(row)
+    result = (timezone, schedules_by_date)
+    cache[cache_key] = result
+    return result
+
+
 async def _admin_event_counts(
     db: AsyncSession,
     start: date,
@@ -4292,29 +4509,9 @@ async def _admin_event_counts(
         for staff_id, user_id in user_id_by_staff.items()
         if staff_id in counts and user_id is not None
     }
-    timezone_name = await db.scalar(select(Company.timezone).where(Company.id == company_id))
-    timezone = _branch_timezone(timezone_name)
-
-    schedule_rows = (
-        await db.execute(
-            select(
-                StaffSchedule.staff_id,
-                StaffSchedule.date,
-                StaffSchedule.slot_from,
-                StaffSchedule.slot_to,
-            )
-            .where(
-                StaffSchedule.staff_id.in_(ordered_staff_ids),
-                StaffSchedule.company_id == company_id,
-                StaffSchedule.date >= start - timedelta(days=1),
-                StaffSchedule.date <= end + timedelta(days=1),
-            )
-            .order_by(StaffSchedule.date.asc(), StaffSchedule.slot_from.asc(), StaffSchedule.staff_id.asc())
-        )
-    ).all()
-    schedules_by_date: dict[date, list[Any]] = {}
-    for row in schedule_rows:
-        schedules_by_date.setdefault(_coerce_date(row.date), []).append(row)
+    timezone, schedules_by_date = await _admin_event_context(
+        db, start, end, company_id, ordered_staff_ids
+    )
 
     for event in sorted(events, key=lambda item: (item.event_date, item.event_moment or datetime.min, item.event_id)):
         local_moment = _local_event_moment(event.event_moment, timezone)
@@ -4819,9 +5016,9 @@ async def _administrator_service_scope(
         cache[key] = result
         return result
 
-    timezone_name = await db.scalar(
-        select(Company.timezone).where(Company.id == company_id)
-    ) or DEFAULT_BRANCH_TIMEZONE
+    timezone_name = (
+        await _company_timezone_names(db, [company_id])
+    ).get(company_id) or DEFAULT_BRANCH_TIMEZONE
     base_filters = _appt_revenue_filters(
         start,
         end,
@@ -5091,7 +5288,7 @@ async def _admin_extra_service_metrics(
         for staff_id in ordered_staff_ids
     }
 
-    timezone_name = await db.scalar(select(Company.timezone).where(Company.id == company_id))
+    timezone_name = (await _company_timezone_names(db, [company_id])).get(company_id)
     timezone = _branch_timezone(timezone_name)
     if db.get_bind().dialect.name == 'postgresql':
         local_moment = _local_moment(Appointment.datetime, timezone.key)
@@ -5486,14 +5683,14 @@ async def _staff_fact_components_by_branch(
         if row.staff_id is not None:
             appointments_by_staff[int(row.staff_id)] += float(row.appointments or 0)
 
-    service_rows = (
-        await db.execute(
+    service_branches = _financial_appointment_branches_union(
+        lambda join_condition: (
             select(
-                Appointment.staff_id,
-                func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+                Appointment.staff_id.label('staff_id'),
+                FinancialTransaction.amount.label('amount'),
             )
             .select_from(FinancialTransaction)
-            .join(Appointment, financial_appointment_match_condition())
+            .join(Appointment, join_condition)
             .outerjoin(
                 AccountCatalog,
                 and_(
@@ -5507,7 +5704,15 @@ async def _staff_fact_components_by_branch(
                 ),
                 _physical_account_condition(),
             )
-            .group_by(Appointment.staff_id)
+        )
+    )
+    service_rows = (
+        await db.execute(
+            select(
+                service_branches.c.staff_id,
+                func.coalesce(func.sum(service_branches.c.amount), 0.0).label('revenue'),
+            )
+            .group_by(service_branches.c.staff_id)
         )
     ).all()
     service_revenue_by_staff: dict[int, float] = defaultdict(float)
@@ -6769,7 +6974,8 @@ async def _fetch_company_staff(
             Staff.company_id == company_id,
             _period_relevant_staff_clause(start, end, plan_start, plan_end),
         )
-        .order_by(Staff.position.asc(), Staff.name.asc())
+        # Staff.id as the final tiebreaker: two staff can share a position and name.
+        .order_by(Staff.position.asc(), Staff.name.asc(), Staff.id.asc())
     )
     if staff_id is not None:
         stmt = stmt.where(Staff.id == staff_id)

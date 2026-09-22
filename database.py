@@ -113,11 +113,43 @@ def init_async_database(host: str, port: int, name: str, user: str, password: st
     # correlated EXISTS, so PostgreSQL JIT-compiles them with inlining and optimisation:
     # measured on production, one such query spends 2203 ms, of which 2157 ms is LLVM, to
     # then execute in 13 ms. Only the API sees these plans, so the ETL engine keeps JIT.
+    #
+    # Pool sized against Postgres max_connections=100, shared with the sync worker and any
+    # ad hoc psql/migration session (uvicorn runs this API as a single process with no
+    # --workers, so this engine's pool is the whole app's ceiling, not a per-process slice):
+    #   - sync worker: one long-lived engine at rest (Database sets no pool_size/max_overflow,
+    #     so it gets SQLAlchemy's default 5 + 10 overflow = 15) plus, while a job is actively
+    #     running, one more engine opened by sync_orchestrator.run_sync_job for the advisory
+    #     lock and run tracking (another 15 ceiling) -> ~30 worst case.
+    #   - ad hoc access: alembic migrations, one-off scripts, a human psql session -> budget 10.
+    #   - remainder for this engine: 100 - 30 - 10 = 60. Split as pool_size=15 (always-open
+    #     baseline) + max_overflow=15 (burst room for concurrent heavy dashboard reports) = 30,
+    #     so API (30) + worker (30) = 60 -- the low end of the ~60-70 ceiling for the two
+    #     together, leaving margin for migrations/psql and Postgres's own reserved connections.
+    # pool_timeout=10 fails a queued request in 10s instead of SQLAlchemy's 30s default, so a
+    # cheap call like /auth/me errors quickly rather than stalling behind a few 6s dashboard
+    # reports holding every pooled connection.
+    #
+    # plan_cache_mode=force_custom_plan is load-bearing, not tuning. asyncpg prepares and caches
+    # a statement per connection, and PostgreSQL's default `auto` mode plans a prepared statement
+    # custom for its first 5 executions, then may switch to a GENERIC plan on the 6th. These fact
+    # queries are dominated by the parameter values (branch scope, date window), which a generic
+    # plan cannot see, so the switch is catastrophic. Measured on a copy of production, from a
+    # cold process, /dashboard/widget/plan_fact over full history:
+    #   run 1-5: 5.6s 5.9s 7.0s 7.1s 7.2s   ->   run 6+: 19.6s 20.7s 20.6s, and it stays there
+    # Because the API holds connections open, every connection falls off that cliff and never
+    # recovers. With force_custom_plan the same endpoint is a flat 4.6-4.9s across all 8 runs.
+    # This predates the pool/query work in this file; it is not caused by it. Same family as the
+    # jit: off note above, and for the same underlying reason. Replanning costs a few ms against
+    # multi-second queries. Do not remove without re-measuring the 6th consecutive request.
     engine = create_async_engine(
         url,
         pool_pre_ping=True,
         pool_recycle=300,
-        connect_args={'server_settings': {'jit': 'off'}},
+        pool_size=15,
+        max_overflow=15,
+        pool_timeout=10,
+        connect_args={'server_settings': {'jit': 'off', 'plan_cache_mode': 'force_custom_plan'}},
     )
     _async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
