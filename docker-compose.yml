@@ -30,6 +30,15 @@ services:
     # `postgres` must lead the list -- this replaces the image's CMD, and the entrypoint
     # expects the server command as its arguments. Verified booting with this exact flag on
     # postgres:16-alpine before it was applied here.
+    #
+    # EDITING THIS BLOCK RESTARTS THE PRODUCTION DATABASE ON THE NEXT DEPLOY. The deploy runs
+    # `docker compose up -d api worker` and never names postgres, which reads as if the
+    # database is left alone -- it is not. The x-app-base anchor above gives api/worker
+    # `depends_on: postgres`, so compose pulls it in, sees the service definition no longer
+    # matches the running container, and recreates it. Observed: the container was recreated
+    # mid-deploy, not by the manual `docker compose up -d postgres` that followed. pg_data is
+    # a named volume so no data is lost, but plan on a few seconds of connection errors, and
+    # do not ship a change here while a sync is mid-flight.
     command: ["postgres", "-c", "shared_buffers=1GB"]
     ports:
       - "127.0.0.1:${DB_PORT:-5432}:5432"
