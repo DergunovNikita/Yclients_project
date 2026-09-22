@@ -20,6 +20,17 @@ x-app-base: &app-base
 services:
   postgres:
     image: postgres:16-alpine
+    # The image ships stock defaults, which meant shared_buffers=128MB against a pg_data
+    # volume of ~640MB -- the working set could not stay resident, so the dashboard's repeated
+    # scans of the same fact tables kept going back to the page cache. 1GB holds the whole
+    # database with headroom; more would be spent on nothing, since there is not more database
+    # to cache. It is also ~13% of the VM's 7.9GB rather than the usual 25% rule (~2GB),
+    # deliberately: this box has NO SWAP and also runs the api, the worker and a second demo
+    # stack, so over-committing is an OOM kill rather than a slowdown.
+    # `postgres` must lead the list -- this replaces the image's CMD, and the entrypoint
+    # expects the server command as its arguments. Verified booting with this exact flag on
+    # postgres:16-alpine before it was applied here.
+    command: ["postgres", "-c", "shared_buffers=1GB"]
     ports:
       - "127.0.0.1:${DB_PORT:-5432}:5432"
     environment:
