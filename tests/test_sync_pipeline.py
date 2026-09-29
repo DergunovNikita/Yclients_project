@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 import importlib
 import io
 from contextlib import contextmanager, redirect_stdout
@@ -2014,11 +2014,82 @@ def test_sync_staff_schedules_preserves_data_when_source_is_unavailable():
         engine.dispose()
 
 
+class EveningUTCScheduleAPI(FakeSyncAPI):
+    """YClients between 20:00 UTC and midnight UTC: the answer starts a day before start_date."""
+
+    def get_staff_schedule(self, company_id, start_date=None, end_date=None):
+        first_day = date.fromisoformat(start_date) - timedelta(days=1)
+        return [
+            {
+                'staff_id': 7,
+                'date': (first_day + timedelta(days=offset)).isoformat(),
+                'slots': [{'from': '10:00', 'to': '22:00'}],
+            }
+            for offset in range(3)
+        ]
+
+
+def test_evening_utc_sync_ignores_the_day_yclients_adds_before_the_schedule_window(monkeypatch):
+    """Rejecting that day failed the step on every branch once a day; storing it doubled the
+    slots an earlier run had already written for it, because it lies outside the replaced window.
+    """
+    real_sync_staff_schedules = sync_pipeline.sync_staff_schedules
+    monkeypatch.setattr(sync_pipeline, 'SCHEDULE_DAYS', 60)
+    tables = [
+        Group.__table__,
+        Company.__table__,
+        Staff.__table__,
+        StaffSchedule.__table__,
+        SyncState.__table__,
+        SyncSourceState.__table__,
+    ]
+    with sqlite_session_with_system(tables) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.add(Staff(id=100, external_id=7, source_type='yclients', name='Admin', company_id=1))
+        db.add(StaffSchedule(staff_id=100, date=date(2026, 9, 28), slot_from=time(10), slot_to=time(22), company_id=1))
+        db.add(StaffSchedule(staff_id=100, date=date(2026, 9, 29), slot_from=time(9), slot_to=time(21), company_id=1))
+        db.commit()
+
+        credential = YClientsCredentialValue(
+            id=11,
+            title='Tenant credential',
+            partner_token='partner',
+            login='login',
+            password='password',
+            company_ids=(1,),
+            portal_account_id=7,
+        )
+        patch_execute_sync_dependencies(monkeypatch, db, credential)
+        monkeypatch.setattr(sync_pipeline, 'sync_staff_schedules', real_sync_staff_schedules)
+        monkeypatch.setattr(sync_pipeline, '_build_api_for_credential', lambda _credential: EveningUTCScheduleAPI())
+
+        # date.today() of the UTC sync container at 2026-09-29 20:00 UTC (23:00 in Moscow).
+        result = execute_sync(mode='incremental', end_date=date(2026, 9, 29), portal_account_id=7)
+
+        schedule_steps = [
+            item for item in result['step_results'] if item['name'].startswith('Графики сотрудников')
+        ]
+        assert [item['success'] for item in schedule_steps] == [True]
+        assert sorted((row.date, row.slot_from) for row in db.query(StaffSchedule)) == [
+            (date(2026, 9, 28), time(10)),
+            (date(2026, 9, 29), time(10)),
+            (date(2026, 9, 30), time(10)),
+        ]
+        coverage = db.get(
+            SyncSourceState,
+            {'company_id': 1, 'source': sync_pipeline.STAFF_SCHEDULE_SOURCE},
+        )
+        assert (coverage.period_start, coverage.period_end) == (date(2026, 9, 29), date(2026, 11, 28))
+
+
 @pytest.mark.parametrize(
     'payload',
     [
         [{'staff_id': 999, 'date': '2025-01-10', 'slots': [{'from': '09:00', 'to': '18:00'}]}],
         [{'staff_id': 7, 'date': '2025-01-10', 'slots': [{'from': 'bad', 'to': '18:00'}]}],
+        [{'staff_id': 7, 'date': '2024-12-30', 'slots': [{'from': '09:00', 'to': '18:00'}]}],
+        [{'staff_id': 7, 'date': '2025-02-01', 'slots': [{'from': '09:00', 'to': '18:00'}]}],
     ],
 )
 def test_sync_staff_schedules_rejects_unusable_snapshot_before_replacement(payload):

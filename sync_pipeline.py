@@ -2175,6 +2175,7 @@ def sync_staff_schedules(api: YClientsAPI, db, company_id: str,
 
         parsed_slots: list[tuple[int, date, object, object]] = []
         seen_slots: set[tuple[int, date, object, object]] = set()
+        skipped_entries = 0
         for entry in schedules:
             if not isinstance(entry, dict):
                 raise ValueError('invalid staff schedule entry')
@@ -2183,6 +2184,12 @@ def sync_staff_schedules(api: YClientsAPI, db, company_id: str,
             slots = entry.get('slots')
             if staff_id is None or schedule_date is None:
                 raise ValueError('staff schedule entry cannot be mapped')
+            # From 20:00 UTC until our UTC date rolls over, YClients also returns the day
+            # before start_date. That day is outside the window replaced below, and storing
+            # it again doubled every day's slots; anything further out still fails closed.
+            if parsed_start is not None and schedule_date == parsed_start - timedelta(days=1):
+                skipped_entries += 1
+                continue
             if parsed_start is not None and schedule_date < parsed_start:
                 raise ValueError('staff schedule entry is outside the requested window')
             if parsed_end is not None and schedule_date > parsed_end:
@@ -2203,6 +2210,8 @@ def sync_staff_schedules(api: YClientsAPI, db, company_id: str,
                     continue
                 seen_slots.add(slot_key)
                 parsed_slots.append(slot_key)
+        if skipped_entries:
+            print(f"  Пропущено записей за день до окна: {skipped_entries}")
 
         delete_query = db.query(StaffSchedule).filter(StaffSchedule.company_id == cid)
         if parsed_start is not None:
