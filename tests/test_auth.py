@@ -2748,7 +2748,7 @@ async def test_initial_passwords_endpoint_lists_pending_invites_without_password
             bookable=True,
         )
     )
-    auth_db.add(
+    auth_db.add_all([
         Staff(
             id=9008,
             name='Branch Administrator',
@@ -2766,8 +2766,8 @@ async def test_initial_passwords_endpoint_lists_pending_invites_without_password
             company_id=2,
             fired=0,
             bookable=True,
-        )
-    )
+        ),
+    ])
     await auth_db.commit()
     super_token = create_access_token(1, 'owner')
     branch_token = create_access_token(3, 'branch_admin')
