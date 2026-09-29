@@ -11,6 +11,9 @@ import {
   PointElement,
   Tooltip,
 } from 'chart.js';
+// Side-effect only: registers the global responsive tick/legend plugin shared with the
+// report viewer's charts.js — see chartResponsive.js for how/why it applies before layout.
+import './chartResponsive.js';
 import { enhanceSelect } from './customSelect.js';
 import {
   acquireStartupSession,
@@ -1914,6 +1917,46 @@ function renderPlanDiagnostics(diagnostics) {
   `;
 }
 
+// The 1st sticky column's width varies by locale/content (e.g. Italian "Dimensione" won't
+// break), so the 2nd column's `left` reads a CSS variable that this keeps in sync with it
+// instead of a hardcoded offset. Both the observer and the initial measurement below share
+// stickyColumnWidth() — getBoundingClientRect(), the border-box size `left` has to match
+// under this page's `box-sizing: border-box` — never a ResizeObserver entry's own
+// contentRect, which excludes padding and undershoots by exactly that much.
+//
+// A ResizeObserver, not a plain window resize listener: renderPlanFact can run while the
+// Plan/actual view is still `display: none` (branch cell measures 0 then), and only the
+// observer fires again once the view is shown and the cell gets its real layout box.
+function stickyColumnWidth(cell) {
+  return cell.getBoundingClientRect().width;
+}
+
+const planTableStickyObserver = new ResizeObserver((entries) => {
+  entries.forEach((entry) => {
+    const width = stickyColumnWidth(entry.target);
+    if (!width) return;
+    entry.target.closest('.plan-table')?.style.setProperty('--plan-col1-width', `${width}px`);
+  });
+});
+
+function syncPlanTableStickyOffsets() {
+  // Disconnect first: each render replaces the table markup wholesale, so the previous
+  // .branch-cell elements are already detached and would otherwise pile up as dead
+  // observations for as long as the page stays open.
+  planTableStickyObserver.disconnect();
+  document.querySelectorAll('.plan-table').forEach((table) => {
+    const branchCell = table.querySelector('.branch-cell');
+    if (!branchCell) return;
+    // box: 'border-box' — the default (content-box) would miss a future CSS edit that
+    // changes only padding at the 560px breakpoint without also changing `width`; today's
+    // rule changes both, but observing the box we actually measure above is what makes
+    // that true by construction instead of by coincidence.
+    planTableStickyObserver.observe(branchCell, { box: 'border-box' });
+    const width = stickyColumnWidth(branchCell);
+    if (width) table.style.setProperty('--plan-col1-width', `${width}px`);
+  });
+}
+
 function renderPlanFact(planFact) {
   const groups = planFact?.groups || [];
   const metrics = planFact?.metrics || [];
@@ -1954,6 +1997,7 @@ function renderPlanFact(planFact) {
     ? `${planFact.branch?.title || t('dash.branch')} · ${selectedStaff?.name || t('dash.staffPlural')}`
     : t('dash.networkAndBranches');
   els.planMeta.textContent = t('dash.planMeta', { scope: scopeText, count: groups.length, period: planPeriodText });
+  syncPlanTableStickyOffsets();
 }
 
 function renderPlanSettingInput(scope, row, field) {
@@ -3197,6 +3241,20 @@ function viewFromLocation() {
   return accessibleView(view);
 }
 
+// .tabs scrolls horizontally on narrow screens; scrollIntoView would also move the
+// page vertically, so nudge scrollLeft directly instead.
+function scrollActiveTabIntoView(link) {
+  const nav = link.closest('.tabs');
+  if (!nav) return;
+  const navRect = nav.getBoundingClientRect();
+  const linkRect = link.getBoundingClientRect();
+  if (linkRect.left < navRect.left) {
+    nav.scrollLeft -= navRect.left - linkRect.left;
+  } else if (linkRect.right > navRect.right) {
+    nav.scrollLeft += linkRect.right - navRect.right;
+  }
+}
+
 function setActiveView(view) {
   view = accessibleView(view);
   const previousView = activeView;
@@ -3213,7 +3271,9 @@ function setActiveView(view) {
   els.opzFactsView.classList.toggle('active', view === 'opzFacts');
   els.reportsView.classList.toggle('active', view === 'reports');
   els.viewLinks.forEach((link) => {
-    link.classList.toggle('active', link.dataset.viewLink === view);
+    const isActive = link.dataset.viewLink === view;
+    link.classList.toggle('active', isActive);
+    if (isActive) scrollActiveTabIntoView(link);
   });
   updateFloatingEditorSave();
   const labels = {

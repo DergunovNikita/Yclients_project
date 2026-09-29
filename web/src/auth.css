@@ -57,11 +57,13 @@ textarea {
 
 .auth-page {
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .auth-layout {
   display: grid;
   min-height: 100vh;
+  min-height: 100dvh;
   grid-template-columns: 1fr;
 }
 
@@ -215,11 +217,13 @@ textarea {
 
 .auth-form {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
 }
 
 .field {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 7px;
 }
 
@@ -461,6 +465,7 @@ textarea {
 
 .admin-page {
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--bg);
 }
 
@@ -517,6 +522,19 @@ textarea {
   width: auto;
   margin-top: 0;
   white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .admin-topbar {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+
+  .admin-topbar__nav {
+    flex-wrap: wrap;
+    width: 100%;
+    justify-content: flex-end;
+  }
 }
 
 .admin-shell {
@@ -594,6 +612,7 @@ textarea {
 
 .admin-search {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   min-width: min(100%, 320px);
   margin-left: auto;
@@ -649,6 +668,25 @@ textarea {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+
+@media (max-width: 640px) {
+  .admin-card__header {
+    flex-wrap: wrap;
+  }
+
+  .admin-search--header {
+    min-width: 100%;
+    max-width: none;
+  }
+
+  .admin-card__header-actions {
+    width: 100%;
+  }
+
+  .admin-card__header-actions .btn {
+    flex: 1 1 auto;
+  }
 }
 
 .admin-card__hint {
@@ -712,12 +750,14 @@ textarea {
 
 .profile-password__form {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   max-width: 420px;
 }
 
 .profile-password__form label {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   font-size: 14px;
   font-weight: 500;
@@ -736,6 +776,7 @@ textarea {
 
 .admin-toolbar {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -757,6 +798,7 @@ textarea {
 
 .admin-toolbar label {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 7px;
   color: var(--muted);
   font-size: 12px;
@@ -1018,6 +1060,18 @@ textarea {
   margin-top: 0;
 }
 
+@media (max-width: 480px) {
+  .profile-card__top,
+  .profile-card__identity {
+    flex-wrap: wrap;
+  }
+
+  .profile-card__logout,
+  .profile-card__change-password {
+    width: 100%;
+  }
+}
+
 .profile-card__change-password {
   width: auto;
   margin-top: 4px;
@@ -1245,6 +1299,7 @@ body.admin-modal-open {
   inset: 0;
   z-index: 100;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
   padding: 20px;
   overflow: auto;
@@ -1264,7 +1319,9 @@ body.admin-modal-open {
   position: relative;
   z-index: 1;
   width: min(920px, 100%);
+  min-width: 0;
   min-height: min(560px, calc(100vh - 40px));
+  min-height: min(560px, calc(100dvh - 40px));
   max-height: none;
   overflow: visible;
   padding: 28px;
@@ -1336,4 +1393,54 @@ body.admin-modal-open {
 
 .admin-modal .alert.error {
   margin-bottom: 12px;
+}
+
+@media (max-width: 640px) {
+  .admin-modal {
+    padding: 12px;
+  }
+
+  .admin-modal__dialog {
+    padding: 16px;
+    min-height: auto;
+  }
+
+  .admin-modal__actions {
+    flex-wrap: wrap;
+  }
+}
+
+/* ── Language switcher (injected by i18n.js into .auth-lang / #lang-switcher) ── */
+
+.auth-lang select {
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-md);
+  background: #fff;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.auth-lang select:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 4px var(--brand-glow);
+}
+
+/* ── iOS Safari zooms on focus when a text field's font-size is under 16px ── */
+
+@media (hover: none) and (pointer: coarse) {
+  .field input,
+  .field select,
+  .admin-search input,
+  .admin-toolbar input,
+  .admin-toolbar select,
+  .password-field input,
+  .profile-password__form input,
+  .auth-lang select {
+    font-size: 16px;
+  }
 }

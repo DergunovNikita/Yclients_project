@@ -22,6 +22,10 @@ import {
   shouldRenderChartDataLabels,
 } from './chartSpec.js';
 import { chartTooltipValue, shouldRenderReportDataLabel } from '../dashboardRequestState.js';
+// Side-effect only: registers the global responsive tick/legend plugin (Chart.js dedupes
+// the module, so main.js importing it too does not register it twice) — see that file for
+// why it has to be a plugin rather than options set here.
+import '../chartResponsive.js';
 
 const dataLabelsPlugin = {
   id: 'reportDataLabels',

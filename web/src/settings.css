@@ -9,6 +9,19 @@
   gap: 4px;
   border-bottom: 1px solid #e2e8f0;
   margin-bottom: 24px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+
+.settings-tabs::-webkit-scrollbar {
+  height: 6px;
+}
+
+.settings-tabs::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
 }
 
 .settings-tab {
@@ -22,12 +35,21 @@
   text-decoration: none;
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .settings-tab.is-active {
   color: #0f766e;
   border-bottom-color: #0f766e;
   font-weight: 600;
+}
+
+/* The tab sits flush against the strip's own bottom border (the active underline touches
+   it), so there is no vertical room to give the strip like .tabs got in index.html — an
+   outside focus ring would be clipped by overflow-y: hidden above. Pull it inside instead. */
+.settings-tab:focus-visible {
+  outline-offset: -2px;
 }
 
 .settings-tab--link::after {
@@ -71,6 +93,7 @@
 
 .settings-form {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   max-width: 420px;
 }
@@ -114,6 +137,27 @@
   word-break: break-word;
 }
 
+@media (max-width: 480px) {
+  .settings-kv {
+    grid-template-columns: 1fr;
+    row-gap: 2px;
+  }
+
+  .settings-kv dt {
+    margin-top: 10px;
+  }
+
+  .settings-kv dt:first-child {
+    margin-top: 0;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .settings-form input {
+    font-size: 16px;
+  }
+}
+
 .settings-sessions,
 .settings-credentials {
   display: flex;
@@ -149,6 +193,25 @@
 .settings-credential__meta {
   font-size: 12px;
   color: #64748b;
+}
+
+/* Meta text wraps to several lines at phone width; centering the action button against
+   the whole card then floats it awkwardly mid-height. Stack it below instead. */
+@media (max-width: 480px) {
+  .settings-session,
+  .settings-credential {
+    flex-wrap: wrap;
+  }
+
+  .settings-session__main,
+  .settings-credential__main {
+    flex-basis: 100%;
+  }
+
+  .settings-session > button,
+  .settings-credential > button {
+    width: 100%;
+  }
 }
 
 .settings-empty {

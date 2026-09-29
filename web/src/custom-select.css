@@ -256,3 +256,13 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* iOS Safari zooms the page on focusing a control with font-size below 16px;
+   coarse/no-hover means a touch device, so desktop sizing is untouched. */
+@media (hover: none) and (pointer: coarse) {
+  .custom-select__trigger,
+  .custom-select__value,
+  .custom-select__search {
+    font-size: 16px;
+  }
+}

@@ -223,6 +223,26 @@
       display: flex;
       gap: 8px;
       margin-bottom: 16px;
+      /* Horizontal scroll strip: seven tabs don't fit at phone widths, and this keeps
+         desktop identical since nothing overflows there. Vertical padding keeps focus
+         outlines from being clipped by the overflow box. */
+      overflow-x: auto;
+      padding: 3px 0;
+      scrollbar-width: thin;
+    }
+
+    .tabs::-webkit-scrollbar {
+      height: 6px;
+    }
+
+    .tabs::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 999px;
+    }
+
+    .tabs .tab {
+      flex: 0 0 auto;
+      white-space: nowrap;
     }
 
     .segmented {
@@ -1753,6 +1773,151 @@
 
       .reports-viewer__head {
         flex-direction: column;
+      }
+
+      /* Topbar: flow left-aligned and wrap instead of a tall centered column. */
+      .status {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .user-profile {
+        flex-direction: row;
+        align-items: center;
+      }
+
+      .user-profile__meta {
+        align-items: flex-start;
+      }
+
+      .user-profile__name,
+      .user-profile__role {
+        text-align: left;
+        overflow-wrap: anywhere;
+      }
+
+      .tenant-switcher {
+        width: 100%;
+      }
+
+      /* Plan/fact table: narrow words per letter would eat the metric columns; let
+         long single-word headers grow the table instead (table-scroll already
+         handles the horizontal scroll). */
+      .plan-table th.number {
+        word-break: normal;
+      }
+
+      /* "Показатель" can't break (one word, and mid-word breaks are unwanted here same as
+         .plan-table th.number above), so it — not this 64px — ends up deciding the 2nd
+         column's real width; matching its padding to the body cells it sits above at
+         least keeps that unavoidable width down to what the word itself needs. */
+      .branch-cell,
+      .row-label,
+      .plan-table thead th:first-child,
+      .plan-table thead th:nth-child(2) {
+        width: 64px;
+        padding: 8px 4px;
+      }
+
+      /* "% completamento" (IT) is one unbreakable word plus a sign: at 64px it eats
+         over half of a 360px screen with the branch column beside it. Syllable-correct
+         hyphenation (the <html lang> the locale switch already sets picks the dictionary)
+         shrinks that to a normal two-line wrap instead of widening the column further —
+         translations stay untouched and no word breaks mid-syllable. */
+      .row-label {
+        font-size: 12px;
+        white-space: normal;
+        overflow-wrap: break-word;
+        -webkit-hyphens: auto;
+        hyphens: auto;
+      }
+
+      /* Row identity (branch + Plan/Actual/Remaining/% completion) must survive the
+         horizontal scroll that .table-scroll already gives this table, or the numbers
+         scrolled into view are unreadable. Two columns pinned side by side, matched by
+         a header without its own classes (nth-child is safe there: unlike the body,
+         the header has exactly one row, so no rowspan can shift what "1st/2nd child" means). */
+      .branch-cell,
+      .row-label,
+      .plan-table thead th:first-child,
+      .plan-table thead th:nth-child(2) {
+        position: sticky;
+        z-index: 1;
+      }
+
+      .branch-cell,
+      .plan-table thead th:first-child {
+        left: 0;
+      }
+
+      /* 64px is only the fallback before JS measures the 1st column (see
+         syncPlanTableStickyOffsets in main.js): "Разрез"/"Dimensione" etc. can't break,
+         so the 1st column is often wider than 64px, and a fixed offset here would then
+         sit the 2nd column on top of it instead of beside it. */
+      .row-label,
+      .plan-table thead th:nth-child(2) {
+        left: var(--plan-col1-width, 64px);
+        background: #ffffff;
+      }
+
+      .plan-table thead th:first-child {
+        background: #f8fafc;
+      }
+
+      /* Report tables: the 840px floor forces a scrollbar even for a 3-column table;
+         let it size to content and pin the row label while scrolling sideways. Reused
+         for the Overview extra-services table, whose first column is the same kind of
+         row identity (service name) rather than a number — and whose own 680px floor
+         (.table-box-scroll table, for desktop) needs the same override here: a sticky
+         `left: 0` cell that wraps to several lines stops actually sticking once the
+         table is forced wider than its content, so the floor has to go at this width
+         for the same reason `.reports-table`'s did. */
+      .reports-table,
+      .extra-services-scroll table {
+        min-width: 0;
+        width: 100%;
+      }
+
+      .reports-table th:first-child,
+      .reports-table td:first-child,
+      .extra-services-scroll table th:first-child,
+      .extra-services-scroll table td:first-child {
+        position: sticky;
+        left: 0;
+        z-index: 1;
+        background: #ffffff;
+      }
+
+      .reports-table thead th:first-child,
+      .extra-services-scroll table thead th:first-child {
+        z-index: 2;
+      }
+
+      .service-group-create {
+        grid-template-columns: 1fr;
+      }
+
+      .reports-chart-box {
+        height: 260px;
+      }
+    }
+
+    /* iOS Safari zooms the page on focusing a control with font-size below 16px;
+       coarse/no-hover means a touch device, so desktop sizing is untouched. */
+    @media (hover: none) and (pointer: coarse) {
+      input,
+      select,
+      textarea {
+        font-size: 16px;
+      }
+
+      .tenant-switcher select,
+      .toolbar .custom-select__trigger,
+      .toolbar .custom-select__search,
+      .reports-ranking-control select {
+        font-size: 16px;
       }
     }
   </style>
