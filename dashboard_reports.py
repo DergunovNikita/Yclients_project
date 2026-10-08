@@ -490,7 +490,7 @@ def _description_for(report_id: str, status: str) -> str:
     if report_id == 'nps_dashboard':
         return 'Отзывы YClients доступны сейчас; NPS-опросы требуют отдельного источника.'
     if report_id == 'year_over_year':
-        return 'Год к году по выручке, визитам, среднему чеку и крупным агрегатам без среза по услугам.'
+        return 'Год к году по выручке, визитам, среднему чеку, ОПЗ и крупным агрегатам без среза по услугам.'
     return 'Отчет строится на текущих данных YClients в PostgreSQL.'
 
 
@@ -936,13 +936,8 @@ async def _year_over_year_activity_bounds(
     staff_id: int | None,
     allowed_company_ids: list[int] | None,
     now: datetime,
-) -> tuple[
-    date,
-    date,
-    dict[int, float],
-    dict[int, dict[int, tuple[date, date]]],
-] | None:
-    """Return the first YClients record and the latest factual metric activity.
+) -> tuple[date, date, dict[str, Any]] | None:
+    """Return the first YClients record, the latest factual metric activity and the OPZ facts.
 
     Both boundaries include every factual component used by Overview/plan-fact:
     completed visits, paid services, goods/top-up payments and goods movements.
@@ -1119,12 +1114,7 @@ async def _year_over_year_activity_bounds(
     )
     if opz_facts['latest_date'] is not None:
         ends.append(opz_facts['latest_date'])
-    return (
-        activity_start,
-        max(ends),
-        opz_facts['counts'],
-        opz_facts['appointment_dependencies'],
-    )
+    return activity_start, max(ends), opz_facts
 
 
 async def _year_over_year_source_states(
@@ -1310,6 +1300,8 @@ def _monthly_yoy_rows(
     scope_company_ids: list[int],
     appointment_dependencies: dict[int, dict[int, tuple[date, date]]] | None = None,
     reporting_windows: dict[int, ReportingWindow] | None = None,
+    opz_counts: dict[int, float] | None = None,
+    opz_dependencies: dict[int, dict[int, tuple[date, date]]] | None = None,
 ) -> list[dict[str, Any]]:
     months = list(range(1, 13))
     monthly = {
@@ -1350,9 +1342,25 @@ def _monthly_yoy_rows(
             if in_activity_period
             else []
         )
+        # Mirrors the annual row: an OPZ-only coverage gap hides OPZ but not revenue or visits.
+        opz_missing = (
+            _year_over_year_missing_sources(
+                state_by_key,
+                scope_company_ids,
+                slice_start,
+                slice_end,
+                required_sources=('appointments_detail',),
+                appointment_dependencies=(opz_dependencies or {}).get(month),
+                reporting_windows=reporting_windows,
+            )
+            if in_activity_period
+            else []
+        )
         appointments_known = 'appointments_detail' not in missing_sources
         financials_known = 'financial_transactions_detail' not in missing_sources
         revenue_known = appointments_known and financials_known
+        opz_known = in_activity_period and appointments_known and 'appointments_detail' not in opz_missing
+        opz_qty = float((opz_counts or {}).get(month, 0.0)) if opz_known else None
         # Same formula as the annual row: revenue over completed visits. A month with
         # no visits has no average check rather than a zero one.
         avg_check = (
@@ -1370,9 +1378,14 @@ def _monthly_yoy_rows(
             'topup_revenue': values['topup_revenue'] if in_activity_period and revenue_known else None,
             'appointments': values['appointments'] if in_activity_period and appointments_known else None,
             'avg_check': avg_check,
+            'opz_qty': opz_qty,
+            # Like avg_check: a month without visits has no rate rather than a zero one.
+            'opz_pct': 100.0 * opz_qty / values['appointments'] if opz_known and values['appointments'] else None,
             'in_activity_period': in_activity_period,
-            'source_status': 'ready' if in_activity_period and not missing_sources else 'partial',
-            'missing_components': missing_sources,
+            'source_status': (
+                'ready' if in_activity_period and not missing_sources and not opz_missing else 'partial'
+            ),
+            'missing_components': sorted({*missing_sources, *opz_missing}),
         })
     return rows
 
@@ -1402,6 +1415,8 @@ def _with_year_changes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             'service_revenue',
             'goods_revenue',
             'topup_revenue',
+            'opz_qty',
+            'opz_pct',
         ):
             metric_comparable = (
                 comparable_period
@@ -1467,7 +1482,9 @@ async def _year_over_year_payload(
         }
         return base
 
-    activity_start, activity_end, opz_by_year, opz_dependencies_by_year = activity_bounds
+    activity_start, activity_end, opz_facts = activity_bounds
+    opz_by_year = opz_facts['counts']
+    opz_dependencies_by_year = opz_facts['appointment_dependencies']
     report_end = report_now.date()
     periods = _year_periods(
         activity_start,
@@ -1581,6 +1598,8 @@ async def _year_over_year_payload(
             scope_company_ids,
             fact_rows['appointment_dependencies']['monthly'].get(year),
             reporting_windows,
+            opz_facts['monthly_counts'].get(year),
+            opz_facts['monthly_appointment_dependencies'].get(year),
         )
 
     year_rows = _with_year_changes(year_rows)
@@ -1611,7 +1630,10 @@ async def _year_over_year_payload(
         'text': (
             'Выручка, завершенные визиты и средний чек рассчитаны по тем же '
             'оплаченным компонентам и бизнес-фильтрам. Первый и последний годы '
-            'показываются за их фактический период.'
+            'показываются за их фактический период. ОПЗ считается по формуле Обзора: '
+            'клиент засчитывается один раз в месяц в помесячном ряду и один раз в год '
+            'в годовом, поэтому сумма месяцев может превышать год. Ручные добавки ОПЗ '
+            'входят в итог филиала и сети и не учитываются при фильтре по сотруднику.'
         ),
     })
     partial_rows = [row for row in year_rows if row.get('source_status') != 'ready']
@@ -1639,7 +1661,12 @@ async def _year_over_year_payload(
         _card('Изменение визитов год к году', latest.get('appointments_change_pct'), PERCENT_FORMAT),
         _card('Средний чек последнего года', latest.get('avg_check', 0), MONEY_FORMAT),
         _card('Клиенты последнего года', latest.get('unique_clients', 0), NUMBER_FORMAT),
+        _card('ОПЗ последнего года', latest.get('opz_qty'), NUMBER_FORMAT),
+        _card('Изменение ОПЗ год к году', latest.get('opz_qty_change_pct'), PERCENT_FORMAT),
+        _card('ОПЗ % последнего года', latest.get('opz_pct'), PERCENT_FORMAT),
     ]
+    # The grid is two columns wide, so each metric is a row: by year on the left, its
+    # month-by-month year-over-year comparison on the right.
     base['charts'] = [
         _chart(
             'year_revenue',
@@ -1647,13 +1674,6 @@ async def _year_over_year_payload(
             'bar',
             [str(row['year']) for row in year_rows],
             [{'label': 'Выручка', 'data': [row['revenue'] for row in year_rows], 'format': MONEY_FORMAT}],
-        ),
-        _chart(
-            'year_appointments',
-            'Визиты по годам',
-            'bar',
-            [str(row['year']) for row in year_rows],
-            [{'label': 'Визиты', 'data': [row['appointments'] for row in year_rows], 'format': NUMBER_FORMAT}],
         ),
         _chart(
             'monthly_revenue_yoy',
@@ -1669,6 +1689,13 @@ async def _year_over_year_payload(
                 }
                 for year in sorted(monthly_by_year)
             ],
+        ),
+        _chart(
+            'year_appointments',
+            'Визиты по годам',
+            'bar',
+            [str(row['year']) for row in year_rows],
+            [{'label': 'Визиты', 'data': [row['appointments'] for row in year_rows], 'format': NUMBER_FORMAT}],
         ),
         _chart(
             'monthly_appointments_yoy',
@@ -1711,6 +1738,50 @@ async def _year_over_year_payload(
                 for year in sorted(monthly_by_year)
             ],
         ),
+        _chart(
+            'year_opz',
+            'ОПЗ по годам',
+            'bar',
+            [str(row['year']) for row in year_rows],
+            [{'label': 'ОПЗ', 'data': [row['opz_qty'] for row in year_rows], 'format': NUMBER_FORMAT}],
+        ),
+        _chart(
+            'monthly_opz_yoy',
+            'Помесячные ОПЗ год к году',
+            'line',
+            months,
+            [
+                {
+                    'label': str(year),
+                    'data': [row['opz_qty'] for row in monthly_by_year[year]],
+                    'format': NUMBER_FORMAT,
+                    'fill': False,
+                }
+                for year in sorted(monthly_by_year)
+            ],
+        ),
+        _chart(
+            'year_opz_pct',
+            'ОПЗ % по годам',
+            'bar',
+            [str(row['year']) for row in year_rows],
+            [{'label': 'ОПЗ %', 'data': [row['opz_pct'] for row in year_rows], 'format': PERCENT_FORMAT}],
+        ),
+        _chart(
+            'monthly_opz_pct_yoy',
+            'Помесячный ОПЗ % год к году',
+            'line',
+            months,
+            [
+                {
+                    'label': str(year),
+                    'data': [row['opz_pct'] for row in monthly_by_year[year]],
+                    'format': PERCENT_FORMAT,
+                    'fill': False,
+                }
+                for year in sorted(monthly_by_year)
+            ],
+        ),
     ]
     base['tables'] = [
         _table(
@@ -1735,7 +1806,9 @@ async def _year_over_year_payload(
                 ('topup_revenue', 'Пополнения', MONEY_FORMAT),
                 ('extra_service_count', 'Доп. услуги', NUMBER_FORMAT),
                 ('opz_qty', 'ОПЗ', NUMBER_FORMAT),
+                ('opz_qty_change_pct', 'ОПЗ YoY', PERCENT_FORMAT),
                 ('opz_pct', 'ОПЗ %', PERCENT_FORMAT),
+                ('opz_pct_change_pct', 'ОПЗ % YoY', PERCENT_FORMAT),
             ], year_rows, {'topup_revenue'}),
             year_rows,
         ),
@@ -1748,6 +1821,8 @@ async def _year_over_year_payload(
                 ('revenue', 'Выручка', MONEY_FORMAT),
                 ('appointments', 'Визиты', NUMBER_FORMAT),
                 ('avg_check', 'Средний чек', MONEY_FORMAT),
+                ('opz_qty', 'ОПЗ', NUMBER_FORMAT),
+                ('opz_pct', 'ОПЗ %', PERCENT_FORMAT),
                 ('service_revenue', 'Услуги', MONEY_FORMAT),
                 ('goods_revenue', 'Товары', MONEY_FORMAT),
                 ('topup_revenue', 'Пополнения', MONEY_FORMAT),

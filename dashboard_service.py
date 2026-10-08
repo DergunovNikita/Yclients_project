@@ -36,7 +36,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import aliased
+from sqlalchemy.sql.expression import FunctionElement
+from sqlalchemy.sql.visitors import InternalTraversal
 
 import yclients_analytics
 from models import (
@@ -89,6 +92,8 @@ PLAN_SETTINGS_SOURCE = 'dashboard_plan_settings'
 GOODS_KPI_CODES = ('wax_qty', 'camouflage_qty', 'face_care_qty', 'head_care_qty')
 DEFAULT_BRANCH_TIMEZONE = 'Europe/Moscow'
 COMPLETED_ATTENDANCE = 1
+# Ids bound into the OPZ visits read; asyncpg allows 32767 parameters per statement.
+OPZ_SURVIVOR_ID_LIMIT = 20000
 PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
 STAFF_SCHEDULE_SOURCE = 'staff_schedules'
 PERSONAL_ACCOUNT_TYPES = ('client_account', 'personal_account', 'account_replenishment')
@@ -4117,6 +4122,51 @@ async def _goods_sales_metrics(
     }
 
 
+class _DayShift(FunctionElement):
+    """`expr` as a calendar day, moved by a constant number of days.
+
+    PostgreSQL (`date + n`) and SQLite (`date(x, '+n days')`) spell this differently, so it is
+    compiled per dialect and the query stays one query.
+    """
+
+    type = SQLDate()
+    inherit_cache = True
+    name = 'day_shift'
+    # `days` is rendered into the SQL text, so it must be part of the statement cache key;
+    # otherwise two shifts would share one compiled string.
+    _traverse_internals = FunctionElement._traverse_internals + [('days', InternalTraversal.dp_plain_obj)]
+
+    def __init__(self, expr, days: int):
+        self.days = int(days)
+        super().__init__(expr)
+
+
+@compiles(_DayShift)
+def _compile_day_shift(element, compiler, **kw):
+    (expr,) = element.clauses
+    sign = '+' if element.days >= 0 else '-'
+    return f'(CAST({compiler.process(expr, **kw)} AS DATE) {sign} {abs(element.days)})'
+
+
+@compiles(_DayShift, 'sqlite')
+def _compile_day_shift_sqlite(element, compiler, **kw):
+    (expr,) = element.clauses
+    return f"date({compiler.process(expr, **kw)}, '{element.days:+d} days')"
+
+
+def _booked_within_anchor_reach(visit, booking_create_date):
+    """Whether `visit` is where a booking created at `booking_create_date` could be anchored.
+
+    The anchor is on the booking's local day or the day before, and the local day is the UTC day
+    +-1 for any timezone, so [UTC day - 2, UTC day + 1] cannot miss it. The exact local-day test
+    stays in Python, where the timezone lives; SQL only discards what cannot qualify.
+    """
+    return and_(
+        visit.date >= _DayShift(booking_create_date, -2),
+        visit.date <= _DayShift(booking_create_date, 1),
+    )
+
+
 def _visit_order_key(visit: Any) -> tuple[date, datetime, int]:
     """Which of a client's visits is the later one. Same order the OPZ anchor is picked by."""
     visit_date = _coerce_date(visit.date)
@@ -4134,10 +4184,15 @@ async def _opz_events(
     company_id: int,
     created_user_id: Optional[int] = None,
     *,
-    deduplicate_by_year: bool = False,
+    deduplicate_by: Literal['period', 'year', 'month'] = 'period',
     factual_at: Optional[datetime] = None,
     timezone_name: Optional[str] = None,
 ) -> list[OpzEvent]:
+    """Rebooking events in [start, end], one per client per `deduplicate_by` unit.
+
+    'period' keeps the first event per client in the whole window (Overview), 'year' and
+    'month' restart the count at each calendar year or month of the event day.
+    """
     if timezone_name is None:
         timezone_name = (await _company_timezone_names(db, [company_id])).get(company_id)
     timezone = _branch_timezone(timezone_name)
@@ -4151,7 +4206,7 @@ async def _opz_events(
         start,
         end,
         created_user_id,
-        deduplicate_by_year,
+        deduplicate_by,
         factual_at,
         timezone.key,
     )
@@ -4180,6 +4235,23 @@ async def _opz_events(
         candidate_filters.append(Appointment.created_user_id == created_user_id)
     if factual_at is not None:
         candidate_filters.append(Appointment.create_date <= factual_at)
+    # Almost every appointment is a candidate, but only a few percent have a completed visit of
+    # the same client shortly before them, and without one there is no anchor. The probe must
+    # stay a superset of the exact rule: it asks for a visit dated before the booking's own
+    # `date`, which the exact rule demands of the anchor too, and leaves out the reporting
+    # window and factual_at, which the visits read applies in full.
+    prior_visit = aliased(Appointment)
+    has_prior_visit = exists(
+        select(1).where(
+            prior_visit.company_id == Appointment.company_id,
+            prior_visit.client_id == Appointment.client_id,
+            prior_visit.attendance == COMPLETED_ATTENDANCE,
+            prior_visit.date < Appointment.date,
+            prior_visit.date >= start - timedelta(days=1),
+            prior_visit.date <= end,
+            _booked_within_anchor_reach(prior_visit, Appointment.create_date),
+        )
+    )
     candidates_stmt = (
         select(
             Appointment.id,
@@ -4189,7 +4261,7 @@ async def _opz_events(
             Appointment.create_date,
             Appointment.created_user_id,
         )
-        .where(*candidate_filters)
+        .where(*candidate_filters, has_prior_visit)
         .order_by(Appointment.create_date.asc(), Appointment.id.asc())
     )
     candidates = (await db.execute(candidates_stmt)).all()
@@ -4197,11 +4269,9 @@ async def _opz_events(
         cache[cache_key] = []
         return []
 
-    client_ids = sorted({candidate.client_id for candidate in candidates if candidate.client_id is not None})
     visit_filters = [
         Appointment.company_id == company_id,
         Appointment.attendance == COMPLETED_ATTENDANCE,
-        Appointment.client_id.in_(client_ids),
         Appointment.date.is_not(None),
         Appointment.date <= end,
         # An event is only counted when the booking was made on the anchor visit's day or
@@ -4218,6 +4288,21 @@ async def _opz_events(
         # on an earlier visit, which this same clause already removes.
         reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
+    if len(candidates) <= OPZ_SURVIVOR_ID_LIMIT:
+        # Reading the survivors' whole history cost more than finding them, so only visits within
+        # reach of a surviving candidate are read. The ids are bound one parameter each (asyncpg
+        # allows 32767; the largest branch has ~3k over its full history), and past the limit
+        # the narrowing is skipped: the Python rule rejects the extra visits anyway.
+        survivor = aliased(Appointment)
+        visit_filters.append(
+            exists(
+                select(1).where(
+                    survivor.id.in_([candidate.id for candidate in candidates]),
+                    survivor.client_id == Appointment.client_id,
+                    _booked_within_anchor_reach(Appointment, survivor.create_date),
+                )
+            )
+        )
     if factual_at is not None:
         visit_filters.append(_appointment_factual_at_condition(factual_at))
     visits_stmt = (
@@ -4268,8 +4353,10 @@ async def _opz_events(
         if create_day not in {last_visit_date, last_visit_date + timedelta(days=1)}:
             continue
         client_key = (int(candidate.company_id), int(candidate.client_id))
-        if deduplicate_by_year:
+        if deduplicate_by == 'year':
             client_key = (*client_key, create_day.year)
+        elif deduplicate_by == 'month':
+            client_key = (*client_key, create_day.year, create_day.month)
         if client_key in booked_clients:
             continue
         booked_clients.add(client_key)
@@ -4358,6 +4445,21 @@ async def _opz_count_scope(
     return total
 
 
+def _widen_dependency(
+    dependencies: dict[int, tuple[date, date]],
+    company_id: int,
+    event: OpzEvent,
+) -> None:
+    """Grow the company's span of visits the event rests on to include this event's."""
+    dependency_start = min(event.last_visit_date, event.appointment_date)
+    dependency_end = max(event.last_visit_date, event.appointment_date)
+    current = dependencies.get(company_id)
+    dependencies[company_id] = (
+        min(current[0], dependency_start) if current else dependency_start,
+        max(current[1], dependency_end) if current else dependency_end,
+    )
+
+
 async def fetch_opz_year_facts(
     db: AsyncSession,
     start: date,
@@ -4368,14 +4470,26 @@ async def fetch_opz_year_facts(
     factual_at: Optional[datetime] = None,
     created_user_id: Optional[int] = None,
 ) -> dict[str, Any]:
-    """Load OPZ once per branch, returning annual counts and latest fact."""
+    """Load OPZ once per branch, returning annual and monthly counts.
+
+    A client counts once per calendar month in `monthly_counts` and once per calendar year in
+    `counts`, so the months of a year can sum to more than the year. Both come from one
+    per-month pass: events are ordered by creation, so a client's first event of a year is
+    exactly the one a per-year pass would have kept. `latest_date` and
+    `appointment_dependencies` describe the annual events only; `monthly_appointment_dependencies`
+    is the same span per event month, as `{year: {month: {company_id: (first, last)}}}`.
+    """
     company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
     counts: dict[int, float] = defaultdict(float)
+    monthly_counts: defaultdict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
     appointment_dependencies: defaultdict[
         int, dict[int, tuple[date, date]]
     ] = defaultdict(dict)
+    monthly_dependencies: defaultdict[
+        int, defaultdict[int, dict[int, tuple[date, date]]]
+    ] = defaultdict(lambda: defaultdict(dict))
     latest_date: date | None = None
     timezone_names = await _company_timezone_names(db, company_ids)
     for item_company_id in company_ids:
@@ -4384,11 +4498,17 @@ async def fetch_opz_year_facts(
             start,
             end,
             item_company_id,
-            deduplicate_by_year=True,
+            deduplicate_by='month',
             factual_at=factual_at,
             timezone_name=timezone_names.get(item_company_id),
         )
+        seen_in_year: set[tuple[int, int]] = set()
         for event in events:
+            # Decided before the staff filters: whether the event is the client's first of the
+            # year does not depend on whose attribution is being asked about.
+            year_key = (event.client_id, event.event_date.year)
+            first_in_year = year_key not in seen_in_year
+            seen_in_year.add(year_key)
             if (
                 created_user_id is not None
                 and event.created_user_id != created_user_id
@@ -4401,14 +4521,13 @@ async def fetch_opz_year_facts(
             ):
                 continue
             event_year = event.event_date.year
+            event_month = event.event_date.month
+            monthly_counts[event_year][event_month] += 1.0
+            _widen_dependency(monthly_dependencies[event_year][event_month], item_company_id, event)
+            if not first_in_year:
+                continue
             counts[event_year] += 1.0
-            dependency_start = min(event.last_visit_date, event.appointment_date)
-            dependency_end = max(event.last_visit_date, event.appointment_date)
-            current = appointment_dependencies[event_year].get(item_company_id)
-            appointment_dependencies[event_year][item_company_id] = (
-                min(current[0], dependency_start) if current else dependency_start,
-                max(current[1], dependency_end) if current else dependency_end,
-            )
+            _widen_dependency(appointment_dependencies[event_year], item_company_id, event)
             latest_date = (
                 max(latest_date, event.event_date)
                 if latest_date is not None
@@ -4423,12 +4542,18 @@ async def fetch_opz_year_facts(
         manual_months = await _manual_opz_by_month(db, start, end, company_ids, factual_at)
         for month_start, manual_value in manual_months.items():
             counts[month_start.year] += manual_value
+            monthly_counts[month_start.year][month_start.month] += manual_value
     return {
         'counts': dict(counts),
+        'monthly_counts': {year: dict(months) for year, months in monthly_counts.items()},
         'latest_date': latest_date,
         'appointment_dependencies': {
             year: dict(values)
             for year, values in appointment_dependencies.items()
+        },
+        'monthly_appointment_dependencies': {
+            year: {month: dict(values) for month, values in months.items()}
+            for year, months in monthly_dependencies.items()
         },
     }
 

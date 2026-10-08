@@ -2876,6 +2876,364 @@ async def test_year_over_year_masks_opz_when_dependent_appointments_are_uncovere
     assert covered_2025['opz_qty'] == 1.0
 
 
+REPORT_NOW_2026 = datetime(2026, 8, 1, 12, 0)
+
+
+def _opz_client_fixtures():
+    """Client 1 rebooks in January and February 2025; client 2 rebooks once in 2024.
+
+    Each visit is completed on day D, and the next booking is created on D for a later date.
+    """
+    return [
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Client(id=1, name='Twice in a year', company_id=1),
+        Client(id=2, name='Once in 2024', company_id=1),
+    ]
+
+
+def _opz_appointments():
+    return [
+        Appointment(
+            id=1, company_id=1, staff_id=1, client_id=1,
+            date=date(2025, 1, 10), datetime=datetime(2025, 1, 10, 10), attendance=1,
+        ),
+        # Booked on the January visit's day: the January event.
+        Appointment(
+            id=2, company_id=1, staff_id=1, client_id=1,
+            date=date(2025, 2, 5), datetime=datetime(2025, 2, 5, 10),
+            create_date=datetime(2025, 1, 10, 12), attendance=1,
+        ),
+        # Booked on the February visit's day: the February event, the same client's second in 2025.
+        Appointment(
+            id=3, company_id=1, staff_id=1, client_id=1,
+            date=date(2025, 3, 1), create_date=datetime(2025, 2, 5, 12), attendance=0,
+        ),
+        Appointment(
+            id=4, company_id=1, staff_id=1, client_id=2,
+            date=date(2024, 3, 10), datetime=datetime(2024, 3, 10, 10), attendance=1,
+        ),
+        Appointment(
+            id=5, company_id=1, staff_id=1, client_id=2,
+            date=date(2024, 4, 1), create_date=datetime(2024, 3, 10, 12), attendance=0,
+        ),
+    ]
+
+
+async def _seed_opz_history(async_session):
+    async_session.add_all(_opz_client_fixtures())
+    await async_session.flush()
+    async_session.add_all([
+        *_opz_appointments(),
+        *_yoy_source_states(1, date(2024, 1, 1), date(2025, 12, 31), REPORT_NOW_2026),
+    ])
+    await async_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_monthly_opz_counts_a_client_once_per_month(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: REPORT_NOW_2026)
+    await _seed_opz_history(async_session)
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+    years = {row['year']: row for row in report['raw']['years']}
+    months = {(row['year'], row['month']): row for row in report['raw']['months']}
+
+    # The client rebooked in two months of 2025: two monthly events, one annual event.
+    assert months[(2025, 1)]['opz_qty'] == 1.0
+    assert months[(2025, 2)]['opz_qty'] == 1.0
+    assert years[2025]['opz_qty'] == 1.0
+    assert months[(2024, 3)]['opz_qty'] == 1.0
+    assert years[2024]['opz_qty'] == 1.0
+    assert months[(2025, 3)]['opz_qty'] == 0.0
+
+    assert months[(2025, 1)]['appointments'] == 1.0
+    assert months[(2025, 1)]['opz_pct'] == 100.0
+    # A month without completed visits has no rate rather than a zero one.
+    assert months[(2025, 3)]['opz_pct'] is None
+
+    for year, month, first_day, last_day in (
+        (2025, 1, date(2025, 1, 1), date(2025, 1, 31)),
+        (2025, 2, date(2025, 2, 1), date(2025, 2, 28)),
+        (2024, 3, date(2024, 3, 1), date(2024, 3, 31)),
+    ):
+        overview = await dashboard_service.fetch_summary(
+            async_session,
+            first_day,
+            last_day,
+            company_id=1,
+            include_appointments_breakdown=False,
+        )
+        assert months[(year, month)]['opz_qty'] == overview['visit_metrics']['opz_qty']
+        assert months[(year, month)]['opz_pct'] == overview['visit_metrics']['opz_pct']
+
+
+@pytest.mark.asyncio
+async def test_opz_year_facts_annual_events_are_the_first_monthly_event_of_the_year(async_session):
+    await _seed_opz_history(async_session)
+    bounds = (date(2024, 1, 1), date(2025, 12, 31))
+
+    year_events = await dashboard_service._opz_events(
+        async_session, *bounds, 1, deduplicate_by='year', factual_at=REPORT_NOW_2026,
+    )
+    month_events = await dashboard_service._opz_events(
+        async_session, *bounds, 1, deduplicate_by='month', factual_at=REPORT_NOW_2026,
+    )
+    facts = await dashboard_service.fetch_opz_year_facts(
+        async_session, *bounds, 1, None, factual_at=REPORT_NOW_2026,
+    )
+
+    assert [event.event_id for event in year_events] == [5, 2]
+    assert [event.event_id for event in month_events] == [5, 2, 3]
+    assert facts['counts'] == {2024: 1.0, 2025: 1.0}
+    assert facts['monthly_counts'] == {2024: {3: 1.0}, 2025: {1: 1.0, 2: 1.0}}
+    assert facts['latest_date'] == date(2025, 1, 10)
+    assert facts['appointment_dependencies'] == {
+        2024: {1: (date(2024, 3, 10), date(2024, 4, 1))},
+        2025: {1: (date(2025, 1, 10), date(2025, 2, 5))},
+    }
+    assert facts['monthly_appointment_dependencies'] == {
+        2024: {3: {1: (date(2024, 3, 10), date(2024, 4, 1))}},
+        2025: {
+            1: {1: (date(2025, 1, 10), date(2025, 2, 5))},
+            2: {1: (date(2025, 2, 5), date(2025, 3, 1))},
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_opz_year_facts_decide_the_year_before_filtering_by_barber(async_session):
+    """A second barber's February event must not turn into the client's annual one."""
+    async_session.add_all([
+        *_opz_client_fixtures(),
+        Staff(id=2, name='Second master', position='Барбер', company_id=1),
+    ])
+    await async_session.flush()
+    appointments = _opz_appointments()
+    appointments[1].staff_id = 2  # the February visit, anchor of the February event
+    async_session.add_all(appointments)
+    await async_session.commit()
+
+    facts = await dashboard_service.fetch_opz_year_facts(
+        async_session, date(2024, 1, 1), date(2025, 12, 31), 1, 2, factual_at=REPORT_NOW_2026,
+    )
+
+    # The January event is anchored on barber 1 and is the annual one; barber 2 owns only February.
+    assert facts['counts'] == {}
+    assert facts['monthly_counts'] == {2025: {2: 1.0}}
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_masks_monthly_opz_without_hiding_revenue_and_visits(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: REPORT_NOW_2026)
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Client(id=1, name='Client', company_id=1),
+        Client(id=2, name='Other client', company_id=1),
+        Appointment(
+            id=1, company_id=1, staff_id=1, client_id=1,
+            date=date(2024, 12, 31), datetime=datetime(2024, 12, 31, 12), attendance=1,
+        ),
+        Appointment(
+            id=2, company_id=1, staff_id=1, client_id=1,
+            date=date(2025, 2, 1), create_date=datetime(2025, 1, 1, 10), attendance=0,
+        ),
+        Appointment(
+            id=3, company_id=1, staff_id=1, client_id=2,
+            date=date(2025, 1, 15), datetime=datetime(2025, 1, 15, 12), attendance=1,
+        ),
+    ])
+    appointment_state = SyncSourceState(
+        company_id=1,
+        source='appointments_detail',
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 12, 31),
+        synced_at=REPORT_NOW_2026,
+    )
+    async_session.add(appointment_state)
+    for source in ('financial_transactions_detail', 'goods_transactions_detail'):
+        async_session.add(SyncSourceState(
+            company_id=1,
+            source=source,
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 12, 31),
+            synced_at=REPORT_NOW_2026,
+        ))
+    await async_session.commit()
+
+    async def month_rows():
+        report = await dashboard_reports.fetch_report_data(
+            async_session,
+            'year_over_year',
+            date(2026, 1, 1),
+            date(2026, 1, 31),
+            allowed_company_ids=[1],
+        )
+        return {
+            (row['year'], row['month']): row for row in report['raw']['months']
+        }
+
+    months = await month_rows()
+    # The event rests on the December 31 visit, which the appointment sync does not cover.
+    january = months[(2025, 1)]
+    assert january['opz_qty'] is None
+    assert january['opz_pct'] is None
+    assert january['appointments'] == 1.0
+    assert january['revenue'] == 0.0
+    assert january['missing_components'] == ['appointments_detail']
+    assert january['source_status'] == 'partial'
+    # February has no OPZ dependency of its own, so it stays complete.
+    assert months[(2025, 2)]['opz_qty'] == 0.0
+    assert months[(2025, 2)]['source_status'] == 'ready'
+
+    appointment_state.period_start = date(2024, 12, 31)
+    await async_session.commit()
+    months = await month_rows()
+    assert months[(2025, 1)]['opz_qty'] == 1.0
+    assert months[(2025, 1)]['opz_pct'] == 100.0
+    assert months[(2025, 1)]['source_status'] == 'ready'
+    # Covered, but no visits to divide by.
+    assert months[(2025, 2)]['appointments'] == 0.0
+    assert months[(2025, 2)]['opz_pct'] is None
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_monthly_opz_carries_manual_top_up_except_under_staff_filter(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: REPORT_NOW_2026)
+    await _seed_opz_history(async_session)
+    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
+    await async_session.flush()
+    async_session.add(ManualFactMetric(
+        period_start=date(2025, 2, 1),
+        period_end=date(2025, 2, 28),
+        company_id=1,
+        staff_id=2,
+        metric_code='opz_qty',
+        value=4.0,
+        updated_at=datetime(2025, 2, 20, 10, 0, 0),
+    ))
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+    months = {(row['year'], row['month']): row for row in report['raw']['months']}
+    years = {row['year']: row for row in report['raw']['years']}
+    assert months[(2025, 1)]['opz_qty'] == 1.0
+    assert months[(2025, 2)]['opz_qty'] == 5.0
+    assert years[2025]['opz_qty'] == 5.0
+    overview = await dashboard_service.fetch_summary(
+        async_session, date(2025, 2, 1), date(2025, 2, 28), company_id=1,
+        include_appointments_breakdown=False,
+    )
+    assert months[(2025, 2)]['opz_qty'] == overview['visit_metrics']['opz_qty']
+
+    # A staff filter counts by one attribution, so neither barber nor administrator carries it.
+    barber_facts = await dashboard_service.fetch_opz_year_facts(
+        async_session, date(2024, 1, 1), date(2025, 12, 31), 1, 1, factual_at=REPORT_NOW_2026,
+    )
+    admin_facts = await dashboard_service.fetch_opz_year_facts(
+        async_session, date(2024, 1, 1), date(2025, 12, 31), 1, 2, factual_at=REPORT_NOW_2026,
+    )
+    assert barber_facts['monthly_counts'][2025] == {1: 1.0, 2: 1.0}
+    assert barber_facts['counts'][2025] == 1.0
+    assert admin_facts['monthly_counts'] == {}
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_payload_exposes_opz_charts_columns_and_cards(
+    async_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: REPORT_NOW_2026)
+    await _seed_opz_history(async_session)
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+    )
+    charts = {chart['id']: chart for chart in report['charts']}
+    years = [str(row['year']) for row in report['raw']['years']]
+
+    # Two-column grid: every row pairs a by-year bar with its monthly year-over-year line.
+    assert [chart['id'] for chart in report['charts']] == [
+        'year_revenue', 'monthly_revenue_yoy',
+        'year_appointments', 'monthly_appointments_yoy',
+        'year_avg_check', 'monthly_avg_check_yoy',
+        'year_opz', 'monthly_opz_yoy',
+        'year_opz_pct', 'monthly_opz_pct_yoy',
+    ]
+    assert charts['year_opz']['labels'] == years
+    assert charts['year_opz']['datasets'][0]['data'][:2] == [1.0, 1.0]
+    for chart_id in ('monthly_opz_yoy', 'monthly_opz_pct_yoy'):
+        assert [dataset['label'] for dataset in charts[chart_id]['datasets']] == years
+        assert all(len(dataset['data']) == 12 for dataset in charts[chart_id]['datasets'])
+    assert {dataset['format'] for dataset in charts['monthly_opz_pct_yoy']['datasets']} == {'percent'}
+    assert charts['monthly_opz_yoy']['datasets'][1]['data'][:3] == [1.0, 1.0, 0.0]
+
+    labels = [card['label'] for card in report['cards']]
+    assert labels[-3:] == ['ОПЗ последнего года', 'Изменение ОПЗ год к году', 'ОПЗ % последнего года']
+
+    columns = {
+        table['id']: [column['key'] for column in table['columns']] for table in report['tables']
+    }
+    years_columns = columns['years']
+    assert years_columns.index('opz_qty_change_pct') == years_columns.index('opz_qty') + 1
+    assert years_columns.index('opz_pct_change_pct') == years_columns.index('opz_pct') + 1
+    months_columns = columns['months']
+    assert months_columns[months_columns.index('avg_check') + 1:][:2] == ['opz_qty', 'opz_pct']
+
+
+def test_with_year_changes_compares_opz_year_over_year():
+    def year_row(year, opz_qty, opz_pct):
+        return {
+            'year': year,
+            'period_start': f'{year}-01-01',
+            'period_end': f'{year}-12-31',
+            'is_partial_year': False,
+            'source_status': 'ready',
+            'opz_qty': opz_qty,
+            'opz_pct': opz_pct,
+        }
+
+    rows = dashboard_reports._with_year_changes([
+        year_row(2023, 10.0, 5.0),
+        year_row(2024, 15.0, 4.0),
+        year_row(2025, None, None),
+    ])
+
+    assert rows[0]['opz_qty_change_pct'] is None
+    assert rows[1]['opz_qty_change_pct'] == 50.0
+    assert rows[1]['opz_pct_change_pct'] == -20.0
+    assert rows[2]['opz_qty_change_pct'] is None
+    assert rows[2]['opz_pct_change_pct'] is None
+
+
 @pytest.mark.asyncio
 async def test_opz_year_facts_ignore_later_same_day_visit_for_staff(
     async_session,
