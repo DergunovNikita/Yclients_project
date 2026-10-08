@@ -77,6 +77,7 @@ import {
   yandexPayMonthStart,
   yandexPayTotal,
 } from './yandexPayInput.js';
+import { buildManualFactItems, manualFactRowKey, manualFactSaveScope } from './manualFactInput.js';
 import { BRANCH_TIME_ZONE, parseServerInstant } from './timestamps.js';
 import { initReports } from './reports/index.js';
 import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
@@ -2668,7 +2669,8 @@ function manualFactAuthorCell(row) {
   return parts.join(' · ');
 }
 
-function renderReviewFactEditor(data) {
+// `loadedFilters` is what `data` was fetched or saved for — the pickers may already show another scope.
+function renderReviewFactEditor(data, loadedFilters = reviewFactFilters()) {
   reviewFactRows = data?.rows || [];
   const totalValue = data?.total_value || 0;
   els.reviewFactMeta.textContent = t('dash.reviewFactMeta', { admins: reviewFactRows.length, reviews: formatNumber(totalValue) });
@@ -2720,7 +2722,7 @@ function renderReviewFactEditor(data) {
   }
 
   reviewFactSavedData = JSON.parse(JSON.stringify(data || { rows: [] }));
-  reviewFactLoadedFilters = reviewFactFilters();
+  reviewFactLoadedFilters = loadedFilters;
   reviewFactSavedSnapshot = reviewFactDraftSnapshot();
   setReviewFactDirty(false);
 }
@@ -2756,6 +2758,29 @@ function setManualFactDirty(isDirty, { assignDirty, saveButton, saving, rows }) 
   assignDirty(isDirty);
   saveButton.disabled = saving || !rows.length;
   updateFloatingEditorSave();
+}
+
+// Every rendered row goes out with the value the last response showed for it, so the server
+// can tell an edit from a row someone else changed since this editor loaded.
+function manualFactPayload(loadedFilters, liveFilters, editorEl, rows, invalidMessageKey) {
+  const rawByKey = new Map([...editorEl.querySelectorAll('input[data-staff-id]')].map((input) => [
+    manualFactRowKey(input.dataset.companyId, input.dataset.staffId),
+    input.value,
+  ]));
+  const built = buildManualFactItems(rows, rawByKey);
+  if (built.error) throw new Error(t(invalidMessageKey));
+  return { ...manualFactSaveScope(loadedFilters, liveFilters), items: built.items };
+}
+
+// Someone saved the same month between our load and our save. Their value wins; what we typed
+// is not merged in, because the sum of two people's edits is nobody's intent.
+async function recoverFromManualFactConflict(reloadEditor, reloadView) {
+  try {
+    await reloadEditor();
+    showError(t('dash.manualFactConflict'), { apiStatus: 'ready' });
+  } catch (reloadError) {
+    showError(reloadError.message, { apiStatus: reloadError.apiStatus, retry: () => reloadView() });
+  }
 }
 
 function manualFactParams(filter) {
@@ -2796,41 +2821,18 @@ function reviewFactParams() {
 }
 
 async function loadReviewFactEditor({ signal = null } = {}) {
+  const filters = reviewFactFilters();
   const payload = await fetchJson('/dashboard/plan/reviews_fact', reviewFactParams(), {
     retry: () => loadReviewFacts(),
     signal,
   });
-  renderReviewFactEditor(payload.data);
+  renderReviewFactEditor(payload.data, filters);
 }
 
 function reviewFactPayload() {
-  const filter = filterEls.reviewFacts;
-  const items = [...els.reviewFactEditor.querySelectorAll('input[data-staff-id]')].map((input) => {
-    const rawValue = input.value.trim().replace(',', '.');
-    if (rawValue === '') {
-      return {
-        company_id: Number(input.dataset.companyId),
-        staff_id: Number(input.dataset.staffId),
-        value: null,
-      };
-    }
-    const value = Number(rawValue);
-    if (!Number.isFinite(value) || value < 0) {
-      throw new Error(t('dash.reviewFactNonNegative'));
-    }
-    return {
-      company_id: Number(input.dataset.companyId),
-      staff_id: Number(input.dataset.staffId),
-      value,
-    };
-  });
-
-  return {
-    month: filter.month.value,
-    company_id: filter.branch.value ? Number(filter.branch.value) : null,
-    staff_id: filter.staff.value ? Number(filter.staff.value) : null,
-    items,
-  };
+  return manualFactPayload(
+    reviewFactLoadedFilters, reviewFactFilters(), els.reviewFactEditor, reviewFactRows, 'dash.reviewFactNonNegative',
+  );
 }
 
 async function saveReviewFactEditor() {
@@ -2843,11 +2845,14 @@ async function saveReviewFactEditor() {
   setApiState(t('dash.apiSaving'), 'warn');
 
   try {
+    // The saved response belongs to the scope the rows were loaded for, whatever the pickers show now.
+    const filters = reviewFactLoadedFilters || reviewFactFilters();
     const payload = await postJson('/dashboard/plan/reviews_fact', reviewFactPayload());
-    renderReviewFactEditor(payload.data);
+    renderReviewFactEditor(payload.data, filters);
     setApiState(t('dash.apiConnected'), 'ok');
   } catch (error) {
-    showError(error.message, { apiStatus: error.apiStatus, retry: () => saveReviewFactEditor() });
+    if (error.status === 409) await recoverFromManualFactConflict(loadReviewFactEditor, loadReviewFacts);
+    else showError(error.message, { apiStatus: error.apiStatus, retry: () => saveReviewFactEditor() });
   } finally {
     reviewFactSaving = false;
     els.reviewFactSave.textContent = t('dash.saveFact');
@@ -2855,7 +2860,7 @@ async function saveReviewFactEditor() {
   }
 }
 
-function renderOpzFactEditor(data) {
+function renderOpzFactEditor(data, loadedFilters = opzFactFilters()) {
   opzFactRows = data?.rows || [];
   els.opzFactMeta.textContent = t('dash.opzFactMeta', {
     admins: opzFactRows.length,
@@ -2919,7 +2924,7 @@ function renderOpzFactEditor(data) {
   }
 
   opzFactSavedData = JSON.parse(JSON.stringify(data || { rows: [] }));
-  opzFactLoadedFilters = opzFactFilters();
+  opzFactLoadedFilters = loadedFilters;
   opzFactSavedSnapshot = opzFactDraftSnapshot();
   setOpzFactDirty(false);
 }
@@ -2982,11 +2987,12 @@ function opzFactParams() {
 }
 
 async function loadOpzFactEditor({ signal = null } = {}) {
+  const filters = opzFactFilters();
   const payload = await fetchJson('/dashboard/plan/opz_fact', opzFactParams(), {
     retry: () => loadOpzFacts(),
     signal,
   });
-  renderOpzFactEditor(payload.data);
+  renderOpzFactEditor(payload.data, filters);
 }
 
 async function loadOpzFacts() {
@@ -3015,33 +3021,9 @@ async function loadOpzFacts() {
 }
 
 function opzFactPayload() {
-  const filter = filterEls.opzFacts;
-  const items = [...els.opzFactEditor.querySelectorAll('input[data-staff-id]')].map((input) => {
-    const rawValue = input.value.trim().replace(',', '.');
-    if (rawValue === '') {
-      return {
-        company_id: Number(input.dataset.companyId),
-        staff_id: Number(input.dataset.staffId),
-        value: null,
-      };
-    }
-    const value = Number(rawValue);
-    if (!Number.isFinite(value) || value < 0) {
-      throw new Error(t('dash.opzFactNonNegative'));
-    }
-    return {
-      company_id: Number(input.dataset.companyId),
-      staff_id: Number(input.dataset.staffId),
-      value,
-    };
-  });
-
-  return {
-    month: filter.month.value,
-    company_id: filter.branch.value ? Number(filter.branch.value) : null,
-    staff_id: filter.staff.value ? Number(filter.staff.value) : null,
-    items,
-  };
+  return manualFactPayload(
+    opzFactLoadedFilters, opzFactFilters(), els.opzFactEditor, opzFactRows, 'dash.opzFactNonNegative',
+  );
 }
 
 async function saveOpzFactEditor() {
@@ -3054,11 +3036,13 @@ async function saveOpzFactEditor() {
   setApiState(t('dash.apiSaving'), 'warn');
 
   try {
+    const filters = opzFactLoadedFilters || opzFactFilters();
     const payload = await postJson('/dashboard/plan/opz_fact', opzFactPayload());
-    renderOpzFactEditor(payload.data);
+    renderOpzFactEditor(payload.data, filters);
     setApiState(t('dash.apiConnected'), 'ok');
   } catch (error) {
-    showError(error.message, { apiStatus: error.apiStatus, retry: () => saveOpzFactEditor() });
+    if (error.status === 409) await recoverFromManualFactConflict(loadOpzFactEditor, loadOpzFacts);
+    else showError(error.message, { apiStatus: error.apiStatus, retry: () => saveOpzFactEditor() });
   } finally {
     opzFactSaving = false;
     els.opzFactSave.textContent = t('dash.saveFact');
@@ -3085,12 +3069,13 @@ function yandexPayRawDates() {
   ]));
 }
 
-function renderYandexPayEditor(data) {
+// `loadedFilters` is what `data` was fetched or saved for — the pickers may already show another scope.
+function renderYandexPayEditor(data, loadedFilters = yandexPayFilters()) {
   yandexPayRows = data?.rows || [];
   yandexPayEditable = data?.editable !== false;
   els.yandexPayFutureHint.hidden = yandexPayEditable;
 
-  const monthStart = yandexPayMonthStart(yandexPayFilters().month);
+  const monthStart = yandexPayMonthStart(loadedFilters.month);
   if (!yandexPayRows.length) {
     els.yandexPayEditor.innerHTML = `<div class="empty compact">${t('dash.yandexPayNoBranches')}</div>`;
   } else {
@@ -3152,7 +3137,7 @@ function renderYandexPayEditor(data) {
   }
 
   yandexPaySavedData = JSON.parse(JSON.stringify(data || { rows: [] }));
-  yandexPayLoadedFilters = yandexPayFilters();
+  yandexPayLoadedFilters = loadedFilters;
   yandexPaySavedSnapshot = yandexPayDraftSnapshot();
   refreshYandexPayTotal();
   setYandexPayDirty(false);
@@ -3215,7 +3200,7 @@ async function loadYandexPayEditor({ signal = null } = {}) {
     retry: () => loadYandexPayFacts(),
     signal,
   });
-  renderYandexPayEditor(payload.data);
+  renderYandexPayEditor(payload.data, filters);
 }
 
 async function loadYandexPayFacts() {
@@ -3277,7 +3262,7 @@ async function saveYandexPayEditor() {
       company_id: filters.branch ? Number(filters.branch) : null,
       items: built.items,
     });
-    renderYandexPayEditor(payload.data);
+    renderYandexPayEditor(payload.data, filters);
     setApiState(t('dash.apiConnected'), 'ok');
   } catch (error) {
     if (error.status === 409) {

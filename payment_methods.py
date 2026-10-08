@@ -343,6 +343,13 @@ async def save_yandex_pay(
     branches = await _editor_branches(db, month_start, company_id, allowed_company_ids, force_allowed)
     open_ids = {int(branch['id']) for branch in branches}
     unknown = sorted(set(changes) - open_ids)
+    if any(changes[branch_id][1][0] is not None for branch_id in unknown):
+        # The editor showed a value for a row that is no longer open (the branch left the tenant
+        # since): a stale editor to reload, not a row that was never open.
+        raise ManualPaymentConflict(CONFLICT_DETAIL)
+    # An untouched empty row writes nothing, so its being closed since the editor loaded must not
+    # refuse the rows that were actually edited; only typing into a closed row is refused.
+    unknown = [branch_id for branch_id in unknown if changes[branch_id][0][0] is not None]
     if unknown:
         raise PaymentRowNotOpen(f'company {unknown[0]} is not open for entry in {_month_value(month_start)}')
 

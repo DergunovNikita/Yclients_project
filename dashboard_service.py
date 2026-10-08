@@ -34,7 +34,7 @@ from sqlalchemy import (
     tuple_,
     union_all,
 )
-from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import aliased
@@ -8700,6 +8700,13 @@ async def fetch_manual_opz_facts(
     return payload
 
 
+MANUAL_FACT_CONFLICT_DETAIL = 'Value was changed by someone else; reload and try again'
+
+
+class ManualFactConflict(Exception):
+    """The stored value differs from the one the editor was showing when the user edited it."""
+
+
 class ManualFactRowNotOpen(ValueError):
     """The row exists but is not open for entry in the requested month.
 
@@ -8719,6 +8726,21 @@ def _stored_manual_value(
     return _round_half_up_int(sum(float(item.value or 0.0) for item in items))
 
 
+def _parse_manual_value(raw: Any, metric_code: str, staff_id: int) -> float | None:
+    """A posted cell as the editor shows it: `None` (nothing entered) or a whole month count."""
+    if raw in (None, ''):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f'invalid {metric_code} fact for staff {staff_id}') from None
+    if not math.isfinite(value):
+        raise ValueError(f'invalid {metric_code} fact for staff {staff_id}')
+    if value < 0:
+        raise ValueError(f'{metric_code} fact cannot be negative for staff {staff_id}')
+    return _round_half_up_int(value)
+
+
 async def _write_manual_facts(
     db: AsyncSession,
     month: str,
@@ -8733,10 +8755,21 @@ async def _write_manual_facts(
     actor_user_id: Optional[int],
     portal_account_id: Optional[int],
 ) -> None:
+    """Write the changed rows of one month in one transaction, or refuse the whole batch.
+
+    Each row carries `previous_value`, the value the editor showed when it loaded; it is the
+    optimistic lock. Rows whose value equals it are not touched, so the author column keeps
+    meaning "who last changed this" even though the editor posts every row it renders.
+
+    Raises:
+        ValueError: invalid month, row or value (`ManualFactRowNotOpen` for a closed row).
+        ManualFactConflict: a row was changed by someone else since the editor loaded it.
+    """
     month_start, month_end = _plan_month_range(month)
     scoped_company_id = int(company_id) if company_id is not None else None
     scoped_staff_id = int(staff_id) if staff_id is not None else None
-    normalized_items: dict[tuple[int, int], float | None] = {}
+    normalized_items: dict[tuple[int, int], tuple[float | None, float | None]] = {}
+    unversioned: set[tuple[int, int]] = set()
     for item in items:
         try:
             item_company_id = int(item.get('company_id'))
@@ -8747,20 +8780,12 @@ async def _write_manual_facts(
             raise ValueError(f'staff {item_staff_id} does not belong to selected company {scoped_company_id}')
         if scoped_staff_id is not None and item_staff_id != scoped_staff_id:
             raise ValueError(f'staff {item_staff_id} does not match selected staff {scoped_staff_id}')
-
-        raw_value = item.get('value')
-        if raw_value in (None, ''):
-            value = None
-        else:
-            try:
-                value = float(raw_value)
-            except (TypeError, ValueError):
-                raise ValueError(f'invalid {metric_code} fact for staff {item_staff_id}') from None
-            if not math.isfinite(value):
-                raise ValueError(f'invalid {metric_code} fact for staff {item_staff_id}')
-            if value < 0:
-                raise ValueError(f'{metric_code} fact cannot be negative for staff {item_staff_id}')
-        normalized_items[(item_company_id, item_staff_id)] = value
+        normalized_items[(item_company_id, item_staff_id)] = (
+            _parse_manual_value(item.get('value'), metric_code, item_staff_id),
+            _parse_manual_value(item.get('previous_value'), metric_code, item_staff_id),
+        )
+        if 'previous_value' not in item:
+            unversioned.add((item_company_id, item_staff_id))
 
     if not normalized_items:
         return
@@ -8786,6 +8811,13 @@ async def _write_manual_facts(
         for staff in staff_ids
     } | set(stored)
     invalid_keys = sorted(set(normalized_items) - valid_staff_keys)
+    if any(normalized_items[key][1] is not None for key in invalid_keys):
+        # The editor showed a value for this row and it is gone: someone cleared it since.
+        # That is a stale editor to reload, not a row that was never open.
+        raise ManualFactConflict(MANUAL_FACT_CONFLICT_DETAIL)
+    # An untouched empty row writes nothing, so its being closed since the editor loaded
+    # (a staff member fired by the sync) must not refuse the rows that were actually edited.
+    invalid_keys = [key for key in invalid_keys if normalized_items[key][0] is not None]
     if invalid_keys:
         invalid_company_id, invalid_staff_id = invalid_keys[0]
         raise ManualFactRowNotOpen(
@@ -8801,31 +8833,51 @@ async def _write_manual_facts(
                 f'staff {foreign_staff_id} in company {foreign_company_id} is not editable by this user'
             )
 
-    # The editor posts every row it renders, not just the edited one, so writing them all back
-    # would restamp each row with whoever pressed Save — and the author column exists precisely
-    # to tell the staff member's own value from the manager's correction.
-    # Comparison is against what the editor shows, i.e. the rounded sum. A legacy row whose raw
-    # value merely rounds to the submitted one therefore keeps its raw value — resaving is not a
+    # The editor posts every row it renders, not just the edited one. A row is an edit only when
+    # its value differs from `previous_value` — what the last GET showed — and never because it
+    # differs from what is stored now: that difference is someone else's save, and writing the
+    # stale value back would silently undo it and re-sign the row to whoever pressed Save.
+    # Comparison is on the rounded sum the editor shows. A legacy row whose raw value merely
+    # rounds to the submitted one therefore keeps its raw value — resaving is not a
     # normalisation pass, and every value written since `0040` is already a whole month integer.
-    changed_items = {
-        key: value
-        for key, value in normalized_items.items()
-        if (None if value is None else _round_half_up_int(value)) != _stored_manual_value(stored, key)
-    }
+    changed_items: dict[tuple[int, int], tuple[float | None, float | None]] = {}
+    for key, (value, previous) in normalized_items.items():
+        if value == previous:
+            # An editor that predates `previous_value` clears a cell with null, which here would
+            # read as "untouched" and drop the clear without a word.
+            if key in unversioned and _stored_manual_value(stored, key) is not None:
+                raise ManualFactConflict(MANUAL_FACT_CONFLICT_DETAIL)
+            continue
+        current = _stored_manual_value(stored, key)
+        # The same client posts the rows it did not touch with their stored value; that is no edit.
+        if key in unversioned and value == current:
+            continue
+        if current != previous:
+            raise ManualFactConflict(MANUAL_FACT_CONFLICT_DETAIL)
+        changed_items[key] = (value, previous)
     if not changed_items:
         return
 
-    # The same clock every other timestamp in the system uses; the editor renders the date.
+    # Rewritten as delete + insert, not update: a legacy month may still be split over several
+    # rows, and the new value replaces them all. Each deleted row is guarded by the exact value
+    # read above, so a concurrent save that slipped in after the read leaves the count short.
+    # Keys go in sorted order: two saves over the same rows then wait on each other in one
+    # direction only, where payload order (the editor's row order) could cross the waits into
+    # a PostgreSQL deadlock.
     now = factual_now()
-    await db.execute(
-        delete(ManualFactMetric).where(
-            ManualFactMetric.period_start >= month_start,
-            ManualFactMetric.period_end <= month_end,
-            tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(list(changed_items)),
-            ManualFactMetric.metric_code == metric_code,
-        )
-    )
-    for (item_company_id, item_staff_id), value in changed_items.items():
+    for (item_company_id, item_staff_id), (value, _) in sorted(changed_items.items()):
+        replaced = stored.get((item_company_id, item_staff_id), [])
+        if replaced:
+            result = await db.execute(
+                delete(ManualFactMetric)
+                .where(or_(*(
+                    and_(ManualFactMetric.id == item.id, ManualFactMetric.value == item.value)
+                    for item in sorted(replaced, key=lambda item: item.id)
+                )))
+            )
+            if result.rowcount != len(replaced):
+                await db.rollback()
+                raise ManualFactConflict(MANUAL_FACT_CONFLICT_DETAIL)
         if value is None:
             continue
         db.add(
@@ -8835,12 +8887,18 @@ async def _write_manual_facts(
                 company_id=item_company_id,
                 staff_id=item_staff_id,
                 metric_code=metric_code,
-                value=_round_half_up_int(value),
+                value=value,
                 source='dashboard',
                 updated_at=now,
                 updated_by_user_id=actor_user_id,
             )
         )
+        try:
+            await db.flush()
+        except IntegrityError:
+            # Someone inserted the same (month, branch, staff) row between our read and our write.
+            await db.rollback()
+            raise ManualFactConflict(MANUAL_FACT_CONFLICT_DETAIL) from None
 
     await log_portal_audit(
         db,
@@ -8856,7 +8914,7 @@ async def _write_manual_facts(
             'rows': [[company, staff] for company, staff in sorted(changed_items)],
             'cleared': [
                 [company, staff]
-                for (company, staff), value in sorted(changed_items.items())
+                for (company, staff), (value, _) in sorted(changed_items.items())
                 if value is None
             ],
         },

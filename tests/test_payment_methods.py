@@ -786,6 +786,42 @@ async def test_invalid_saves_are_400_and_write_nothing(client, seeded, month, it
 
 
 @pytest.mark.asyncio
+async def test_an_untouched_empty_row_that_closed_since_loading_does_not_refuse_the_batch(client, seeded):
+    # Branch 6 left the tenant after the editor loaded: its blank row is simply not written.
+    saved = await _save(
+        client,
+        [
+            {'company_id': 6, 'value': None, 'previous_value': None},
+            {'company_id': 1, 'value': 5, 'previous_value': None},
+        ],
+    )
+    assert saved.status_code == 200, saved.text
+    assert [(row.company_id, float(row.amount)) for row in (await seeded.execute(select(ManualPaymentAmount))).scalars()] == [(1, 5.0)]
+    (event,) = await _audit_events(seeded)
+    assert [row['company_id'] for row in event.metadata_json['rows']] == [1]
+    # Nothing but the closed blank row: a no-op, not an error.
+    assert (await _save(client, [{'company_id': 6, 'value': None, 'previous_value': None}])).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_a_closed_row_with_a_shown_value_is_a_conflict_and_a_typed_value_is_refused(client, seeded):
+    await _store(seeded, 6, 40.0, month=8, user_id=2)
+    await seeded.commit()
+    stale = await _save(
+        client,
+        [
+            {'company_id': 1, 'value': 5, 'previous_value': None},
+            {'company_id': 6, 'value': 40, 'previous_value': 40, 'previous_data_through': '2026-08-31'},
+        ],
+    )
+    assert stale.status_code == 409
+    assert (await seeded.scalar(select(func.count()).select_from(ManualPaymentAmount))) == 1
+    typed = await _save(client, [{'company_id': 6, 'value': 7, 'previous_value': None}])
+    assert typed.status_code == 400
+    assert typed.json()['detail'] == 'Payment row is not open for entry'
+
+
+@pytest.mark.asyncio
 async def test_non_finite_numbers_are_rejected(client):
     for literal in ('NaN', 'Infinity', '-Infinity'):
         response = await client.post(

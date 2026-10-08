@@ -7716,7 +7716,7 @@ async def test_manual_opz_facts_cleared_value_restores_calculated_fact(async_ses
             json={
                 'month': '2025-01',
                 'company_id': 1,
-                'items': [{'company_id': 1, 'staff_id': 2, 'value': None}],
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': None, 'previous_value': 5}],
             },
         )
         summary_response = await client.get(
@@ -8536,6 +8536,502 @@ async def test_manual_fact_write_records_the_author(async_session):
     assert events[0].metadata_json['cleared'] == []
 
 
+async def _seed_two_admins_with_a_value(async_session, value=5.0):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        Staff(id=2, name='Anna', position='Администратор', company_id=1, fired=0),
+        Staff(id=3, name='Bella', position='Администратор', company_id=1, fired=0),
+    ])
+    await async_session.flush()
+    async_session.add(ManualFactMetric(
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 1, 31),
+        company_id=1,
+        staff_id=2,
+        metric_code='reviews_qty',
+        value=value,
+        updated_at=datetime(2025, 1, 20, 10, 0, 0),
+        updated_by_user_id=100,
+    ))
+    await async_session.commit()
+
+
+async def _manual_fact_audit_rows(async_session):
+    events = (
+        await async_session.execute(
+            select(PortalAuditEvent)
+            .where(PortalAuditEvent.action == 'manual_fact.updated')
+            .order_by(PortalAuditEvent.id.asc())
+        )
+    ).scalars().all()
+    return [(event.actor_user_id, event.metadata_json['rows']) for event in events]
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_stale_editor_does_not_undo_a_concurrent_save(async_session):
+    """A saves an unrelated row after B changed Anna's value: B's value must survive.
+
+    Before the fix A's payload still carried the 5 it had loaded, which differed from B's 7,
+    and was taken for an edit — B's value was silently reverted and re-signed to A.
+    """
+    await _seed_two_admins_with_a_value(async_session)
+    contexts = {
+        user_id: AccessContext.from_user(
+            user_id=user_id, role='manager', portal_account_id=None, company_ids=[1],
+        )
+        for user_id in (300, 400)
+    }
+    active = {'user': 300}
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return contexts[active['user']]
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        loaded_by_a = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01', 'company_id': 1})
+        rows_a = loaded_by_a.json()['data']['rows']
+
+        active['user'] = 400
+        b_save = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 7, 'previous_value': 5}],
+            },
+        )
+
+        active['user'] = 300
+        # Exactly what the SPA builds: every rendered row, previous_value from A's own GET.
+        typed = {2: rows_a[0]['value'], 3: 9}
+        a_unrelated = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [
+                    {
+                        'company_id': row['company_id'],
+                        'staff_id': row['staff_id'],
+                        'value': typed[row['staff_id']],
+                        'previous_value': row['value'],
+                    }
+                    for row in rows_a
+                ],
+            },
+        )
+        # Now A does edit Anna's row from the stale 5: the whole batch is refused.
+        a_stale_edit = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [
+                    {'company_id': 1, 'staff_id': 2, 'value': 6, 'previous_value': 5},
+                    {'company_id': 1, 'staff_id': 3, 'value': 1, 'previous_value': 9},
+                ],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert [row['staff_id'] for row in rows_a] == [2, 3]
+    assert b_save.status_code == 200
+    assert a_unrelated.status_code == 200
+    assert a_stale_edit.status_code == 409
+    assert a_stale_edit.json()['detail'] == dashboard_service.MANUAL_FACT_CONFLICT_DETAIL
+
+    stored = {
+        row.staff_id: (row.value, row.updated_by_user_id)
+        for row in (await async_session.execute(select(ManualFactMetric))).scalars().all()
+    }
+    # B's value and signature survive A's save; the refused batch wrote neither of its rows.
+    assert stored == {2: (7.0, 400), 3: (9.0, 300)}
+    assert await _manual_fact_audit_rows(async_session) == [(400, [[1, 2]]), (300, [[1, 3]])]
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_batch_writes_rows_in_key_order(async_session):
+    """Two saves over the same rows must lock them in the same order, or PostgreSQL deadlocks.
+
+    The unique index makes the second inserter of a key wait for the first; payload order
+    (the DOM order of the editor, which differs between users' sorting) would cross the waits.
+    """
+    await _seed_two_admins_with_a_value(async_session)
+    async_session.add(Staff(id=4, name='Clara', position='Администратор', company_id=1, fired=0))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [
+                    {'company_id': 1, 'staff_id': 4, 'value': 1, 'previous_value': None},
+                    {'company_id': 1, 'staff_id': 3, 'value': 2, 'previous_value': None},
+                    {'company_id': 1, 'staff_id': 2, 'value': 6, 'previous_value': 5},
+                ],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    written = (await async_session.execute(select(ManualFactMetric).order_by(ManualFactMetric.id))).scalars().all()
+    assert [row.staff_id for row in written] == [2, 3, 4]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('race', ['first_insert', 'changed_after_read'])
+async def test_manual_fact_save_racing_a_concurrent_write_is_a_conflict(async_session, monkeypatch, race):
+    """The race the stale-value check cannot see: another save lands between our read and write.
+
+    `first_insert`: both editors start from an empty cell and the other insert wins the unique
+    index — formerly a 500. `changed_after_read`: the guarded DELETE finds the row changed.
+    """
+    await _seed_two_admins_with_a_value(async_session)
+    original = dashboard_service._stored_manual_facts
+
+    async def stored_then_concurrent_write(db, *args, **kwargs):
+        stored = await original(db, *args, **kwargs)
+        if race == 'first_insert':
+            db.add(ManualFactMetric(
+                period_start=date(2025, 1, 1),
+                period_end=date(2025, 1, 31),
+                company_id=1,
+                staff_id=3,
+                metric_code='reviews_qty',
+                value=4.0,
+                updated_at=datetime(2025, 1, 21),
+                updated_by_user_id=400,
+            ))
+        else:
+            await db.execute(
+                text('UPDATE manual_fact_metrics SET value = 8, updated_by_user_id = 400 WHERE staff_id = 2')
+            )
+        await db.commit()
+        return stored
+
+    monkeypatch.setattr(dashboard_service, '_stored_manual_facts', stored_then_concurrent_write)
+    item = (
+        {'company_id': 1, 'staff_id': 3, 'value': 9, 'previous_value': None}
+        if race == 'first_insert'
+        else {'company_id': 1, 'staff_id': 2, 'value': 6, 'previous_value': 5}
+    )
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={'month': '2025-01', 'company_id': 1, 'items': [item]},
+        )
+    app.dependency_overrides.clear()
+    monkeypatch.undo()
+
+    assert response.status_code == 409
+    stored = {
+        row.staff_id: (row.value, row.updated_by_user_id)
+        for row in (await async_session.execute(select(ManualFactMetric))).scalars().all()
+    }
+    # The concurrent write is what stays, and our refused save left no audit event behind.
+    expected = {2: (5.0, 100), 3: (4.0, 400)} if race == 'first_insert' else {2: (8.0, 400)}
+    assert stored == expected
+    assert await _manual_fact_audit_rows(async_session) == []
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_conflict_on_insert_undoes_the_delete_of_the_same_batch(async_session, monkeypatch):
+    """Anna's guarded DELETE has already run when Bella's insert loses the unique index.
+
+    The refusal must take Anna's row back with it: nothing of a refused batch survives.
+    """
+    await _seed_two_admins_with_a_value(async_session)
+    original = dashboard_service._stored_manual_facts
+
+    async def stored_then_concurrent_insert(db, *args, **kwargs):
+        stored = await original(db, *args, **kwargs)
+        db.add(ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=1,
+            staff_id=3,
+            metric_code='reviews_qty',
+            value=4.0,
+            updated_at=datetime(2025, 1, 21),
+            updated_by_user_id=400,
+        ))
+        await db.commit()
+        return stored
+
+    monkeypatch.setattr(dashboard_service, '_stored_manual_facts', stored_then_concurrent_insert)
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [
+                    {'company_id': 1, 'staff_id': 2, 'value': 6, 'previous_value': 5},
+                    {'company_id': 1, 'staff_id': 3, 'value': 9, 'previous_value': None},
+                ],
+            },
+        )
+    app.dependency_overrides.clear()
+    monkeypatch.undo()
+
+    assert response.status_code == 409
+    stored = {
+        row.staff_id: (row.value, row.updated_by_user_id)
+        for row in (await async_session.execute(select(ManualFactMetric))).scalars().all()
+    }
+    assert stored == {2: (5.0, 100), 3: (4.0, 400)}
+    assert await _manual_fact_audit_rows(async_session) == []
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_save_without_previous_value_reads_as_an_empty_cell(async_session):
+    """An older SPA that does not send previous_value may still fill an empty cell.
+
+    It may not overwrite a stored value, though: that would be the lost update again.
+    """
+    await _seed_two_admins_with_a_value(async_session)
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        overwrite = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={'month': '2025-01', 'company_id': 1, 'items': [{'company_id': 1, 'staff_id': 2, 'value': 1}]},
+        )
+        fill = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={'month': '2025-01', 'company_id': 1, 'items': [{'company_id': 1, 'staff_id': 3, 'value': 2}]},
+        )
+    app.dependency_overrides.clear()
+
+    assert overwrite.status_code == 409
+    assert fill.status_code == 200
+    assert {row['staff_id']: row['value'] for row in fill.json()['data']['rows']} == {2: 5.0, 3: 2.0}
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_save_without_previous_value_ignores_untouched_stored_rows(async_session):
+    """An older SPA posts every rendered row, stored ones included, and sends no `previous_value`.
+
+    A row that merely repeats the stored value is not an edit; refusing it would make every save
+    of a month that already holds a value a 409 until the tab is reloaded.
+    """
+    await _seed_two_admins_with_a_value(async_session)
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [
+                    {'company_id': 1, 'staff_id': 2, 'value': 5},
+                    {'company_id': 1, 'staff_id': 3, 'value': 2},
+                ],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    assert {row['staff_id']: row['value'] for row in response.json()['data']['rows']} == {2: 5.0, 3: 2.0}
+    stored = (await async_session.execute(select(ManualFactMetric))).scalars().all()
+    # Anna's row was neither rewritten nor re-signed.
+    assert {row.staff_id: row.updated_by_user_id for row in stored if row.staff_id == 2} == {2: 100}
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_save_without_previous_value_cannot_silently_drop_a_clear(async_session):
+    """An older SPA clearing a stored cell sends `value: null` and no `previous_value`.
+
+    Null equals the missing previous value, so it used to read as "untouched": the save came
+    back 200 with the value still there and no word about the lost edit.
+    """
+    await _seed_two_admins_with_a_value(async_session)
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={'month': '2025-01', 'company_id': 1, 'items': [{'company_id': 1, 'staff_id': 2, 'value': None}]},
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    stored = (await async_session.execute(select(ManualFactMetric))).scalars().all()
+    assert [(row.staff_id, row.value) for row in stored] == [(2, 5.0)]
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_save_of_a_row_cleared_meanwhile_is_a_conflict_not_a_closed_row(async_session):
+    """A row the editor showed with a value, cleared by someone else, is a stale editor.
+
+    It used to read as "not open for entry" (400, no reload), so a save of an unrelated row
+    failed with a phrase the SPA cannot recover from.
+    """
+    await _seed_two_admins_with_a_value(async_session)
+    # Not an administrator any more: the row is open only while it holds a value.
+    async_session.add(Staff(id=4, name='Gone', position='Барбер', company_id=1, fired=0))
+    await async_session.flush()
+    async_session.add(ManualFactMetric(
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 1, 31),
+        company_id=1,
+        staff_id=4,
+        metric_code='reviews_qty',
+        value=3.0,
+        updated_at=datetime(2025, 1, 20, 10, 0, 0),
+        updated_by_user_id=100,
+    ))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        loaded = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01', 'company_id': 1})
+        rows = loaded.json()['data']['rows']
+        cleared = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 4, 'value': None, 'previous_value': 3}],
+            },
+        )
+        stale = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [
+                    {
+                        'company_id': row['company_id'],
+                        'staff_id': row['staff_id'],
+                        'value': 9 if row['staff_id'] == 3 else row['value'],
+                        'previous_value': row['value'],
+                    }
+                    for row in rows
+                ],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert sorted(row['staff_id'] for row in rows) == [2, 3, 4]
+    assert cleared.status_code == 200
+    assert stale.status_code == 409
+    stored = (await async_session.execute(select(ManualFactMetric))).scalars().all()
+    assert [(row.staff_id, row.value) for row in stored] == [(2, 5.0)]
+
+
+@pytest.mark.asyncio
+async def test_manual_fact_untouched_empty_row_that_closed_meanwhile_does_not_fail_the_save(async_session):
+    """An empty row the editor still shows, closed since (the sync fired the staff member), is untouched.
+
+    Nothing is written for it, so refusing the whole batch as "not open" would leave the user
+    with a 400 no reload can explain; only an actual entry into a closed row is refused.
+    """
+    await _seed_two_admins_with_a_value(async_session)
+    async_session.add(Staff(id=4, name='Closed', position='Барбер', company_id=1, fired=0))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        untouched = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [
+                    {'company_id': 1, 'staff_id': 3, 'value': 2, 'previous_value': None},
+                    {'company_id': 1, 'staff_id': 4, 'value': None, 'previous_value': None},
+                ],
+            },
+        )
+        entered = await client.post(
+            '/dashboard/plan/reviews_fact',
+            json={
+                'month': '2025-01',
+                'company_id': 1,
+                'items': [{'company_id': 1, 'staff_id': 4, 'value': 1, 'previous_value': None}],
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert untouched.status_code == 200
+    assert entered.status_code == 400
+    stored = (await async_session.execute(select(ManualFactMetric).order_by(ManualFactMetric.staff_id))).scalars().all()
+    assert [(row.staff_id, row.value) for row in stored] == [(2, 5.0), (3, 2.0)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field', ['value', 'previous_value'])
+@pytest.mark.parametrize('endpoint', ['reviews_fact', 'opz_fact'])
+async def test_manual_fact_save_refuses_a_boolean_as_a_number(async_session, field, endpoint):
+    """`true` is not one review: lax float parsing would store it as 1, as the Yandex Pay editor already forbids."""
+    await _seed_two_admins_with_a_value(async_session)
+
+    async def override_db():
+        yield async_session
+
+    item = {'company_id': 1, 'staff_id': 3, 'value': 2, 'previous_value': None}
+    item[field] = True
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            f'/dashboard/plan/{endpoint}',
+            json={'month': '2025-01', 'company_id': 1, 'items': [item]},
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+    stored = (await async_session.execute(select(ManualFactMetric))).scalars().all()
+    assert [(row.staff_id, row.value) for row in stored] == [(2, 5.0)]
+
+
 @pytest.mark.asyncio
 async def test_manual_fact_save_keeps_the_author_of_an_untouched_row(async_session):
     """The editor posts every row it renders, so an untouched one must not change hands.
@@ -8629,8 +9125,8 @@ async def test_manual_fact_save_keeps_the_author_of_an_untouched_row(async_sessi
                 'month': '2025-01',
                 'company_id': 1,
                 'items': [
-                    {'company_id': 1, 'staff_id': 2, 'value': 5},
-                    {'company_id': 1, 'staff_id': 3, 'value': 9},
+                    {'company_id': 1, 'staff_id': 2, 'value': 5, 'previous_value': 5},
+                    {'company_id': 1, 'staff_id': 3, 'value': 9, 'previous_value': None},
                 ],
             },
         )
@@ -8645,7 +9141,12 @@ async def test_manual_fact_save_keeps_the_author_of_an_untouched_row(async_sessi
                 'month': '2025-01',
                 'company_id': 1,
                 'items': [
-                    {'company_id': row['company_id'], 'staff_id': row['staff_id'], 'value': row['value']}
+                    {
+                        'company_id': row['company_id'],
+                        'staff_id': row['staff_id'],
+                        'value': row['value'],
+                        'previous_value': row['value'],
+                    }
                     for row in reloaded.json()['data']['rows']
                 ],
             },
@@ -8657,8 +9158,8 @@ async def test_manual_fact_save_keeps_the_author_of_an_untouched_row(async_sessi
                 'month': '2025-01',
                 'company_id': 1,
                 'items': [
-                    {'company_id': 1, 'staff_id': 2, 'value': 5},
-                    {'company_id': 1, 'staff_id': 3, 'value': None},
+                    {'company_id': 1, 'staff_id': 2, 'value': 5, 'previous_value': 5},
+                    {'company_id': 1, 'staff_id': 3, 'value': None, 'previous_value': 9},
                 ],
             },
         )
@@ -9733,7 +10234,7 @@ async def test_manual_review_facts_use_one_value_per_month(async_session):
             json={
                 'month': '2025-06',
                 'company_id': 1,
-                'items': [{'company_id': 1, 'staff_id': 2, 'value': 12}],
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 12, 'previous_value': 10}],
             },
         )
         full_response = await client.get(
@@ -9939,7 +10440,7 @@ async def test_manual_review_facts_keep_branch_total_equal_to_staff_rows(async_s
             json={
                 'month': '2025-04',
                 'company_id': 1,
-                'items': [{'company_id': 1, 'staff_id': 3, 'value': None}],
+                'items': [{'company_id': 1, 'staff_id': 3, 'value': None, 'previous_value': 4}],
             },
         )
     app.dependency_overrides.clear()

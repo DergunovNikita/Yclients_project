@@ -502,6 +502,7 @@
     "yandexPayConflict": "Qualcun altro ha appena modificato questo importo. I dati sono stati ricaricati: controlli i valori e inserisca di nuovo i suoi.",
     "reviewFactInactive": "non è più amministratore",
     "manualFactAuthor": "Inserito da",
+    "manualFactConflict": "Un altro utente ha appena modificato i valori di questo mese. I dati sono stati aggiornati: controlli i valori e inserisca di nuovo le sue modifiche.",
     "manualFactSelfHint": "Compili solo i tuoi dati; il responsabile della filiale può correggerli.",
     "daysCount": "{count} giorni",
     "appointmentsCount": "{count} appuntamenti",

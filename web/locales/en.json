@@ -502,6 +502,7 @@
     "yandexPayConflict": "Someone else has just changed this amount. The data has been reloaded — check the values and enter yours again.",
     "reviewFactInactive": "no longer an administrator",
     "manualFactAuthor": "Entered by",
+    "manualFactConflict": "Someone else has just changed values for this month. The editor has been reloaded — check the values and enter your changes again.",
     "manualFactSelfHint": "You report for yourself only; the branch manager can correct the value.",
     "daysCount": "{count} days",
     "appointmentsCount": "{count} appointments",

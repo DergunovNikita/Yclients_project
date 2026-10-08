@@ -30,6 +30,8 @@ from auth_scope import (
 )
 import dashboard_service
 from dashboard_service import (
+    MANUAL_FACT_CONFLICT_DETAIL,
+    ManualFactConflict,
     ManualFactRowNotOpen,
     OverviewPeriodPreset,
     fetch_branches,
@@ -111,7 +113,10 @@ class MetricVisibilityPayload(BaseModel):
 class ManualReviewFactItem(BaseModel):
     company_id: int
     staff_id: int
-    value: float | None = None
+    # Strict: lax float parsing turns `true` into one review.
+    value: float | None = Field(None, strict=True)
+    # What the last GET showed for this row: the save is an edit only where `value` differs.
+    previous_value: float | None = Field(None, strict=True)
 
 
 class ManualReviewFactsPayload(BaseModel):
@@ -124,7 +129,10 @@ class ManualReviewFactsPayload(BaseModel):
 class ManualOpzFactItem(BaseModel):
     company_id: int
     staff_id: int
-    value: float | None = None
+    # Strict: lax float parsing turns `true` into one review.
+    value: float | None = Field(None, strict=True)
+    # What the last GET showed for this row: the save is an edit only where `value` differs.
+    previous_value: float | None = Field(None, strict=True)
 
 
 class ManualOpzFactsPayload(BaseModel):
@@ -1108,13 +1116,16 @@ async def _manual_fact_post(
             month,
             scope['company_id'],
             staff_id,
-            [item.model_dump() for item in items],
+            [item.model_dump(exclude_unset=True) for item in items],
             allowed_company_ids=branch_ids,
             force_allowed=force_allowed,
             allowed_staff_keys=staff_keys,
             actor_user_id=ctx.user_id,
             portal_account_id=ctx.portal_account_id,
         )
+    except ManualFactConflict as exc:
+        logger.info('manual fact save refused, stale value: month=%s user=%s', month, ctx.user_id)
+        raise HTTPException(status_code=409, detail=MANUAL_FACT_CONFLICT_DETAIL) from exc
     except ManualFactRowNotOpen as exc:
         # The reason names staff and branch ids, and the SPA prints `detail` verbatim —
         # the editors are open to rank-and-file staff now, so it belongs in the log.
