@@ -302,6 +302,8 @@ test('catch-all proxy enforces dashboard and auth route allowlists', () => {
         ['POST', '/api/dashboard/plan/reviews_fact'],
         ['GET', '/api/dashboard/plan/opz_fact?month=2025-01'],
         ['POST', '/api/dashboard/plan/opz_fact'],
+        ['GET', '/api/dashboard/payments/yandex_pay?month=2025-01'],
+        ['POST', '/api/dashboard/payments/yandex_pay'],
       ]) {
         const result = buildTarget(requestStub(method, {}, path));
         assert.equal(result.ok, true, `${method} ${path}`);

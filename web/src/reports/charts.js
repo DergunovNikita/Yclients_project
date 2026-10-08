@@ -16,10 +16,12 @@ import {
 
 import { formatValue } from './format.js';
 import {
+  axisMax,
   axisValueFormat,
   chartRenderType,
   chartSeriesColor,
   shouldRenderChartDataLabels,
+  tooltipSeriesLabel,
 } from './chartSpec.js';
 import { chartTooltipValue, shouldRenderReportDataLabel } from '../dashboardRequestState.js';
 // Side-effect only: registers the global responsive tick/legend plugin (Chart.js dedupes
@@ -160,10 +162,15 @@ export class ReportChartManager {
     });
     const scales = {};
     if (type !== 'doughnut' && type !== 'pie') {
+      const stacked = spec.stacked === true;
+      if (stacked) scales.x = { stacked };
       scales.y = {
         beginAtZero: true,
         ticks: axisTicks('y'),
       };
+      if (stacked) scales.y.stacked = true;
+      const yMax = axisMax(spec, 'y');
+      if (yMax !== undefined) scales.y.max = yMax;
       if ((spec.datasets || []).some((dataset) => dataset.axis === 'y1')) {
         scales.y1 = {
           beginAtZero: true,
@@ -187,7 +194,8 @@ export class ReportChartManager {
               const dataset = spec.datasets?.[ctx.datasetIndex] || {};
               const value = chartTooltipValue(ctx.parsed, ctx.chart?.options?.indexAxis);
               const format = dataset.format || axisValueFormat(spec, dataset.axis || 'y');
-              return ` ${dataset.label}: ${formatValue(value, format)}`;
+              const name = tooltipSeriesLabel(spec, type, ctx);
+              return ` ${name}: ${formatValue(value, format)}`;
             },
           },
         },

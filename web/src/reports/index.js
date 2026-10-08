@@ -32,6 +32,7 @@ import {
   reportLinkSearch,
   reportPeriodIsValid,
   reportRequestFilters,
+  reportStaffApplies,
   staffSelectionForOptions,
 } from '../dashboardRequestState.js';
 
@@ -152,6 +153,7 @@ export function initReports({
     endField: document.getElementById('report-end')?.closest('label'),
     branch: document.getElementById('report-branch'),
     staff: document.getElementById('report-staff'),
+    staffField: document.getElementById('report-staff')?.closest('label'),
     granularity: document.getElementById('report-granularity'),
     compareEnabled: document.getElementById('report-compare-enabled'),
     compareStart: document.getElementById('report-compare-start'),
@@ -177,6 +179,7 @@ export function initReports({
     branches: [],
     activeReportId: '',
     periodApplies: true,
+    staffApplies: true,
     // Which Overview preset produced the period, when the user arrived from a card.
     // It picks the same baseline the card measured against; editing the period drops it,
     // exactly as the Overview's own preset buttons do.
@@ -473,6 +476,7 @@ export function initReports({
     reportRequests.abort();
     state.activeReportId = '';
     state.periodApplies = true;
+    state.staffApplies = true;
     setCatalogVisible(true);
     els.viewer.classList.remove('visible');
     if (push) pushHistory({ view: 'reports' }, reportPath('', reportSearch()));
@@ -499,6 +503,7 @@ export function initReports({
       filters: currentFilters(),
       periodApplies: state.periodApplies,
       fallbackPeriod: defaultReportDates(),
+      staffApplies: state.staffApplies,
     });
   }
 
@@ -515,7 +520,7 @@ export function initReports({
   // period must not overwrite the one the user picked for every other report.
   function reportSearch() {
     return reportLinkSearch({
-      filters: currentFilters(),
+      filters: state.staffApplies ? currentFilters() : { ...currentFilters(), staff_id: '' },
       currentSearch: window.location.search.replace(/^\?/, ''),
       periodApplies: state.periodApplies,
     });
@@ -525,6 +530,8 @@ export function initReports({
     const filters = meta.filters || {};
     const visibility = reportFilterVisibility(filters);
     state.periodApplies = visibility.dateRange;
+    state.staffApplies = reportStaffApplies(filters);
+    if (els.staffField) els.staffField.hidden = !state.staffApplies;
     if (els.monthField) els.monthField.hidden = !visibility.dateRange;
     if (els.startField) els.startField.hidden = !visibility.dateRange;
     if (els.endField) els.endField.hidden = !visibility.dateRange;

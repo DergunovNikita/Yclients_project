@@ -7,6 +7,12 @@ export function formatMoney(value) {
   return `${Math.round(Number(value || 0)).toLocaleString(intlLocale())} ₽`;
 }
 
+// Kopecks matter where a person types the amount in; formatMoney's whole roubles suit totals.
+export function formatMoneyExact(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  return `${Number(value || 0).toLocaleString(intlLocale(), { minimumFractionDigits: 0, maximumFractionDigits: 2 })} ₽`;
+}
+
 export function formatNumber(value) {
   if (value === null || value === undefined || value === '') return '—';
   return Number(value || 0).toLocaleString(intlLocale());

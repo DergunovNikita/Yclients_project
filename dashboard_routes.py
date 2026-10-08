@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from copy import deepcopy
 from datetime import date, datetime
 from typing import Annotated, Any, Callable
@@ -17,6 +18,7 @@ from auth_deps import forbid_demo, get_dashboard_access, is_demo_request
 from auth_hierarchy import USER_ADMIN_ROLES
 from auth_scope import (
     AccessContext,
+    can_view_branch_payments,
     can_view_financials,
     effective_staff_id,
     hidden_money_codes,
@@ -53,6 +55,7 @@ from dashboard_service import (
     fetch_top_services,
 )
 from dashboard_reports import (
+    BRANCH_PAYMENT_REPORTS,
     DEMO_UNAVAILABLE_REPORTS,
     REPORT_GRANULARITIES,
     ReportCalculationError,
@@ -69,6 +72,13 @@ from plan_config import (
     MONEY_METRICS,
     default_money_codes_for_role,
     money_payload_keys,
+)
+from payment_methods import (
+    CONFLICT_DETAIL,
+    ManualPaymentConflict,
+    PaymentRowNotOpen,
+    fetch_yandex_pay_editor,
+    save_yandex_pay,
 )
 from portal_audit import log_portal_audit
 from sync_jobs import SyncJobService
@@ -122,6 +132,40 @@ class ManualOpzFactsPayload(BaseModel):
     company_id: int | None = None
     staff_id: int | None = None
     items: list[ManualOpzFactItem]
+
+
+ISO_DAY = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _iso_day(value: Any) -> Any:
+    """Only a 'YYYY-MM-DD' string is a day: lax date parsing would also take a number as a timestamp."""
+    if value is None:
+        return None
+    if isinstance(value, str) and ISO_DAY.match(value):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            pass
+    raise ValueError('must be an ISO date (YYYY-MM-DD)')
+
+
+IsoDay = Annotated[date | None, BeforeValidator(_iso_day)]
+
+
+class YandexPayItem(BaseModel):
+    company_id: int
+    # Strict: lax float parsing turns `true` into one rouble.
+    value: float | None = Field(None, strict=True)
+    previous_value: float | None = Field(None, strict=True)
+    # The last day `value` covers; the optimistic lock is the pair, so the date has its previous twin.
+    data_through: IsoDay = None
+    previous_data_through: IsoDay = None
+
+
+class YandexPayPayload(BaseModel):
+    month: str
+    company_id: int | None = None
+    items: list[YandexPayItem]
 
 
 class PlanSettingsBranchPayload(BaseModel):
@@ -247,6 +291,12 @@ def _require_manual_fact_access(ctx: AccessContext) -> frozenset[tuple[int, int]
     if staff_keys is not None and not staff_keys:
         raise HTTPException(status_code=403, detail='Manual facts are not available')
     return staff_keys
+
+
+def _require_branch_payments_access(ctx: AccessContext) -> None:
+    """The one gate for payment totals: report catalog, report data, editor and `/auth/me`."""
+    if not can_view_branch_payments(ctx):
+        raise HTTPException(status_code=403, detail='Payment totals are not allowed for this role')
 
 
 def _assert_manual_fact_staff_allowed(
@@ -708,7 +758,11 @@ async def dashboard_reports(
     """Report catalog for the product reports SPA, narrowed to what the role may open."""
     return {
         'success': True,
-        'data': fetch_report_registry(is_demo, hide_financials=not can_view_financials(ctx)),
+        'data': fetch_report_registry(
+            is_demo,
+            hide_financials=not can_view_financials(ctx),
+            hide_branch_payments=not can_view_branch_payments(ctx),
+        ),
     }
 
 
@@ -735,6 +789,8 @@ async def dashboard_report_data(
         raise HTTPException(status_code=404, detail='Report is not available in the demo tenant')
     if report_requires_financials(report_id):
         require_financial_access(ctx)
+    if report_id in BRANCH_PAYMENT_REPORTS:
+        _require_branch_payments_access(ctx)
     scope = query_scope(ctx, company_id)
     staff_id = effective_staff_id(ctx, staff_id)
     compare_staff_id = effective_staff_id(ctx, compare_staff_id)
@@ -1111,6 +1167,77 @@ async def dashboard_plan_opz_fact_save(
     return await _manual_fact_post(
         db, ctx, save_manual_opz_facts, payload.month, payload.company_id, payload.staff_id, payload.items
     )
+
+
+async def _yandex_pay_editor(
+    db: AsyncSession,
+    ctx: AccessContext,
+    month: str,
+    company_id: int | None,
+) -> dict[str, Any]:
+    branch_ids, force_allowed = user_branch_ids(ctx)
+    try:
+        data = await fetch_yandex_pay_editor(
+            db,
+            month,
+            company_id,
+            allowed_company_ids=branch_ids,
+            force_allowed=force_allowed,
+            portal_account_id=ctx.portal_account_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'success': True, 'data': data}
+
+
+@router.get('/payments/yandex_pay')
+async def dashboard_yandex_pay(
+    month: str = Query(..., description='Month in YYYY-MM format'),
+    company_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    _require_branch_payments_access(ctx)
+    scope = query_scope(ctx, company_id)
+    await _validate_dashboard_scope(db, scope['company_id'], None, allowed_company_ids=scope['branch_ids'])
+    return await _yandex_pay_editor(db, ctx, month, scope['company_id'])
+
+
+@router.post('/payments/yandex_pay', dependencies=[Depends(forbid_demo)])
+async def dashboard_yandex_pay_save(
+    payload: YandexPayPayload,
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    _require_branch_payments_access(ctx)
+    scope = query_scope(ctx, payload.company_id)
+    if not ctx.full_access:
+        # A row of someone else's branch is a denial, not a malformed payload — and it must not
+        # reach the service, whose only answer would be a 400 with an internal sentence.
+        allowed = set(ctx.company_ids or [])
+        if any(item.company_id not in allowed for item in payload.items):
+            raise HTTPException(status_code=403, detail='Branch not allowed')
+    branch_ids, force_allowed = user_branch_ids(ctx)
+    try:
+        await save_yandex_pay(
+            db,
+            payload.month,
+            scope['company_id'],
+            [item.model_dump() for item in payload.items],
+            allowed_company_ids=branch_ids,
+            force_allowed=force_allowed,
+            actor_user_id=ctx.user_id,
+            portal_account_id=ctx.portal_account_id,
+        )
+    except ManualPaymentConflict as exc:
+        logger.info('yandex pay save refused, stale value: month=%s user=%s', payload.month, ctx.user_id)
+        raise HTTPException(status_code=409, detail=CONFLICT_DETAIL) from exc
+    except PaymentRowNotOpen as exc:
+        logger.info('yandex pay row not open for entry: %s', exc)
+        raise HTTPException(status_code=400, detail='Payment row is not open for entry') from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _yandex_pay_editor(db, ctx, payload.month, scope['company_id'])
 
 
 def _require_visibility_admin(ctx: AccessContext) -> None:

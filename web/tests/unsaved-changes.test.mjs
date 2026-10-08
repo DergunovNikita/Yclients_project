@@ -129,6 +129,47 @@ test('floating save dock follows the active editor dirty and saving state', () =
   });
 });
 
+test('floating save dock follows the Yandex Pay editor', () => {
+  const base = {
+    activeView: 'overview',
+    planSettingsDirty: false,
+    planSettingsSaving: false,
+    reviewFactDirty: false,
+    reviewFactSaving: false,
+    opzFactDirty: false,
+    opzFactSaving: false,
+    yandexPayDirty: false,
+    yandexPaySaving: false,
+  };
+  assert.deepEqual(editorSaveDockState({
+    ...base,
+    activeView: 'yandexPayFacts',
+    yandexPayDirty: true,
+  }), {
+    editor: 'yandexPayFacts',
+    visible: true,
+    saving: false,
+  });
+  assert.deepEqual(editorSaveDockState({
+    ...base,
+    activeView: 'yandexPayFacts',
+    yandexPaySaving: true,
+  }), {
+    editor: 'yandexPayFacts',
+    visible: true,
+    saving: true,
+  });
+  // Another editor's draft does not light up this tab's dock, and vice versa.
+  assert.equal(editorSaveDockState({ ...base, activeView: 'yandexPayFacts', opzFactDirty: true }).visible, false);
+  assert.equal(editorSaveDockState({ ...base, activeView: 'opzFacts', yandexPayDirty: true }).visible, false);
+  assert.equal(editorSaveDockState({
+    ...base,
+    activeView: 'yandexPayFacts',
+    yandexPayDirty: true,
+    isDemo: true,
+  }).visible, false);
+});
+
 test('floating save dock stays hidden outside editors and in demo mode', () => {
   const dirtyPlan = {
     activeView: 'overview',

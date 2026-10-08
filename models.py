@@ -1,6 +1,7 @@
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     Date,
     DateTime,
@@ -10,6 +11,7 @@ from sqlalchemy import (
     Index,
     Integer,
     JSON,
+    Numeric,
     String,
     Text,
     Time,
@@ -778,6 +780,47 @@ class ManualFactMetric(Base):
             'staff_id',
             'metric_code',
             unique=True,
+        ),
+    )
+
+
+METHOD_YANDEX_PAY = 'yandex_pay'
+
+
+class ManualPaymentAmount(Base):
+    """Monthly payment-method total entered by hand, for methods YClients does not report.
+
+    Separate from `manual_fact_metrics`: that table is per staff row (`staff_id NOT NULL`),
+    while a payment total belongs to a branch and a month.
+    """
+
+    __tablename__ = 'manual_payment_amounts'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    period_start = Column(Date, nullable=False)
+    period_end = Column(Date, nullable=False)
+    company_id = Column(Integer, ForeignKey('companies.id', ondelete='CASCADE'), nullable=False, index=True)
+    method_code = Column(String(32), nullable=False)
+    amount = Column(Numeric(14, 2), nullable=False)
+    # Last day the amount covers: it is entered for the month from the 1st, but possibly before the month is over.
+    data_through = Column(Date, nullable=False)
+    source = Column(String, default='dashboard')
+    updated_at = Column(DateTime, nullable=False)
+    # No FK, same reason as `ManualFactMetric.updated_by_user_id`.
+    updated_by_user_id = Column(Integer, nullable=True)
+
+    __table_args__ = (
+        Index(
+            'uq_manual_payment_amounts_period_company_method',
+            'period_start',
+            'company_id',
+            'method_code',
+            unique=True,
+        ),
+        CheckConstraint('amount >= 0', name='ck_manual_payment_amounts_amount_non_negative'),
+        CheckConstraint(
+            'data_through BETWEEN period_start AND period_end',
+            name='ck_manual_payment_amounts_data_through_in_period',
         ),
     )
 

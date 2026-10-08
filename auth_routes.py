@@ -23,7 +23,7 @@ from auth_hierarchy import (
     can_manage_user,
     validate_company_ids_for_role,
 )
-from auth_scope import AccessContext, manual_fact_staff_keys
+from auth_scope import AccessContext, can_view_branch_payments, manual_fact_staff_keys
 from auth_service import (
     PORTAL_PASSWORD_MIN_LENGTH,
     TOKEN_PURPOSE_RESET,
@@ -165,11 +165,13 @@ def _user_payload(
     *,
     staff_id: int | None = None,
     manual_fact_scope: str | None = None,
+    branch_payments_access: bool | None = None,
 ) -> dict:
     payload = {
         'id': user.id,
         'staff_id': staff_id,
         'manual_fact_scope': manual_fact_scope,
+        'branch_payments_access': branch_payments_access,
         'email': user.email,
         'full_name': user.full_name,
         'role': user.role,
@@ -550,6 +552,8 @@ async def me(
             manageable=None,
             staff_id=staff_id,
             manual_fact_scope=scope,
+            # Same guard as `_manual_fact_scope`: a context cached for someone else shows nothing.
+            branch_payments_access=ctx.user_id == user.id and can_view_branch_payments(ctx),
         ),
     }
 

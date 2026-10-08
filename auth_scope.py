@@ -168,6 +168,17 @@ def can_view_financials(ctx: AccessContext) -> bool:
     return can_view_money_metric(ctx, 'revenue')
 
 
+def can_view_branch_payments(ctx: AccessContext) -> bool:
+    """Whether the principal may see branch-level payment totals and enter Yandex Pay.
+
+    Revenue visibility alone is not enough: `admin`/`barber` are clamped to their own staff row,
+    and branch cash/cashless totals would reveal what that clamp hides even when the owner has
+    opened `revenue` for them. One predicate guards the report catalog, the report data, the
+    editor and the `/auth/me` flag, so the four never disagree.
+    """
+    return ctx.full_access or (ctx.role in BRANCH_SCOPE_ROLES and can_view_financials(ctx))
+
+
 def require_financial_access(ctx: AccessContext) -> None:
     if not can_view_financials(ctx):
         raise HTTPException(status_code=403, detail='Financial metrics are not allowed for this role')

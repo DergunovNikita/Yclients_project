@@ -130,3 +130,28 @@ test('a chart rendered while the toggle is on opens with labels', () => {
   );
   manager.clear();
 });
+
+test('a line of shares keeps its gap and scales to its own values', () => {
+  const manager = new ReportChartManager();
+  const spec = {
+    id: 'shares_by_month',
+    type: 'line',
+    labels: ['июл 2026', 'авг 2026', 'сен 2026'],
+    datasets: [
+      { label: 'Наличные', data: [30, 28, 25], format: 'percent', fill: false },
+      { label: 'Яндекс Пэй', data: [5, null, 7], format: 'percent', fill: false },
+    ],
+  };
+  const { canvas } = stubCanvas();
+  manager.render(canvas, spec);
+
+  const chart = manager.instances.get(spec.id);
+  assert.equal(chart.config.type, 'line');
+  // A missing month must stay a break in the line, not be bridged across.
+  assert.equal(chart.config.data.datasets[1].spanGaps, undefined);
+  assert.equal(chart.config.data.datasets[1].data[1], null);
+  assert.equal(chart.config.data.datasets[1].fill, false);
+  // Only a stack of shares is pinned to 100; a line of shares autoscales.
+  assert.equal(manager.optionsFor(spec, 'line').scales.y.max, undefined);
+  manager.clear();
+});

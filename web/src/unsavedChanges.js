@@ -36,6 +36,8 @@ export function editorSaveDockState({
   reviewFactSaving,
   opzFactDirty,
   opzFactSaving,
+  yandexPayDirty = false,
+  yandexPaySaving = false,
   isDemo = false,
 }) {
   const editors = {
@@ -50,6 +52,10 @@ export function editorSaveDockState({
     opzFacts: {
       dirty: opzFactDirty,
       saving: opzFactSaving,
+    },
+    yandexPayFacts: {
+      dirty: yandexPayDirty,
+      saving: yandexPaySaving,
     },
   };
   const editor = editors[activeView];

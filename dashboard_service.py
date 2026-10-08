@@ -1268,6 +1268,74 @@ async def _source_coverage_status(
     return 'ready', []
 
 
+def _service_revenue_union(
+    dr: DateRange,
+    company_id: Optional[int],
+    staff_id: Optional[int],
+    created_user_id: Optional[int],
+    company_ids: Optional[list[int]],
+    factual_at: Optional[datetime],
+    extra_columns: tuple = (),
+):
+    """Paid service rows of completed visits, exactly the set the Overview's revenue sums.
+
+    `_service_paid_filters(...)` + `_physical_account_condition()` is byte-for-byte what a
+    hand-rolled filter list used to build here (sold_item_type == SERVICE, completed
+    attendance, business_appointment_condition, the visit anchor on top of the payment
+    anchor, the same scope/staff/factual_at handling) — the filters fetch_top_services /
+    fetch_revenue_daily / etc. already share. `extra_columns` are labelled columns the caller
+    wants to group by; they never change which rows are selected.
+    """
+    return _financial_appointment_branches_union(
+        lambda join_condition: (
+            select(FinancialTransaction.amount.label('amount'), *extra_columns)
+            .select_from(FinancialTransaction)
+            .join(Appointment, join_condition)
+            .outerjoin(
+                AccountCatalog,
+                and_(
+                    AccountCatalog.company_id == FinancialTransaction.company_id,
+                    AccountCatalog.account_id == FinancialTransaction.account_id,
+                ),
+            )
+            .where(
+                _service_paid_filters(
+                    dr.start,
+                    dr.end,
+                    company_id,
+                    staff_id,
+                    created_user_id=created_user_id,
+                    allowed_company_ids=company_ids,
+                    factual_at=factual_at,
+                ),
+                _physical_account_condition(),
+            )
+        )
+    )
+
+
+def _direct_payment_filters(
+    dr: DateRange,
+    company_id: Optional[int],
+    company_ids: Optional[list[int]],
+    factual_at: Optional[datetime],
+) -> list:
+    """Row filter shared by goods, top-up and unclassified revenue (no Appointment join)."""
+    filters = [
+        FinancialTransaction.amount > 0,
+        *day_window(FinancialTransaction.date, dr.start, dr.end),
+        _physical_account_condition(),
+        reporting_window_clause(FinancialTransaction.company_id, FinancialTransaction.date),
+    ]
+    if factual_at is not None:
+        filters.append(FinancialTransaction.date <= factual_at)
+    filters.append(_business_financial_master_condition(factual_at))
+    scope = _company_scope_clause(FinancialTransaction.company_id, company_id, company_ids)
+    if scope is not None:
+        filters.append(scope)
+    return filters
+
+
 async def _average_check_block(
     db: AsyncSession,
     dr: DateRange,
@@ -1321,46 +1389,8 @@ async def _average_check_block(
         or 0
     )
 
-    base_payment_filters = [
-        FinancialTransaction.amount > 0,
-        *day_window(FinancialTransaction.date, dr.start, dr.end),
-        _physical_account_condition(),
-        reporting_window_clause(FinancialTransaction.company_id, FinancialTransaction.date),
-    ]
-    if factual_at is not None:
-        base_payment_filters.append(FinancialTransaction.date <= factual_at)
-
-    # _service_paid_filters(...) + _physical_account_condition() is byte-for-byte what a
-    # hand-rolled service_filters list used to build here (sold_item_type == SERVICE,
-    # completed attendance, business_appointment_condition, the visit anchor on top of
-    # base_payment_filters' payment anchor, the same scope/staff/factual_at handling) —
-    # the exact filters fetch_top_services/fetch_revenue_daily/etc. already share. Calling
-    # the shared helper instead removes the second, hand-synced copy of the same rule.
-    service_revenue_branches = _financial_appointment_branches_union(
-        lambda join_condition: (
-            select(FinancialTransaction.amount.label('amount'))
-            .select_from(FinancialTransaction)
-            .join(Appointment, join_condition)
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
-            .where(
-                _service_paid_filters(
-                    dr.start,
-                    dr.end,
-                    company_id,
-                    staff_id,
-                    created_user_id=created_user_id,
-                    allowed_company_ids=company_ids,
-                    factual_at=factual_at,
-                ),
-                _physical_account_condition(),
-            )
-        )
+    service_revenue_branches = _service_revenue_union(
+        dr, company_id, staff_id, created_user_id, company_ids, factual_at
     )
     service_revenue = float(
         await db.scalar(
@@ -1384,11 +1414,7 @@ async def _average_check_block(
     # silently drop them), and its base filter is a materially different rule — completed
     # attendance, business_appointment_condition, the visit-side reporting window — rather
     # than just one more classifying condition layered on direct_payment_filters.
-    direct_payment_filters = list(base_payment_filters)
-    direct_payment_filters.append(_business_financial_master_condition(factual_at))
-    scope = _company_scope_clause(FinancialTransaction.company_id, company_id, company_ids)
-    if scope is not None:
-        direct_payment_filters.append(scope)
+    direct_payment_filters = _direct_payment_filters(dr, company_id, company_ids, factual_at)
 
     staff_attribution_active = staff_id is not None and created_user_id is None
     goods_condition = FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE
@@ -1479,6 +1505,110 @@ async def _average_check_block(
         'unclassified_operations': unclassified_operations,
         'total': _safe_div(numerator, denominator),
     }
+
+
+# YClients `account.type`: 0 is a cash drawer, 1 a cashless account. Everything else — and an
+# account missing from the catalog altogether — still counts as revenue, so it gets its own
+# bucket instead of vanishing from the sum.
+ACCOUNT_TYPE_BUCKETS = {0: 'cash', 1: 'cashless'}
+OTHER_ACCOUNT_BUCKET = 'other'
+
+
+async def fetch_revenue_by_account_type(
+    db: AsyncSession,
+    dr: DateRange,
+    company_ids: list[int],
+    factual_at: Optional[datetime],
+    by_month: bool = False,
+) -> dict[Any, dict[str, float]]:
+    """Overview revenue split by the type of the account it was paid into, per branch.
+
+    Built from the same row sets `_average_check_block` sums (`_service_revenue_union` plus
+    the goods and top-up conditions over `_direct_payment_filters`), only grouped by branch
+    and account type instead of collapsed, so the buckets add up to that revenue to the
+    kopeck. No staff attribution: this is a branch-level view.
+
+    With `by_month` the keys become `(company_id, first day of the payment month)`. Every row
+    is windowed by its payment date alone (the visit date only meets the reporting window), so
+    the months partition the period and add up to the unsplit buckets exactly.
+    """
+    buckets: dict[Any, dict[str, float]] = {}
+    month_exprs = (
+        (extract('year', FinancialTransaction.date), extract('month', FinancialTransaction.date)) if by_month else ()
+    )
+    month_columns = tuple(expr.label(name) for expr, name in zip(month_exprs, ('pay_year', 'pay_month')))
+
+    def add(row: Any, amount: Any) -> None:
+        bucket = ACCOUNT_TYPE_BUCKETS.get(row.account_type, OTHER_ACCOUNT_BUCKET)
+        key: Any = int(row.company_id)
+        if by_month:
+            key = (key, date(int(row.pay_year), int(row.pay_month), 1))
+        branch = buckets.setdefault(key, {name: 0.0 for name in (*ACCOUNT_TYPE_BUCKETS.values(), OTHER_ACCOUNT_BUCKET)})
+        branch[bucket] += float(amount or 0)
+
+    service_union = _service_revenue_union(
+        dr,
+        None,
+        None,
+        None,
+        company_ids,
+        factual_at,
+        extra_columns=(
+            FinancialTransaction.company_id.label('company_id'),
+            AccountCatalog.type.label('account_type'),
+            *month_columns,
+        ),
+    )
+    service_keys = [
+        service_union.c.company_id,
+        service_union.c.account_type,
+        *(service_union.c[column.name] for column in month_columns),
+    ]
+    service_rows = await db.execute(
+        select(*service_keys, func.coalesce(func.sum(service_union.c.amount), 0.0).label('amount')).group_by(
+            *service_keys
+        )
+    )
+    for row in service_rows.all():
+        add(row, row.amount)
+
+    # Same pair of classifiers as `_average_check_block`: goods and top-ups are not asserted
+    # mutually exclusive there, and a row matching both is counted twice by the Overview too.
+    direct_rows = await db.execute(
+        select(
+            FinancialTransaction.company_id.label('company_id'),
+            AccountCatalog.type.label('account_type'),
+            *month_columns,
+            (
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE, FinancialTransaction.amount),
+                            else_=0.0,
+                        )
+                    ),
+                    0.0,
+                )
+                + func.coalesce(
+                    func.sum(case((_personal_account_condition(), FinancialTransaction.amount), else_=0.0)),
+                    0.0,
+                )
+            ).label('amount'),
+        )
+        .select_from(FinancialTransaction)
+        .outerjoin(
+            AccountCatalog,
+            and_(
+                AccountCatalog.company_id == FinancialTransaction.company_id,
+                AccountCatalog.account_id == FinancialTransaction.account_id,
+            ),
+        )
+        .where(*_direct_payment_filters(dr, None, company_ids, factual_at))
+        .group_by(FinancialTransaction.company_id, AccountCatalog.type, *month_exprs)
+    )
+    for row in direct_rows.all():
+        add(row, row.amount)
+    return buckets
 
 
 def _returning_bucket(count: int, total: int) -> dict[str, Any]:

@@ -127,9 +127,17 @@ export function reportHistoryAction({ push, historyUrl, currentUrl }) {
  * Substituting one keeps a period left inverted on another report from blocking it — and
  * from freezing its link, which would drop the branch the user picked.
  */
-export function reportRequestFilters({ filters, periodApplies = true, fallbackPeriod }) {
-  if (periodApplies || !fallbackPeriod) return filters;
-  return { ...filters, start_date: fallbackPeriod.start, end_date: fallbackPeriod.end };
+export function reportRequestFilters({
+  filters,
+  periodApplies = true,
+  fallbackPeriod,
+  staffApplies = true,
+}) {
+  // The staff select is shared between reports, so a report that has no staff filter must not
+  // inherit the one picked on another: it would travel in the request and in the link.
+  const scoped = staffApplies ? filters : { ...filters, staff_id: '' };
+  if (periodApplies || !fallbackPeriod) return scoped;
+  return { ...scoped, start_date: fallbackPeriod.start, end_date: fallbackPeriod.end };
 }
 
 /** A period caught mid-edit — the new start typed before the new end — the API rejects. */
@@ -151,6 +159,11 @@ export function reportLinkSearch({ filters, currentSearch = '', periodApplies = 
   return !periodApplies || reportPeriodIsValid(filters)
     ? reportSearchParams(filters).toString()
     : currentSearch;
+}
+
+/** Whether the report's metadata offers a staff filter (absent means yes, as for the others). */
+export function reportStaffApplies(filters = {}) {
+  return filters.staff !== false;
 }
 
 export function reportFilterVisibility(filters = {}) {

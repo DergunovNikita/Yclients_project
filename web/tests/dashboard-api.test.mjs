@@ -315,6 +315,13 @@ test('renderReportData hides flagged empty tops but keeps ranking data in a non-
         },
       },
       { id: 'anchor_empty', title: 'Anchor Top', columns: [], rows: [] },
+      {
+        id: 'wrapped',
+        title: 'Wrapped Headers',
+        columns: [{ key: 'metric', label: 'Metric', format: 'text' }],
+        rows: [{ metric: 'Cash' }],
+        wrap_headers: true,
+      },
     ],
   }, charts);
 
@@ -324,4 +331,36 @@ test('renderReportData hides flagged empty tops but keeps ranking data in a non-
   assert.ok(container.innerHTML.includes('Selected branch'), 'employee branch is named in the scope');
   assert.ok(container.innerHTML.includes('Kept Ranking Top'), 'ranking with data only in a non-default metric is kept');
   assert.ok(container.innerHTML.includes('Anchor Top'), 'unflagged empty table still renders as an anchor');
+  assert.equal(
+    (container.innerHTML.match(/reports-table--wrap-headers/g) || []).length,
+    1,
+    'only the flagged table wraps its headers',
+  );
+});
+
+test('only a chart flagged wide spans the whole chart grid', async (t) => {
+  globalThis.localStorage = new MemoryStorage();
+  globalThis.sessionStorage = new MemoryStorage();
+  const server = await createServer({
+    appType: 'custom',
+    logLevel: 'silent',
+    root: new URL('..', import.meta.url).pathname,
+    server: { middlewareMode: true },
+  });
+  t.after(() => server.close());
+  const { renderReportData } = await server.ssrLoadModule('/src/reports/renderers/generic.js');
+
+  const container = { innerHTML: '', querySelectorAll: () => [], querySelector: () => null };
+  renderReportData(container, {
+    source_status: 'ready',
+    charts: [
+      { id: 'plain', title: 'Plain chart', type: 'bar', labels: [], datasets: [] },
+      { id: 'truthy', title: 'Truthy chart', type: 'bar', labels: [], datasets: [], wide: 'yes' },
+      { id: 'spanning', title: 'Spanning chart', type: 'line', labels: [], datasets: [], wide: true },
+    ],
+  }, { clear() {}, render() {} });
+
+  const panels = container.innerHTML.split('<section').slice(1);
+  assert.equal(panels.length, 3);
+  assert.deepEqual(panels.map((panel) => panel.includes('reports-panel--span')), [false, false, true]);
 });

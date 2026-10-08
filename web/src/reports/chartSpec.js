@@ -91,3 +91,47 @@ export function axisValueFormat(spec, axisId = 'y') {
   const onAxis = datasets.find((dataset) => (dataset.axis || 'y') === axisId);
   return onAxis?.format || 'number';
 }
+
+function datasetsOnAxis(spec, axisId) {
+  return (spec?.datasets || []).filter((dataset) => (dataset.axis || 'y') === axisId);
+}
+
+// Rounded shares of one column may add up to a hair over 100 (33.3 + 33.3 + 33.4 = 100.0,
+// 33.4 + 33.4 + 33.3 = 100.1); that is rounding, not a value the axis should make room for.
+const STACKED_ROUNDING_TOLERANCE = 1;
+
+/**
+ * Fixed upper bound of a stacked axis whose every series is a share, or undefined to auto-scale.
+ *
+ * Only a stack of shares is pinned: its columns are parts of one whole, so the axis ending at
+ * 100 is what makes them comparable. A plain percent chart (ОПЗ %, growth) keeps auto-scaling —
+ * pinning it would flatten a series that lives between 5 and 30 — and a column that passes the
+ * ceiling unpins the axis rather than clip the very bar the reader came to see.
+ */
+export function axisMax(spec, axisId = 'y') {
+  if (spec?.stacked !== true) return undefined;
+  const onAxis = datasetsOnAxis(spec, axisId);
+  if (!onAxis.length || !onAxis.every((dataset) => dataset.format === 'percent')) return undefined;
+  const columnCount = Math.max(...onAxis.map((dataset) => (dataset.data || []).length));
+  for (let index = 0; index < columnCount; index += 1) {
+    const column = onAxis
+      .map((dataset) => dataset.data?.[index])
+      .filter((value) => shouldRenderReportDataLabel(value))
+      .map(Number);
+    const height = column.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
+    if (height > 100 + STACKED_ROUNDING_TOLERANCE) return undefined;
+  }
+  return 100;
+}
+
+/**
+ * Name shown in front of a tooltip value.
+ *
+ * An arc chart has one dataset and one segment per label, so the dataset's name would be
+ * the same on every segment ("Доля: 40%") and say nothing about which one is hovered.
+ */
+export function tooltipSeriesLabel(spec, type, { datasetIndex = 0, dataIndex = 0 } = {}) {
+  const dataset = spec?.datasets?.[datasetIndex] || {};
+  if (type === 'doughnut' || type === 'pie') return spec?.labels?.[dataIndex] ?? dataset.label;
+  return dataset.label;
+}

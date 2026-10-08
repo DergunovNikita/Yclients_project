@@ -6,6 +6,7 @@ import traceback
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from calendar import monthrange
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -30,6 +31,7 @@ from dashboard_service import (
     _pct_change,
     _physical_account_condition,
     _service_paid_filters,
+    _source_coverage_status,
     business_appointment_condition,
     financial_appointment_match_condition,
     fetch_extra_services,
@@ -43,8 +45,18 @@ from dashboard_service import (
     fetch_top_services,
     fetch_year_over_year_facts,
     day_window,
+    factual_branch_date,
     ReportingWindow,
     reporting_window_clause,
+)
+from payment_methods import (
+    REASON_BEYOND_PERIOD,
+    REASON_STARTS_MID_MONTH,
+    describe_months,
+    fetch_payment_breakdown,
+    format_day,
+    month_label,
+    short_month_label,
 )
 from models import (
     AccountCatalog,
@@ -118,6 +130,7 @@ REPORT_ORDER = (
     'month_return',
     'new_vs_returning_cross',
     'nps_dashboard',
+    'payment_methods',
     'peak_hours_site_vs_salon',
     'peak_load',
     'price_elasticity',
@@ -166,6 +179,7 @@ READY_REPORTS = {
     'losses_by_staff',
     'lost_clients_list',
     'new_vs_returning_cross',
+    'payment_methods',
     'peak_load',
     'retention_3_6_12',
     'return_priorities',
@@ -202,6 +216,7 @@ FINANCE_REPORTS = {
     'avg_check_dynamics',
     'day_overview',
     'financial_overview',
+    'payment_methods',
     'revenue_decomposition',
     'revenue_dynamics',
     'booking_channels',
@@ -261,6 +276,7 @@ TITLE_OVERRIDES = {
     'month_return': 'Возвратность месяц к месяцу',
     'new_vs_returning_cross': 'Новые и повторные клиенты',
     'nps_dashboard': 'NPS и отзывы',
+    'payment_methods': 'Формы оплаты',
     'peak_hours_site_vs_salon': 'Пиковые часы: сайт и салон',
     'peak_load': 'Пиковая загрузка',
     'price_elasticity': 'Эластичность цены',
@@ -433,7 +449,9 @@ def _filters_for(report_id: str, group: str, status: str) -> dict[str, bool]:
     return {
         'date_range': report_id != 'year_over_year',
         'branch': True,
-        'staff': group in {'team', 'services', 'clients', 'churn', 'goods', 'operations'} or report_id in READY_REPORTS,
+        # Branch-level totals by payment form have no per-employee reading.
+        'staff': report_id != 'payment_methods'
+        and (group in {'team', 'services', 'clients', 'churn', 'goods', 'operations'} or report_id in READY_REPORTS),
         'granularity': report_id in GRANULARITY_REPORTS,
         'compare': status == 'ready' and report_id in COMPARE_REPORTS,
     }
@@ -503,7 +521,17 @@ REPORT_REGISTRY = _build_registry()
 DEMO_UNAVAILABLE_REPORTS = frozenset({'year_over_year'})
 
 
-def fetch_report_registry(is_demo: bool = False, *, hide_financials: bool = False) -> list[dict[str, Any]]:
+# Reports that disclose branch-level payment totals; the caller's right to them is
+# `can_view_branch_payments`, which is stricter than the revenue gate.
+BRANCH_PAYMENT_REPORTS = frozenset({'payment_methods'})
+
+
+def fetch_report_registry(
+    is_demo: bool = False,
+    *,
+    hide_financials: bool = False,
+    hide_branch_payments: bool = False,
+) -> list[dict[str, Any]]:
     """Catalog of reports the caller can actually open.
 
     A card the role may not open is worse than no card: `/reports/data` answers 403 for it,
@@ -514,6 +542,7 @@ def fetch_report_registry(is_demo: bool = False, *, hide_financials: bool = Fals
         for report_id in REPORT_ORDER
         if not (is_demo and report_id in DEMO_UNAVAILABLE_REPORTS)
         and not (hide_financials and report_requires_financials(report_id))
+        and not (hide_branch_payments and report_id in BRANCH_PAYMENT_REPORTS)
     ]
 
 
@@ -620,6 +649,10 @@ async def _fetch_report_payload(
         return _missing_payload(base, definition)
     if definition.status == 'planned':
         return _planned_payload(base, definition)
+    if report_id == 'payment_methods':
+        # The report has no employee filter, and the roles that may open it are not clamped
+        # to a staff row, so a stray staff_id must not narrow the branch totals.
+        staff_id = None
     allowed_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
@@ -631,6 +664,8 @@ async def _fetch_report_payload(
     )
     if report_id == 'nps_dashboard':
         return await _nps_payload(db, base, definition, start, end, company_id, allowed_company_ids)
+    if report_id == 'payment_methods':
+        return await _payment_methods_payload(db, base, start, end, allowed_company_ids, factual_at)
     if report_id in GOODS_REPORTS:
         return await _goods_payload(
             db,
@@ -784,8 +819,16 @@ def _chart(
     chart_type: str,
     labels: list[str],
     datasets: list[dict[str, Any]],
+    *,
+    stacked: bool = False,
+    wide: bool = False,
 ) -> dict[str, Any]:
-    return {'id': chart_id, 'title': title, 'type': chart_type, 'labels': labels, 'datasets': datasets}
+    chart = {'id': chart_id, 'title': title, 'type': chart_type, 'labels': labels, 'datasets': datasets}
+    if stacked:
+        chart['stacked'] = True
+    if wide:
+        chart['wide'] = True
+    return chart
 
 
 def _table(
@@ -795,6 +838,7 @@ def _table(
     rows: list[dict[str, Any]],
     *,
     hide_when_empty: bool = False,
+    wrap_headers: bool = False,
 ) -> dict[str, Any]:
     table = {
         'id': table_id,
@@ -804,6 +848,8 @@ def _table(
     }
     if hide_when_empty:
         table['hide_when_empty'] = True
+    if wrap_headers:
+        table['wrap_headers'] = True
     return table
 
 
@@ -1955,6 +2001,285 @@ async def _financial_payload(
         'top_services': services,
     }
     return base
+
+
+async def _payment_methods_payload(
+    db: AsyncSession,
+    base: dict[str, Any],
+    start: date,
+    end: date,
+    company_ids: list[int],
+    factual_at: datetime,
+) -> dict[str, Any]:
+    breakdown = await fetch_payment_breakdown(db, start, end, company_ids, factual_at)
+    branches = breakdown['branches']
+    multi = len(branches) > 1
+    # Revenue includes top-ups, so the coverage verdict is the Overview's, not a new one.
+    source_status, missing_components = await _source_coverage_status(
+        db, start, end, None, None, company_ids_override=company_ids
+    )
+    base['missing_sources'] = sorted(missing_components)
+    if source_status == 'partial':
+        base['source_status'] = 'partial'
+    if not branches:
+        # Every branch of the selection is outside its reporting window for this period: there
+        # is no column to draw, and a table of one "Показатель" header reads as a broken report.
+        base['notes'].append({
+            'kind': 'warning',
+            'title': 'Нет данных',
+            'text': 'За выбранный период у филиала нет данных: он не входил в отчётность за эти даты.',
+        })
+        base['raw'] = {
+            'yandex_pay_applied': breakdown['yandex_pay_applied'],
+            'countable_months': breakdown['countable_months'],
+            'branches': [],
+        }
+        return base
+
+    def total_of(key: str) -> float | None:
+        values = [branch[key] for branch in branches if branch[key] is not None]
+        # `+ 0.0` keeps a cancelled-out sum from rounding to -0.0, which the SPA prints as "-0".
+        return round(sum(values), 2) + 0.0 if values else None
+
+    total = {
+        'revenue': total_of('revenue') or 0.0,
+        'cash': total_of('cash') or 0.0,
+        'cashless': total_of('cashless') or 0.0,
+        'yandex_pay': total_of('yandex_pay'),
+        'other': total_of('other') or 0.0,
+    }
+    forms = [('cash', 'Наличные'), ('cashless', 'Безналичные'), ('yandex_pay', 'Яндекс Пэй')]
+    if any(branch['other'] for branch in branches):
+        forms.append(('other', 'Прочие кассы'))
+
+    def share(value: float | None, revenue: float) -> float | None:
+        return round(value / revenue * 100, 2) if value is not None and revenue else None
+
+    def positive_or_none(value: float | None) -> float | None:
+        return value if value is not None and value >= 0 else None
+
+    columns = ([('total', 'Все филиалы')] if multi else []) + [
+        (f"company_{branch['company_id']}", branch['title']) for branch in branches
+    ]
+    column_values = ([total] if multi else []) + branches
+
+    def metric_row(label: str, key: str, as_share: bool) -> dict[str, Any]:
+        row: dict[str, Any] = {'metric': label}
+        for (column_key, _), values in zip(columns, column_values):
+            row[column_key] = share(values[key], values['revenue']) if as_share else values[key]
+        return row
+
+    base['cards'] = [
+        _card('Выручка', total['revenue'], MONEY_FORMAT),
+        _card('Доля наличных', share(total['cash'], total['revenue']), PERCENT_FORMAT),
+        _card('Доля безналичных', share(total['cashless'], total['revenue']), PERCENT_FORMAT),
+        _card('Доля Яндекс Пэй', share(total['yandex_pay'], total['revenue']), PERCENT_FORMAT),
+    ]
+    # The network column is last in the chart, first in the tables: bars read branch by branch.
+    chart_rows = branches + ([total] if multi else [])
+    chart_labels = [row['title'] for row in branches] + (['Все филиалы'] if multi else [])
+    base['charts'] = [
+        _chart(
+            'payment_shares_by_branch',
+            'Доли форм оплаты по филиалам',
+            'bar',
+            chart_labels,
+            [
+                {
+                    'label': label,
+                    'data': [share(values[key], values['revenue']) for values in chart_rows],
+                    'format': PERCENT_FORMAT,
+                }
+                for key, label in forms
+            ],
+            stacked=True,
+        ),
+        _chart(
+            'payment_shares_network',
+            'Структура выручки',
+            'doughnut',
+            [label for _, label in forms],
+            [{
+                'label': 'Доля',
+                # An arc is drawn from |value|, so a negative share (Yandex Pay above the cashless
+                # sum, flagged in the notes) would show up as a positive slice: left out here, and
+                # still negative in the tables.
+                'data': [positive_or_none(share(total[key], total['revenue'])) for key, _ in forms],
+                'format': PERCENT_FORMAT,
+            }],
+        ),
+    ]
+    if not total['revenue']:
+        # No revenue, no shares: both charts would be empty frames.
+        base['charts'] = []
+    # A trend needs two points; the last chart, across the whole grid, because twelve months do not fit half of it.
+    monthly = breakdown['monthly']
+    trend_drawn = bool(total['revenue']) and len(monthly) >= 2
+    if trend_drawn:
+        base['charts'].append(_chart(
+            'payment_shares_by_month',
+            'Доли форм оплаты по месяцам',
+            'line',
+            [short_month_label(row['month']) for row in monthly],
+            [
+                {
+                    'label': label,
+                    'data': [share(row[key], row['revenue']) for row in monthly],
+                    'format': PERCENT_FORMAT,
+                    'fill': False,
+                }
+                for key, label in forms
+            ],
+            wide=True,
+        ))
+    table_columns = [('metric', 'Показатель', 'text')]
+    # Shares first: the structure is what the report is read for, the roubles back it up.
+    # Branch titles are long column headers, so they wrap instead of stretching the table.
+    base['tables'] = [
+        _table(
+            'payment_shares',
+            'Доли форм оплаты',
+            table_columns + [(key, label, PERCENT_FORMAT) for key, label in columns],
+            [metric_row(label, key, True) for key, label in forms],
+            wrap_headers=True,
+        ),
+        _table(
+            'payment_amounts',
+            'Суммы по формам оплаты',
+            table_columns + [(key, label, MONEY_FORMAT) for key, label in columns],
+            [metric_row('Выручка', 'revenue', False)] + [metric_row(label, key, False) for key, label in forms],
+            wrap_headers=True,
+        ),
+    ]
+
+    base['notes'].append({
+        'kind': 'info',
+        'title': 'Методика',
+        'text': (
+            'Выручка считается так же, как на Обзоре: услуги завершённых визитов, товары и пополнения. '
+            'Кассы делятся по типу счёта YClients; счета без типа попадают в «Прочие кассы». '
+            'Яндекс Пэй вводится вручную за месяц с 1-го числа по дату «данные по» и вычитается из безналичных.'
+        ),
+    })
+    unapplied = [branch for branch in branches if not branch['yandex_pay_applied']]
+    if unapplied:
+        # The trend decides value by value, so it can carve Yandex Pay out where the tables above do not.
+        trend_note = (
+            ' На графике по месяцам Яндекс Пэй вычтен там, где введённая сумма укладывается в период.'
+            if trend_drawn and any(row['yandex_pay'] is not None for row in monthly)
+            else ''
+        )
+        base['notes'].append({
+            'kind': 'warning',
+            'title': 'Яндекс Пэй не учтён',
+            'text': f'{_unapplied_phrases(unapplied, branches, end)} Безналичные показаны целиком, как в YClients.{trend_note}',
+        })
+    missing = [branch for branch in branches if branch['yandex_pay_missing_months']]
+    if missing:
+        # A long period turns "every missing month of every branch" into a wall of text, so a
+        # branch with nothing entered is one name in one phrase, and the months are shown
+        # only where some were entered and the gap is the news.
+        untouched = [branch['title'] for branch in missing if branch['yandex_pay'] is None]
+        gaps = [
+            f"{branch['title']}: {describe_months(branch['yandex_pay_missing_months'])}"
+            for branch in missing
+            if branch['yandex_pay'] is not None
+        ]
+        phrases = gaps + ([f"Не введён ни за один месяц периода: {', '.join(untouched)}"] if untouched else [])
+        base['notes'].append({
+            'kind': 'warning',
+            'title': 'Яндекс Пэй введён не за все месяцы',
+            'text': '. '.join(phrases),
+        })
+    partial_note = _data_through_note(branches, end, factual_branch_date(factual_at))
+    if partial_note:
+        base['notes'].append(partial_note)
+    excess = [branch for branch in branches if branch['cashless'] < 0]
+    if excess:
+        base['notes'].append({
+            'kind': 'warning',
+            'title': 'Яндекс Пэй больше безналичных YClients',
+            'text': (
+                f"{', '.join(branch['title'] for branch in excess)}. "
+                'Проверьте введённую сумму или способ проведения оплат Яндекс Пэй в YClients.'
+            ),
+        })
+    # The table nets a branch over the whole period, so one month can dip below zero in the trend
+    # while every branch above stays positive; without a word the line reads as a broken report.
+    negative_months = [row['month'] for row in monthly if row['cashless'] < 0] if trend_drawn else []
+    if negative_months:
+        base['notes'].append({
+            'kind': 'warning',
+            'title': 'Яндекс Пэй больше безналичных YClients по месяцам',
+            'text': (
+                f"{describe_months(negative_months)}. "
+                'Проверьте введённую сумму или способ проведения оплат Яндекс Пэй в YClients.'
+            ),
+        })
+    base['raw'] = {
+        'yandex_pay_applied': breakdown['yandex_pay_applied'],
+        'countable_months': breakdown['countable_months'],
+        'branches': branches,
+    }
+    return base
+
+
+def _unapplied_phrases(unapplied: list[dict[str, Any]], branches: list[dict[str, Any]], end: date) -> str:
+    """Why Yandex Pay is not netted out of these branches' cashless, in the words the period's reader needs."""
+
+    def who(group: list[dict[str, Any]]) -> str:
+        return '' if len(group) == len(branches) else f"{', '.join(branch['title'] for branch in group)}: "
+
+    starts_mid = [b for b in unapplied if b['yandex_pay_unapplied_reason'] == REASON_STARTS_MID_MONTH]
+    beyond = [b for b in unapplied if b['yandex_pay_unapplied_reason'] == REASON_BEYOND_PERIOD]
+    phrases = []
+    if starts_mid:
+        phrases.append(
+            f'{who(starts_mid)}Яндекс Пэй вводится за месяц с 1-го числа, а период начинается позже — '
+            'выберите период с 1-го числа месяца.'
+        )
+    if beyond:
+        covered = ', '.join(
+            f"{b['title']} (данные по {format_day(date.fromisoformat(b['yandex_pay_unapplied_data_through']), end.year)})"
+            for b in beyond
+        )
+        phrases.append(
+            f'Введённая сумма Яндекс Пэй покрывает дни после конца периода: {covered}. '
+            'Продлите период хотя бы до этой даты.'
+        )
+    return ' '.join(phrases)
+
+
+def _data_through_note(
+    branches: list[dict[str, Any]],
+    end: date,
+    today: date,
+) -> dict[str, Any] | None:
+    """Info note for counted Yandex Pay values entered before their month was over, by month and date."""
+    partial: dict[str, dict[date, list[str]]] = {}
+    for branch in branches:
+        for month, iso in branch['yandex_pay_data_through'].items():
+            through = date.fromisoformat(iso)
+            month_start = date.fromisoformat(f'{month}-01')
+            if through < month_start.replace(day=monthrange(month_start.year, month_start.month)[1]):
+                partial.setdefault(month, {}).setdefault(through, []).append(branch['title'])
+    if not partial:
+        return None
+    lines = []
+    for month, by_day in sorted(partial.items()):
+        groups = [
+            f"{'данные по' if index == 0 else 'по'} {format_day(through, end.year)} — {', '.join(titles)}"
+            for index, (through, titles) in enumerate(sorted(by_day.items(), reverse=True))
+        ]
+        lines.append(f"{month_label(month)}: {'; '.join(groups)}")
+    text = '. '.join(lines) + '.'
+    revenue_through = min(end, today)
+    if any(through < revenue_through for by_day in partial.values() for through in by_day):
+        text += (
+            f' Выручка YClients посчитана по {format_day(revenue_through, end.year)}, поэтому доля Яндекс Пэй '
+            'за дни после даты «данные по» может быть занижена.'
+        )
+    return {'kind': 'info', 'title': 'Яндекс Пэй внесён не за весь месяц', 'text': text}
 
 
 def _services_table(table_id: str, title: str, rows: list[dict[str, Any]]) -> dict[str, Any]:

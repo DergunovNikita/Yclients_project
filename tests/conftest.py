@@ -27,6 +27,7 @@ from models import (
     GoodTransaction,
     Group,
     ManualFactMetric,
+    ManualPaymentAmount,
     PlanBranchSetting,
     PlanMetric,
     PlanStaffInput,
@@ -96,6 +97,7 @@ PUBLIC_TABLES = [
     PlanBranchSetting.__table__,
     PlanStaffInput.__table__,
     ManualFactMetric.__table__,
+    ManualPaymentAmount.__table__,
 ]
 
 

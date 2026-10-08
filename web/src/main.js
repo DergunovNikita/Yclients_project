@@ -65,8 +65,18 @@ import { branchesForPeriod } from './reportingWindow.js';
 // guard, so a financials_hidden field (e.g. revenue.service_revenue for the manager default,
 // see AGENTS.md) rendered as a misleading "0 ₽" instead of admitting it isn't shown. These
 // versions render "—" for null/undefined, same as Reports already did — see format.test.mjs.
-import { formatDate, formatDecimal, formatMoney, formatNumber } from './reports/format.js';
+import { formatDate, formatDecimal, formatMoney, formatMoneyExact, formatNumber } from './reports/format.js';
 import { canEnterManualFacts, entersManualFactsForSelf } from './manualFactAccess.js';
+import { canViewBranchPayments } from './branchPaymentsAccess.js';
+import {
+  UNREADABLE_DATE,
+  buildYandexPayItems,
+  syncYandexPayDate,
+  yandexPayDateKey,
+  yandexPayDraftKey,
+  yandexPayMonthStart,
+  yandexPayTotal,
+} from './yandexPayInput.js';
 import { BRANCH_TIME_ZONE, parseServerInstant } from './timestamps.js';
 import { initReports } from './reports/index.js';
 import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
@@ -144,6 +154,10 @@ const els = {
   opzFactMeta: document.getElementById('opz-fact-meta'),
   opzFactSelfHint: document.getElementById('opz-fact-self-hint'),
   opzFactSave: document.getElementById('opz-fact-save'),
+  yandexPayEditor: document.getElementById('yandex-pay-editor'),
+  yandexPayMeta: document.getElementById('yandex-pay-meta'),
+  yandexPayFutureHint: document.getElementById('yandex-pay-future-hint'),
+  yandexPaySave: document.getElementById('yandex-pay-save'),
   servicesTable: document.getElementById('services-table'),
   extraServicesTable: document.getElementById('extra-services-table'),
   revenueChart: document.getElementById('revenue-chart'),
@@ -156,6 +170,7 @@ const els = {
   serviceManagementView: document.getElementById('service-management-view'),
   reviewFactsView: document.getElementById('review-facts-view'),
   opzFactsView: document.getElementById('opz-facts-view'),
+  yandexPayView: document.getElementById('yandex-pay-view'),
   reportsView: document.getElementById('reports-view'),
   viewLinks: [...document.querySelectorAll('[data-view-link]')],
   planSettingsMonth: document.getElementById('plan-settings-month'),
@@ -229,12 +244,20 @@ const filterEls = {
     staff: document.getElementById('opz-fact-staff'),
     load: document.getElementById('opz-fact-load'),
   },
+  // No worker filter: the amount belongs to a branch and a month, not to a person.
+  yandexPay: {
+    month: document.getElementById('yandex-pay-month'),
+    branch: document.getElementById('yandex-pay-branch'),
+    load: document.getElementById('yandex-pay-load'),
+  },
 };
 
 const customFilterDropdowns = {};
 Object.values(filterEls).forEach((filter) => {
   customFilterDropdowns[filter.branch.id] = enhanceSelect(filter.branch, { placeholder: t('dash.allBranches') });
-  customFilterDropdowns[filter.staff.id] = enhanceSelect(filter.staff, { placeholder: t('dash.allWorkers') });
+  if (filter.staff) {
+    customFilterDropdowns[filter.staff.id] = enhanceSelect(filter.staff, { placeholder: t('dash.allWorkers') });
+  }
 });
 
 const charts = {
@@ -277,6 +300,13 @@ let opzFactSavedData = null;
 let opzFactDirty = false;
 let opzFactLoadedFilters = null;
 let opzFactSaving = false;
+let yandexPayRows = [];
+let yandexPayEditable = true;
+let yandexPaySavedSnapshot = '';
+let yandexPaySavedData = null;
+let yandexPayDirty = false;
+let yandexPayLoadedFilters = null;
+let yandexPaySaving = false;
 let serviceManagementData = { rows: [], groups: [], categories: [] };
 let serviceManagementSavedData = null;
 let serviceManagementSavedSnapshot = '';
@@ -297,6 +327,7 @@ const viewRequestScopes = {
   serviceManagement: createLatestRequestScope(),
   reviewFacts: createLatestRequestScope(),
   opzFacts: createLatestRequestScope(),
+  yandexPayFacts: createLatestRequestScope(),
   branches: createLatestRequestScope(),
   syncStatus: createLatestRequestScope(),
 };
@@ -336,6 +367,7 @@ function hasProtectedDirtyChanges() {
     (activeView === 'planSettings' && planSettingsDirty)
     || (activeView === 'reviewFacts' && reviewFactDirty)
     || (activeView === 'opzFacts' && opzFactDirty)
+    || (activeView === 'yandexPayFacts' && yandexPayDirty)
   );
 }
 
@@ -344,6 +376,7 @@ function protectedSavePending() {
     (activeView === 'planSettings' && planSettingsSaving)
     || (activeView === 'reviewFacts' && reviewFactSaving)
     || (activeView === 'opzFacts' && opzFactSaving)
+    || (activeView === 'yandexPayFacts' && yandexPaySaving)
   );
 }
 
@@ -361,6 +394,11 @@ function discardProtectedChanges() {
     restoreOpzFactFilters();
     if (opzFactSavedData) renderOpzFactEditor(JSON.parse(JSON.stringify(opzFactSavedData)));
     else setOpzFactDirty(false);
+  }
+  if (activeView === 'yandexPayFacts') {
+    restoreYandexPayFilters();
+    if (yandexPaySavedData) renderYandexPayEditor(JSON.parse(JSON.stringify(yandexPaySavedData)));
+    else setYandexPayDirty(false);
   }
 }
 
@@ -380,6 +418,8 @@ function updateFloatingEditorSave() {
     reviewFactSaving,
     opzFactDirty,
     opzFactSaving,
+    yandexPayDirty,
+    yandexPaySaving,
     isDemo: document.body.classList.contains('demo-mode'),
   });
   els.floatingEditorSave.hidden = !state.visible;
@@ -408,6 +448,7 @@ function dashboardPath(view) {
     serviceManagement: '/#services',
     reviewFacts: '/#review-facts',
     opzFacts: '/#opz-facts',
+    yandexPayFacts: '/#yandex-pay',
     reports: '/reports',
   };
   return paths[view] || paths.overview;
@@ -468,6 +509,10 @@ const SETTINGS_VIEWS = new Set(['planSettings', 'serviceManagement']);
 // Manual facts are not settings: a staff member enters their own value and the branch
 // manager corrects it, so these two tabs follow the server-side scope instead of the role.
 const MANUAL_FACT_VIEWS = new Set(['reviewFacts', 'opzFacts']);
+// Branch-wide money by payment form: not a settings tab and not a per-person fact, so it
+// has its own server-side flag (`branch_payments_access`) and not even every manual-fact
+// role has it.
+const BRANCH_PAYMENT_VIEWS = new Set(['yandexPayFacts']);
 
 function hasSettingsAdminAccess() {
   if (apiKey && !currentUser) return true;
@@ -482,8 +527,13 @@ function hasManualFactAccess() {
   return canEnterManualFacts(currentUser, manualFactAccessOptions());
 }
 
+function hasBranchPaymentsAccess() {
+  return canViewBranchPayments(currentUser, manualFactAccessOptions());
+}
+
 function canAccessView(view) {
   if (MANUAL_FACT_VIEWS.has(view)) return hasManualFactAccess();
+  if (BRANCH_PAYMENT_VIEWS.has(view)) return hasBranchPaymentsAccess();
   return !SETTINGS_VIEWS.has(view) || hasSettingsAdminAccess();
 }
 
@@ -508,6 +558,9 @@ function applyDashboardPermissions() {
   MANUAL_FACT_VIEWS.forEach((view) => setViewLinksHidden(view, hideManualFacts));
   els.reviewFactsView.hidden = hideManualFacts;
   els.opzFactsView.hidden = hideManualFacts;
+  const hideBranchPayments = !hasBranchPaymentsAccess();
+  BRANCH_PAYMENT_VIEWS.forEach((view) => setViewLinksHidden(view, hideBranchPayments));
+  els.yandexPayView.hidden = hideBranchPayments;
   applyManualFactSelfScope();
 }
 
@@ -726,6 +779,9 @@ function setManualFactDefaultMonths() {
   const month = monthValue(new Date(pageOpenedAt));
   filterEls.reviewFacts.month.value = month;
   filterEls.opzFacts.month.value = month;
+  filterEls.yandexPay.month.value = month;
+  // A month that has not started has nothing to enter; the server refuses it too.
+  filterEls.yandexPay.month.max = month;
 }
 
 function overviewPresetRange(preset) {
@@ -3010,6 +3066,239 @@ async function saveOpzFactEditor() {
   }
 }
 
+function yandexPayInputs() {
+  return [...els.yandexPayEditor.querySelectorAll('input[data-company-id]')];
+}
+
+function yandexPayRawValues() {
+  return new Map(yandexPayInputs().map((input) => [input.dataset.companyId, input.value]));
+}
+
+function yandexPayDateInputs() {
+  return [...els.yandexPayEditor.querySelectorAll('input[data-through-company-id]')];
+}
+
+function yandexPayRawDates() {
+  return new Map(yandexPayDateInputs().map((input) => [
+    input.dataset.throughCompanyId,
+    input.validity?.badInput ? UNREADABLE_DATE : input.value,
+  ]));
+}
+
+function renderYandexPayEditor(data) {
+  yandexPayRows = data?.rows || [];
+  yandexPayEditable = data?.editable !== false;
+  els.yandexPayFutureHint.hidden = yandexPayEditable;
+
+  const monthStart = yandexPayMonthStart(yandexPayFilters().month);
+  if (!yandexPayRows.length) {
+    els.yandexPayEditor.innerHTML = `<div class="empty compact">${t('dash.yandexPayNoBranches')}</div>`;
+  } else {
+    els.yandexPayEditor.innerHTML = `
+      <div class="table-scroll manual-fact-scroll">
+        <table class="manual-fact-table yandex-pay-table">
+          <thead>
+            <tr>
+              <th>${t('dash.branch')}</th>
+              <th class="number">${t('dash.yandexPayCashless')}</th>
+              <th class="number">${t('dash.yandexPayAmount')}</th>
+              <th>${t('dash.yandexPayDataThrough')}</th>
+              <th>${t('dash.manualFactAuthor')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${yandexPayRows
+              .map((row) => {
+                const counted = row.counted !== false;
+                const title = row.company_title || t('dash.branchFallbackWithId', { id: row.company_id });
+                const mark = counted
+                  ? ''
+                  : ` <span class="meta">· ${escapeHtml(t('dash.yandexPayNotCounted'))}</span>`;
+                return `
+                  <tr class="${counted ? '' : 'is-muted'}">
+                    <td>${escapeHtml(title)}${mark}</td>
+                    <td class="number">${escapeHtml(formatMoneyExact(row.cashless_yclients))}</td>
+                    <td class="number">
+                      <input
+                        type="text"
+                        inputmode="decimal"
+                        autocomplete="off"
+                        data-company-id="${escapeHtml(row.company_id)}"
+                        value="${escapeHtml(formatInputNumber(row.value))}"
+                        ${yandexPayEditable ? '' : 'disabled'}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="date"
+                        autocomplete="off"
+                        data-through-company-id="${escapeHtml(row.company_id)}"
+                        aria-label="${escapeHtml(t('dash.yandexPayDataThrough'))}: ${escapeHtml(title)}"
+                        value="${escapeHtml(row.data_through || '')}"
+                        ${monthStart ? `min="${escapeHtml(monthStart)}"` : ''}
+                        ${row.max_data_through ? `max="${escapeHtml(row.max_data_through)}"` : ''}
+                        ${yandexPayEditable ? '' : 'disabled'}
+                      />
+                    </td>
+                    <td class="meta">${manualFactAuthorCell(row)}</td>
+                  </tr>
+                `;
+              })
+              .join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  yandexPaySavedData = JSON.parse(JSON.stringify(data || { rows: [] }));
+  yandexPayLoadedFilters = yandexPayFilters();
+  yandexPaySavedSnapshot = yandexPayDraftSnapshot();
+  refreshYandexPayTotal();
+  setYandexPayDirty(false);
+}
+
+// The total is what the reports will count once saved, so it follows the cells while typing.
+function refreshYandexPayTotal() {
+  els.yandexPayMeta.textContent = t('dash.yandexPayMeta', {
+    branches: yandexPayRows.length,
+    total: formatMoneyExact(yandexPayTotal(yandexPayRows, yandexPayRawValues())),
+  });
+}
+
+function yandexPayFilters() {
+  return { month: filterEls.yandexPay.month.value, branch: filterEls.yandexPay.branch.value };
+}
+
+function restoreYandexPayFilters() {
+  if (!yandexPayLoadedFilters) return;
+  filterEls.yandexPay.month.value = yandexPayLoadedFilters.month;
+  filterEls.yandexPay.branch.value = yandexPayLoadedFilters.branch;
+  customFilterDropdowns[filterEls.yandexPay.branch.id]?.refresh();
+}
+
+// Typing an amount into an empty row proposes the date the server would pick anyway, so the
+// manager sees it before saving; emptying the amount empties the date, as no value has no date.
+function fillYandexPayDate(amountInput) {
+  const id = amountInput.dataset.companyId;
+  const dateInput = yandexPayDateInputs().find((input) => input.dataset.throughCompanyId === id);
+  if (!dateInput || dateInput.validity?.badInput) return;
+  const row = yandexPayRows.find((item) => String(item.company_id) === id);
+  dateInput.value = syncYandexPayDate(amountInput.value, dateInput.value, row?.default_data_through);
+}
+
+function yandexPayDraftSnapshot() {
+  const dates = yandexPayRawDates();
+  return JSON.stringify(yandexPayInputs().map((input) => [
+    input.dataset.companyId,
+    yandexPayDraftKey(input.value),
+    yandexPayDateKey(dates.get(input.dataset.companyId)),
+  ]));
+}
+
+function setYandexPayDirty(isDirty) {
+  yandexPayDirty = isDirty;
+  els.yandexPaySave.disabled = yandexPaySaving || !yandexPayRows.length || !yandexPayEditable;
+  updateFloatingEditorSave();
+}
+
+function updateYandexPayDirtyFromForm() {
+  setYandexPayDirty(yandexPayDraftSnapshot() !== yandexPaySavedSnapshot);
+}
+
+async function loadYandexPayEditor({ signal = null } = {}) {
+  const filters = yandexPayFilters();
+  const payload = await fetchJson('/dashboard/payments/yandex_pay', {
+    month: filters.month,
+    company_id: filters.branch,
+  }, {
+    retry: () => loadYandexPayFacts(),
+    signal,
+  });
+  renderYandexPayEditor(payload.data);
+}
+
+async function loadYandexPayFacts() {
+  const filter = filterEls.yandexPay;
+  const request = beginViewRequest('yandexPayFacts');
+  clearError();
+  setFilterLoading(filter, true);
+
+  const syncStatus = loadSyncStatus();
+  try {
+    await loadYandexPayEditor({ signal: request.signal });
+    if (!request.isCurrent()) return;
+    viewsWithData.add('yandexPayFacts');
+    clearError();
+    setLoadedApiState(null, { empty: yandexPayRows.length === 0 });
+    await syncStatus;
+  } catch (error) {
+    if (isSupersededRequest(error) || !request.isCurrent()) return;
+    showError(error.message, { apiStatus: error.apiStatus, retry: () => loadYandexPayFacts() });
+  } finally {
+    if (request.isCurrent()) {
+      setFilterLoading(filter, false);
+      request.finish();
+    }
+  }
+}
+
+function yandexPayInvalidMessage(error, row) {
+  const branch = row.company_title || t('dash.branchFallbackWithId', { id: row.company_id });
+  const keys = {
+    range: 'dash.yandexPayInvalidRange',
+    precision: 'dash.yandexPayInvalidPrecision',
+    dateRequired: 'dash.yandexPayInvalidDateRequired',
+    dateFormat: 'dash.yandexPayInvalidDateFormat',
+    dateRange: 'dash.yandexPayInvalidDateRange',
+  };
+  return t(keys[error] || 'dash.yandexPayInvalidFormat', { branch });
+}
+
+async function saveYandexPayEditor() {
+  if (yandexPaySaving || !yandexPayRows.length || !yandexPayEditable) return;
+  // The month the rows were loaded for, not the picker: it may have moved without a reload.
+  const filters = yandexPayLoadedFilters || yandexPayFilters();
+  const built = buildYandexPayItems(yandexPayRows, yandexPayRawValues(), yandexPayRawDates(), filters.month);
+  if (built.error) {
+    showError(yandexPayInvalidMessage(built.error, built.row), { apiStatus: 'ready' });
+    return;
+  }
+  yandexPaySaving = true;
+  updateFloatingEditorSave();
+  clearError();
+  els.yandexPaySave.disabled = true;
+  els.yandexPaySave.textContent = t('common.saving');
+  setApiState(t('dash.apiSaving'), 'warn');
+
+  try {
+    const payload = await postJson('/dashboard/payments/yandex_pay', {
+      month: filters.month,
+      company_id: filters.branch ? Number(filters.branch) : null,
+      items: built.items,
+    });
+    renderYandexPayEditor(payload.data);
+    setApiState(t('dash.apiConnected'), 'ok');
+  } catch (error) {
+    if (error.status === 409) {
+      // Someone saved the same month between our load and our save. Their value wins; what we
+      // typed is not merged in, because the sum of two people's edits is nobody's intent.
+      try {
+        await loadYandexPayEditor();
+        showError(t('dash.yandexPayConflict'), { apiStatus: 'ready' });
+      } catch (reloadError) {
+        showError(reloadError.message, { apiStatus: reloadError.apiStatus, retry: () => loadYandexPayFacts() });
+      }
+    } else {
+      showError(error.message, { apiStatus: error.apiStatus, retry: () => saveYandexPayEditor() });
+    }
+  } finally {
+    yandexPaySaving = false;
+    els.yandexPaySave.textContent = t('dash.saveFact');
+    setYandexPayDirty(yandexPayDirty);
+  }
+}
+
 // Which window the deltas are measured against depends on the preset, and the same dates
 // picked two ways can land on two different baselines — so show it rather than let the
 // reader guess.
@@ -3176,11 +3465,12 @@ function filterForView(view) {
   if (view === 'plan') return filterEls.plan;
   if (view === 'reviewFacts') return filterEls.reviewFacts;
   if (view === 'opzFacts') return filterEls.opzFacts;
+  if (view === 'yandexPayFacts') return filterEls.yandexPay;
   return filterEls.overview;
 }
 
 async function ensureStaffForView(view) {
-  if (view === 'planSettings' || view === 'serviceManagement' || view === 'reports') return;
+  if (view === 'planSettings' || view === 'serviceManagement' || view === 'reports' || view === 'yandexPayFacts') return;
   await loadStaff(filterForView(view));
 }
 
@@ -3238,6 +3528,7 @@ function viewFromLocation() {
   else if (window.location.hash === '#services') view = 'serviceManagement';
   else if (window.location.hash === '#review-facts') view = 'reviewFacts';
   else if (window.location.hash === '#opz-facts') view = 'opzFacts';
+  else if (window.location.hash === '#yandex-pay') view = 'yandexPayFacts';
   return accessibleView(view);
 }
 
@@ -3269,6 +3560,7 @@ function setActiveView(view) {
   els.serviceManagementView.classList.toggle('active', view === 'serviceManagement');
   els.reviewFactsView.classList.toggle('active', view === 'reviewFacts');
   els.opzFactsView.classList.toggle('active', view === 'opzFacts');
+  els.yandexPayView.classList.toggle('active', view === 'yandexPayFacts');
   els.reportsView.classList.toggle('active', view === 'reports');
   els.viewLinks.forEach((link) => {
     const isActive = link.dataset.viewLink === view;
@@ -3283,6 +3575,7 @@ function setActiveView(view) {
     serviceManagement: t('dash.serviceManagementSubhead'),
     reviewFacts: t('dash.reviewFactsSubhead'),
     opzFacts: t('dash.opzFactsSubhead'),
+    yandexPayFacts: t('dash.yandexPaySubhead'),
     reports: t('dash.reportsSubhead'),
   };
   els.periodLabel.textContent = labels[view] || labels.overview;
@@ -3388,6 +3681,8 @@ async function loadCurrentView() {
     await loadReviewFacts();
   } else if (activeView === 'opzFacts') {
     await loadOpzFacts();
+  } else if (activeView === 'yandexPayFacts') {
+    await loadYandexPayFacts();
   } else if (activeView === 'reports') {
     await reportsController?.loadFromLocation();
   } else {
@@ -3700,6 +3995,7 @@ els.floatingEditorSaveButton.addEventListener('click', () => {
   if (activeView === 'planSettings') savePlanSettings();
   if (activeView === 'reviewFacts') saveReviewFactEditor();
   if (activeView === 'opzFacts') saveOpzFactEditor();
+  if (activeView === 'yandexPayFacts') saveYandexPayEditor();
 });
 els.reviewFactEditor.addEventListener('input', () => updateReviewFactDirtyFromForm());
 filterEls.opzFacts.load.addEventListener('click', () => protectedChangesGuard.run(() => loadOpzFacts()));
@@ -3734,6 +4030,36 @@ els.opzFactEditor.addEventListener('input', () => {
   refreshOpzFactTotals();
   updateOpzFactDirtyFromForm();
 });
+filterEls.yandexPay.load.addEventListener('click', () => protectedChangesGuard.run(() => loadYandexPayFacts()));
+filterEls.yandexPay.month.addEventListener('change', async () => {
+  const requestedMonth = filterEls.yandexPay.month.value;
+  // A half-typed month has no data to ask for; leave the editor on the month it holds.
+  if (!requestedMonth) {
+    restoreYandexPayFilters();
+    return;
+  }
+  const changed = await protectedChangesGuard.run(async () => {
+    filterEls.yandexPay.month.value = requestedMonth;
+    await loadYandexPayFacts();
+  });
+  if (!changed) restoreYandexPayFilters();
+});
+filterEls.yandexPay.branch.addEventListener('change', async () => {
+  const requestedBranch = filterEls.yandexPay.branch.value;
+  const changed = await protectedChangesGuard.run(async () => {
+    filterEls.yandexPay.branch.value = requestedBranch;
+    customFilterDropdowns[filterEls.yandexPay.branch.id]?.refresh();
+    await loadYandexPayFacts();
+  });
+  if (!changed) restoreYandexPayFilters();
+});
+els.yandexPaySave.addEventListener('click', () => saveYandexPayEditor());
+els.yandexPayEditor.addEventListener('input', (event) => {
+  const amount = event.target.closest?.('input[data-company-id]');
+  if (amount) fillYandexPayDate(amount);
+  refreshYandexPayTotal();
+  updateYandexPayDirtyFromForm();
+});
 els.planSettingsLoad.addEventListener('click', () => reloadPlanSettingsMonth());
 // The branch list depends on the period, so every filter re-renders its own options when
 // its dates move. Registered after the month handlers above, which set start/end first.
@@ -3744,7 +4070,7 @@ Object.values(filterEls).forEach((filter) => {
       renderBranchOptions(filter);
       // The employee list is scoped by the same window, so it is stale the moment the
       // period moves: a branch that left takes its people out of the filter with it.
-      loadStaff(filter, { force: true });
+      if (filter.staff) loadStaff(filter, { force: true });
     }));
 });
 
@@ -3989,6 +4315,8 @@ window.addEventListener('beforeunload', (event) => {
     && !reviewFactSaving
     && !opzFactDirty
     && !opzFactSaving
+    && !yandexPayDirty
+    && !yandexPaySaving
     && !serviceManagementDirty
     && !serviceManagementMutationPending
   ) return;

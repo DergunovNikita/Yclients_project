@@ -53,7 +53,7 @@ function renderCharts(charts = []) {
   return `
     <div class="reports-chart-grid">
       ${charts.map((chart) => `
-        <section class="reports-panel">
+        <section class="reports-panel${chart.wide === true ? ' reports-panel--span' : ''}">
           <div class="reports-panel__head">
             <h3>${escapeHtml(chart.title || t('reports.chart'))}</h3>
           </div>
@@ -111,7 +111,7 @@ function renderTables(tables = []) {
         </div>
         ${(rows.length || ranking) ? `
           <div class="reports-table-scroll"${rows.length ? '' : ' hidden'}>
-            <table class="reports-table">
+            <table class="reports-table${table.wrap_headers ? ' reports-table--wrap-headers' : ''}">
               <thead>
                 <tr>
                   ${columns.map((column) => `<th class="${column.format !== 'text' && column.format !== 'date' ? 'number' : ''}">${escapeHtml(column.label)}</th>`).join('')}

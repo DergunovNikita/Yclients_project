@@ -16,6 +16,7 @@ import {
   reportLinkSearch,
   reportPeriodIsValid,
   reportRequestFilters,
+  reportStaffApplies,
   staffSelectionForOptions,
   reportSearchParams,
   chartTooltipValue,
@@ -660,4 +661,25 @@ test('a report that hides the period still publishes the filters the user did pi
   const published = reportLinkSearch({ filters: inverted, currentSearch, periodApplies: false });
   assert.equal(published.includes('company_id=7'), true);
   assert.equal(published.includes('start_date=2026-09-05'), true);
+});
+
+test('a report without a staff filter neither asks for one nor links to one', () => {
+  assert.equal(reportStaffApplies({ staff: false }), false);
+  assert.equal(reportStaffApplies({ staff: true }), true);
+  // Metadata that predates the flag keeps the filter.
+  assert.equal(reportStaffApplies({}), true);
+  assert.equal(reportStaffApplies(undefined), true);
+
+  const inherited = { start_date: '2026-09-01', end_date: '2026-09-30', company_id: '7', staff_id: '42' };
+  assert.equal(reportRequestFilters({ filters: inherited, staffApplies: false }).staff_id, '');
+  assert.equal(reportRequestFilters({ filters: inherited }).staff_id, '42');
+  assert.equal(reportRequestFilters({ filters: inherited, staffApplies: false }).company_id, '7');
+  const both = reportRequestFilters({
+    filters: inherited,
+    staffApplies: false,
+    periodApplies: false,
+    fallbackPeriod: { start: '2026-08-01', end: '2026-08-31' },
+  });
+  assert.equal(both.staff_id, '');
+  assert.equal(both.start_date, '2026-08-01');
 });

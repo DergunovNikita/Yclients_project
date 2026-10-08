@@ -61,6 +61,17 @@ test('a financials_hidden field renders as an em dash, never a misleading zero',
   assert.equal(format.formatDecimal(0), '0');
 });
 
+test('exact money keeps kopecks where whole roubles would hide them', async (t) => {
+  const { format, server } = await loadFormat();
+  t.after(() => server.close());
+
+  for (const missing of [undefined, null, '']) assert.equal(format.formatMoneyExact(missing), '—');
+  assert.equal(format.formatMoneyExact(0), '0 ₽');
+  assert.match(format.formatMoneyExact(1250.5), /1.250,5 ₽|1,250\.5 ₽|1\s250,5 ₽/);
+  assert.equal(format.formatMoney(1250.5), format.formatMoney(1251));
+  assert.notEqual(format.formatMoneyExact(1250.5), format.formatMoneyExact(1251));
+});
+
 test('main.js uses the shared formatters rather than redefining them', async () => {
   // A wiring assertion, and an honest proxy for a call-site test rather than the real
   // thing. main.js exports nothing and calls init() at import, so importing it in node
