@@ -6129,6 +6129,7 @@ async def _staff_fact_components_by_branch(
                 'revenue': revenue,
                 'clients': denominator,
                 'avg_check_denominator': denominator,
+                'extra_services_denominator': denominator,
                 'opz_qty': barber_opz_by_staff.get(staff_id, 0.0),
             }
             values.update(service_groups_by_staff.get(staff_id, {}))

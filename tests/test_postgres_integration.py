@@ -2,7 +2,7 @@ import os
 from datetime import date, datetime, time
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -10,7 +10,8 @@ from sqlalchemy.orm import sessionmaker
 import dashboard_service
 import sync_orchestrator
 import sync_worker
-from database import Database, run_migrations
+from database import Database
+from scripts.bootstrap_db import bootstrap_database
 from sync_control import SyncControlService
 from sync_jobs import SyncJobService
 from models import (
@@ -24,6 +25,7 @@ from models import (
     Staff,
     StaffSchedule,
     SyncJob,
+    SyncRun,
     SyncSourceState,
     Transaction,
 )
@@ -36,12 +38,14 @@ pytestmark = pytest.mark.skipif(not TEST_DATABASE_URL, reason='TEST_DATABASE_URL
 
 @pytest.fixture
 def pg_session_factory():
-    engine = create_engine(TEST_DATABASE_URL, future=True)
+    database = _bind_database_to_test_url()
+    engine = database.engine
     with engine.begin() as conn:
         conn.execute(text('DROP SCHEMA IF EXISTS public CASCADE'))
         conn.execute(text('CREATE SCHEMA public'))
         conn.execute(text('DROP SCHEMA IF EXISTS system CASCADE'))
-    run_migrations(TEST_DATABASE_URL)
+    # Same path migrate.py takes on an empty database: replaying the chain from 0001 is unsupported.
+    bootstrap_database(database)
     session_local = sessionmaker(bind=engine)
     try:
         yield session_local
@@ -289,6 +293,11 @@ def test_worker_processes_queued_job(pg_session_factory, monkeypatch):
     service = SyncJobService()
     session = pg_session_factory()
     try:
+        # sync_jobs.run_id is a real foreign key: the faked run has to exist.
+        run = SyncRun(trigger_type='pytest', mode='incremental', status='success', started_at=datetime.now())
+        session.add(run)
+        session.commit()
+        run_id = run.id
         job = service.enqueue_job(session, 'incremental', 'pytest')
     finally:
         session.close()
@@ -301,14 +310,14 @@ def test_worker_processes_queued_job(pg_session_factory, monkeypatch):
             return self._session_factory()
 
     monkeypatch.setattr(sync_worker, 'init_database', lambda *args, **kwargs: BoundDatabase(pg_session_factory))
-    monkeypatch.setattr(sync_worker, 'run_sync_job', lambda **kwargs: {'status': 'success', 'run_id': 77})
+    monkeypatch.setattr(sync_worker, 'run_sync_job', lambda **kwargs: {'status': 'success', 'run_id': run_id})
     assert sync_worker.process_next_job() is True
 
     session = pg_session_factory()
     try:
         saved = session.get(SyncJob, job.id)
         assert saved.status == 'success'
-        assert saved.run_id == 77
+        assert saved.run_id == run_id
         assert saved.finished_at is not None
     finally:
         session.close()
@@ -322,7 +331,9 @@ async def test_postgres_administrator_attribution_uses_local_shifts_and_role_per
     engine = create_async_engine(async_url)
     try:
         async with AsyncSession(engine) as db:
-            db.add_all([
+            # One flush per row: without relationship() between these models the unit of work
+            # does not order inserts by foreign key, and PostgreSQL enforces them.
+            for row in [
                 Group(id=1, title='G1'),
                 Company(
                     id=1,
@@ -407,8 +418,9 @@ async def test_postgres_administrator_attribution_uses_local_shifts_and_role_per
                     period_end=date(2025, 12, 31),
                     synced_at=datetime(2025, 12, 31),
                 ),
-            ])
-            await db.flush()
+            ]:
+                db.add(row)
+                await db.flush()
             for appointment_id, appointment_date, appointment_datetime, master_id, qty in (
                 (1, date(2025, 1, 10), datetime(2025, 1, 10, 7, 30), 1, 2),
                 (2, date(2025, 2, 10), datetime(2025, 2, 10, 7, 30), 2, 5),
