@@ -83,7 +83,10 @@ function clearSensitivePage() {
 }
 
 function beginSessionTransition(destination = 'reload', loginPath = '/login.html') {
-  if (sessionTransitionStarted || typeof window === 'undefined') return;
+  // The login page holds no session data to protect, and wiping it is what broke sign-in: a stale
+  // csrf cookie made its focus probe fail, the page blanked itself and reloaded as
+  // /login.html?return_to=/login.html, so the next successful login returned to the login page.
+  if (sessionTransitionStarted || typeof window === 'undefined' || isLoginPage()) return;
   sessionTransitionStarted = true;
   clearSensitivePage();
   if (destination === 'login') {
@@ -212,7 +215,9 @@ export function safeReturnTo(value) {
   if (!raw || raw.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(raw)) {
     return '/';
   }
-  return raw.startsWith('/') ? raw : '/';
+  if (!raw.startsWith('/')) return '/';
+  // Returning to the login page after a successful login reads as "the button did nothing".
+  return normalizedPath(raw).endsWith('/login.html') ? '/' : raw;
 }
 
 export function loginPathWithReturnTo(loginPath = '/login.html', returnTo = currentReturnTo()) {
@@ -393,7 +398,7 @@ export function wait(ms) {
 }
 
 export async function revalidateSessionIdentity({ force = false } = {}) {
-  if (sessionTransitionStarted) return false;
+  if (sessionTransitionStarted || isLoginPage()) return false;
   if (!hasSessionHint()) {
     if (activeSessionUser) beginSessionTransition('login');
     return false;

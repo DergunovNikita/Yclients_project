@@ -424,6 +424,37 @@ test('login redirect preserves only same-origin return_to paths', async (t) => {
   assert.equal(auth.loginPathWithReturnTo('/login.html', 'https://evil.example'), '/login.html?return_to=%2F');
 });
 
+test('a stale csrf cookie cannot blank the login page or point it back at itself', async (t) => {
+  // Production repro: the session expired but portal_csrf (30 days) survived. Focusing the login
+  // tab probed /auth/me, got 401, wiped the form and reloaded as /login.html?return_to=/login.html,
+  // so the next successful login returned to the login page and the button seemed dead.
+  const { auth, server } = await loadAuthModule({ pathname: '/login.html' });
+  t.after(() => server.close());
+
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ detail: 'Not authenticated' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  window.dispatchEvent({ type: 'focus' });
+  await auth.revalidateSessionIdentity({ force: true });
+  window.dispatchEvent({
+    type: 'storage',
+    key: 'portal_auth_event',
+    newValue: JSON.stringify({ id: 'other-page', type: 'session-ended' }),
+  });
+
+  assert.equal(calls, 0, 'the login page does not probe the session');
+  assert.equal(document.body.cleared, false);
+  assert.equal(window.location.href, '');
+  assert.equal(window.location.reloadCalls, 0);
+  assert.equal(auth.loginPathWithReturnTo(), '/login.html?return_to=%2F');
+});
+
 test('return_to normalizer accepts only root-relative paths', async (t) => {
   const { auth, server } = await loadAuthModule();
   t.after(() => server.close());
@@ -436,6 +467,10 @@ test('return_to normalizer accepts only root-relative paths', async (t) => {
     ['HtTpS://evil.example', '/'],
     ['javascript:alert(1)', '/'],
     ['//evil.example', '/'],
+    // A successful login must never land back on the login page.
+    ['/login.html', '/'],
+    ['/login.html?return_to=%2Flogin.html', '/'],
+    ['/login.html#again', '/'],
   ];
   for (const [returnTo, expected] of cases) {
     assert.equal(auth.safeReturnTo(returnTo), expected);

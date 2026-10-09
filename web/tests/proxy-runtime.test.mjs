@@ -661,4 +661,9 @@ test('both vercel.json files agree, and the auth proxy outlasts a YClients crede
   assert.deepEqual(root.functions, web.functions, 'functions differ between vercel.json and web/vercel.json');
   // Onboarding verifies credentials against YClients (30s timeout, retried) inside this function.
   assert.ok(root.functions['api/auth-proxy.js'].maxDuration >= 60);
+  // The proxy aborts its own upstream call at PROXY_TIMEOUT_MS (160 s) and must still have time to
+  // answer; a shorter function limit turns every slow call into a bare Vercel timeout.
+  for (const fn of ['api/auth-proxy.js', 'api/dashboard/**/*.js']) {
+    assert.ok(root.functions[fn].maxDuration > 160, `${fn} maxDuration must exceed the 160 s proxy timeout`);
+  }
 });
