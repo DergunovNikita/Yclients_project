@@ -467,6 +467,7 @@ test('root and web proxy files stay synchronized', async () => {
     'auth/[...path].js',
     'dashboard/[...path].js',
     'dashboard/payments/[...path].js',
+    'onboarding/[...path].js',
     'auth/admin/yclients-credentials.js',
     'auth/admin/yclients-credentials/test.js',
     'auth/admin/yclients-credentials/[credential_id].js',
@@ -483,21 +484,50 @@ test('root and web proxy files stay synchronized', async () => {
   }
 });
 
-// Vercel's `api/dashboard/[...path].js` only answers one-segment paths: every nested prefix the
-// allowlist opens (`plan/…`, `payments/…`) needs its own function file, or the route is a 404 from
-// Vercel itself even though the proxy would forward it. Locally there is no such layer, so only
-// this test notices the gap.
-test('every nested dashboard prefix in the allowlist has a Vercel function in both trees', async () => {
+// Vercel's catch-all `[...path].js` only answers one segment below its own directory: every scope
+// that vercel.json rewrites by path (`/onboarding/state` → `/api/onboarding/state`) needs a function
+// under `api/<scope>/`, and every nested prefix the allowlist opens (`plan/…`, `payments/…`) needs
+// one more level. Otherwise the route is a 404 from Vercel itself even though the proxy would
+// forward it. Locally there is no such layer, so only this test notices the gap.
+test('every allowlisted route has a Vercel function in both trees', async () => {
   const source = await readFile(new URL('../../api/_proxy.js', import.meta.url), 'utf8');
-  const rules = source.slice(source.indexOf('const DASHBOARD_ROUTE_RULES'), source.indexOf('const ONBOARDING_ROUTE_RULES'));
-  const prefixes = new Set([...rules.matchAll(/(?:\^|\(|\|)([a-z_-]+)\\\//g)].map((match) => match[1]));
-  assert.ok(prefixes.has('payments') && prefixes.has('plan'), `unexpected prefixes: ${[...prefixes]}`);
+  const ruleBlock = (scope, nextMarker) => source.slice(
+    source.indexOf(`const ${scope.toUpperCase()}_ROUTE_RULES`),
+    source.indexOf(nextMarker),
+  );
+  const scopes = {
+    dashboard: ruleBlock('dashboard', 'const ONBOARDING_ROUTE_RULES'),
+    onboarding: ruleBlock('onboarding', 'export function env'),
+  };
+  const dirs = new Set();
+  for (const [scope, rules] of Object.entries(scopes)) {
+    assert.ok(rules.includes('pattern:'), `no route rules found for ${scope}`);
+    dirs.add(scope);
+    for (const match of rules.matchAll(/(?:\^|\(|\|)([a-z_-]+)\\\//g)) {
+      dirs.add(`${scope}/${match[1]}`);
+    }
+  }
+  assert.ok(dirs.has('dashboard/payments') && dirs.has('dashboard/plan'), `unexpected dirs: ${[...dirs]}`);
 
-  for (const prefix of prefixes) {
+  for (const vercelConfig of ['../../vercel.json', '../vercel.json']) {
+    const { rewrites } = JSON.parse(await readFile(new URL(vercelConfig, import.meta.url), 'utf8'));
+    for (const scope of Object.keys(scopes)) {
+      assert.ok(
+        rewrites.some((rule) => rule.source === `/${scope}/:path*` && rule.destination === `/api/${scope}/:path*`),
+        `${vercelConfig} does not rewrite /${scope}/ to /api/${scope}/`,
+      );
+    }
+    // Auth paths ride in a query parameter to a single function, so their depth never matters.
+    assert.ok(
+      rewrites.some((rule) => rule.source === '/auth/:path*' && rule.destination === '/api/auth-proxy?path=:path*'),
+      `${vercelConfig} no longer sends /auth/ through api/auth-proxy.js`,
+    );
+  }
+
+  for (const dir of dirs) {
     for (const tree of ['../../api', '../api']) {
-      const dir = new URL(`${tree}/dashboard/${prefix}/`, import.meta.url);
-      const files = await readdir(dir).catch(() => []);
-      assert.ok(files.some((file) => file.endsWith('.js')), `${tree}/dashboard/${prefix}/ has no function file`);
+      const files = await readdir(new URL(`${tree}/${dir}/`, import.meta.url)).catch(() => []);
+      assert.ok(files.some((file) => file.endsWith('.js')), `${tree}/${dir}/ has no function file`);
     }
   }
 });

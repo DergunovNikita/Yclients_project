@@ -903,8 +903,11 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
    `web/tests/proxy-runtime.test.mjs`. Allowlist мало, если путь вложенный (`payments/yandex_pay`):
    `api/dashboard/[...path].js` на Vercel ловит только один сегмент, и новому префиксу нужна своя
    функция-обёртка `api/dashboard/<префикс>/[...path].js` в **обоих** деревьях — иначе 404 отдаёт сам
-   Vercel, до прокси. Так 08.10.2026 вкладка «Яндекс Пэй» вышла в прод нерабочей; тест «every nested
-   dashboard prefix…» теперь ловит пропуск.
+   Vercel, до прокси. Так 08.10.2026 вкладка «Яндекс Пэй» вышла в прод нерабочей. То же правило на
+   уровень выше: скоуп, который `vercel.json` переписывает по пути (`/onboarding/:path*` →
+   `/api/onboarding/:path*`), требует своего `api/<скоуп>/[...path].js` — без него онбординг владельца
+   с самого появления отвечал 404 от Vercel. `auth` от глубины не зависит: путь едет query-параметром
+   в `api/auth-proxy.js`. Тест «every allowlisted route has a Vercel function…» ловит оба пропуска.
 5. Портальные/дашборд-эндпоинты — в `auth_routes.py` / `dashboard_routes.py` / `onboarding_routes.py` с зависимостями доступа (`get_dashboard_access`, роли); на мутации навешивать `forbid_demo`, чтобы демо оставался read-only
 
 ### Окна синхронизации: почему одного инкремента мало
