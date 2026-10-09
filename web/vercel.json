@@ -4,7 +4,7 @@
   "framework": null,
   "installCommand": "npm install",
   "functions": {
-    "api/auth-proxy.js": { "maxDuration": 30 },
+    "api/auth-proxy.js": { "maxDuration": 60 },
     "api/dashboard/**/*.js": { "maxDuration": 180 }
   },
   "headers": [
@@ -25,8 +25,11 @@
     { "source": "/auth/admin/yclients-credentials/:credential_id/test", "destination": "/api/auth/admin/yclients-credentials/:credential_id/test" },
     { "source": "/auth/:path*", "destination": "/api/auth-proxy?path=:path*" },
     { "source": "/api/auth/:path*", "destination": "/api/auth-proxy?path=:path*" },
+    { "source": "/dashboard/payments/:path*", "destination": "/api/auth-proxy?scope=dashboard&path=payments/:path*" },
+    { "source": "/api/dashboard/payments/:path*", "destination": "/api/auth-proxy?scope=dashboard&path=payments/:path*" },
     { "source": "/dashboard/:path*", "destination": "/api/dashboard/:path*" },
-    { "source": "/onboarding/:path*", "destination": "/api/onboarding/:path*" },
+    { "source": "/onboarding/:path*", "destination": "/api/auth-proxy?scope=onboarding&path=:path*" },
+    { "source": "/api/onboarding/:path*", "destination": "/api/auth-proxy?scope=onboarding&path=:path*" },
     { "source": "/settings", "destination": "/settings.html" },
     { "source": "/reports", "destination": "/index.html" },
     { "source": "/reports/:path*", "destination": "/index.html" }

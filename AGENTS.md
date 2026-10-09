@@ -900,14 +900,20 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
 3. Тест в `tests/test_api.py`
 4. Роут в allowlist same-origin прокси — **обе** копии `api/_proxy.js` и `web/api/_proxy.js`
    (локально всё работает и без этого, а в деплое запрос вернёт 404); проверка — в
-   `web/tests/proxy-runtime.test.mjs`. Allowlist мало, если путь вложенный (`payments/yandex_pay`):
-   `api/dashboard/[...path].js` на Vercel ловит только один сегмент, и новому префиксу нужна своя
-   функция-обёртка `api/dashboard/<префикс>/[...path].js` в **обоих** деревьях — иначе 404 отдаёт сам
-   Vercel, до прокси. Так 08.10.2026 вкладка «Яндекс Пэй» вышла в прод нерабочей. То же правило на
-   уровень выше: скоуп, который `vercel.json` переписывает по пути (`/onboarding/:path*` →
-   `/api/onboarding/:path*`), требует своего `api/<скоуп>/[...path].js` — без него онбординг владельца
-   с самого появления отвечал 404 от Vercel. `auth` от глубины не зависит: путь едет query-параметром
-   в `api/auth-proxy.js`. Тест «every allowlisted route has a Vercel function…» ловит оба пропуска.
+   `web/tests/proxy-runtime.test.mjs`. Allowlist мало, если путь вложенный (`payments/yandex_pay`)
+   или скоуп переписывается по пути (`/onboarding/…`): catch-all `[...path].js` на Vercel ловит только
+   один сегмент ниже своей папки, и такой путь — 404 от самого Vercel, до прокси. Так 08.10.2026 вкладка
+   «Яндекс Пэй» вышла в прод нерабочей, а онбординг владельца отвечал 404 с самого появления.
+   **Новую функцию-обёртку не заводить**: на тарифе Hobby в деплое не больше **12** функций, их ровно 12,
+   и 13-я 09.10.2026 уронила всю сборку Vercel. Вместо этого — rewrite в **обоих** `vercel.json` на
+   `api/auth-proxy.js` со скоупом и путём в query: `/api/<скоуп>/<префикс>/:path*` →
+   `/api/auth-proxy?scope=<скоуп>&path=<префикс>/:path*` (и такой же для пути без `/api`, **раньше**
+   общего `/<скоуп>/:path*`). `auth-proxy.js` знает скоупы `auth` (по умолчанию), `dashboard` и
+   `onboarding` с теми же адресами на VM, что и `api/[...path].js`, и пропускает только allowlist; `scope`/`path` с **разными** значениями в query (Vercel подмешивает
+   исходный query в destination) — 400, одинаковый повтор проходит: если Vercel сам продублирует
+   подставленный параметр, отказ уронил бы всю авторизацию. `maxDuration` у функции 60 с: онбординг проверяет креды в YClients.
+   Тесты «every allowlisted route reaches a Vercel function…» и «…within the Vercel function limit»
+   ловят и пропуск, и 13-ю функцию.
 5. Портальные/дашборд-эндпоинты — в `auth_routes.py` / `dashboard_routes.py` / `onboarding_routes.py` с зависимостями доступа (`get_dashboard_access`, роли); на мутации навешивать `forbid_demo`, чтобы демо оставался read-only
 
 ### Окна синхронизации: почему одного инкремента мало

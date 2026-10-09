@@ -466,8 +466,6 @@ test('root and web proxy files stay synchronized', async () => {
     '[...path].js',
     'auth/[...path].js',
     'dashboard/[...path].js',
-    'dashboard/payments/[...path].js',
-    'onboarding/[...path].js',
     'auth/admin/yclients-credentials.js',
     'auth/admin/yclients-credentials/test.js',
     'auth/admin/yclients-credentials/[credential_id].js',
@@ -484,12 +482,29 @@ test('root and web proxy files stay synchronized', async () => {
   }
 });
 
-// Vercel's catch-all `[...path].js` only answers one segment below its own directory: every scope
-// that vercel.json rewrites by path (`/onboarding/state` → `/api/onboarding/state`) needs a function
-// under `api/<scope>/`, and every nested prefix the allowlist opens (`plan/…`, `payments/…`) needs
-// one more level. Otherwise the route is a 404 from Vercel itself even though the proxy would
-// forward it. Locally there is no such layer, so only this test notices the gap.
-test('every allowlisted route has a Vercel function in both trees', async () => {
+// Vercel's catch-all `[...path].js` only answers one segment below its own directory, so every
+// scope and every nested prefix the allowlist opens (`plan/…`, `payments/…`) must be reachable by
+// either a function under `api/<dir>/` or a vercel.json rewrite to api/auth-proxy.js, which takes
+// the scope and the path as query parameters. New prefixes go the rewrite way: the Hobby plan caps a
+// deployment at 12 functions, and the 13th failed the whole Vercel build on 2026-10-09. Locally
+// there is no such layer, so only this test notices either gap.
+const VERCEL_FUNCTION_LIMIT = 12;
+
+async function functionFiles(tree, dir = '') {
+  const entries = await readdir(new URL(`${tree}/${dir}`, import.meta.url), { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const relative = `${dir}${entry.name}`;
+    if (entry.isDirectory()) {
+      files.push(...await functionFiles(tree, `${relative}/`));
+    } else if (entry.name.endsWith('.js') && !entry.name.startsWith('_')) {
+      files.push(relative);
+    }
+  }
+  return files;
+}
+
+test('every allowlisted route reaches a Vercel function in both trees', async () => {
   const source = await readFile(new URL('../../api/_proxy.js', import.meta.url), 'utf8');
   const ruleBlock = (scope, nextMarker) => source.slice(
     source.indexOf(`const ${scope.toUpperCase()}_ROUTE_RULES`),
@@ -499,35 +514,151 @@ test('every allowlisted route has a Vercel function in both trees', async () => 
     dashboard: ruleBlock('dashboard', 'const ONBOARDING_ROUTE_RULES'),
     onboarding: ruleBlock('onboarding', 'export function env'),
   };
-  const dirs = new Set();
+  const dirs = [];
   for (const [scope, rules] of Object.entries(scopes)) {
     assert.ok(rules.includes('pattern:'), `no route rules found for ${scope}`);
-    dirs.add(scope);
-    for (const match of rules.matchAll(/(?:\^|\(|\|)([a-z_-]+)\\\//g)) {
-      dirs.add(`${scope}/${match[1]}`);
+    dirs.push({ scope, dir: scope, prefix: '' });
+    for (const match of new Set([...rules.matchAll(/(?:\^|\(|\|)([a-z_-]+)\\\//g)].map((m) => m[1]))) {
+      dirs.push({ scope, dir: `${scope}/${match}`, prefix: `${match}/` });
     }
   }
-  assert.ok(dirs.has('dashboard/payments') && dirs.has('dashboard/plan'), `unexpected dirs: ${[...dirs]}`);
+  assert.ok(dirs.some(({ dir }) => dir === 'dashboard/payments'), 'payments prefix not found in the allowlist');
 
   for (const vercelConfig of ['../../vercel.json', '../vercel.json']) {
     const { rewrites } = JSON.parse(await readFile(new URL(vercelConfig, import.meta.url), 'utf8'));
-    for (const scope of Object.keys(scopes)) {
-      assert.ok(
-        rewrites.some((rule) => rule.source === `/${scope}/:path*` && rule.destination === `/api/${scope}/:path*`),
-        `${vercelConfig} does not rewrite /${scope}/ to /api/${scope}/`,
-      );
+    const ruleIndex = (src, destination) => rewrites.findIndex(
+      (rule) => rule.source === src && (destination === undefined || rule.destination === destination),
+    );
+    for (const { scope, dir, prefix } of dirs) {
+      const viaProxy = `/api/auth-proxy?scope=${scope}&path=${prefix}:path*`;
+      if (ruleIndex(`/api/${dir}/:path*`, viaProxy) !== -1) {
+        // The bare path (`/dashboard/payments/…`) must hit the same rule before the scope-wide one.
+        const bare = ruleIndex(`/${dir}/:path*`, viaProxy);
+        assert.ok(bare !== -1, `${vercelConfig}: /${dir}/ is not rewritten like /api/${dir}/`);
+        const scopeWide = ruleIndex(`/${scope}/:path*`);
+        assert.ok(dir === scope || bare < scopeWide, `${vercelConfig}: /${dir}/ rule comes after /${scope}/:path*`);
+        continue;
+      }
+      for (const tree of ['../../api', '../api']) {
+        const files = await readdir(new URL(`${tree}/${dir}/`, import.meta.url)).catch(() => []);
+        assert.ok(
+          files.some((file) => file.endsWith('.js')),
+          `${tree}/${dir}/ has no function file and ${vercelConfig} does not rewrite /api/${dir}/ to auth-proxy`,
+        );
+      }
     }
+    // The scope-wide dashboard rule is what sends every one-segment path to its catch-all function.
+    assert.ok(
+      ruleIndex('/dashboard/:path*', '/api/dashboard/:path*') !== -1,
+      `${vercelConfig} no longer sends /dashboard/ to api/dashboard/`,
+    );
     // Auth paths ride in a query parameter to a single function, so their depth never matters.
     assert.ok(
-      rewrites.some((rule) => rule.source === '/auth/:path*' && rule.destination === '/api/auth-proxy?path=:path*'),
+      ruleIndex('/auth/:path*', '/api/auth-proxy?path=:path*') !== -1,
       `${vercelConfig} no longer sends /auth/ through api/auth-proxy.js`,
     );
   }
+});
 
-  for (const dir of dirs) {
-    for (const tree of ['../../api', '../api']) {
-      const files = await readdir(new URL(`${tree}/${dir}/`, import.meta.url)).catch(() => []);
-      assert.ok(files.some((file) => file.endsWith('.js')), `${tree}/${dir}/ has no function file`);
+test('each proxy tree stays within the Vercel function limit', async () => {
+  for (const tree of ['../../api', '../api']) {
+    const files = await functionFiles(tree);
+    assert.ok(
+      files.length <= VERCEL_FUNCTION_LIMIT,
+      `${tree} has ${files.length} functions (limit ${VERCEL_FUNCTION_LIMIT}): ${files.join(', ')}`,
+    );
+  }
+});
+
+test('auth proxy forwards rewritten dashboard and onboarding scopes', () => {
+  const originalOrigin = process.env.VM_API_ORIGIN;
+  process.env.VM_API_ORIGIN = 'https://vm.example.test';
+
+  try {
+    const editor = buildAuthProxyTarget(
+      requestStub('GET', {}, '/api/auth-proxy?scope=dashboard&path=payments/yandex_pay&month=2026-10'),
+    );
+    assert.equal(editor.ok, true);
+    assert.equal(editor.target.href, 'https://vm.example.test/dashboard/payments/yandex_pay?month=2026-10');
+
+    const save = buildAuthProxyTarget(requestStub('POST', {}, '/api/auth-proxy?scope=dashboard&path=payments/yandex_pay'));
+    assert.equal(save.ok, true);
+
+    const onboarding = buildAuthProxyTarget(requestStub('GET', {}, '/api/auth-proxy?scope=onboarding&path=state'));
+    assert.equal(onboarding.ok, true);
+    assert.equal(onboarding.target.href, 'https://vm.example.test/dashboard/onboarding/state');
+
+    const login = buildAuthProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=login'));
+    assert.equal(login.target.href, 'https://vm.example.test/dashboard/auth/login', 'auth stays the default scope');
+
+    const keepsClientQuery = buildAuthProxyTarget(
+      requestStub('GET', {}, '/api/auth-proxy?scope=dashboard&company_id=7&path=payments/yandex_pay&month=2026-10'),
+    );
+    assert.equal(
+      keepsClientQuery.target.href,
+      'https://vm.example.test/dashboard/payments/yandex_pay?company_id=7&month=2026-10',
+      'only the routing parameters are dropped from the forwarded query',
+    );
+
+    // Vercel merges the original query into a rewrite's destination: a client-supplied copy of a
+    // routing parameter shows up next to the rewrite's own, and such a request is refused outright.
+    const ambiguous = [
+      '/api/auth-proxy?scope=dashboard&path=payments/yandex_pay&scope=onboarding',
+      '/api/auth-proxy?scope=dashboard&path=payments/yandex_pay&path=plan/settings',
+      '/api/auth-proxy?path=me&path=sessions',
+    ];
+    for (const url of ambiguous) {
+      const refused = buildAuthProxyTarget(requestStub('GET', {}, url));
+      assert.equal(refused.ok, false, url);
+      assert.equal(refused.statusCode, 400, url);
+    }
+
+    // A repeated identical copy is not ambiguous: refusing it would break every auth call if Vercel
+    // ever echoed the parameter it substituted.
+    const echoedAuth = buildAuthProxyTarget(requestStub('GET', {}, '/api/auth-proxy?path=me&path=me'));
+    assert.equal(echoedAuth.ok, true);
+    assert.equal(echoedAuth.target.href, 'https://vm.example.test/dashboard/auth/me');
+    const echoedScope = buildAuthProxyTarget(
+      requestStub('GET', {}, '/api/auth-proxy?scope=onboarding&path=state&scope=onboarding&path=state'),
+    );
+    assert.equal(echoedScope.ok, true);
+    assert.equal(echoedScope.target.href, 'https://vm.example.test/dashboard/onboarding/state');
+
+    for (const url of [
+      // A rewritten /api/auth/login with a client-added scope never reaches another scope's routes.
+      '/api/auth-proxy?path=login&scope=dashboard',
+      '/api/auth-proxy?scope=constructor&path=login',
+      '/api/auth-proxy?scope=toString&path=login',
+      '/api/auth-proxy?scope=dashboard&path=payments//yandex_pay',
+      '/api/auth-proxy?scope=dashboard&path=payments/yandex_pay%3Fx=1',
+      '/api/auth-proxy?scope=dashboard&path=payments%2F..%2Fplan/settings',
+      '/api/auth-proxy?scope=dashboard&path=payments/%252e%252e/plan/settings',
+      '/api/auth-proxy?scope=onboarding&path=payments/yandex_pay',
+      '/api/auth-proxy?scope=dashboard&path=',
+      '/api/auth-proxy?scope=health&path=x',
+      '/api/auth-proxy?scope=__proto__&path=login',
+      '/api/auth-proxy?scope=dashboard&path=admin/users',
+      '/api/auth-proxy?scope=dashboard&path=payments/%2e%2e/plan/settings',
+    ]) {
+      const blocked = buildAuthProxyTarget(requestStub('GET', {}, url));
+      assert.equal(blocked.ok, false, url);
+      assert.equal(blocked.statusCode, 404, url);
+    }
+  } finally {
+    if (originalOrigin === undefined) {
+      delete process.env.VM_API_ORIGIN;
+    } else {
+      process.env.VM_API_ORIGIN = originalOrigin;
     }
   }
+});
+
+test('both vercel.json files agree, and the auth proxy outlasts a YClients credential check', async () => {
+  const [root, web] = await Promise.all(
+    ['../../vercel.json', '../vercel.json'].map(async (file) => JSON.parse(await readFile(new URL(file, import.meta.url), 'utf8'))),
+  );
+  assert.deepEqual(root.rewrites, web.rewrites, 'rewrites differ between vercel.json and web/vercel.json');
+  assert.deepEqual(root.functions, web.functions, 'functions differ between vercel.json and web/vercel.json');
+  // Onboarding verifies credentials against YClients (30s timeout, retried) inside this function.
+  assert.ok(root.functions['api/auth-proxy.js'].maxDuration >= 60);
 });
