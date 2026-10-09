@@ -455,6 +455,84 @@ test('a stale csrf cookie cannot blank the login page or point it back at itself
   assert.equal(auth.loginPathWithReturnTo(), '/login.html?return_to=%2F');
 });
 
+test('public auth pages are not wiped or redirected by a stale csrf cookie either', async () => {
+  // Same production cause as the login page: forgot/reset/verify/register hold a typed form or a
+  // one-time token in the URL, and the redirect would carry that token into return_to.
+  for (const pathname of ['/register.html', '/forgot-password.html', '/reset-password.html', '/verify-email.html']) {
+    const { auth, server } = await loadAuthModule({ pathname });
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ detail: 'Not authenticated' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    await auth.revalidateSessionIdentity({ force: true });
+    window.dispatchEvent({
+      type: 'storage',
+      key: 'portal_auth_event',
+      newValue: JSON.stringify({ id: 'other-page', type: 'session-ended' }),
+    });
+
+    assert.equal(calls, 0, `${pathname} does not probe the session`);
+    assert.equal(document.body.cleared, false, `${pathname} keeps its form`);
+    assert.equal(window.location.href, '', `${pathname} is not redirected`);
+    await server.close();
+  }
+});
+
+test('a dashboard route that merely ends in a public page name keeps its session protection', async () => {
+  // /reports/:path* is rewritten to the SPA, so /reports/login.html is a dashboard page.
+  for (const pathname of ['/reports/login.html', '/reports/register.html']) {
+    const { auth, server } = await loadAuthModule({ pathname });
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ detail: 'Not authenticated' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    try {
+      await auth.revalidateSessionIdentity({ force: true });
+
+      assert.ok(calls > 0, `${pathname} still probes the session`);
+      assert.equal(document.body.cleared, true, `${pathname} is still wiped on a lost session`);
+    } finally {
+      await server.close();
+    }
+  }
+});
+
+test('return_to never resolves to the login page, however it is spelled', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  for (const value of ['/%6Cogin.html', '/login%2Ehtml', '/a/../login.html', '/./login.html?x=1', '/%6cogin.html#h']) {
+    assert.equal(auth.safeReturnTo(value), '/', value);
+  }
+  assert.equal(auth.safeReturnTo('/%E0%A4%A.html'), '/%E0%A4%A.html', 'undecodable paths are left alone');
+});
+
+test('return_to cannot leave the origin through browser URL-parser quirks', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  // WHATWG URL parsing treats a backslash as a slash and drops tabs/newlines, so each of these
+  // starts with a single "/" yet navigates to https://evil.example.
+  for (const value of ['/\\evil.example', '/\t/evil.example', '/\n/evil.example', '/\\/evil.example', '/\r/evil.example']) {
+    assert.equal(auth.safeReturnTo(value), '/', JSON.stringify(value));
+  }
+  for (const value of ['/%5Cevil', '/%2F%2Fevil.example', '/%252F%252Fevil']) {
+    assert.equal(auth.safeReturnTo(value), value, 'percent-encoded slashes stay inside the path');
+  }
+  assert.equal(auth.safeReturnTo('/login.html/'), '/');
+  assert.equal(auth.safeReturnTo('/LOGIN.HTML'), '/');
+});
+
 test('return_to normalizer accepts only root-relative paths', async (t) => {
   const { auth, server } = await loadAuthModule();
   t.after(() => server.close());

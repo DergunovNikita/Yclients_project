@@ -83,10 +83,10 @@ function clearSensitivePage() {
 }
 
 function beginSessionTransition(destination = 'reload', loginPath = '/login.html') {
-  // The login page holds no session data to protect, and wiping it is what broke sign-in: a stale
-  // csrf cookie made its focus probe fail, the page blanked itself and reloaded as
+  // Public auth pages hold no session data to protect, and wiping them is what broke sign-in: a stale
+  // csrf cookie made the focus probe fail, the page blanked itself and reloaded as
   // /login.html?return_to=/login.html, so the next successful login returned to the login page.
-  if (sessionTransitionStarted || typeof window === 'undefined' || isLoginPage()) return;
+  if (sessionTransitionStarted || typeof window === 'undefined' || isPublicAuthPage()) return;
   sessionTransitionStarted = true;
   clearSensitivePage();
   if (destination === 'login') {
@@ -172,8 +172,16 @@ function ensureSessionCoordination() {
   });
 }
 
+// Exact paths: /reports/:path* is rewritten to the dashboard SPA, so a suffix match would let
+// /reports/login.html switch the dashboard's session protection off.
+const PUBLIC_AUTH_PAGES = ['/register.html', '/forgot-password.html', '/reset-password.html', '/verify-email.html'];
+
+function isPublicAuthPage() {
+  return isLoginPage() || (typeof window !== 'undefined' && PUBLIC_AUTH_PAGES.includes(window.location.pathname));
+}
+
 function isLoginPage() {
-  return typeof window !== 'undefined' && window.location.pathname.endsWith('/login.html');
+  return typeof window !== 'undefined' && window.location.pathname === '/login.html';
 }
 
 function rememberSessionPayload(path, payload, { allowIdentityChange = false } = {}) {
@@ -216,8 +224,24 @@ export function safeReturnTo(value) {
     return '/';
   }
   if (!raw.startsWith('/')) return '/';
+  // Browsers read "/\evil.example" and "/<tab>/evil.example" as "//evil.example": the startsWith
+  // checks above cannot see that, only the parser's own verdict on the host can.
+  const origin = typeof window === 'undefined' ? 'https://app.invalid' : window.location.origin;
+  let path;
+  try {
+    const url = new URL(raw, origin);
+    if (url.origin !== origin) return '/';
+    path = url.pathname;
+  } catch {
+    return '/';
+  }
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    /* an undecodable path cannot name the login page */
+  }
   // Returning to the login page after a successful login reads as "the button did nothing".
-  return normalizedPath(raw).endsWith('/login.html') ? '/' : raw;
+  return path.toLowerCase().replace(/\/+$/, '').endsWith('/login.html') ? '/' : raw;
 }
 
 export function loginPathWithReturnTo(loginPath = '/login.html', returnTo = currentReturnTo()) {
@@ -398,7 +422,7 @@ export function wait(ms) {
 }
 
 export async function revalidateSessionIdentity({ force = false } = {}) {
-  if (sessionTransitionStarted || isLoginPage()) return false;
+  if (sessionTransitionStarted || isPublicAuthPage()) return false;
   if (!hasSessionHint()) {
     if (activeSessionUser) beginSessionTransition('login');
     return false;
