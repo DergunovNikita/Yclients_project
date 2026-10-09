@@ -356,7 +356,7 @@ async def test_cancellation_report_uses_exact_aggregate_counts(async_session, mo
         response = await client.get(
             '/dashboard/reports/data',
             params={
-                'report_id': 'cancellation_analysis',
+                'report_id': 'bookings_dynamics',
                 'start_date': '2026-06-01',
                 'end_date': '2026-06-18',
                 'company_id': 1,
@@ -366,13 +366,12 @@ async def test_cancellation_report_uses_exact_aggregate_counts(async_session, mo
 
     assert response.status_code == 200
     data = response.json()['data']
-    assert [card['value'] for card in data['cards']] == [10, 1, 7, 2]
-    assert data['raw']['by_period'][0]['completed'] == 1
-    assert data['raw']['by_period'][0]['records'] == 3
+    assert [card['value'] for card in data['cards']] == [10, 1, 7, 70.0]
+    june_10 = next(row for row in data['raw']['by_period'] if row['period'] == '2026-06-10')
+    assert june_10['completed'] == 1
+    assert june_10['records'] == 3
+    assert june_10['no_show'] == 1
+    assert len(data['raw']['by_period']) == 18
     assert data['raw']['exact_aggregates']['total'] == 10
-    assert data['raw']['local_available_aggregates'] == {
-        'available_records': 3,
-        'completed': 1,
-        'no_show': 1,
-    }
-    assert data['notes'][0]['title'] == 'Состав детализации'
+    assert data['notes'][0]['title'] == 'Что считается'
+    assert 'агрегатов YClients' in data['notes'][0]['text']

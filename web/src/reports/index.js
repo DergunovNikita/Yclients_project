@@ -9,7 +9,7 @@ import {
   staffRefreshAllowsDataLoad,
 } from '../dashboardApi.js';
 import { ReportChartManager } from './charts.js';
-import { escapeHtml, formatDate } from './format.js';
+import { escapeHtml, formatDate, periodSubtitle } from './format.js';
 import {
   comparePeriodOnLoad,
   defaultReportDates,
@@ -19,13 +19,15 @@ import {
   shouldAdoptComparePeriod,
 } from '../period.js';
 import { GROUP_LABELS, STATUS_LABELS, sourceLabel } from './registry.js';
+import { decodePathSegment, migrateFavorites, resolveReportRoute } from './routing.js';
 import { renderReportData } from './renderers/generic.js';
 import { intlLocale, t } from '../i18n.js';
 import { branchesForPeriod } from '../reportingWindow.js';
 import {
   DEFAULT_GRANULARITY,
   REPORT_FILTER_KEYS,
-  reportCompareParams,
+  reportComparisonRequest,
+  reportDataParams,
   reportFilterVisibility,
   reportFiltersFromParams,
   reportHistoryAction,
@@ -58,7 +60,17 @@ function getFavorites() {
 }
 
 function saveFavorites(favorites) {
-  localStorage.setItem(FAVORITES_KEY, JSON.stringify([...favorites]));
+  try {
+    localStorage.setItem(FAVORITES_KEY, JSON.stringify([...favorites]));
+  } catch {
+    // Storage is a convenience: private mode or a full quota must not break the catalog.
+  }
+}
+
+// Retired ids follow their alias, so a favourite pinned before the catalog was merged keeps its star.
+function migrateStoredFavorites(reports) {
+  const { favorites, changed } = migrateFavorites([...getFavorites()], reports);
+  if (changed) saveFavorites(new Set(favorites));
 }
 
 function uniqueSorted(values) {
@@ -80,11 +92,10 @@ function sourceText(report) {
 function reportMatches(report, filters, favorites) {
   const q = filters.search.trim().toLowerCase();
   if (q) {
-    const hay = `${report.title} ${report.description} ${report.id}`.toLowerCase();
+    const hay = `${report.title} ${report.description} ${report.id} ${(report.aliases || []).join(' ')}`.toLowerCase();
     if (!hay.includes(q)) return false;
   }
   if (filters.group && report.group !== filters.group) return false;
-  if (filters.status && report.status !== filters.status) return false;
   if (filters.role && !(report.roles || []).includes(filters.role)) return false;
   if (filters.theme && !(report.themes || []).includes(filters.theme)) return false;
   if (filters.favoritesOnly && !favorites.has(report.id)) return false;
@@ -102,7 +113,7 @@ function reportIdFromLocation() {
   const path = window.location.pathname.replace(/\/+$/, '');
   if (path === '/reports') return '';
   if (!path.startsWith('/reports/')) return '';
-  return decodeURIComponent(path.slice('/reports/'.length).split('/')[0] || '');
+  return decodePathSegment(path.slice('/reports/'.length).split('/')[0] || '');
 }
 
 function applyReportParamsFromLocation(els) {
@@ -112,12 +123,6 @@ function applyReportParamsFromLocation(els) {
   els.compareEnd.value = filters.compare_end_date;
   els.compareEnabled.checked = filters.compare_enabled;
   return filters;
-}
-
-function periodSubtitle(data) {
-  const period = data?.period;
-  if (!period) return '';
-  return `${formatDate(period.start)} .. ${formatDate(period.end)} · ${period.granularity}`;
 }
 
 export function initReports({
@@ -132,7 +137,6 @@ export function initReports({
     count: document.getElementById('reports-count'),
     search: document.getElementById('reports-search'),
     group: document.getElementById('reports-group'),
-    status: document.getElementById('reports-status'),
     role: document.getElementById('reports-role'),
     theme: document.getElementById('reports-theme'),
     favoritesOnly: document.getElementById('reports-favorites'),
@@ -180,6 +184,8 @@ export function initReports({
     activeReportId: '',
     periodApplies: true,
     staffApplies: true,
+    granularityApplies: true,
+    compareApplies: true,
     // Which Overview preset produced the period, when the user arrived from a card.
     // It picks the same baseline the card measured against; editing the period drops it,
     // exactly as the Overview's own preset buttons do.
@@ -192,7 +198,6 @@ export function initReports({
     filters: {
       search: '',
       group: '',
-      status: '',
       role: '',
       theme: '',
       favoritesOnly: false,
@@ -229,6 +234,30 @@ export function initReports({
   function clearFilterWarning() {
     const warning = document.getElementById('reports-filter-warning');
     if (warning) warning.hidden = true;
+  }
+
+  let routeNoteTimer = null;
+
+  function clearRouteNote() {
+    clearTimeout(routeNoteTimer);
+    const note = document.getElementById('reports-route-note');
+    if (note) note.hidden = true;
+  }
+
+  // `transient` notes explain a redirect that already happened; an error note stays until the next navigation.
+  function showRouteNote(text, { transient = false } = {}) {
+    clearRouteNote();
+    let note = document.getElementById('reports-route-note');
+    if (!note) {
+      note = document.createElement('div');
+      note.id = 'reports-route-note';
+      note.className = 'reports-note reports-note--warning';
+      note.setAttribute('role', 'status');
+      els.view.prepend(note);
+    }
+    note.hidden = false;
+    note.textContent = text;
+    if (transient) routeNoteTimer = setTimeout(clearRouteNote, 8000);
   }
 
   function setCatalogVisible(visible) {
@@ -305,6 +334,7 @@ export function initReports({
       });
       if (!catalogRequest.isCurrent()) return;
       state.reports = reportsPayload.data || [];
+      migrateStoredFavorites(state.reports);
       renderFilterOptions();
       const branchRequest = branchRequests.start();
       try {
@@ -345,18 +375,15 @@ export function initReports({
   function renderFilterOptions() {
     const selected = {
       group: els.group.value,
-      status: els.status.value,
       role: els.role.value,
       theme: els.theme.value,
     };
-    const groups = uniqueSorted(state.reports.map((report) => report.group));
-    const statuses = uniqueSorted(state.reports.map((report) => report.status));
+    // The catalog arrives in the backend's group order; sorting the names would scramble it.
+    const groups = [...new Set(state.reports.map((report) => report.group))];
     const roles = uniqueSorted(state.reports.flatMap((report) => report.roles || []));
     const themes = uniqueSorted(state.reports.flatMap((report) => report.themes || []));
     els.group.innerHTML = optionHtml('', t('dash.allGroups'), selected.group)
       + groups.map((group) => optionHtml(group, GROUP_LABELS[group] || group, selected.group)).join('');
-    els.status.innerHTML = optionHtml('', t('dash.allStatuses'), selected.status)
-      + statuses.map((status) => optionHtml(status, STATUS_LABELS[status] || status, selected.status)).join('');
     els.role.innerHTML = optionHtml('', t('dash.allRoles'), selected.role)
       + roles.map((role) => optionHtml(role, role, selected.role)).join('');
     els.theme.innerHTML = optionHtml('', t('dash.allThemes'), selected.theme)
@@ -426,7 +453,6 @@ export function initReports({
   function collectCatalogFilters() {
     state.filters.search = els.search.value;
     state.filters.group = els.group.value;
-    state.filters.status = els.status.value;
     state.filters.role = els.role.value;
     state.filters.theme = els.theme.value;
     state.filters.favoritesOnly = els.favoritesOnly.checked;
@@ -474,9 +500,12 @@ export function initReports({
 
   function showCatalog(push = true) {
     reportRequests.abort();
+    clearRouteNote();
     state.activeReportId = '';
     state.periodApplies = true;
     state.staffApplies = true;
+    state.granularityApplies = true;
+    state.compareApplies = true;
     setCatalogVisible(true);
     els.viewer.classList.remove('visible');
     if (push) pushHistory({ view: 'reports' }, reportPath('', reportSearch()));
@@ -507,20 +536,21 @@ export function initReports({
     });
   }
 
-  function reportParams() {
-    const filters = requestFilters();
-    const params = { report_id: state.activeReportId };
-    REPORT_FILTER_KEYS.forEach((key) => { params[key] = filters[key]; });
-    if (state.periodPreset) params.period_preset = state.periodPreset;
+  function reportParams(meta) {
     // The same rule that builds the link decides what the request asks for.
-    return Object.assign(params, reportCompareParams(filters));
+    return reportDataParams({ reportId: state.activeReportId, filters: requestFilters(), meta: meta.filters });
   }
 
   // The link carries the period the form actually holds — a report that ignores the
   // period must not overwrite the one the user picked for every other report.
   function reportSearch() {
     return reportLinkSearch({
-      filters: state.staffApplies ? currentFilters() : { ...currentFilters(), staff_id: '' },
+      filters: {
+        ...currentFilters(),
+        ...(state.staffApplies ? {} : { staff_id: '' }),
+        // The select is shared like the staff one: a report without it must not write it into its link.
+        ...(state.granularityApplies ? {} : { granularity: '' }),
+      },
       currentSearch: window.location.search.replace(/^\?/, ''),
       periodApplies: state.periodApplies,
     });
@@ -531,24 +561,33 @@ export function initReports({
     const visibility = reportFilterVisibility(filters);
     state.periodApplies = visibility.dateRange;
     state.staffApplies = reportStaffApplies(filters);
+    state.granularityApplies = visibility.granularity;
     if (els.staffField) els.staffField.hidden = !state.staffApplies;
     if (els.monthField) els.monthField.hidden = !visibility.dateRange;
     if (els.startField) els.startField.hidden = !visibility.dateRange;
     if (els.endField) els.endField.hidden = !visibility.dateRange;
     if (els.granularityField) els.granularityField.hidden = !visibility.granularity;
-    const canCompare = visibility.compare;
-    if (els.compareRow) els.compareRow.hidden = !canCompare;
-    // Only the checkbox gates the request, so the window itself is kept. Blanking it
-    // here would read as the user clearing it and freeze it for the rest of the session.
-    if (!canCompare) els.compareEnabled.checked = false;
+    state.compareApplies = visibility.compare;
+    if (els.compareRow) els.compareRow.hidden = !visibility.compare;
+    // The checkbox and the window keep what the user set: a report that cannot compare just does not
+    // send them, and the next report that can finds the comparison still ticked.
   }
 
-  async function openReport(reportId, push = true) {
-    state.activeReportId = reportId;
-    const meta = state.reports.find((report) => report.id === reportId);
-    if (!meta) {
-      showCatalog(push);
+  async function openReport(requestedId, push = true) {
+    const route = resolveReportRoute(requestedId, state.reports);
+    if (route.unknown) {
+      showCatalog(false);
+      replaceHistory({ view: 'reports' }, reportPath('', reportSearch()));
+      showRouteNote(t('reports.unknownReport'));
       return;
+    }
+    const reportId = route.id;
+    const meta = state.reports.find((report) => report.id === reportId);
+    state.activeReportId = reportId;
+    if (route.renamed) {
+      showRouteNote(t('reports.renamedReport', { title: meta.title }), { transient: true });
+    } else {
+      clearRouteNote();
     }
     const request = reportRequests.start();
     applyReportFilterVisibility(meta);
@@ -577,12 +616,12 @@ export function initReports({
       request.finish();
       return;
     }
-    const requestParams = reportParams();
+    const requestParams = reportParams(meta);
     const cacheKey = reportDataCacheKey(requestParams);
     const previousData = state.reportData.get(cacheKey);
     const refreshPresentation = reportRefreshPresentation(previousData);
     if (refreshPresentation.retainedData) {
-      els.viewerSubtitle.textContent = periodSubtitle(refreshPresentation.retainedData);
+      els.viewerSubtitle.textContent = periodSubtitle(refreshPresentation.retainedData, meta);
       renderReportData(els.content, refreshPresentation.retainedData, charts);
     } else {
       els.viewerSubtitle.textContent = t('common.loadingShort');
@@ -604,13 +643,14 @@ export function initReports({
       const data = payload.data;
       state.reportData.set(cacheKey, data);
       els.viewerTitle.textContent = data.title || meta.title;
-      els.viewerSubtitle.textContent = periodSubtitle(data);
+      els.viewerSubtitle.textContent = periodSubtitle(data, meta);
       renderReportData(els.content, data, charts);
       clearError();
       const dataState = reportDataState(data);
       const asked = currentFilters();
-      const compareDropped = Boolean(asked.compare_enabled && !reportCompareParams(asked));
-      const compareInverted = Boolean(asked.compare_start_date && asked.compare_end_date);
+      const compareDropped = Boolean(
+        state.compareApplies && asked.compare_enabled && !reportComparisonRequest(asked),
+      );
       if (compareDropped) {
         // The report is fine; only its comparison was dropped, and dropping it silently
         // would leave the ticked checkbox claiming a comparison that is not on screen.
@@ -679,7 +719,7 @@ export function initReports({
         await loadFromLocation();
       };
       showError(t('reports.filtersUnavailable'), { apiStatus: 'error', retry });
-      const reportId = reportIdFromLocation();
+      const { id: reportId } = resolveReportRoute(reportIdFromLocation(), state.reports);
       const meta = state.reports.find((report) => report.id === reportId);
       if (meta) {
         state.activeReportId = reportId;
@@ -719,7 +759,6 @@ export function initReports({
   function resetFilters() {
     els.search.value = '';
     els.group.value = '';
-    els.status.value = '';
     els.role.value = '';
     els.theme.value = '';
     els.favoritesOnly.checked = false;
@@ -727,7 +766,7 @@ export function initReports({
   }
 
   els.search.addEventListener('input', renderCatalog);
-  [els.group, els.status, els.role, els.theme].forEach((select) => {
+  [els.group, els.role, els.theme].forEach((select) => {
     select.addEventListener('change', renderCatalog);
   });
   els.favoritesOnly.addEventListener('change', renderCatalog);

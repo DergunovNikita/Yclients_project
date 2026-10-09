@@ -181,28 +181,270 @@ async def test_dashboard_reports_registry_contract(async_session):
 
     assert r.status_code == 200
     data = r.json()['data']
-    assert len(data) == 62
+    assert [item['id'] for item in data] == [
+        'financial_overview',
+        'payment_methods',
+        'year_over_year',
+        'avg_check_by_service',
+        'service_staff_profit',
+        'service_combos',
+        'staff_efficiency',
+        'staff_leaderboard',
+        'peak_load',
+        'bookings_dynamics',
+        'booking_channels',
+        'new_vs_returning_cross',
+        'top_clients_pareto',
+        'retention_3_6_12',
+        'revenue_at_risk',
+        'nps_dashboard',
+        'goods_dynamics',
+    ]
     by_id = {item['id']: item for item in data}
-    assert by_id['revenue_dynamics']['status'] == 'ready'
-    assert by_id['conversion_funnel']['status'] == 'source_missing'
-    assert by_id['nps_dashboard']['status'] == 'partial'
-    assert by_id['revenue_dynamics']['filters']['compare'] is True
-    assert by_id['year_over_year']['status'] == 'ready'
+    for item in data:
+        assert set(item) == {
+            'id', 'title', 'description', 'group', 'type', 'themes', 'roles', 'filters', 'status',
+            'required_sources', 'aliases',
+        }
+        assert item['status'] == 'ready'
+        assert item['description'] and item['description'] != 'Отчет строится на текущих данных YClients в PostgreSQL.'
+        assert set(item['filters']) == {'date_range', 'branch', 'staff', 'granularity', 'compare'}
+    assert by_id['financial_overview']['filters']['compare'] is True
+    assert by_id['financial_overview']['filters']['granularity'] is True
+    assert 'revenue_dynamics' in by_id['financial_overview']['aliases']
     assert by_id['year_over_year']['group'] == 'finance'
     assert by_id['year_over_year']['filters']['date_range'] is False
-    assert by_id['new_vs_returning_cross']['status'] == 'ready'
     assert by_id['new_vs_returning_cross']['group'] == 'clients'
-    assert by_id['staff_leaderboard']['status'] == 'ready'
     assert by_id['staff_leaderboard']['group'] == 'team'
-    # Compare is offered only for dynamics/aggregate reports, not rankings or plan duplicates.
+    # Compare is offered only where a period-over-period reading is meaningful.
     assert by_id['staff_leaderboard']['filters']['compare'] is False
-    assert by_id['top_goods_revenue']['filters']['compare'] is False
-    assert by_id['payment_methods']['status'] == 'ready'
     assert by_id['payment_methods']['group'] == 'finance'
     assert by_id['payment_methods']['filters']['staff'] is False
-    assert 'plan_execution' not in by_id
-    assert 'masters_rating' not in by_id
-    assert not any(report_id.startswith('milena_') for report_id in by_id)
+    assert by_id['revenue_at_risk']['title'] == 'Отток клиентов'
+    # Groups come in the explicit catalog order, not in whatever order the table lists them.
+    groups = [item['group'] for item in data]
+    assert groups == sorted(groups, key=dashboard_reports.REPORT_GROUP_ORDER.index)
+    # Retired stubs and plan duplicates are neither in the catalog nor aliases of anything.
+    assert not {'conversion_funnel', 'plan_execution', 'masters_rating', 'staff_salary'} & set(by_id)
+    assert not {'conversion_funnel', 'staff_salary'} & set(dashboard_reports.REPORT_ALIASES)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_reports_catalog_hides_money_reports_but_keeps_overview_link_target(async_session):
+    async def override_db():
+        yield async_session
+
+    money_blind = AccessContext.from_user(
+        user_id=11, role='manager', portal_account_id=1, company_ids=[1], money_metrics=frozenset()
+    )
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = lambda: money_blind
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        narrowed = await client.get('/dashboard/reports')
+    app.dependency_overrides.clear()
+
+    visible = {item['id'] for item in narrowed.json()['data']}
+    # The Overview links to this report, so a role without revenue has to be able to open it.
+    assert 'new_vs_returning_cross' in visible
+    assert 'peak_load' in visible
+    for money_report in ('financial_overview', 'payment_methods', 'year_over_year', 'goods_dynamics', 'revenue_at_risk'):
+        assert money_report not in visible
+    assert visible == {
+        report_id
+        for report_id in dashboard_reports.REPORT_REGISTRY
+        if not dashboard_reports.REPORT_REGISTRY[report_id].requires_financials
+        # Its own platform_admin gate, not a money metric.
+        and report_id != 'report_usage'
+    }
+
+
+def test_every_report_definition_has_a_builder():
+    import inspect
+
+    assert dashboard_reports.REPORT_REGISTRY
+    for report_id in dashboard_reports.REPORT_REGISTRY:
+        builder = dashboard_reports._builder_for(report_id)
+        assert inspect.iscoroutinefunction(builder), report_id
+        assert list(inspect.signature(builder).parameters) == ['req'], report_id
+
+
+def test_resolve_report_id():
+    resolve = dashboard_reports.resolve_report_id
+    assert resolve('financial_overview') == 'financial_overview'
+    assert resolve('revenue_dynamics') == 'financial_overview'
+    assert resolve('seasonality') == 'year_over_year'
+    assert resolve('cancellation_analysis') == 'bookings_dynamics'
+    assert resolve('conversion_funnel') is None
+    assert resolve('missing') is None
+    assert resolve('') is None and resolve(None) is None
+    # Every alias points at a live definition and none shadows a canonical id.
+    for alias, target in dashboard_reports.REPORT_ALIASES.items():
+        assert target in dashboard_reports.REPORT_REGISTRY
+        assert alias not in dashboard_reports.REPORT_REGISTRY
+
+
+def _money_leaks(node, path=''):
+    """Money formats and money-named fields anywhere in a payload."""
+    found = []
+    if isinstance(node, dict):
+        if node.get('format') == 'money':
+            found.append(f'{path} format=money')
+        for key, value in node.items():
+            if any(word in str(key) for word in ('revenue', 'amount', 'price', 'avg_check', 'average_check')):
+                found.append(f'{path}/{key}')
+            found += _money_leaks(value, f'{path}/{key}')
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            found += _money_leaks(value, f'{path}[{index}]')
+    elif isinstance(node, str) and '\u20bd' in node:
+        found.append(f'{path} text')
+    return found
+
+
+@pytest.mark.asyncio
+async def test_a_report_declared_money_free_carries_no_money_anywhere(async_session):
+    """`requires_financials=False` is a promise about the whole payload, comparison block included.
+
+    An empty database is enough: the money columns, cards and chart series are part of the report's shape.
+    `staff_leaderboard` is exempt by design (the route strips its money columns) and `report_usage` is built
+    by the route; both are covered by their own tests.
+    """
+    checked = []
+    for report_id, definition in dashboard_reports.REPORT_REGISTRY.items():
+        if definition.requires_financials or report_id in {'staff_leaderboard', dashboard_reports.REPORT_USAGE_ID}:
+            continue
+        data = await dashboard_reports.fetch_report_data(
+            async_session,
+            report_id,
+            date(2026, 6, 1),
+            date(2026, 6, 30),
+            granularity='day',
+            compare_previous=True,
+        )
+        assert _money_leaks(data) == [], report_id
+        assert ('comparison' in data) == definition.compare, report_id
+        checked.append(report_id)
+    assert {'peak_load', 'bookings_dynamics', 'retention_3_6_12', 'nps_dashboard'} <= set(checked)
+
+
+def test_report_requires_financials_reads_the_resolved_definition():
+    gate = dashboard_reports.report_requires_financials
+    assert gate('revenue_dynamics') is True  # alias of financial_overview
+    assert gate('cancellation_analysis') is False  # alias of bookings_dynamics
+    assert gate('new_vs_returning_cross') is False
+    assert gate('staff_leaderboard') is False
+    # No substring heuristics: an unknown id fails closed whatever it is called.
+    assert gate('conversion_funnel') is True
+    assert gate('anything_unknown') is True
+
+
+@pytest.mark.asyncio
+async def test_report_data_alias_resolves_to_canonical_id(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    params = {'start_date': '2025-01-01', 'end_date': '2025-01-31'}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        via_alias = await client.get('/dashboard/reports/data', params={**params, 'report_id': 'revenue_dynamics'})
+        canonical = await client.get('/dashboard/reports/data', params={**params, 'report_id': 'financial_overview'})
+        stub = await client.get('/dashboard/reports/data', params={**params, 'report_id': 'conversion_funnel'})
+        unknown = await client.get('/dashboard/reports/data', params={**params, 'report_id': 'missing'})
+    app.dependency_overrides.clear()
+
+    assert via_alias.status_code == 200 and canonical.status_code == 200
+    aliased = via_alias.json()['data']
+    assert aliased['report_id'] == 'financial_overview'
+    assert aliased['requested_report_id'] == 'revenue_dynamics'
+    assert aliased['title'] == 'Финансовый обзор'
+    assert 'requested_report_id' not in canonical.json()['data']
+    assert {k: v for k, v in aliased.items() if k != 'requested_report_id'} == canonical.json()['data']
+    # A removed stub id is unknown, not a 200 with a "planned" placeholder.
+    assert stub.status_code == 400 and stub.json()['detail'] == 'unknown report_id'
+    assert unknown.status_code == 400 and unknown.json()['detail'] == 'unknown report_id'
+
+
+@pytest.mark.asyncio
+async def test_a_period_at_the_edge_of_the_calendar_is_a_client_error_not_a_crash(async_session):
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        futures = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'goods_dynamics', 'start_date': '2026-01-01', 'end_date': '9999-12-31'},
+        )
+        past = await client.get(
+            '/dashboard/reports/data',
+            params={'report_id': 'new_vs_returning_cross', 'start_date': '0001-01-01', 'end_date': '2026-01-01'},
+        )
+    app.dependency_overrides.clear()
+
+    assert (futures.status_code, past.status_code) == (400, 400)
+
+
+@pytest.mark.asyncio
+async def test_a_comparison_window_at_the_end_of_the_calendar_is_a_client_error_not_a_crash(async_session):
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'financial_overview',
+                'start_date': '2026-05-01',
+                'end_date': '2026-05-31',
+                'compare_start_date': '2026-01-01',
+                'compare_end_date': '9999-12-31',
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert 'compare_end_date' in response.json()['detail']
+
+
+@pytest.mark.asyncio
+async def test_report_gates_are_evaluated_on_the_canonical_id(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    money_blind = AccessContext.from_user(
+        user_id=11, role='manager', portal_account_id=1, company_ids=[1], money_metrics=frozenset()
+    )
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = lambda: money_blind
+    transport = ASGITransport(app=app)
+    params = {'start_date': '2025-01-01', 'end_date': '2025-01-31'}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        # Counts-only report reached through an alias that the old substring heuristic never flagged.
+        allowed = await client.get('/dashboard/reports/data', params={**params, 'report_id': 'cancellation_analysis'})
+        # Money report reached through an alias: the alias must not dodge the gate.
+        denied = await client.get('/dashboard/reports/data', params={**params, 'report_id': 'revenue_dynamics'})
+        unknown = await client.get('/dashboard/reports/data', params={**params, 'report_id': 'conversion_funnel'})
+    app.dependency_overrides.clear()
+
+    assert allowed.status_code == 200
+    assert allowed.json()['data']['report_id'] == 'bookings_dynamics'
+    assert allowed.json()['data']['requested_report_id'] == 'cancellation_analysis'
+    assert denied.status_code == 403
+    # Unknown ids are rejected as unknown before any money gate answers 403.
+    assert unknown.status_code == 400
 
 
 @pytest.mark.asyncio
@@ -269,7 +511,7 @@ async def test_dashboard_report_data_ready_report_and_compare(async_session):
         r = await client.get(
             '/dashboard/reports/data',
             params={
-                'report_id': 'revenue_dynamics',
+                'report_id': 'financial_overview',
                 'start_date': '2025-01-01',
                 'end_date': '2025-01-31',
                 'granularity': 'month',
@@ -283,7 +525,7 @@ async def test_dashboard_report_data_ready_report_and_compare(async_session):
     data = r.json()['data']
     assert data['source_status'] == 'ready'
     assert data['average_check_source_status'] == 'partial'
-    assert data['report_id'] == 'revenue_dynamics'
+    assert data['report_id'] == 'financial_overview'
     assert data['cards'][0]['value'] == 1200.0
     assert data['comparison']['cards'][0]['value'] == 800.0
     assert data['comparison']['rows'][0]['label'] == 'Выручка'
@@ -331,7 +573,7 @@ async def test_dashboard_client_reports_are_aggregated_without_client_pii(async_
         churn = await client.get(
             '/dashboard/reports/data',
             params={
-                'report_id': 'lost_clients_list',
+                'report_id': 'revenue_at_risk',
                 'start_date': '2025-01-01',
                 'end_date': '2025-01-31',
             },
@@ -345,7 +587,7 @@ async def test_dashboard_client_reports_are_aggregated_without_client_pii(async_
     assert recency_data['cards'][3]['value'] == 1
 
     assert churn.status_code == 200
-    assert churn.json()['data']['tables'][0]['id'] == 'risk_segments'
+    assert churn.json()['data']['tables'][0]['id'] == 'churn_by_month'
 
     combined_payload = recency.text + churn.text
     assert 'Alice Personal' not in combined_payload
@@ -425,16 +667,17 @@ async def test_dashboard_client_reports_revenue_uses_paid_service_rows(async_ses
     card_values = [card['value'] for card in data['cards']]
     assert card_values[:3] == [3, 3, 2200.0]
     assert card_values[3] == pytest.approx(2200.0 / 3)
-    # Buckets count the client's whole history at the branch, not the period, so the
-    # client whose only visit predates the window lands in "1 визит" and carries its
-    # in-period revenue there. "0 визитов" is left for clients who never attended.
+    # Buckets follow the whole history of the clients who visited in the period, like the Overview.
+    # The client who only paid in the period for an earlier visit is not one of them: their revenue
+    # sits on its own row instead of inflating a bucket.
     frequency_by_bucket = {row['bucket']: row for row in data['raw']['visit_frequency']}
-    assert frequency_by_bucket['0 визитов']['clients'] == 0
-    assert frequency_by_bucket['0 визитов']['revenue'] == 0.0
-    assert frequency_by_bucket['1 визит']['clients'] == 2
-    assert frequency_by_bucket['1 визит']['revenue'] == 700.0
+    assert '0 визитов' not in frequency_by_bucket
+    assert frequency_by_bucket['1 визит']['clients'] == 1
+    assert frequency_by_bucket['1 визит']['revenue'] == 0.0
     assert frequency_by_bucket['2-3 визита']['clients'] == 1
     assert frequency_by_bucket['2-3 визита']['revenue'] == 1500.0
+    assert frequency_by_bucket['Оплатили визиты прошлых периодов']['clients'] == 1
+    assert frequency_by_bucket['Оплатили визиты прошлых периодов']['revenue'] == 700.0
 
     overview = await dashboard_service.fetch_summary(
         async_session,
@@ -1364,7 +1607,7 @@ async def test_reporting_start_trims_breakdown_cards_client_blocks_and_staff_fac
         date(2025, 12, 31),
         allowed_company_ids=[1],
     )
-    reviews = next(card for card in nps['cards'] if card['label'] == 'Отзывы YClients')
+    reviews = next(card for card in nps['cards'] if card['label'] == 'Отзывов')
     assert reviews['value'] == 1
 
     # Churn counts lost clients from the same trimmed visit history, so a client whose
@@ -3485,7 +3728,7 @@ async def test_dashboard_report_data_validates_request(async_session):
         bad_granularity = await client.get(
             '/dashboard/reports/data',
             params={
-                'report_id': 'revenue_dynamics',
+                'report_id': 'financial_overview',
                 'start_date': '2025-01-01',
                 'end_date': '2025-01-31',
                 'granularity': 'quarter',
@@ -3498,7 +3741,7 @@ async def test_dashboard_report_data_validates_request(async_session):
         bad_compare = await client.get(
             '/dashboard/reports/data',
             params={
-                'report_id': 'revenue_dynamics',
+                'report_id': 'financial_overview',
                 'start_date': '2025-01-01',
                 'end_date': '2025-01-31',
                 'compare_start_date': '2024-12-01',
@@ -3507,7 +3750,7 @@ async def test_dashboard_report_data_validates_request(async_session):
         bad_company = await client.get(
             '/dashboard/reports/data',
             params={
-                'report_id': 'revenue_dynamics',
+                'report_id': 'financial_overview',
                 'start_date': '2025-01-01',
                 'end_date': '2025-01-31',
                 'company_id': 999,
@@ -3516,7 +3759,7 @@ async def test_dashboard_report_data_validates_request(async_session):
         bad_staff = await client.get(
             '/dashboard/reports/data',
             params={
-                'report_id': 'revenue_dynamics',
+                'report_id': 'financial_overview',
                 'start_date': '2025-01-01',
                 'end_date': '2025-01-31',
                 'staff_id': 999,
@@ -3532,7 +3775,7 @@ async def test_dashboard_report_data_validates_request(async_session):
 
 
 @pytest.mark.asyncio
-async def test_dashboard_report_data_missing_and_partial_sources(async_session):
+async def test_dashboard_report_data_partial_sources(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
     async_session.add(Staff(id=1, name='Master', company_id=1))
@@ -3553,23 +3796,17 @@ async def test_dashboard_report_data_missing_and_partial_sources(async_session):
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        missing = await client.get(
-            '/dashboard/reports/data',
-            params={'report_id': 'conversion_funnel', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
-        )
         partial = await client.get(
             '/dashboard/reports/data',
             params={'report_id': 'nps_dashboard', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
     app.dependency_overrides.clear()
 
-    assert missing.status_code == 200
-    assert missing.json()['data']['source_status'] == 'missing'
-    assert missing.json()['data']['missing_sources'] == ['yandex_metrika']
     assert partial.status_code == 200
     partial_data = partial.json()['data']
-    assert partial_data['source_status'] == 'partial'
-    assert 'telegram_nps' in partial_data['missing_sources']
+    # The reviews report has no source that could be missing: the NPS survey card is gone.
+    assert partial_data['source_status'] == 'ready'
+    assert partial_data['missing_sources'] == []
     assert partial_data['tables'][0]['rows'][0]['rating'] == 2.0
 
 
@@ -3714,7 +3951,8 @@ async def test_dashboard_staff_efficiency_revenue_uses_paid_service_rows(async_s
             'not_completed': 0,
             'clients': 0,
             'revenue': 700.0,
-            'avg_check': 0.0,
+            # Paid in the period for a visit outside it: no completed visit here, so no average either.
+            'avg_check': None,
         },
     ]
     overview = await dashboard_service.fetch_summary(
@@ -3803,14 +4041,19 @@ async def test_goods_report_revenue_matches_paid_overview_component(async_sessio
     cards = {card['label']: card['value'] for card in data['cards']}
     assert cards['Выручка товаров'] == 2400.0
     assert cards['Единиц продано'] == 2.0
-    assert data['raw']['goods'] == [{
-        'good_title': 'Помада',
+    tables = {table['id']: table['rows'] for table in data['tables']}
+    assert tables['goods'] == [{
+        'title': 'Помада',
+        'branches': 1,
         'sales_count': 1,
         'units': 2.0,
         'revenue': 2400.0,
     }]
-    assert data['raw']['by_staff'] == [{
+    assert tables['goods_by_staff'] == [{
+        'seller_key': '1:1',
+        'staff_id': 1,
         'staff_name': 'Master',
+        'company_title': 'Salon',
         'sales_count': 1,
         'revenue': 2400.0,
     }]
@@ -4660,7 +4903,7 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
         )
         branch_admin_finance_report = await client.get(
             '/dashboard/reports/data',
-            params={'report_id': 'revenue_dynamics', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
+            params={'report_id': 'financial_overview', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
             headers={'Authorization': f'Bearer {branch_admin_token}'},
         )
         branch_admin_operations_report = await client.get(
@@ -11753,7 +11996,7 @@ async def test_administrator_service_scope_is_explicitly_separated_from_personal
     )
     service_report = await dashboard_reports.fetch_report_data(
         async_session,
-        'service_combos',
+        'avg_check_by_service',
         date(2025, 1, 10),
         date(2025, 1, 10),
         company_id=1,
@@ -11876,7 +12119,7 @@ async def test_administrator_service_scope_fails_closed_without_schedule_coverag
     )
     report = await dashboard_reports.fetch_report_data(
         async_session,
-        'service_combos',
+        'avg_check_by_service',
         date(2025, 1, 1),
         date(2025, 1, 31),
         company_id=1,
@@ -13988,7 +14231,7 @@ async def test_service_report_cards_use_complete_overview_totals_beyond_top_25(
 
     report = await dashboard_reports.fetch_report_data(
         async_session,
-        'service_combos',
+        'avg_check_by_service',
         date(2026, 8, 1),
         date(2026, 8, 1),
         company_id=1,
@@ -14015,8 +14258,7 @@ async def test_service_report_cards_use_complete_overview_totals_beyond_top_25(
     assert cards['Выручка услуг'] == expected_revenue
     assert cards['Выручка услуг'] == overview['revenue']['service_revenue']
     assert cards['Услуг оказано'] == overview['revenue']['service_count'] == 31.0
-    assert cards['Уникальных услуг'] == 31
-    assert len(services_table['rows']) == 25
+    assert len(services_table['rows']) == 31
     free_service = next(
         row for row in complete_detail if row['title'] == 'Included package service'
     )
@@ -14096,11 +14338,15 @@ async def test_goods_report_uses_shared_factual_cutoff_for_units_and_revenue(
     assert cards['Выручка товаров'] == 100.0
     assert cards['Выручка товаров'] == overview['revenue']['goods_revenue']
     assert cards['Единиц продано'] == 1.0
-    assert report['raw']['by_period'] == [{
+    periods = next(table for table in report['tables'] if table['id'] == 'periods')
+    assert periods['rows'] == [{
         'period': '2026-08-01',
-        'sales_count': 1,
-        'units': 1.0,
         'revenue': 100.0,
+        'units': 1.0,
+        'sales_count': 1,
+        'completed_visits': 0,
+        'goods_visits': 0,
+        'goods_share': None,
     }]
 
 
@@ -14203,11 +14449,12 @@ async def test_ready_report_slices_share_one_factual_cutoff(
         date(2026, 8, 1),
         company_id=1,
     )
+    # Client 2's August visit is after the cutoff, so as of "now" their last visit is on 1 May.
     churn_report = await dashboard_reports.fetch_report_data(
         async_session,
         'revenue_at_risk',
-        date(2026, 8, 1),
-        date(2026, 8, 1),
+        date(2026, 5, 1),
+        date(2026, 5, 1),
         company_id=1,
     )
     booking_report = await dashboard_reports.fetch_report_data(
@@ -14227,10 +14474,9 @@ async def test_ready_report_slices_share_one_factual_cutoff(
     assert client_cards['Визитов'] == 1
     assert client_cards['Выручка клиентов'] == 100.0
     assert recency_report['raw']['summary_metrics']['unique_clients'] == 1
-    assert churn_cards['Спящие'] == 1
-    assert churn_cards['Выручка под риском'] == 60.0
-    assert booking_cards['Всего записей'] == 1
-    assert booking_cards['Завершено'] == 1
+    assert churn_cards['Ушедших клиентов'] == 1
+    assert churn_cards['Ежемесячная выручка под риском'] == pytest.approx(60.0 / 12)
+    assert booking_cards['Визитов'] == 1
 
 
 @pytest.mark.asyncio
@@ -14310,7 +14556,9 @@ async def test_client_report_exposes_anonymous_residual_and_reconciles_totals(
         'visits': 1,
         'revenue': 200.0,
     }
-    assert sum(row['revenue'] for row in report['raw']['segments']) == 300.0
+    # The part without a client card is one residual line, so the table still adds up to the whole.
+    residual = [row for row in report['raw']['pareto'] if row['bucket'] == 'Оплаты без клиента']
+    assert [(row['clients'], row['revenue']) for row in residual] == [(None, 200.0)]
     assert sum(
         row['revenue_pct'] for row in report['raw']['pareto']
     ) == pytest.approx(100.0)
@@ -14368,10 +14616,9 @@ async def test_future_ended_client_reports_measure_recency_at_factual_cutoff(
     cards = {card['label']: card['value'] for card in churn['cards']}
 
     assert rows[0]['days_since_last_visit'] == 31
-    assert cards['Под риском'] == 0
-    assert cards['Спящие'] == 0
-    assert cards['Потерянные'] == 0
-    assert cards['Выручка под риском'] == 0.0
+    # 31 days after the last visit is far from the 90 the report waits for.
+    assert cards['Ушедших клиентов'] == 0
+    assert cards['Ежемесячная выручка под риском'] == 0.0
 
 
 @pytest.mark.asyncio

@@ -56,10 +56,14 @@ export function reportFiltersFromParams(params) {
   const filters = {};
   REPORT_FILTER_KEYS.forEach((key) => { filters[key] = value(key); });
   filters.granularity = filters.granularity || DEFAULT_GRANULARITY;
+  const compare = comparePeriod(value('compare_start_date'), value('compare_end_date'));
+  const periodPreset = value('period_preset');
   return {
     ...filters,
-    ...comparePeriod(value('compare_start_date'), value('compare_end_date')),
-    period_preset: value('period_preset'),
+    ...compare,
+    // A ticked box under a preset carries no window, only `compare_previous` (see reportComparisonRequest).
+    compare_enabled: compare.compare_enabled || Boolean(periodPreset && value('compare_previous') === 'true'),
+    period_preset: periodPreset,
   };
 }
 
@@ -75,6 +79,37 @@ export function reportCompareParams(filters = {}) {
   const end = filters.compare_end_date;
   if (!filters.compare_enabled || !start || !end || start > end) return null;
   return { compare_start_date: start, compare_end_date: end };
+}
+
+/**
+ * What the comparison checkbox asks the report endpoint for, or null.
+ *
+ * A window typed in wins. A ticked box under an Overview preset with no window asks for the
+ * preset's own baseline (`compare_previous`), which the server resolves the way the Overview does.
+ */
+export function reportComparisonRequest(filters = {}) {
+  const window = reportCompareParams(filters);
+  if (window) return window;
+  const empty = !filters.compare_start_date && !filters.compare_end_date;
+  return filters.compare_enabled && filters.period_preset && empty ? { compare_previous: 'true' } : null;
+}
+
+/**
+ * Query of `/dashboard/reports/data`.
+ *
+ * Parameters a report does not offer are not sent: a hidden granularity select would otherwise
+ * keep re-bucketing it invisibly, and a ticked comparison box would ask a report that cannot compare.
+ */
+export function reportDataParams({ reportId, filters, meta = {} }) {
+  const visibility = reportFilterVisibility(meta);
+  const params = { report_id: reportId };
+  REPORT_FILTER_KEYS.forEach((key) => {
+    if (key === 'granularity' && !visibility.granularity) return;
+    params[key] = filters[key];
+  });
+  if (filters.period_preset) params.period_preset = filters.period_preset;
+  if (visibility.compare) Object.assign(params, reportComparisonRequest(filters));
+  return params;
 }
 
 function comparePeriod(start, end) {
@@ -96,11 +131,8 @@ export function reportSearchParams(filters = {}) {
   REPORT_FILTER_KEYS.forEach((key) => {
     if (filters[key]) params.set(key, String(filters[key]));
   });
-  const compare = reportCompareParams(filters);
-  if (compare) {
-    params.set('compare_start_date', compare.compare_start_date);
-    params.set('compare_end_date', compare.compare_end_date);
-  }
+  // The link asks for exactly what the request does, so a reload keeps the comparison the page was showing.
+  Object.entries(reportComparisonRequest(filters) || {}).forEach(([key, value]) => params.set(key, String(value)));
   // Not a filter — it names the Overview preset the period came from, and so the
   // baseline the deltas are measured against. Dropping it here would let a reload
   // silently re-measure the report against a different window than the card that

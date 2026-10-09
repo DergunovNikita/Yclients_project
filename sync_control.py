@@ -3,11 +3,17 @@ from typing import Any, Optional
 
 from sqlalchemy import text
 
-from config import SYNC_LOCK_ID, SYNC_RUN_RETENTION_DAYS, SYNC_RUN_RETENTION_INTERVAL_HOURS
-from models import SyncJob, SyncRun, SyncState, SyncStepRun
+from config import (
+    REPORT_USAGE_RETENTION_DAYS,
+    SYNC_LOCK_ID,
+    SYNC_RUN_RETENTION_DAYS,
+    SYNC_RUN_RETENTION_INTERVAL_HOURS,
+)
+from models import ReportUsageEvent, SyncJob, SyncRun, SyncState, SyncStepRun
 from sync_parsing import parse_datetime, serialize_dt
 
 _RETENTION_STATE_KEY = 'last_run_retention_at'
+_REPORT_USAGE_RETENTION_STATE_KEY = 'last_report_usage_retention_at'
 
 
 class SyncControlService:
@@ -127,6 +133,44 @@ class SyncControlService:
         # interval is the right answer for best-effort maintenance; the caller logs the failure.
         self.set_state(db, _RETENTION_STATE_KEY, now)
         return self.purge_old_runs(db, retention_days=retention_days, now=now)
+
+    def purge_old_report_usage(
+        self,
+        db,
+        retention_days: int = REPORT_USAGE_RETENTION_DAYS,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Delete report_usage_events older than retention_days. The log is append-only and nothing refers to it."""
+        if retention_days <= 0:
+            return 0
+        cutoff = (now or datetime.now()) - timedelta(days=retention_days)
+        deleted = db.query(ReportUsageEvent).filter(ReportUsageEvent.created_at < cutoff).delete(
+            synchronize_session=False
+        )
+        db.commit()
+        if deleted:
+            print(f'✓ Purged {deleted} report usage event(s) older than {retention_days}d')
+        return deleted
+
+    def purge_old_report_usage_if_due(
+        self,
+        db,
+        *,
+        retention_days: int = REPORT_USAGE_RETENTION_DAYS,
+        interval_hours: int = SYNC_RUN_RETENTION_INTERVAL_HOURS,
+        now: datetime | None = None,
+    ) -> int | None:
+        """Throttled purge_old_report_usage(), on the same schedule and with the same attempt-first throttle
+        as purge_old_runs_if_due. Returns None when skipped."""
+        now = now or datetime.now()
+        last_at = parse_datetime(
+            self.get_state_values(db, [_REPORT_USAGE_RETENTION_STATE_KEY]).get(_REPORT_USAGE_RETENTION_STATE_KEY)
+        )
+        if last_at is not None and now - last_at < timedelta(hours=interval_hours):
+            return None
+        self.set_state(db, _REPORT_USAGE_RETENTION_STATE_KEY, now)
+        return self.purge_old_report_usage(db, retention_days=retention_days, now=now)
 
     def create_run(self, db, mode: str, trigger_type: str, initiator: str, log_path: str) -> SyncRun:
         now = datetime.now()

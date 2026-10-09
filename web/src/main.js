@@ -65,7 +65,15 @@ import { branchesForPeriod } from './reportingWindow.js';
 // guard, so a financials_hidden field (e.g. revenue.service_revenue for the manager default,
 // see AGENTS.md) rendered as a misleading "0 ₽" instead of admitting it isn't shown. These
 // versions render "—" for null/undefined, same as Reports already did — see format.test.mjs.
-import { formatDate, formatDecimal, formatMoney, formatMoneyExact, formatNumber } from './reports/format.js';
+import {
+  deltaClass,
+  formatDate,
+  formatDecimal,
+  formatMoney,
+  formatMoneyExact,
+  formatNumber,
+  formatPct,
+} from './reports/format.js';
 import { canEnterManualFacts, entersManualFactsForSelf } from './manualFactAccess.js';
 import { canViewBranchPayments } from './branchPaymentsAccess.js';
 import {
@@ -593,12 +601,6 @@ function applyFinancialVisibility(summary) {
   setOverviewSectionHidden('services', financialsHidden);
 }
 
-function formatPct(value) {
-  if (value === null || value === undefined) return t('dash.noBase');
-  const sign = value > 0 ? '+' : '';
-  return t('dash.changeVsPrevious', { value: `${sign}${Number(value).toLocaleString(intlLocale())}%` });
-}
-
 function formatMetricValue(value, format) {
   if (value === null || value === undefined) return '—';
   if (format === 'money') return formatMoney(value);
@@ -626,11 +628,6 @@ function formatMoscowDateTime(value) {
     minute: '2-digit',
     second: '2-digit',
   }).format(date);
-}
-
-function deltaClass(value) {
-  if (value === null || value === undefined || value === 0) return '';
-  return value > 0 ? 'up' : 'down';
 }
 
 function setApiState(text, kind = 'warn') {

@@ -39,6 +39,7 @@ from models import (
     PortalRefreshToken,
     PortalUser,
     PortalUserBranch,
+    ReportUsageEvent,
     SyncJob,
     SyncJobEvent,
     SyncRun,
@@ -113,6 +114,19 @@ def isolate_api_auth(monkeypatch):
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
 
 
+@pytest.fixture(autouse=True)
+def never_write_usage_events_to_the_configured_database(monkeypatch):
+    """`import api` initialises the engine from .env, so a route test with a signed-in principal would write
+    its usage event to that real database (and did, into the local copy of production). The writer logs a
+    warning and drops the event; tests that look at usage events point the factory at their own database."""
+    import report_usage
+
+    def refuse():
+        raise RuntimeError('tests must not write to the configured database')
+
+    monkeypatch.setattr(report_usage, 'get_async_session_factory', refuse)
+
+
 @pytest_asyncio.fixture
 async def async_session() -> AsyncGenerator[AsyncSession, None]:
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
@@ -132,6 +146,7 @@ async def async_session() -> AsyncGenerator[AsyncSession, None]:
             SyncJob.__table__,
             PortalAuditEvent.__table__,
             SyncJobEvent.__table__,
+            ReportUsageEvent.__table__,
         ])
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:

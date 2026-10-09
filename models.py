@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     JSON,
     Numeric,
+    SmallInteger,
     String,
     Text,
     Time,
@@ -1073,6 +1074,41 @@ class SyncJobEvent(Base):
     message = Column(Text)
     payload = Column(JSON)
     created_at = Column(DateTime, nullable=False, index=True)
+
+
+class ReportUsageEvent(Base):
+    """One opening of a report by a signed-in tenant user (written by `report_usage.record_report_usage`).
+
+    An append-only analytics log, so it carries no foreign keys: a user or account that is deleted
+    later must not erase or block the history, and a failed insert must never be able to reach the
+    request that produced it. `usage_day` is the branch-time business day of `created_at` (naive UTC).
+    `staff_filter` records what the client asked for, before a personal role is clamped to its own row.
+    """
+
+    __tablename__ = 'report_usage_events'
+    __table_args__ = (
+        Index('ix_report_usage_events_account_created', 'portal_account_id', 'created_at'),
+        Index('ix_report_usage_events_created', 'created_at'),
+        {'schema': SYSTEM_SCHEMA},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    portal_account_id = Column(Integer, nullable=False)
+    user_id = Column(Integer, nullable=False)
+    role = Column(String(32), nullable=False)
+    report_id = Column(String(64), nullable=False)
+    requested_report_id = Column(String(64))
+    created_at = Column(DateTime, nullable=False)
+    usage_day = Column(Date, nullable=False)
+    duration_ms = Column(Integer, nullable=False)
+    status_code = Column(SmallInteger, nullable=False)
+    source_status = Column(String(16))
+    compare_used = Column(Boolean, nullable=False)
+    staff_filter = Column(Boolean, nullable=False)
+    company_filter = Column(Boolean, nullable=False)
+    granularity = Column(String(8))
+    period_days = Column(Integer)
+    period_preset = Column(String(16))
 
 
 class PortalAuditEvent(Base):

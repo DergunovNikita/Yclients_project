@@ -3162,8 +3162,8 @@ async def test_demo_tenant_hides_reports_its_data_cannot_populate(auth_db):
         demo_ids = {item['id'] for item in catalog.json()['data']}
         assert 'year_over_year' not in demo_ids
         # Hiding one report must not thin out the rest of the catalog.
-        assert 'revenue_dynamics' in demo_ids
-        assert len(demo_ids) >= 30
+        assert 'financial_overview' in demo_ids
+        assert len(demo_ids) == 16
 
         # A bookmarked URL must not bypass the catalog.
         blocked = await client.get('/dashboard/reports/data', params={

@@ -35,6 +35,12 @@ export function chartSeriesColor(index) {
   return `hsl(${generatedHue(position)}, ${GENERATED_SATURATION}%, ${GENERATED_LIGHTNESS}%)`;
 }
 
+/** The same colour, faded: how the comparison window is drawn next to the current one. */
+export function mutedColor(color, alpha = 0.55) {
+  if (color.startsWith('#')) return `${color}${Math.round(alpha * 255).toString(16).padStart(2, '0')}`;
+  return color.replace(/^hsl\((.*)\)$/, `hsla($1, ${alpha})`);
+}
+
 function hasDrawableSegment(data) {
   const values = data || [];
   return values.some((value, index) => (
@@ -134,4 +140,43 @@ export function tooltipSeriesLabel(spec, type, { datasetIndex = 0, dataIndex = 0
   const dataset = spec?.datasets?.[datasetIndex] || {};
   if (type === 'doughnut' || type === 'pie') return spec?.labels?.[dataIndex] ?? dataset.label;
   return dataset.label;
+}
+
+export const COMPARE_DASH = [6, 4];
+
+/**
+ * Adds the comparison window's series to a chart spec, one dashed series per current series.
+ *
+ * Time charts align by position (the windows have different dates), category charts by label.
+ * Arcs and stacks are left alone: a second ring or a second stack would not read as a comparison.
+ * Added series carry `compare: true` and the `colorIndex` of the series they shadow.
+ */
+export function withComparisonDatasets(spec, comparisonChart, compareLabel = '') {
+  if (!spec || !comparisonChart || spec.stacked === true) return spec;
+  if (spec.type === 'doughnut' || spec.type === 'pie') return spec;
+  const previous = comparisonChart.datasets || [];
+  if (!previous.length) return spec;
+  const labels = spec.labels || [];
+  const byTime = spec.x_kind === 'time';
+  const previousLabels = comparisonChart.labels || [];
+  const labelIndex = new Map(previousLabels.map((label, index) => [String(label), index]));
+  const align = (data) => labels.map((label, index) => {
+    const source = byTime ? index : labelIndex.get(String(label));
+    const value = source === undefined ? null : data?.[source];
+    return value === undefined ? null : value;
+  });
+  const shadows = (spec.datasets || []).flatMap((dataset, index) => {
+    const match = previous.find((item) => item.label === dataset.label) || (
+      previous.length === (spec.datasets || []).length ? previous[index] : null
+    );
+    if (!match) return [];
+    return [{
+      ...dataset,
+      label: `${dataset.label} (${compareLabel})`,
+      data: align(match.data),
+      compare: true,
+      colorIndex: index,
+    }];
+  });
+  return shadows.length ? { ...spec, datasets: [...spec.datasets, ...shadows] } : spec;
 }

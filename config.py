@@ -161,6 +161,10 @@ SYNC_RUN_RETENTION_DAYS = _get_int('SYNC_RUN_RETENTION_DAYS', 30)
 SYNC_RUN_RETENTION_INTERVAL_HOURS = _get_int('SYNC_RUN_RETENTION_INTERVAL_HOURS', 24)
 SYNC_JOB_RETENTION_DAYS = _get_int('SYNC_JOB_RETENTION_DAYS', 30)
 SYNC_JOB_RETENTION_INTERVAL_HOURS = _get_int('SYNC_JOB_RETENTION_INTERVAL_HOURS', 24)
+# Report usage log (system.report_usage_events): rows older than this are swept from the worker's
+# idle branch on the same daily throttle. 400 days keeps a full year plus the previous period for
+# comparison; 0 keeps everything.
+REPORT_USAGE_RETENTION_DAYS = _get_int('REPORT_USAGE_RETENTION_DAYS', 400)
 
 # ============================================================================
 # API runtime

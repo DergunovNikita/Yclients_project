@@ -1,4 +1,13 @@
-import { escapeHtml, formatValue } from '../format.js';
+import { cellDelta, pairedRows } from '../comparison.js';
+import {
+  deltaClass,
+  deltaDigits,
+  escapeHtml,
+  formatDate,
+  formatDeltaPct,
+  formatSignedValue,
+  formatValue,
+} from '../format.js';
 import { intlLocale, t } from '../../i18n.js';
 import { sourceLabel } from '../registry.js';
 import { rankingRowsForMetric, tableHasRows } from '../ranking.js';
@@ -70,19 +79,31 @@ function rowsCountText(count) {
   return t('reports.rowsCount', { count: count.toLocaleString(intlLocale()) });
 }
 
-function renderTableRows(rows, columns) {
-  return rows.map((row) => `
+function renderCellDelta(delta) {
+  if (!delta) return '';
+  const text = delta.format === 'percent'
+    ? formatSignedValue(delta.value, 'percent')
+    : formatDeltaPct(delta.value);
+  return `<small class="reports-cell-delta delta ${deltaClass(delta.value, 1)}" title="${escapeHtml(t('reports.deltaVsCompare'))}">${escapeHtml(text)}</small>`;
+}
+
+function renderTableRows(rows, columns, table, comparisonTable) {
+  return pairedRows(table, rows, comparisonTable).map(({ row, previous, compared }) => `
     <tr>
       ${columns.map((column) => `
         <td class="${column.format !== 'text' && column.format !== 'date' ? 'number' : ''}">
-          ${escapeHtml(formatValue(row[column.key], column.format))}
+          ${escapeHtml(formatValue(row[column.key], column.format))}${compared && column.key !== table.row_key ? renderCellDelta(cellDelta(column, row, previous)) : ''}
         </td>
       `).join('')}
     </tr>
   `).join('');
 }
 
-function renderTables(tables = []) {
+function comparisonTableFor(comparison, table) {
+  return (comparison?.tables || []).find((item) => item.id === table.id);
+}
+
+function renderTables(tables = [], comparison = null) {
   return tables.map((table) => {
     if (table.hide_when_empty && !tableHasRows(table)) return '';
     const rows = table.rows || [];
@@ -118,7 +139,7 @@ function renderTables(tables = []) {
                 </tr>
               </thead>
               <tbody>
-                ${renderTableRows(rows, columns)}
+                ${renderTableRows(rows, columns, table, comparisonTableFor(comparison, table))}
               </tbody>
             </table>
           </div>
@@ -129,7 +150,7 @@ function renderTables(tables = []) {
   }).join('');
 }
 
-function wireRankingTables(container, tables = []) {
+function wireRankingTables(container, tables = [], comparison = null) {
   const byId = new Map(tables.map((table) => [String(table.id), table]));
   container.querySelectorAll('[data-ranking-table]').forEach((select) => {
     select.addEventListener('change', () => {
@@ -142,7 +163,7 @@ function wireRankingTables(container, tables = []) {
       const body = panel.querySelector('tbody');
       const empty = panel.querySelector('[data-ranking-empty]');
       const count = panel.querySelector('[data-ranking-count]');
-      if (body) body.innerHTML = renderTableRows(rows, table.columns || []);
+      if (body) body.innerHTML = renderTableRows(rows, table.columns || [], table, comparisonTableFor(comparison, table));
       if (scroll) scroll.hidden = rows.length === 0;
       if (empty) empty.hidden = rows.length > 0;
       if (count) count.textContent = rowsCountText(rows.length);
@@ -150,22 +171,19 @@ function wireRankingTables(container, tables = []) {
   });
 }
 
-function renderUnavailable(data) {
-  const label = data.source_status === 'planned' ? t('reports.plannedReport') : t('reports.sourceNotConnected');
-  return `
-    <div class="reports-unavailable">
-      <h3>${escapeHtml(label)}</h3>
-      ${renderNotes(data.notes || [], data.missing_sources || [])}
-    </div>
-  `;
+function periodRange(period) {
+  return period ? `${formatDate(period.start)} – ${formatDate(period.end)}` : '';
+}
+
+function renderComparisonWarning(comparison) {
+  if (!comparison?.source_status || comparison.source_status === 'ready') return '';
+  return `<div class="reports-note reports-note--warning"><span>${escapeHtml(t('reports.compareSourcePartial'))}</span></div>`;
 }
 
 function renderComparison(data) {
   const comparison = data.comparison;
   const rows = comparison?.rows || [];
   if (!rows.length && !comparison?.cards?.length) return '';
-  const currentPeriod = data.period ? `${data.period.start || ''} .. ${data.period.end || ''}` : '';
-  const comparePeriod = comparison.period ? `${comparison.period.start || ''} .. ${comparison.period.end || ''}` : '';
   const bodyRows = rows.length
     ? rows
     : (comparison.cards || []).map((card) => ({
@@ -180,29 +198,31 @@ function renderComparison(data) {
     <section class="reports-panel reports-panel--wide reports-compare">
       <div class="reports-panel__head">
         <h3>${t('reports.comparison')}</h3>
-        <span>${escapeHtml(currentPeriod)} / ${escapeHtml(comparePeriod)}</span>
       </div>
       <div class="reports-table-scroll">
         <table class="reports-table">
           <thead>
             <tr>
               <th>${t('reports.metric')}</th>
-              <th class="number">${t('reports.currentPeriod')}</th>
-              <th class="number">${t('reports.comparePeriod')}</th>
+              <th class="number">${t('reports.currentPeriod')}<small class="reports-th-period">${escapeHtml(periodRange(data.period))}</small></th>
+              <th class="number">${t('reports.comparePeriod')}<small class="reports-th-period">${escapeHtml(periodRange(comparison.period))}</small></th>
               <th class="number">Δ</th>
               <th class="number">Δ%</th>
             </tr>
           </thead>
           <tbody>
-            ${bodyRows.map((row) => `
+            ${bodyRows.map((row) => {
+    // A change of a share is already in points; a percent of it would read as a second metric.
+    const deltaPct = row.format === 'percent' ? null : row.delta_pct;
+    return `
               <tr>
                 <td>${escapeHtml(row.label || '')}</td>
                 <td class="number">${escapeHtml(formatValue(row.current, row.format))}</td>
                 <td class="number">${escapeHtml(formatValue(row.compare, row.format))}</td>
-                <td class="number">${escapeHtml(formatValue(row.delta, row.format))}</td>
-                <td class="number">${escapeHtml(formatValue(row.delta_pct, 'percent'))}</td>
-              </tr>
-            `).join('')}
+                <td class="number"><span class="delta ${deltaClass(row.delta, deltaDigits(row.format))}">${escapeHtml(formatSignedValue(row.delta, row.format))}</span></td>
+                <td class="number"><span class="delta ${deltaClass(deltaPct, 1)}">${escapeHtml(formatDeltaPct(deltaPct))}</span></td>
+              </tr>`;
+  }).join('')}
           </tbody>
         </table>
       </div>
@@ -216,21 +236,18 @@ export function renderReportData(container, data, chartManager) {
     container.innerHTML = `<div class="empty compact">${t('reports.noReportData')}</div>`;
     return;
   }
-  if (data.source_status === 'missing' || data.source_status === 'planned') {
-    container.innerHTML = renderUnavailable(data);
-    return;
-  }
-
   container.innerHTML = `
     ${renderCalculationScope(data.calculation_scope)}
     ${renderNotes(data.notes || [], data.missing_sources || [])}
+    ${renderComparisonWarning(data.comparison)}
     ${renderCards(data.cards || [])}
     ${renderComparison(data)}
     ${renderCharts(data.charts || [])}
-    ${renderTables(data.tables || [])}
+    ${renderTables(data.tables || [], data.comparison)}
   `;
-  wireRankingTables(container, data.tables || []);
+  wireRankingTables(container, data.tables || [], data.comparison);
   (data.charts || []).forEach((chart) => {
-    chartManager.render(container.querySelector(`[data-report-chart="${chart.id}"]`), chart);
+    const comparisonChart = (data.comparison?.charts || []).find((item) => item.id === chart.id);
+    chartManager.render(container.querySelector(`[data-report-chart="${chart.id}"]`), chart, comparisonChart);
   });
 }

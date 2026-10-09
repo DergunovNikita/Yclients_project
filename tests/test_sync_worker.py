@@ -47,6 +47,9 @@ class _FakeControl:
     def purge_old_runs_if_due(self, db):
         return None
 
+    def purge_old_report_usage_if_due(self, db):
+        return None
+
 
 class _StopWorker(Exception):
     """Sentinel used to break main()'s `while True:` after a fixed number of ticks."""

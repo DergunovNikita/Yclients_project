@@ -1855,6 +1855,23 @@ def _service_group_key(title_expr, service_id_expr):
     return func.coalesce(func.nullif(normalized_title, ''), cast(service_id_expr, String))
 
 
+def _transaction_title_lookup():
+    """Visit lines' own service titles, keyed by internal visit id and service id.
+
+    A payment's `record_id` is the YClients (external) visit id, so payments reach this lookup
+    through the matched `Appointment.id`, never through `record_id` itself.
+    """
+    return (
+        select(
+            Transaction.appointment_id.label('appointment_id'),
+            Transaction.service_id.label('service_id'),
+            func.min(func.nullif(Transaction.service_title, '')).label('service_title'),
+        )
+        .group_by(Transaction.appointment_id, Transaction.service_id)
+        .subquery()
+    )
+
+
 def _transaction_service_label_join():
     return and_(
         ServiceLabel.service_id == Transaction.service_id,
@@ -3709,7 +3726,14 @@ async def fetch_top_services(
     factual_at: Optional[datetime] = None,
     *,
     use_administrator_schedule: bool = False,
+    group_by_staff: bool = False,
 ) -> list[dict[str, Any]]:
+    """Services of completed visits: units sold and revenue paid for them.
+
+    `group_by_staff` splits every service by the visit's master (`Appointment.staff_id`, the
+    attribution `_staff_rows` uses); rows then carry `staff_id`, `staff_name` and `company_title`.
+    The counted rows are the same either way, so totals do not move.
+    """
     factual_at = factual_at or factual_now()
     allowed_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
@@ -3734,6 +3758,7 @@ async def fetch_top_services(
     )
     title_expr = func.trim(func.coalesce(func.nullif(Transaction.service_title, ''), ServiceCatalog.title, ''))
     group_key = _service_group_key(title_expr, Transaction.service_id)
+    staff_group = (Appointment.staff_id,) if group_by_staff else ()
     count_stmt = (
         select(
             group_key.label('group_key'),
@@ -3742,6 +3767,15 @@ async def fetch_top_services(
             func.sum(Transaction.amount).label('sold'),
             func.count(func.distinct(Transaction.service_id)).label('service_count'),
             func.count(func.distinct(Appointment.company_id)).label('branch_count'),
+            *(
+                (
+                    Appointment.staff_id.label('staff_id'),
+                    func.min(Staff.name).label('staff_name'),
+                    func.min(Company.title).label('company_title'),
+                )
+                if group_by_staff
+                else ()
+            ),
         )
         .select_from(Transaction)
         .join(Appointment, Appointment.id == Transaction.appointment_id)
@@ -3757,17 +3791,13 @@ async def fetch_top_services(
             ),
             *([administrator_filter] if administrator_filter is not None else []),
         )
-        .group_by(group_key)
+        .group_by(*staff_group, group_key)
     )
-    tx_titles = (
-        select(
-            Transaction.appointment_id.label('record_id'),
-            Transaction.service_id.label('service_id'),
-            func.min(func.nullif(Transaction.service_title, '')).label('service_title'),
+    if group_by_staff:
+        count_stmt = count_stmt.outerjoin(Staff, Staff.id == Appointment.staff_id).outerjoin(
+            Company, Company.id == Appointment.company_id
         )
-        .group_by(Transaction.appointment_id, Transaction.service_id)
-        .subquery()
-    )
+    tx_titles = _transaction_title_lookup()
     paid_title_expr = func.trim(
         func.coalesce(
             tx_titles.c.service_title,
@@ -3785,21 +3815,30 @@ async def fetch_top_services(
     # partial counts would double-count. Projecting raw rows and aggregating once, on top of
     # the union, is safe for every aggregate type because the union reproduces exactly the
     # same (FinancialTransaction, Appointment) row pairs the OR-based join would have.
-    paid_branches = _financial_appointment_branches_union(
-        lambda join_condition: (
+    def paid_branch(join_condition):
+        branch = (
             select(
                 paid_group_key.label('group_key'),
                 FinancialTransaction.sold_item_id.label('service_id'),
                 paid_title_expr.label('service_title'),
                 FinancialTransaction.amount.label('amount'),
                 Appointment.company_id.label('company_id'),
+                *(
+                    (
+                        Appointment.staff_id.label('staff_id'),
+                        Staff.name.label('staff_name'),
+                        Company.title.label('company_title'),
+                    )
+                    if group_by_staff
+                    else ()
+                ),
             )
             .select_from(FinancialTransaction)
             .join(Appointment, join_condition)
             .outerjoin(
                 tx_titles,
                 and_(
-                    tx_titles.c.record_id == FinancialTransaction.record_id,
+                    tx_titles.c.appointment_id == Appointment.id,
                     tx_titles.c.service_id == FinancialTransaction.sold_item_id,
                 ),
             )
@@ -3824,7 +3863,13 @@ async def fetch_top_services(
                 _physical_account_condition(),
             )
         )
-    )
+        if group_by_staff:
+            branch = branch.outerjoin(Staff, Staff.id == Appointment.staff_id).outerjoin(
+                Company, Company.id == Appointment.company_id
+            )
+        return branch
+
+    paid_branches = _financial_appointment_branches_union(paid_branch)
     paid_revenue = func.coalesce(func.sum(paid_branches.c.amount), 0.0)
     paid_stmt = (
         select(
@@ -3834,19 +3879,41 @@ async def fetch_top_services(
             paid_revenue.label('revenue'),
             func.count(func.distinct(paid_branches.c.service_id)).label('service_count'),
             func.count(func.distinct(paid_branches.c.company_id)).label('branch_count'),
+            *(
+                (
+                    paid_branches.c.staff_id.label('staff_id'),
+                    func.min(paid_branches.c.staff_name).label('staff_name'),
+                    func.min(paid_branches.c.company_title).label('company_title'),
+                )
+                if group_by_staff
+                else ()
+            ),
         )
-        .group_by(paid_branches.c.group_key)
+        .group_by(*((paid_branches.c.staff_id,) if group_by_staff else ()), paid_branches.c.group_key)
         .order_by(paid_revenue.desc())
     )
     count_rows = (await db.execute(count_stmt)).all()
     paid_rows = (await db.execute(paid_stmt)).all()
-    counts_by_key = {str(r.group_key): r for r in count_rows}
-    paid_by_key = {str(r.group_key): r for r in paid_rows}
+    def row_key(row):
+        return (row.staff_id, str(row.group_key)) if group_by_staff else str(row.group_key)
+
+    counts_by_key = {row_key(r): r for r in count_rows}
+    paid_by_key = {row_key(r): r for r in paid_rows}
     out = []
     for key in counts_by_key.keys() | paid_by_key.keys():
         counts = counts_by_key.get(key)
         paid = paid_by_key.get(key)
+        source = counts if counts is not None else paid
         out.append({
+            **(
+                {
+                    'staff_id': source.staff_id,
+                    'staff_name': source.staff_name,
+                    'company_title': source.company_title,
+                }
+                if group_by_staff
+                else {}
+            ),
             'service_id': counts.service_id if counts is not None else paid.service_id,
             'title': (
                 counts.service_title if counts is not None else paid.service_title
@@ -4024,15 +4091,7 @@ async def fetch_extra_services(
         )
         .group_by(group_key)
     )
-    tx_titles = (
-        select(
-            Transaction.appointment_id.label('record_id'),
-            Transaction.service_id.label('service_id'),
-            func.min(func.nullif(Transaction.service_title, '')).label('service_title'),
-        )
-        .group_by(Transaction.appointment_id, Transaction.service_id)
-        .subquery()
-    )
+    tx_titles = _transaction_title_lookup()
     paid_title_expr = func.trim(
         func.coalesce(
             tx_titles.c.service_title,
@@ -4052,7 +4111,7 @@ async def fetch_extra_services(
             .outerjoin(
                 tx_titles,
                 and_(
-                    tx_titles.c.record_id == FinancialTransaction.record_id,
+                    tx_titles.c.appointment_id == Appointment.id,
                     tx_titles.c.service_id == FinancialTransaction.sold_item_id,
                 ),
             )

@@ -1369,11 +1369,6 @@
       box-shadow: 0 12px 28px rgba(15, 23, 42, .08);
     }
 
-    .report-card--source_missing,
-    .report-card--planned {
-      background: #fbfdff;
-    }
-
     .report-card__pin {
       position: absolute;
       top: 10px;
@@ -1636,6 +1631,32 @@
       white-space: nowrap;
     }
 
+    .reports-table .delta {
+      margin-top: 0;
+      font-size: inherit;
+    }
+
+    /* Δ% under a table value. Block-level inside a nowrap cell: it adds a line, never width. */
+    .reports-table .reports-cell-delta {
+      display: block;
+      margin-top: 2px;
+      font-size: 11px;
+      font-weight: 500;
+      line-height: 1.2;
+    }
+
+    .reports-table .reports-th-period {
+      display: block;
+      margin-top: 2px;
+      color: #64748b;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    #reports-route-note[hidden] {
+      display: none;
+    }
+
     /* Long headers (branch titles as columns) wrap instead of widening every column to the
        title; the floor keeps a column from collapsing to one word per line. Cells stay nowrap.
        Doubled class: it has to outrank `.reports-table .number`, which also matches these th. */
@@ -1645,8 +1666,7 @@
       vertical-align: bottom;
     }
 
-    .reports-note,
-    .reports-unavailable {
+    .reports-note {
       display: grid;
       gap: 6px;
       margin-bottom: 16px;
@@ -1659,7 +1679,7 @@
     }
 
     .reports-note--missing,
-    .reports-note--planned {
+    .reports-note--warning {
       border-color: #fed7aa;
       background: #fff7ed;
       color: #9a3412;
@@ -1674,15 +1694,6 @@
     .reports-note__sources {
       color: #64748b;
       font-size: 13px;
-    }
-
-    .reports-unavailable h3 {
-      margin: 0;
-      font-size: 18px;
-    }
-
-    .reports-compare .reports-metrics {
-      margin-bottom: 0;
     }
 
     @media (max-width: 1100px) {
@@ -2449,12 +2460,6 @@
           <span data-i18n="dash.group">Gruppo</span>
           <select id="reports-group">
             <option value="" data-i18n="dash.allGroups">Tutti i gruppi</option>
-          </select>
-        </label>
-        <label>
-          <span data-i18n="dash.status">Stato</span>
-          <select id="reports-status">
-            <option value="" data-i18n="dash.allStatuses">Tutti gli stati</option>
           </select>
         </label>
         <label>

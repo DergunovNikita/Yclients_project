@@ -179,6 +179,15 @@ def can_view_branch_payments(ctx: AccessContext) -> bool:
     return ctx.full_access or (ctx.role in BRANCH_SCOPE_ROLES and can_view_financials(ctx))
 
 
+def can_view_report_usage(ctx: AccessContext) -> bool:
+    """Whether the principal may read the report-usage analytics of a tenant.
+
+    Platform operators only: tenant owners do not see it. The global API key is not a person
+    and has no tenant, so it never qualifies.
+    """
+    return not ctx.full_access and ctx.role == 'platform_admin'
+
+
 def require_financial_access(ctx: AccessContext) -> None:
     if not can_view_financials(ctx):
         raise HTTPException(status_code=403, detail='Financial metrics are not allowed for this role')

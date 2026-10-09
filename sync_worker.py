@@ -184,13 +184,18 @@ def main():
                 # the sync cadence entirely, because every tick afterwards finds nothing queued
                 # and lands right back in this branch. These two sweeps only delete old
                 # bookkeeping rows -- losing a sweep is a cost worth paying to never lose sync.
-                # Two sweeps, two tables, two independent throttles: runs+step_runs here,
-                # jobs+job_events there. Neither is the other's cascade. Both sit inside
+                # Three sweeps, independent throttles: runs+step_runs, jobs+job_events, report usage
+                # events. None is another's cascade. All sit inside
                 # the idle branch, so they never run under --once and never on a tick that
                 # claimed a job: a permanently backlogged worker simply never prunes. That
                 # is the right trade (draining the queue matters more than trimming logs),
                 # but it is why retention can look like it 'never ran'.
-                for sweep in (SyncControlService().purge_old_runs_if_due, jobs.purge_old_jobs_if_due):
+                control = SyncControlService()
+                for sweep in (
+                    control.purge_old_runs_if_due,
+                    jobs.purge_old_jobs_if_due,
+                    control.purge_old_report_usage_if_due,
+                ):
                     try:
                         sweep(db)
                     except Exception as exc:  # noqa: BLE001 - maintenance must never stop sync

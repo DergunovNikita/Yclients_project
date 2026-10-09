@@ -423,10 +423,11 @@ def test_report_registry_flags():
     definition = dashboard_reports.REPORT_REGISTRY['payment_methods']
     assert definition.title == 'Формы оплаты'
     assert definition.status == 'ready' and definition.group == 'finance'
-    assert definition.filters['staff'] is False
-    assert definition.filters['compare'] is False and definition.filters['granularity'] is False
+    assert definition.staff_filter is False
+    assert definition.compare is False and definition.granularity is False
+    assert definition.to_payload()['filters']['staff'] is False
     assert dashboard_reports.report_requires_financials('payment_methods') is True
-    assert 'payment_methods' in dashboard_reports.MONEY_REPORTS
+    assert 'payment_methods' in dashboard_reports.BRANCH_PAYMENT_REPORTS
 
 
 # --- access -----------------------------------------------------------------------------

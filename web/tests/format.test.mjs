@@ -103,3 +103,27 @@ test('main.js uses the shared formatters rather than redefining them', async () 
     );
   }
 });
+
+test('a change that rounds to zero reads as a plain zero, never -0 or +0', async (t) => {
+  const { format, server } = await loadFormat();
+  t.after(() => server.close());
+
+  for (const tiny of [-0.04, -0, 0.04, 0]) {
+    assert.equal(format.formatDeltaPct(tiny), '0%', String(tiny));
+    assert.equal(format.deltaClass(tiny, 1), '', String(tiny));
+  }
+  assert.match(format.formatDeltaPct(-0.06), /^[-−]0[.,]1%$/);
+  assert.equal(format.deltaClass(-0.06, 1), 'down');
+  assert.match(format.formatDeltaPct(12.34), /^\+12[.,]3%$/);
+
+  // Money, counts and points: the sign follows what is displayed.
+  assert.equal(format.formatSignedValue(-0.4, 'money'), '0 ₽');
+  assert.equal(format.formatSignedValue(0.4, 'money'), '0 ₽');
+  assert.match(format.formatSignedValue(-0.04, 'percent'), /^0 \S+$/);
+  assert.equal(format.formatSignedValue(null, 'money'), '—');
+  assert.match(format.formatSignedValue(-3, 'number'), /^[-−]3$/);
+
+  // The Overview sentence goes through the same rounding.
+  assert.doesNotMatch(format.formatPct(-0), /-0(?!\.)/);
+  assert.doesNotMatch(format.formatPct(-0.0001), /-/);
+});

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import traceback
 import time
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from calendar import monthrange
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select
@@ -34,17 +38,12 @@ from dashboard_service import (
     _source_coverage_status,
     business_appointment_condition,
     financial_appointment_match_condition,
-    fetch_extra_services,
-    fetch_appointments_breakdown,
     fetch_opz_year_facts,
-    fetch_paid_goods_rows,
     fetch_plan_fact,
-    fetch_revenue_daily,
     fetch_summary,
     fetch_reporting_windows,
-    fetch_top_services,
     fetch_year_over_year_facts,
-    day_window,
+    DateRange,
     factual_branch_date,
     ReportingWindow,
     reporting_window_clause,
@@ -58,10 +57,21 @@ from payment_methods import (
     month_label,
     short_month_label,
 )
+from report_payload import (
+    DECIMAL_FORMAT,
+    MONEY_FORMAT,
+    NUMBER_FORMAT,
+    PERCENT_FORMAT,
+    ReportRequest,
+    card as _card,
+    chart as _chart,
+    ranking_table as _ranking_table,
+    table as _table,
+    without_empty_columns as _without_empty_columns,
+)
 from models import (
     AccountCatalog,
     Appointment,
-    Comment,
     Company,
     FinancialTransaction,
     GoodTransaction,
@@ -70,10 +80,8 @@ from models import (
 )
 
 REPORT_GRANULARITIES = {'day', 'week', 'month'}
-MONEY_FORMAT = 'money'
-NUMBER_FORMAT = 'number'
-PERCENT_FORMAT = 'percent'
-DECIMAL_FORMAT = 'decimal'
+# Daily history since 2018 is ~3,200 periods; this leaves room for decades of weeks and months.
+MAX_PERIOD_BUCKETS = 6000
 
 
 def _report_now() -> datetime:
@@ -97,220 +105,16 @@ class ReportCalculationError(RuntimeError):
         super().__init__(message)
         self.stage = stage
 
-REPORT_ORDER = (
-    'avg_check_by_service',
-    'avg_check_dynamics',
-    'booking_channels',
-    'bookings_dynamics',
-    'cancellation_analysis',
-    'chair_utilization',
-    'churn_dynamics',
-    'churn_prediction',
-    'client_base_dynamics',
-    'client_cohorts',
-    'client_journey',
-    'client_labels',
-    'cohort_ltv_matrix',
-    'conversion_funnel',
-    'data_audit',
-    'day_overview',
-    'demographics_check',
-    'devices_vs_booking',
-    'financial_overview',
-    'goal_conversions_report',
-    'goods_by_staff',
-    'goods_conversion',
-    'goods_dynamics',
-    'losses_by_staff',
-    'lost_clients_list',
-    'market_benchmarks',
-    'marketing_funnel',
-    'master_motivation',
-    'mind_index',
-    'month_return',
-    'new_vs_returning_cross',
-    'nps_dashboard',
-    'payment_methods',
-    'peak_hours_site_vs_salon',
-    'peak_load',
-    'price_elasticity',
-    'retention_3_6_12',
-    'retention_opz_dynamics',
-    'return_priorities',
-    'revenue_at_risk',
-    'revenue_decomposition',
-    'revenue_dynamics',
-    'revenue_factor_analysis',
-    'revenue_forecast',
-    'rfm_analysis',
-    'schedule_optimizer',
-    'search_phrases_efficiency',
-    'seasonality',
-    'service_combos',
-    'service_consumption',
-    'service_staff_profit',
-    'service_trends',
-    'staff_efficiency',
-    'staff_leaderboard',
-    'staff_salary',
-    'staff_services',
-    'staff_time_heatmap',
-    'top_clients_pareto',
-    'top_goods_revenue',
-    'traffic_source_roi',
-    'visit_forecast',
-    'year_over_year',
-)
 
-READY_REPORTS = {
-    'avg_check_by_service',
-    'avg_check_dynamics',
-    'booking_channels',
-    'bookings_dynamics',
-    'cancellation_analysis',
-    'client_cohorts',
-    'client_journey',
-    'client_labels',
-    'day_overview',
-    'financial_overview',
-    'goods_by_staff',
-    'goods_conversion',
-    'goods_dynamics',
-    'losses_by_staff',
-    'lost_clients_list',
-    'new_vs_returning_cross',
-    'payment_methods',
-    'peak_load',
-    'retention_3_6_12',
-    'return_priorities',
-    'revenue_at_risk',
-    'revenue_decomposition',
-    'revenue_dynamics',
-    'rfm_analysis',
-    'service_combos',
-    'service_staff_profit',
-    'service_trends',
-    'staff_efficiency',
-    'staff_leaderboard',
-    'staff_services',
-    'staff_time_heatmap',
-    'top_clients_pareto',
-    'top_goods_revenue',
-    'year_over_year',
-}
-
-SOURCE_MISSING_REPORTS = {
-    'conversion_funnel',
-    'demographics_check',
-    'devices_vs_booking',
-    'goal_conversions_report',
-    'market_benchmarks',
-    'peak_hours_site_vs_salon',
-    'search_phrases_efficiency',
-    'traffic_source_roi',
-}
-
-PARTIAL_REPORTS = {'nps_dashboard'}
-
-FINANCE_REPORTS = {
-    'avg_check_dynamics',
-    'day_overview',
-    'financial_overview',
-    'payment_methods',
-    'revenue_decomposition',
-    'revenue_dynamics',
-    'booking_channels',
-    'year_over_year',
-}
-BOOKING_REPORTS = {'bookings_dynamics', 'cancellation_analysis', 'peak_load'}
-STAFF_REPORTS = {
-    'staff_efficiency',
-    'staff_leaderboard',
-    'staff_services',
-    'staff_time_heatmap',
-}
-LEADERBOARD_REPORTS = {'staff_leaderboard'}
-SERVICE_REPORTS = {'avg_check_by_service', 'service_combos', 'service_staff_profit', 'service_trends'}
-CLIENT_REPORTS = {
-    'client_cohorts',
-    'client_journey',
-    'client_labels',
-    'new_vs_returning_cross',
-    'retention_3_6_12',
-    'rfm_analysis',
-    'top_clients_pareto',
-}
-CHURN_REPORTS = {'losses_by_staff', 'lost_clients_list', 'return_priorities', 'revenue_at_risk'}
-GOODS_REPORTS = {'goods_by_staff', 'goods_conversion', 'goods_dynamics', 'top_goods_revenue'}
-MONEY_REPORTS = FINANCE_REPORTS | GOODS_REPORTS | SERVICE_REPORTS | CLIENT_REPORTS | CHURN_REPORTS | STAFF_REPORTS
-TITLE_OVERRIDES = {
-    'avg_check_by_service': 'Средний чек по услугам',
-    'avg_check_dynamics': 'Динамика среднего чека',
-    'booking_channels': 'Каналы записи',
-    'bookings_dynamics': 'Динамика записей',
-    'cancellation_analysis': 'Анализ отмен',
-    'chair_utilization': 'Загрузка кресел',
-    'churn_dynamics': 'Динамика оттока',
-    'churn_prediction': 'Скоринг риска оттока',
-    'client_base_dynamics': 'Динамика клиентской базы',
-    'client_cohorts': 'Когортный анализ клиентов',
-    'client_journey': 'Путь клиента',
-    'client_labels': 'Сегменты и метки клиентов',
-    'cohort_ltv_matrix': 'Когортная LTV-матрица',
-    'conversion_funnel': 'Маркетинговая воронка',
-    'data_audit': 'Аудит данных',
-    'day_overview': 'Обзор дня',
-    'demographics_check': 'Демография: сайт и CRM',
-    'devices_vs_booking': 'Устройства и запись',
-    'financial_overview': 'Финансовый обзор',
-    'goal_conversions_report': 'Конверсии целей',
-    'goods_by_staff': 'Товары по сотрудникам',
-    'goods_conversion': 'Конверсия визитов в товары',
-    'goods_dynamics': 'Динамика товаров',
-    'losses_by_staff': 'Потери клиентов по мастерам',
-    'lost_clients_list': 'Потерянные клиенты',
-    'market_benchmarks': 'Рыночные бенчмарки',
-    'marketing_funnel': 'Воронка новых клиентов',
-    'master_motivation': 'Мотивация мастеров',
-    'mind_index': 'MInd индекс мастеров',
-    'month_return': 'Возвратность месяц к месяцу',
-    'new_vs_returning_cross': 'Новые и повторные клиенты',
-    'nps_dashboard': 'NPS и отзывы',
-    'payment_methods': 'Формы оплаты',
-    'peak_hours_site_vs_salon': 'Пиковые часы: сайт и салон',
-    'peak_load': 'Пиковая загрузка',
-    'price_elasticity': 'Эластичность цены',
-    'retention_3_6_12': 'Возвратность 3/6/12',
-    'retention_opz_dynamics': 'Динамика удержания и ОПЗ',
-    'return_priorities': 'Приоритеты возврата',
-    'revenue_at_risk': 'Выручка под риском',
-    'revenue_decomposition': 'Декомпозиция выручки',
-    'revenue_dynamics': 'Динамика выручки',
-    'revenue_factor_analysis': 'Факторный анализ выручки',
-    'revenue_forecast': 'Прогноз выручки',
-    'rfm_analysis': 'RFM-анализ',
-    'schedule_optimizer': 'Оптимизатор расписания',
-    'search_phrases_efficiency': 'Эффективность поисковых фраз',
-    'seasonality': 'Сезонность',
-    'service_combos': 'Комбинации услуг',
-    'service_consumption': 'Потребление услуг',
-    'service_staff_profit': 'Услуги x мастера',
-    'service_trends': 'Тренды услуг',
-    'staff_efficiency': 'Эффективность сотрудников',
-    'staff_leaderboard': 'Рейтинги и топы',
-    'staff_salary': 'Зарплата сотрудников',
-    'staff_services': 'Услуги по мастерам',
-    'staff_time_heatmap': 'Тепловая карта мастеров',
-    'top_clients_pareto': 'Клиентская выручка и Парето',
-    'top_goods_revenue': 'Топ товаров по выручке',
-    'traffic_source_roi': 'ROI источников трафика',
-    'visit_forecast': 'Прогноз визитов',
-    'year_over_year': 'Сравнение по годам',
-}
+# Platform-admin only (`can_view_report_usage`) and built by the route with a tenant, unlike every other report.
+REPORT_USAGE_ID = 'report_usage'
+REPORT_GROUP_ORDER = ('finance', 'services', 'team', 'operations', 'clients', 'goods', 'diagnostics')
 
 
 @dataclass(frozen=True)
 class ReportDefinition:
+    """One catalog entry. `builder` is a lazy 'module:function' path (see `_builder_for`), not part of the payload."""
+
     id: str
     title: str
     description: str
@@ -318,9 +122,17 @@ class ReportDefinition:
     type: str
     themes: tuple[str, ...]
     roles: tuple[str, ...]
-    filters: dict[str, bool]
-    status: str
-    required_sources: tuple[str, ...]
+    builder: str
+    # Whether the payload carries money. A role without the `revenue` metric cannot open such a report
+    # or see it in the catalog; unknown ids fail closed the same way.
+    requires_financials: bool
+    granularity: bool = False
+    compare: bool = False
+    staff_filter: bool = True
+    date_range: bool = True
+    aliases: tuple[str, ...] = ()
+    status: str = 'ready'
+    required_sources: tuple[str, ...] = ('yclients',)
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -331,194 +143,342 @@ class ReportDefinition:
             'type': self.type,
             'themes': list(self.themes),
             'roles': list(self.roles),
-            'filters': self.filters,
+            'filters': {
+                'date_range': self.date_range,
+                'branch': True,
+                'staff': self.staff_filter,
+                'granularity': self.granularity,
+                'compare': self.compare,
+            },
             'status': self.status,
             'required_sources': list(self.required_sources),
+            'aliases': list(self.aliases),
         }
 
 
-def _group_for(report_id: str) -> str:
-    if report_id in FINANCE_REPORTS:
-        return 'finance'
-    if report_id in BOOKING_REPORTS:
-        return 'operations'
-    if report_id in STAFF_REPORTS:
-        return 'team'
-    if report_id in SERVICE_REPORTS:
-        return 'services'
-    if report_id in CLIENT_REPORTS:
-        return 'clients'
-    if report_id in CHURN_REPORTS:
-        return 'churn'
-    if report_id in GOODS_REPORTS:
-        return 'goods'
-    if report_id in SOURCE_MISSING_REPORTS:
-        return 'marketing'
-    if report_id in {'data_audit'}:
-        return 'diagnostics'
-    return 'advanced'
+_OWNER_ROLES = ('владельцу', 'управляющему')
+_MANAGER_ROLES = ('управляющему', 'владельцу')
+_FRONT_DESK_ROLES = ('администратору', 'управляющему')
+_PLATFORM_ADMIN_ROLES = ('платформенному администратору',)
+
+# The catalog: one row per report. Catalog order is REPORT_GROUP_ORDER, then the order of this list.
+# `aliases` are retired ids that still resolve here, so old links and favourites keep working.
+REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
+    ReportDefinition(
+        id='financial_overview',
+        title='Финансовый обзор',
+        description=(
+            'Выручка, средний чек и завершённые визиты по периодам: услуги, товары и пополнения отдельно, '
+            'с динамикой по дням, неделям или месяцам.'
+        ),
+        group='finance',
+        type='финансовый',
+        themes=('выручка', 'средний чек'),
+        roles=_OWNER_ROLES,
+        builder='reports_finance:build_financial_overview',
+        requires_financials=True,
+        granularity=True,
+        compare=True,
+        aliases=('revenue_dynamics', 'avg_check_dynamics', 'revenue_decomposition', 'day_overview'),
+    ),
+    ReportDefinition(
+        id='payment_methods',
+        title='Формы оплаты',
+        description='Доли наличных, безналичных платежей, Яндекс Пэй и прочих касс в выручке по филиалам и месяцам.',
+        group='finance',
+        type='финансовый',
+        themes=('выручка',),
+        roles=_OWNER_ROLES,
+        builder='dashboard_reports:build_payment_methods',
+        requires_financials=True,
+        # Branch-level totals by payment form have no per-employee reading.
+        staff_filter=False,
+    ),
+    ReportDefinition(
+        id='year_over_year',
+        title='Сравнение по годам',
+        description='Выручка, визиты, средний чек и ОПЗ по годам и по месяцам года к году.',
+        group='finance',
+        type='финансовый',
+        themes=('выручка', 'средний чек'),
+        roles=_OWNER_ROLES,
+        builder='dashboard_reports:build_year_over_year',
+        requires_financials=True,
+        date_range=False,
+        aliases=('seasonality',),
+    ),
+    ReportDefinition(
+        id='avg_check_by_service',
+        title='Услуги: количество, цена, выручка',
+        description=(
+            'Каждая услуга: сколько раз оказана, какую выручку и долю выручки даёт и по какой средней цене; '
+            'дополнительные услуги отдельно.'
+        ),
+        group='services',
+        type='операционный',
+        themes=('услуги', 'средний чек'),
+        roles=_OWNER_ROLES,
+        builder='reports_services:build_avg_check_by_service',
+        requires_financials=True,
+        compare=True,
+        aliases=('service_trends',),
+    ),
+    ReportDefinition(
+        id='service_staff_profit',
+        title='Услуги по мастерам',
+        description='Услуги в разрезе мастеров: сколько раз каждый мастер оказал услугу, выручка и средняя цена.',
+        group='services',
+        type='операционный',
+        themes=('услуги', 'мастера'),
+        roles=_OWNER_ROLES,
+        builder='reports_services:build_service_staff_profit',
+        requires_financials=True,
+        compare=True,
+        aliases=('staff_services',),
+    ),
+    ReportDefinition(
+        id='service_combos',
+        title='Комбинации услуг',
+        description='Какие услуги клиенты берут вместе в одном визите и как часто встречается каждая пара.',
+        group='services',
+        type='операционный',
+        themes=('услуги',),
+        roles=_OWNER_ROLES,
+        builder='reports_services:build_service_combos',
+        requires_financials=False,
+        compare=True,
+    ),
+    ReportDefinition(
+        id='staff_efficiency',
+        title='Эффективность сотрудников',
+        description='Сводка по сотрудникам: завершённые записи, клиенты, выручка услуг и выручка на запись.',
+        group='team',
+        type='управленческий',
+        themes=('мастера',),
+        roles=_MANAGER_ROLES,
+        builder='reports_operations:build_staff_efficiency',
+        requires_financials=True,
+        compare=True,
+    ),
+    ReportDefinition(
+        id='staff_leaderboard',
+        title='Рейтинги и топы',
+        description=(
+            'Рейтинги мастеров и администраторов по выручке, допуслугам, косметике, ОПЗ, отзывам '
+            'и выполнению плана среднего чека.'
+        ),
+        group='team',
+        type='управленческий',
+        themes=('мастера',),
+        roles=_MANAGER_ROLES,
+        builder='dashboard_reports:build_staff_leaderboard',
+        # A mixed report (OPZ, reviews and percentages next to money): the route strips the money columns.
+        requires_financials=False,
+    ),
+    ReportDefinition(
+        id='peak_load',
+        title='Загрузка по дням недели и часам',
+        description=(
+            'Завершённые визиты по дням недели и часам по местному времени филиала: '
+            'когда загрузка пиковая, а когда кресла простаивают.'
+        ),
+        group='operations',
+        type='операционный',
+        themes=('записи',),
+        roles=_MANAGER_ROLES,
+        builder='reports_operations:build_peak_load',
+        requires_financials=False,
+        compare=True,
+        aliases=('staff_time_heatmap',),
+    ),
+    ReportDefinition(
+        id='bookings_dynamics',
+        title='Записи и неявки',
+        description='Динамика записей по периодам и мастерам: сколько записано, сколько завершено и сколько не пришло.',
+        group='operations',
+        type='операционный',
+        themes=('записи',),
+        roles=_MANAGER_ROLES,
+        builder='reports_operations:build_bookings_dynamics',
+        requires_financials=False,
+        granularity=True,
+        compare=True,
+        aliases=('cancellation_analysis',),
+    ),
+    ReportDefinition(
+        id='booking_channels',
+        title='Каналы записи: онлайн и администратор',
+        description='Сколько записей клиенты оформили сами онлайн и сколько создали сотрудники: по периодам и в долях.',
+        group='operations',
+        type='операционный',
+        themes=('записи',),
+        roles=_MANAGER_ROLES,
+        builder='reports_operations:build_booking_channels',
+        # Counts only: record totals and shares, no money anywhere in the payload.
+        requires_financials=False,
+        granularity=True,
+        compare=True,
+    ),
+    ReportDefinition(
+        id='new_vs_returning_cross',
+        title='Новые и повторные клиенты',
+        description='Сколько клиентов пришло впервые и сколько вернулось, их доли и изменение к прошлому периоду.',
+        group='clients',
+        type='клиентский',
+        themes=('клиенты',),
+        roles=_FRONT_DESK_ROLES,
+        builder='dashboard_reports:build_new_vs_returning_cross',
+        # Counts only, and the Overview links here, so a role without revenue must reach it.
+        requires_financials=False,
+        compare=True,
+    ),
+    ReportDefinition(
+        id='top_clients_pareto',
+        title='Клиентская база: концентрация и частотность',
+        description='Какую долю выручки дают лучшие клиенты (принцип Парето) и как часто клиенты возвращаются.',
+        group='clients',
+        type='клиентский',
+        themes=('клиенты', 'выручка'),
+        roles=_FRONT_DESK_ROLES,
+        builder='reports_clients:build_top_clients_pareto',
+        requires_financials=True,
+        compare=True,
+        aliases=('rfm_analysis', 'client_labels', 'client_journey'),
+    ),
+    ReportDefinition(
+        id='retention_3_6_12',
+        title='Возвратность новых клиентов',
+        description='Какая доля новых клиентов каждого месяца вернулась в течение 1, 3, 6 и 12 месяцев.',
+        group='clients',
+        type='клиентский',
+        themes=('клиенты',),
+        roles=_FRONT_DESK_ROLES,
+        builder='reports_clients:build_retention_3_6_12',
+        # Cohort sizes and percentages only; the payload carries no money.
+        requires_financials=False,
+        aliases=('client_cohorts', 'month_return'),
+    ),
+    ReportDefinition(
+        id='revenue_at_risk',
+        title='Отток клиентов',
+        description=(
+            'Клиенты, не вернувшиеся в течение 90 дней после последнего визита: их число и доля, '
+            'выручка под риском и мастера, у которых они были в последний раз.'
+        ),
+        group='clients',
+        type='клиентский',
+        themes=('клиенты', 'отток'),
+        roles=_FRONT_DESK_ROLES,
+        builder='reports_clients:build_revenue_at_risk',
+        requires_financials=True,
+        compare=True,
+        aliases=('lost_clients_list', 'return_priorities', 'losses_by_staff', 'churn_dynamics'),
+    ),
+    ReportDefinition(
+        id='goods_dynamics',
+        title='Товары',
+        description=(
+            'Продажи товаров: выручка, единицы и доля визитов с покупкой товара, '
+            'в разрезе периодов, товаров и продавцов.'
+        ),
+        group='goods',
+        type='товарный',
+        themes=('товары', 'выручка'),
+        roles=_OWNER_ROLES,
+        builder='reports_goods:build_goods_dynamics',
+        requires_financials=True,
+        granularity=True,
+        compare=True,
+        aliases=('top_goods_revenue', 'goods_by_staff', 'goods_conversion'),
+    ),
+    ReportDefinition(
+        id='nps_dashboard',
+        title='Отзывы',
+        description='Отзывы клиентов из YClients: количество, средняя оценка, распределение оценок и низкие оценки.',
+        group='clients',
+        type='клиентский',
+        themes=('клиенты', 'отзывы'),
+        roles=_OWNER_ROLES,
+        builder='reports_feedback:build_nps_dashboard',
+        requires_financials=False,
+        compare=True,
+    ),
+    ReportDefinition(
+        id=REPORT_USAGE_ID,
+        title='Использование отчётов',
+        description=(
+            'Какие отчёты открывают сотрудники выбранного аккаунта: дни-пользователи, вызовы, доля со сравнением, '
+            'время ответа и отчёты, которые давно не открывали.'
+        ),
+        group='diagnostics',
+        type='служебный',
+        themes=('диагностика',),
+        roles=_PLATFORM_ADMIN_ROLES,
+        # Dispatched by the route with an explicit tenant (the registry builder refuses to run without one).
+        builder='report_usage:build_report_usage',
+        requires_financials=False,
+        # Own gate: `can_view_report_usage`, not a money metric.
+        staff_filter=False,
+    ),
+)
+
+
+def _build_registry(definitions: tuple[ReportDefinition, ...]) -> dict[str, ReportDefinition]:
+    """Validate the table and index it in catalog order; a malformed table is a startup error."""
+    ids = [definition.id for definition in definitions]
+    if len(set(ids)) != len(ids):
+        raise RuntimeError('duplicate report id in REPORT_DEFINITIONS')
+    claimed = set(ids)
+    for definition in definitions:
+        if definition.group not in REPORT_GROUP_ORDER:
+            raise RuntimeError(f'report {definition.id}: unknown group {definition.group}')
+        module_name, separator, function_name = definition.builder.partition(':')
+        if not (module_name and separator and function_name):
+            raise RuntimeError(f'report {definition.id}: builder must be "module:function"')
+        if importlib.util.find_spec(module_name) is None:
+            raise RuntimeError(f'report {definition.id}: builder module {module_name} not found')
+        for alias in definition.aliases:
+            if alias in claimed:
+                raise RuntimeError(f'report alias {alias} of {definition.id} is already taken')
+            claimed.add(alias)
+    ordered = sorted(definitions, key=lambda definition: REPORT_GROUP_ORDER.index(definition.group))
+    return {definition.id: definition for definition in ordered}
+
+
+REPORT_REGISTRY = _build_registry(REPORT_DEFINITIONS)
+REPORT_ALIASES: dict[str, str] = {
+    alias: definition.id for definition in REPORT_REGISTRY.values() for alias in definition.aliases
+}
+
+
+def resolve_report_id(raw: str | None) -> str | None:
+    """Canonical id for a canonical id or a retired alias; None for anything unknown."""
+    if raw in REPORT_REGISTRY:
+        return raw
+    return REPORT_ALIASES.get(raw) if raw else None
 
 
 def report_requires_financials(report_id: str) -> bool:
-    normalized = (report_id or '').strip()
-    if normalized == 'staff_leaderboard':
-        # This mixed report also contains OPZ, review and percentage rankings.
-        # Its individual money components are filtered by the route.
-        return False
-    return (
-        normalized in MONEY_REPORTS
-        or 'revenue' in normalized
-        or 'avg_check' in normalized
-        or 'ltv' in normalized
-        or 'price' in normalized
-        or 'profit' in normalized
-    )
+    """Money gate of a report, read from the definition of the resolved id. Unknown ids fail closed."""
+    definition = REPORT_REGISTRY.get(resolve_report_id(report_id) or '')
+    return True if definition is None else definition.requires_financials
 
 
-def _type_for(group: str) -> str:
-    return {
-        'finance': 'финансовый',
-        'operations': 'операционный',
-        'team': 'управленческий',
-        'clients': 'клиентский',
-        'services': 'операционный',
-        'churn': 'клиентский',
-        'goods': 'товарный',
-        'marketing': 'маркетинговый',
-        'plans': 'управленческий',
-    }.get(group, 'аналитический')
+@lru_cache(maxsize=None)
+def _builder_for(report_id: str) -> Callable[[ReportRequest], Awaitable[dict[str, Any]]]:
+    """Resolve the builder named by the definition.
 
-
-def _themes_for(report_id: str, group: str) -> tuple[str, ...]:
-    themes = set()
-    if group == 'finance' or 'revenue' in report_id:
-        themes.add('выручка')
-    if 'avg_check' in report_id or report_id == 'master_avg_check':
-        themes.add('средний чек')
-    if group == 'operations' or 'booking' in report_id:
-        themes.add('записи')
-    if group == 'team' or 'staff' in report_id or 'master' in report_id:
-        themes.add('мастера')
-    if group in {'clients', 'churn'} or 'client' in report_id:
-        themes.add('клиенты')
-    if group == 'services' or 'service' in report_id:
-        themes.add('услуги')
-    if group == 'churn' or 'lost' in report_id or 'risk' in report_id:
-        themes.add('отток')
-    if group == 'marketing':
-        themes.add('маркетинг')
-    if group == 'goods':
-        themes.add('товары')
-    if report_id == 'nps_dashboard':
-        themes.add('NPS и отзывы')
-    return tuple(sorted(themes)) or ('обзор',)
-
-
-def _roles_for(group: str) -> tuple[str, ...]:
-    if group == 'marketing':
-        return ('маркетологу', 'владельцу')
-    if group in {'team', 'operations', 'plans'}:
-        return ('управляющему', 'владельцу')
-    if group in {'clients', 'churn'}:
-        return ('администратору', 'управляющему')
-    return ('владельцу', 'управляющему')
-
-
-GRANULARITY_REPORTS = {
-    'avg_check_dynamics',
-    'booking_channels',
-    'bookings_dynamics',
-    'financial_overview',
-    'goods_conversion',
-    'goods_dynamics',
-    'revenue_decomposition',
-    'revenue_dynamics',
-    'service_trends',
-}
-
-# Reports where period-over-period comparison is meaningful: time-series and
-# headline aggregate KPIs. Rankings, lists, matrices and detail reports omit it.
-COMPARE_REPORTS = GRANULARITY_REPORTS | {
-    'cancellation_analysis',
-    'day_overview',
-    'new_vs_returning_cross',
-}
-
-
-def _filters_for(report_id: str, group: str, status: str) -> dict[str, bool]:
-    return {
-        'date_range': report_id != 'year_over_year',
-        'branch': True,
-        # Branch-level totals by payment form have no per-employee reading.
-        'staff': report_id != 'payment_methods'
-        and (group in {'team', 'services', 'clients', 'churn', 'goods', 'operations'} or report_id in READY_REPORTS),
-        'granularity': report_id in GRANULARITY_REPORTS,
-        'compare': status == 'ready' and report_id in COMPARE_REPORTS,
-    }
-
-
-def _status_for(report_id: str) -> str:
-    if report_id in READY_REPORTS:
-        return 'ready'
-    if report_id in PARTIAL_REPORTS:
-        return 'partial'
-    if report_id in SOURCE_MISSING_REPORTS:
-        return 'source_missing'
-    return 'planned'
-
-
-def _required_sources_for(report_id: str, status: str) -> tuple[str, ...]:
-    if status == 'ready':
-        return ('yclients',)
-    if report_id == 'nps_dashboard':
-        return ('yclients_comments', 'telegram_nps')
-    if report_id == 'market_benchmarks':
-        return ('market_benchmark_data',)
-    if status == 'source_missing':
-        return ('yandex_metrika',)
-    return ('yclients', 'scheduled_report_calculation')
-
-
-def _build_registry() -> dict[str, ReportDefinition]:
-    registry: dict[str, ReportDefinition] = {}
-    for report_id in REPORT_ORDER:
-        group = _group_for(report_id)
-        status = _status_for(report_id)
-        title = TITLE_OVERRIDES.get(report_id, report_id.replace('_', ' ').title())
-        registry[report_id] = ReportDefinition(
-            id=report_id,
-            title=title,
-            description=_description_for(report_id, status),
-            group=group,
-            type=_type_for(group),
-            themes=_themes_for(report_id, group),
-            roles=_roles_for(group),
-            filters=_filters_for(report_id, group, status),
-            status=status,
-            required_sources=_required_sources_for(report_id, status),
-        )
-    return registry
-
-
-def _description_for(report_id: str, status: str) -> str:
-    if status == 'source_missing':
-        return 'Отчет появится после подключения внешнего источника данных.'
-    if status == 'planned':
-        return 'Отчет включен в каталог и ожидает отдельной методологии расчета.'
-    if report_id == 'nps_dashboard':
-        return 'Отзывы YClients доступны сейчас; NPS-опросы требуют отдельного источника.'
-    if report_id == 'year_over_year':
-        return 'Год к году по выручке, визитам, среднему чеку, ОПЗ и крупным агрегатам без среза по услугам.'
-    return 'Отчет строится на текущих данных YClients в PostgreSQL.'
-
-
-REPORT_REGISTRY = _build_registry()
+    Imported lazily: builder modules import helpers from this one, so importing them at the top
+    would be circular.
+    """
+    module_name, _, function_name = REPORT_REGISTRY[report_id].builder.partition(':')
+    return getattr(importlib.import_module(module_name), function_name)
 
 
 # The demo tenant is seeded, not synced: it holds a few months of activity and no
 # SyncSourceState coverage at all. year_over_year certifies whole years against
 # that coverage, so for demo it can only ever render every metric as unknown.
-DEMO_UNAVAILABLE_REPORTS = frozenset({'year_over_year'})
+DEMO_UNAVAILABLE_REPORTS = frozenset({'year_over_year', REPORT_USAGE_ID})
 
 
 # Reports that disclose branch-level payment totals; the caller's right to them is
@@ -531,6 +491,7 @@ def fetch_report_registry(
     *,
     hide_financials: bool = False,
     hide_branch_payments: bool = False,
+    hide_report_usage: bool = False,
 ) -> list[dict[str, Any]]:
     """Catalog of reports the caller can actually open.
 
@@ -538,11 +499,12 @@ def fetch_report_registry(
     so the only thing it can do is take the user to an error page.
     """
     return [
-        REPORT_REGISTRY[report_id].to_payload()
-        for report_id in REPORT_ORDER
-        if not (is_demo and report_id in DEMO_UNAVAILABLE_REPORTS)
-        and not (hide_financials and report_requires_financials(report_id))
-        and not (hide_branch_payments and report_id in BRANCH_PAYMENT_REPORTS)
+        definition.to_payload()
+        for definition in REPORT_REGISTRY.values()
+        if not (is_demo and definition.id in DEMO_UNAVAILABLE_REPORTS)
+        and not (hide_financials and definition.requires_financials)
+        and not (hide_branch_payments and definition.id in BRANCH_PAYMENT_REPORTS)
+        and not (hide_report_usage and definition.id == REPORT_USAGE_ID)
     ]
 
 
@@ -559,8 +521,16 @@ async def fetch_report_data(
     compare_staff_id: int | None = None,
     allowed_company_ids: list[int] | None = None,
     period_preset: str | None = None,
+    compare_previous: bool = False,
 ) -> dict[str, Any]:
-    if report_id not in REPORT_REGISTRY:
+    """Report payload for a canonical id or a retired alias.
+
+    The payload always carries the canonical `report_id`; `requested_report_id` appears only when
+    the caller asked by an alias. `compare_previous` measures the period against the Overview's
+    baseline (`DateRange.previous_period`); an explicit compare window wins over it.
+    """
+    canonical_id = resolve_report_id(report_id)
+    if canonical_id is None:
         raise ValueError(f'unknown report_id: {report_id}')
     if granularity not in REPORT_GRANULARITIES:
         raise ValueError('granularity must be one of day, week, month')
@@ -574,11 +544,20 @@ async def fetch_report_data(
     # inside the tables while the comparison block measures against the window the user
     # ticked would put two different percentages for one metric on one screen — the
     # segments table and the comparison panel of `new_vs_returning_cross` sit together.
-    if (compare_start and compare_end) or compare_staff_id is not None:
+    explicit_window = bool(compare_start and compare_end)
+    # The comparison window must come from the preset the page was opened with, before it is dropped below.
+    cmp_start, cmp_end = (
+        (compare_start, compare_end)
+        if explicit_window
+        else _previous_window(start, end, period_preset)
+        if compare_previous
+        else (start, end)
+    )
+    if explicit_window or compare_staff_id is not None:
         period_preset = None
     data = await _fetch_report_payload(
         db,
-        report_id,
+        canonical_id,
         start,
         end,
         company_id,
@@ -588,17 +567,13 @@ async def fetch_report_data(
         factual_at,
         period_preset,
     )
-    if (
-        report_id in COMPARE_REPORTS
-        and data['source_status'] == 'ready'
-        and ((compare_start and compare_end) or compare_staff_id)
-    ):
-        cmp_start = compare_start or start
-        cmp_end = compare_end or end
+    if canonical_id != report_id:
+        data['requested_report_id'] = report_id
+    if REPORT_REGISTRY[canonical_id].compare and (explicit_window or compare_previous or compare_staff_id is not None):
         cmp_staff_id = compare_staff_id if compare_staff_id is not None else staff_id
         compare_data = await _fetch_report_payload(
             db,
-            report_id,
+            canonical_id,
             cmp_start,
             cmp_end,
             company_id,
@@ -608,16 +583,61 @@ async def fetch_report_data(
             factual_at,
             # The preset names the primary window; the compare window is its own range.
             None,
+            for_comparison=True,
         )
-        data['comparison'] = {
-            'period': compare_data['period'],
-            'staff_id': cmp_staff_id,
-            'source_status': compare_data['source_status'],
-            'cards': compare_data.get('cards', []),
-            'rows': _comparison_rows(data.get('cards', []), compare_data.get('cards', [])),
-            'raw': compare_data.get('raw', {}),
-        }
+        data['comparison'] = _comparison_payload(data, compare_data, cmp_staff_id)
     return data
+
+
+def _previous_window(start: date, end: date, period_preset: str | None) -> tuple[date, date]:
+    try:
+        previous = DateRange(start=start, end=end).previous_period(period_preset)
+    except (OverflowError, ValueError) as exc:  # a period at the very start of the calendar has no baseline
+        raise ValueError('the period has no previous period to compare with') from exc
+    return previous.start, previous.end
+
+
+def _comparison_payload(data: dict[str, Any], compare_data: dict[str, Any], staff_id: int | None) -> dict[str, Any]:
+    """Comparison block: cards matched by label, charts and tables only for ids the current payload has.
+
+    A table without a `row_key` cannot be paired row by row, so it is not carried at all (a list of events
+    such as the negative reviews would only ship the previous window's rows for nothing).
+
+    `raw` is left out on purpose: the page renders only cards, charts and tables, and the raw block
+    of a long window is the largest part of a payload.
+    """
+    chart_ids = {item.get('id') for item in data.get('charts', [])}
+    table_ids = {item.get('id') for item in data.get('tables', [])}
+    return {
+        'period': compare_data['period'],
+        'staff_id': staff_id,
+        'source_status': compare_data['source_status'],
+        'cards': compare_data.get('cards', []),
+        'rows': _comparison_rows(data.get('cards', []), compare_data.get('cards', [])),
+        'charts': [
+            {'id': item['id'], 'labels': item.get('labels', []), 'datasets': item.get('datasets', [])}
+            for item in compare_data.get('charts', [])
+            if item.get('id') in chart_ids
+        ],
+        'tables': [
+            {'id': item['id'], 'rows': _comparison_table_rows(item)}
+            for item in compare_data.get('tables', [])
+            if item.get('id') in table_ids and item.get('row_key')
+        ],
+    }
+
+
+def _comparison_table_rows(table_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rows of a table; a ranking table is re-sorted client-side, so every metric's rows are merged by key."""
+    ranking = table_payload.get('ranking')
+    row_key = table_payload.get('row_key')
+    if not ranking or not row_key:
+        return table_payload.get('rows', [])
+    merged: dict[Any, dict[str, Any]] = {}
+    for rows in ranking.get('rows_by_metric', {}).values():
+        for row in rows:
+            merged.setdefault(row.get(row_key), row)
+    return list(merged.values())
 
 
 async def _fetch_report_payload(
@@ -631,13 +651,14 @@ async def _fetch_report_payload(
     allowed_company_ids: list[int] | None,
     factual_at: datetime,
     period_preset: str | None = None,
+    for_comparison: bool = False,
 ) -> dict[str, Any]:
     definition = REPORT_REGISTRY[report_id]
     base = {
         'report_id': definition.id,
         'title': definition.title,
         'period': {'start': start.isoformat(), 'end': end.isoformat(), 'granularity': granularity},
-        'source_status': definition.status if definition.status != 'source_missing' else 'missing',
+        'source_status': definition.status,
         'missing_sources': [],
         'cards': [],
         'charts': [],
@@ -645,13 +666,9 @@ async def _fetch_report_payload(
         'notes': [],
         'raw': {},
     }
-    if definition.status == 'source_missing':
-        return _missing_payload(base, definition)
-    if definition.status == 'planned':
-        return _planned_payload(base, definition)
-    if report_id == 'payment_methods':
-        # The report has no employee filter, and the roles that may open it are not clamped
-        # to a staff row, so a stray staff_id must not narrow the branch totals.
+    if not definition.staff_filter:
+        # No employee filter, and the roles that may open such a report are not clamped to a
+        # staff row, so a stray staff_id must not narrow the branch totals.
         staff_id = None
     allowed_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
@@ -662,89 +679,44 @@ async def _fetch_report_payload(
         company_id,
         staff_id,
     )
-    if report_id == 'nps_dashboard':
-        return await _nps_payload(db, base, definition, start, end, company_id, allowed_company_ids)
-    if report_id == 'payment_methods':
-        return await _payment_methods_payload(db, base, start, end, allowed_company_ids, factual_at)
-    if report_id in GOODS_REPORTS:
-        return await _goods_payload(
-            db,
-            base,
-            start,
-            end,
-            company_id,
-            staff_id,
-            granularity,
-            allowed_company_ids,
-            factual_at,
-        )
-    if report_id in LEADERBOARD_REPORTS:
-        return await _leaderboard_payload(
-            db,
-            base,
-            start,
-            end,
-            company_id,
-            staff_id,
-            allowed_company_ids,
-            factual_at,
-        )
-    if report_id in STAFF_REPORTS:
-        return await _staff_payload(
-            db, base, start, end, company_id, staff_id, allowed_company_ids, factual_at
-        )
-    if report_id in SERVICE_REPORTS:
-        return await _services_payload(
-            db,
-            base,
-            start,
-            end,
-            company_id,
-            staff_id,
-            granularity,
-            allowed_company_ids,
-            factual_at,
-        )
-    if report_id == 'new_vs_returning_cross':
-        return await _client_recency_payload(
-            db, base, start, end, company_id, staff_id, allowed_company_ids, factual_at,
-            period_preset,
-        )
-    if report_id in CLIENT_REPORTS:
-        return await _clients_payload(
-            db, base, start, end, company_id, staff_id, allowed_company_ids, factual_at
-        )
-    if report_id in CHURN_REPORTS:
-        return await _churn_payload(
-            db, base, start, end, company_id, staff_id, allowed_company_ids, factual_at
-        )
-    if report_id in BOOKING_REPORTS:
-        return await _operations_payload(
-            db,
-            base,
-            start,
-            end,
-            company_id,
-            staff_id,
-            granularity,
-            allowed_company_ids,
-            factual_at,
-        )
-    if report_id == 'year_over_year':
-        return await _year_over_year_payload(
-            db, base, company_id, staff_id, allowed_company_ids, factual_at
-        )
-    return await _financial_payload(
-        db,
-        base,
-        start,
-        end,
-        company_id,
-        staff_id,
-        granularity,
-        allowed_company_ids,
-        factual_at,
-        period_preset,
+    request = ReportRequest(
+        db=db,
+        base=base,
+        start=start,
+        end=end,
+        company_id=company_id,
+        staff_id=staff_id,
+        granularity=granularity,
+        allowed_company_ids=allowed_company_ids,
+        factual_at=factual_at,
+        period_preset=period_preset,
+        for_comparison=for_comparison,
+    )
+    return await _builder_for(report_id)(request)
+
+
+async def build_payment_methods(req: ReportRequest) -> dict[str, Any]:
+    return await _payment_methods_payload(
+        req.db, req.base, req.start, req.end, req.allowed_company_ids, req.factual_at
+    )
+
+
+async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
+    return await _year_over_year_payload(
+        req.db, req.base, req.company_id, req.staff_id, req.allowed_company_ids, req.factual_at
+    )
+
+
+async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
+    return await _leaderboard_payload(
+        req.db, req.base, req.start, req.end, req.company_id, req.staff_id, req.allowed_company_ids, req.factual_at
+    )
+
+
+async def build_new_vs_returning_cross(req: ReportRequest) -> dict[str, Any]:
+    return await _client_recency_payload(
+        req.db, req.base, req.start, req.end, req.company_id, req.staff_id, req.allowed_company_ids, req.factual_at,
+        req.period_preset,
     )
 
 
@@ -789,110 +761,6 @@ async def _report_calculation_scope(
     return {'kind': 'network', 'mode': 'aggregate'}
 
 
-def _missing_payload(base: dict[str, Any], definition: ReportDefinition) -> dict[str, Any]:
-    base['missing_sources'] = list(definition.required_sources)
-    base['notes'].append({
-        'kind': 'missing',
-        'title': 'Источник данных не подключен',
-        'text': 'Карточка отчета доступна в каталоге, но для расчета нужен внешний источник.',
-    })
-    return base
-
-
-def _planned_payload(base: dict[str, Any], definition: ReportDefinition) -> dict[str, Any]:
-    base['missing_sources'] = list(definition.required_sources)
-    base['notes'].append({
-        'kind': 'planned',
-        'title': 'Отчет запланирован',
-        'text': 'Для этого отчета нужен отдельный расчет или уточнение методологии. Контракт API уже стабилен.',
-    })
-    return base
-
-
-def _card(label: str, value: Any, fmt: str = NUMBER_FORMAT) -> dict[str, Any]:
-    return {'label': label, 'value': value, 'format': fmt}
-
-
-def _chart(
-    chart_id: str,
-    title: str,
-    chart_type: str,
-    labels: list[str],
-    datasets: list[dict[str, Any]],
-    *,
-    stacked: bool = False,
-    wide: bool = False,
-) -> dict[str, Any]:
-    chart = {'id': chart_id, 'title': title, 'type': chart_type, 'labels': labels, 'datasets': datasets}
-    if stacked:
-        chart['stacked'] = True
-    if wide:
-        chart['wide'] = True
-    return chart
-
-
-def _table(
-    table_id: str,
-    title: str,
-    columns: list[tuple[str, str, str]],
-    rows: list[dict[str, Any]],
-    *,
-    hide_when_empty: bool = False,
-    wrap_headers: bool = False,
-) -> dict[str, Any]:
-    table = {
-        'id': table_id,
-        'title': title,
-        'columns': [{'key': key, 'label': label, 'format': fmt} for key, label, fmt in columns],
-        'rows': rows,
-    }
-    if hide_when_empty:
-        table['hide_when_empty'] = True
-    if wrap_headers:
-        table['wrap_headers'] = True
-    return table
-
-
-def _ranking_table(
-    table_id: str,
-    title: str,
-    columns: list[tuple[str, str, str]],
-    rows_by_metric: dict[str, list[dict[str, Any]]],
-    default_metric: str,
-    options: list[tuple[str, str]],
-    *,
-    hide_when_empty: bool = False,
-) -> dict[str, Any]:
-    table = _table(
-        table_id, title, columns, rows_by_metric.get(default_metric, []), hide_when_empty=hide_when_empty
-    )
-    table['ranking'] = {
-        'default_metric': default_metric,
-        'options': [{'key': key, 'label': label} for key, label in options],
-        'rows_by_metric': rows_by_metric,
-    }
-    return table
-
-
-def _without_empty_columns(
-    columns: list[tuple[str, str, str]],
-    rows: list[dict[str, Any]],
-    optional_keys: set[str],
-) -> list[tuple[str, str, str]]:
-    """Drop optional columns that carry no value in any row.
-
-    Personal-account top-ups do not exist in every tenant, and a permanently zero
-    column is just noise. Kept as soon as one row has a value, so a tenant that
-    does use them still sees that component of total revenue.
-    """
-    return [
-        column
-        for column in columns
-        if column[0] not in optional_keys
-        or any(float(row.get(column[0]) or 0) for row in rows)
-    ]
-
-
 def _appointment_conditions(
     start: date | None,
     end: date,
@@ -934,6 +802,28 @@ def _period_key(value: date | datetime | None, granularity: str) -> str:
     return day.isoformat()
 
 
+def _period_starts(start: date, end: date, granularity: str) -> list[str]:
+    """Every period start from the one holding `start` to the one holding `end`, so empty periods stay on the axis.
+
+    Raises ValueError past `MAX_PERIOD_BUCKETS`: the axis is zero-filled, so a window of centuries by day would
+    otherwise allocate millions of rows for a request that has data on a few hundred of them.
+    """
+    current = date.fromisoformat(_period_key(start, granularity))
+    keys = []
+    while current <= end:
+        if len(keys) >= MAX_PERIOD_BUCKETS:
+            raise ValueError(f'period is too long for granularity {granularity}: choose a coarser one or a shorter period')
+        keys.append(current.isoformat())
+        try:
+            if granularity == 'month':
+                current = (current + timedelta(days=32)).replace(day=1)
+            else:
+                current += timedelta(days=7 if granularity == 'week' else 1)
+        except OverflowError:
+            break
+    return keys
+
+
 def _aggregate_daily(rows: list[dict[str, Any]], granularity: str) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, float]] = defaultdict(lambda: {
         'revenue': 0.0,
@@ -964,7 +854,10 @@ def _comparison_rows(current_cards: list[dict[str, Any]], compare_cards: list[di
         delta_pct = None
         if isinstance(current_value, (int, float)) and isinstance(compare_value, (int, float)):
             delta = current_value - compare_value
-            delta_pct = _pct_change(float(current_value), float(compare_value))
+            # A zero base has no percentage change; the page prints a dash instead of a made-up +100%.
+            # Four decimals, not two: the page rounds once to one decimal, and a value already rounded to
+            # -0.55 would land on -0.6 while the table cells of the same metric (exact values) say -0.5.
+            delta_pct = round(100.0 * delta / compare_value, 4) if compare_value else None
         rows.append({
             'label': label,
             'format': card.get('format') or (compare_card.get('format') if compare_card else None),
@@ -1857,6 +1750,7 @@ async def _year_over_year_payload(
                 ('opz_pct_change_pct', 'ОПЗ % YoY', PERCENT_FORMAT),
             ], year_rows, {'topup_revenue'}),
             year_rows,
+            row_key='year',
         ),
         _table(
             'months',
@@ -1885,120 +1779,6 @@ async def _year_over_year_payload(
         'activity_end': activity_end.isoformat(),
         'months_in_scope': months,
         'service_detail_excluded': True,
-    }
-    return base
-
-
-async def _financial_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    granularity: str,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-    period_preset: str | None = None,
-) -> dict[str, Any]:
-    # Publishes the whole summary under raw, previous_period and change_pct included, so
-    # it has to measure against the same baseline as every other surface.
-    summary = await fetch_summary(
-        db,
-        start,
-        end,
-        company_id,
-        staff_id,
-        allowed_company_ids=allowed_company_ids,
-        factual_at=factual_at,
-        period_preset=period_preset,
-    )
-    daily = _aggregate_daily(
-        await fetch_revenue_daily(
-            db,
-            start,
-            end,
-            company_id,
-            staff_id,
-            allowed_company_ids=allowed_company_ids,
-            factual_at=factual_at,
-        ),
-        granularity,
-    )
-    services = await fetch_top_services(
-        db,
-        start,
-        end,
-        company_id,
-        15,
-        staff_id,
-        allowed_company_ids=allowed_company_ids,
-        factual_at=factual_at,
-    )
-    revenue = summary.get('revenue', {})
-    avg = summary.get('average_check', {})
-    visits = summary.get('visit_metrics', {})
-    base['average_check_source_status'] = avg.get('source_status')
-    base['missing_sources'] = sorted(avg.get('missing_components') or [])
-    if (
-        summary.get('source_status') == 'partial'
-        and summary.get('service_attribution', {}).get('mode') != 'administrator_schedule'
-    ):
-        base['source_status'] = 'partial'
-    base['notes'].append({
-        'kind': 'formula',
-        'title': 'Средний чек общий',
-        'text': avg.get('formula'),
-    })
-    base['cards'] = [
-        _card('Выручка', revenue.get('total', 0), MONEY_FORMAT),
-        _card('Услуги', revenue.get('service_revenue', 0), MONEY_FORMAT),
-        _card('Товары', revenue.get('goods_revenue', 0), MONEY_FORMAT),
-        _card('Пополнения', revenue.get('topup_revenue', 0), MONEY_FORMAT),
-        _card('Записи', revenue.get('appointments', 0), NUMBER_FORMAT),
-        _card('Средний чек', avg.get('total', 0), MONEY_FORMAT),
-        _card('Уникальные клиенты', visits.get('unique_clients', 0), NUMBER_FORMAT),
-    ]
-    base['charts'] = [
-        _chart(
-            'revenue_periods',
-            'Выручка и записи',
-            'line',
-            [row['period'] for row in daily],
-            [
-                {'label': 'Выручка', 'data': [row['revenue'] for row in daily], 'format': MONEY_FORMAT},
-                {'label': 'Записи', 'data': [row['appointments'] for row in daily], 'format': NUMBER_FORMAT, 'axis': 'y1'},
-            ],
-        ),
-        _chart(
-            'top_services',
-            'Топ услуг по выручке',
-            'bar',
-            [row.get('title') or row.get('service_title') or 'Услуга' for row in services[:10]],
-            [{'label': 'Выручка', 'data': [row.get('revenue', 0) for row in services[:10]], 'format': MONEY_FORMAT}],
-        ),
-    ]
-    base['tables'] = [
-        _table(
-            'periods',
-            'Динамика по периодам',
-            [
-                ('period', 'Период', 'text'),
-                ('revenue', 'Выручка', MONEY_FORMAT),
-                ('appointments', 'Записи', NUMBER_FORMAT),
-                ('service_revenue', 'Услуги', MONEY_FORMAT),
-                ('goods_revenue', 'Товары', MONEY_FORMAT),
-                ('topup_revenue', 'Пополнения', MONEY_FORMAT),
-            ],
-            daily,
-        ),
-        _services_table('top_services', 'Услуги', services),
-    ]
-    base['raw'] = {
-        'summary': summary,
-        'average_check': avg,
-        'daily': daily,
-        'top_services': services,
     }
     return base
 
@@ -2131,6 +1911,7 @@ async def _payment_methods_payload(
                 for key, label in forms
             ],
             wide=True,
+            x_kind='time',
         ))
     table_columns = [('metric', 'Показатель', 'text')]
     # Shares first: the structure is what the report is read for, the roubles back it up.
@@ -2142,6 +1923,7 @@ async def _payment_methods_payload(
             table_columns + [(key, label, PERCENT_FORMAT) for key, label in columns],
             [metric_row(label, key, True) for key, label in forms],
             wrap_headers=True,
+            row_key='metric',
         ),
         _table(
             'payment_amounts',
@@ -2149,6 +1931,7 @@ async def _payment_methods_payload(
             table_columns + [(key, label, MONEY_FORMAT) for key, label in columns],
             [metric_row('Выручка', 'revenue', False)] + [metric_row(label, key, False) for key, label in forms],
             wrap_headers=True,
+            row_key='metric',
         ),
     ]
 
@@ -2282,106 +2065,6 @@ def _data_through_note(
     return {'kind': 'info', 'title': 'Яндекс Пэй внесён не за весь месяц', 'text': text}
 
 
-def _services_table(table_id: str, title: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
-    return _table(
-        table_id,
-        title,
-        [
-            ('title', 'Услуга', 'text'),
-            ('sold', 'Кол-во', NUMBER_FORMAT),
-            ('revenue', 'Выручка', MONEY_FORMAT),
-            ('branch_count', 'Филиалов', NUMBER_FORMAT),
-        ],
-        [
-            {
-                'title': row.get('title') or row.get('service_title') or f"Услуга {row.get('service_id') or ''}",
-                'sold': row.get('sold', 0),
-                'revenue': row.get('revenue', 0),
-                'branch_count': row.get('branch_count', 0),
-            }
-            for row in rows
-        ],
-    )
-
-
-async def _services_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    granularity: str,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-) -> dict[str, Any]:
-    all_services = await fetch_top_services(
-        db,
-        start,
-        end,
-        company_id,
-        None,
-        staff_id,
-        allowed_company_ids=allowed_company_ids,
-        factual_at=factual_at,
-    )
-    all_extra = await fetch_extra_services(
-        db,
-        start,
-        end,
-        company_id,
-        None,
-        staff_id,
-        allowed_company_ids=allowed_company_ids,
-        factual_at=factual_at,
-    )
-    total_revenue = sum(float(row.get('revenue') or 0) for row in all_services)
-    total_sold = sum(float(row.get('sold') or 0) for row in all_services)
-    attribution = {
-        'mode': 'master',
-        'source_status': 'ready',
-        'missing_sources': [],
-    }
-    services = all_services[:25]
-    extra = all_extra[:25]
-    base['cards'] = [
-        _card('Услуг оказано', total_sold, NUMBER_FORMAT),
-        _card('Выручка услуг', total_revenue, MONEY_FORMAT),
-        _card('Уникальных услуг', len(all_services), NUMBER_FORMAT),
-        _card('Доп. услуг в списке', len(all_extra), NUMBER_FORMAT),
-    ]
-    base['charts'] = [
-        _chart(
-            'service_revenue',
-            'Услуги по выручке',
-            'bar',
-            [row.get('title') or 'Услуга' for row in services[:12]],
-            [{'label': 'Выручка', 'data': [row.get('revenue', 0) for row in services[:12]], 'format': MONEY_FORMAT}],
-        )
-    ]
-    if extra:
-        base['charts'].append(
-            _chart(
-                'extra_services',
-                'Доп. услуги',
-                'bar',
-                [row.get('title') or 'Доп. услуга' for row in extra[:12]],
-                [{'label': 'Оказано', 'data': [row.get('sold', 0) for row in extra[:12]], 'format': NUMBER_FORMAT}],
-            )
-        )
-    base['tables'] = [
-        _services_table('services', 'Услуги', services),
-        _services_table('extra_services', 'Дополнительные услуги', extra),
-    ]
-    base['raw'] = {
-        'services': services,
-        'extra_services': extra,
-        'granularity': granularity,
-        'service_attribution': attribution,
-    }
-    return base
-
-
 async def _staff_rows(
     db: AsyncSession,
     start: date,
@@ -2485,7 +2168,7 @@ async def _staff_rows(
         )
     rows = list(rows_by_staff.values())
     # staff_id is a unique final tiebreaker: without it, staff tied on revenue and
-    # completed count swap places whenever the query plan changes (see _goods_payload).
+    # completed count swap places whenever the query plan changes.
     rows.sort(
         key=lambda item: (
             item['revenue'],
@@ -2495,71 +2178,6 @@ async def _staff_rows(
         reverse=True,
     )
     return rows
-
-
-async def _staff_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-) -> dict[str, Any]:
-    rows = await _staff_rows(
-        db, start, end, company_id, staff_id, allowed_company_ids, factual_at
-    )
-    total_revenue = sum(row['revenue'] for row in rows)
-    total_completed = sum(row['completed'] for row in rows)
-    base['notes'].append({
-        'kind': 'formula',
-        'title': 'Выручка услуг по сотрудникам',
-        'text': (
-            'Разрез включает физические оплаты услуг по дате платежа, как в Обзоре '
-            'и План/факт; товары и пополнения показаны отдельно.'
-        ),
-    })
-    base['cards'] = [
-        _card('Сотрудников в отчете', len(rows), NUMBER_FORMAT),
-        _card('Завершено записей', total_completed, NUMBER_FORMAT),
-        _card('Выручка услуг', total_revenue, MONEY_FORMAT),
-        _card('Выручка услуг / завершенная запись', total_revenue / total_completed if total_completed else 0, MONEY_FORMAT),
-    ]
-    base['charts'] = [
-        _chart(
-            'staff_revenue',
-            'Выручка услуг по сотрудникам',
-            'bar',
-            [row['staff_name'] for row in rows[:12]],
-            [{'label': 'Выручка услуг', 'data': [row['revenue'] for row in rows[:12]], 'format': MONEY_FORMAT}],
-        ),
-        _chart(
-            'staff_completed',
-            'Завершенные записи',
-            'bar',
-            [row['staff_name'] for row in rows[:12]],
-            [{'label': 'Записи', 'data': [row['completed'] for row in rows[:12]], 'format': NUMBER_FORMAT}],
-        ),
-    ]
-    base['tables'] = [
-        _table(
-            'staff',
-            'Сотрудники',
-            [
-                ('staff_name', 'Сотрудник', 'text'),
-                ('company_title', 'Филиал', 'text'),
-                ('completed', 'Завершено', NUMBER_FORMAT),
-                ('appointments', 'Доступные записи', NUMBER_FORMAT),
-                ('clients', 'Клиентов', NUMBER_FORMAT),
-                ('revenue', 'Выручка услуг', MONEY_FORMAT),
-                ('avg_check', 'Выручка услуг / завершенная запись', MONEY_FORMAT),
-            ],
-            rows,
-        )
-    ]
-    base['raw'] = {'staff': rows, 'revenue_scope': 'services'}
-    return base
 
 
 async def _clients_rows(
@@ -2690,7 +2308,7 @@ async def _clients_rows(
         })
     # client_id is a unique final tiebreaker (it can be None for the "no client" bucket,
     # which sorts last): without it, clients tied on revenue swap places whenever the
-    # query plan changes (see _goods_payload).
+    # query plan changes.
     rows.sort(
         key=lambda item: (
             item['revenue'],
@@ -2701,76 +2319,6 @@ async def _clients_rows(
     return rows
 
 
-def _client_segment_rows(rows: list[dict[str, Any]], avg_revenue: float) -> list[dict[str, Any]]:
-    grouped: dict[str, dict[str, Any]] = defaultdict(lambda: {
-        'segment': '',
-        'clients': 0,
-        'visits': 0,
-        'revenue': 0.0,
-    })
-    for row in rows:
-        segment = _segment_client(row, avg_revenue)
-        row['segment'] = segment
-        bucket = grouped[segment]
-        bucket['segment'] = segment
-        bucket['clients'] += 1
-        bucket['visits'] += int(row.get('visits') or 0)
-        bucket['revenue'] += float(row.get('revenue') or 0)
-    out = []
-    for item in grouped.values():
-        clients = int(item['clients'] or 0)
-        visits = int(item['visits'] or 0)
-        revenue = float(item['revenue'] or 0)
-        item['avg_revenue_per_client'] = revenue / clients if clients else 0.0
-        item['avg_visits_per_client'] = visits / clients if clients else 0.0
-        out.append(item)
-    # 'segment' is the dict key each bucket was grouped under, so it is already unique
-    # and makes a tie on client count deterministic instead of plan-order-dependent.
-    # Negated count rather than reverse=True: reverse would flip the text tiebreaker too and
-    # list tied segments Я-to-А, which reads as a bug. Count descending, name ascending.
-    return sorted(out, key=lambda item: (-int(item['clients'] or 0), item['segment']))
-
-
-def _client_visit_frequency_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Bucket the report's clients by how often they have visited the branch.
-
-    The buckets match the Overview's, but the base does not: this report lists everyone
-    with activity in the period, including clients who only paid, so its counts can run
-    above the Overview cards. '0 визитов' catches a client whose payment landed here
-    without any attended visit at the branch — rare enough that the row usually reads 0.
-    """
-    buckets = {
-        '0 визитов': {'bucket': '0 визитов', 'clients': 0, 'revenue': 0.0},
-        '1 визит': {'bucket': '1 визит', 'clients': 0, 'revenue': 0.0},
-        '2-3 визита': {'bucket': '2-3 визита', 'clients': 0, 'revenue': 0.0},
-        '4+ визита': {'bucket': '4+ визита', 'clients': 0, 'revenue': 0.0},
-    }
-    for row in rows:
-        lifetime = row.get('lifetime_visits')
-        if lifetime is None:
-            # Not a bad request: the rows were built without include_lifetime_visits, and
-            # silently bucketing every client at zero would be worse than failing.
-            raise RuntimeError('visit-frequency rows need _clients_rows(include_lifetime_visits=True)')
-        visits = int(lifetime)
-        if visits == 0:
-            key = '0 визитов'
-        elif visits == 1:
-            key = '1 визит'
-        elif visits <= 3:
-            key = '2-3 визита'
-        else:
-            key = '4+ визита'
-        buckets[key]['clients'] += 1
-        buckets[key]['revenue'] += float(row.get('revenue') or 0)
-    total_clients = len(rows)
-    out = []
-    for item in buckets.values():
-        clients = int(item['clients'] or 0)
-        item['clients_pct'] = 100.0 * clients / total_clients if total_clients else 0.0
-        out.append(item)
-    return out
-
-
 def _client_pareto_rows(
     rows: list[dict[str, Any]],
     total_revenue: float | None = None,
@@ -2779,8 +2327,8 @@ def _client_pareto_rows(
         return []
     # client_id as the final tiebreaker only decides which of two equally-ranked clients
     # lands on which side of a decile cut; since they are tied on revenue, every bucket's
-    # revenue/clients totals are unaffected either way (see _goods_payload for the same
-    # reasoning) — this only removes the plan-order dependence of *which* client that is.
+    # revenue/clients totals are unaffected either way — this only removes the plan-order
+    # dependence of *which* client that is.
     sorted_rows = sorted(
         rows,
         key=lambda item: (
@@ -2815,21 +2363,6 @@ def _client_pareto_rows(
             'avg_revenue_per_client': revenue / clients if clients else 0.0,
         })
     return out
-
-
-def _segment_client(row: dict[str, Any], avg_revenue: float) -> str:
-    recency = row.get('days_since_last_visit')
-    visits = int(row.get('visits') or 0)
-    revenue = float(row.get('revenue') or 0)
-    if recency is None:
-        return 'Без визитов'
-    if recency <= 45 and visits >= 3 and revenue >= avg_revenue:
-        return 'Чемпионы'
-    if recency <= 60:
-        return 'Активные'
-    if recency <= 120:
-        return 'Под риском'
-    return 'Потерянные'
 
 
 async def _client_recency_payload(
@@ -2907,611 +2440,10 @@ async def _client_recency_payload(
                 ('share_change_pct', 'Изменение доли', PERCENT_FORMAT),
             ],
             rows,
+            row_key='segment',
         )
     ]
     base['raw'] = {'segments': rows, 'summary_metrics': visits}
-    return base
-
-
-async def _clients_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-) -> dict[str, Any]:
-    rows = await _clients_rows(
-        db, start, end, company_id, staff_id, allowed_company_ids, factual_at,
-        include_lifetime_visits=True,
-    )
-    total_revenue = sum(row['revenue'] for row in rows)
-    total_visits = sum(row['visits'] for row in rows)
-    identified_rows = [row for row in rows if row.get('client_id') is not None]
-    anonymous_rows = [row for row in rows if row.get('client_id') is None]
-    identified_revenue = sum(row['revenue'] for row in identified_rows)
-    avg_revenue = identified_revenue / len(identified_rows) if identified_rows else 0.0
-    segment_rows = _client_segment_rows(identified_rows, avg_revenue)
-    frequency_rows = _client_visit_frequency_rows(identified_rows)
-    pareto_rows = _client_pareto_rows(identified_rows, total_revenue)
-    anonymous_visits = sum(row['visits'] for row in anonymous_rows)
-    anonymous_revenue = sum(row['revenue'] for row in anonymous_rows)
-    if anonymous_visits or anonymous_revenue:
-        segment_rows.append({
-            'segment': 'Без клиента',
-            'clients': 0,
-            'visits': anonymous_visits,
-            'revenue': anonymous_revenue,
-            'avg_revenue_per_client': 0.0,
-            'avg_visits_per_client': 0.0,
-        })
-        frequency_rows.append({
-            'bucket': 'Без клиента',
-            'clients': 0,
-            'revenue': anonymous_revenue,
-            'clients_pct': 0.0,
-        })
-        pareto_rows.append({
-            'bucket': 'Без клиента',
-            'clients': 0,
-            'clients_pct': 0.0,
-            'revenue': anonymous_revenue,
-            'revenue_pct': 100.0 * anonymous_revenue / total_revenue if total_revenue else 0.0,
-            'avg_revenue_per_client': 0.0,
-        })
-    base['cards'] = [
-        _card('Клиентов', len(identified_rows), NUMBER_FORMAT),
-        _card('Визитов', total_visits, NUMBER_FORMAT),
-        _card('Выручка клиентов', total_revenue, MONEY_FORMAT),
-        _card('Средний доход на клиента', avg_revenue, MONEY_FORMAT),
-    ]
-    base['charts'] = [
-        _chart(
-            'client_segments',
-            'Сегменты клиентов',
-            'doughnut',
-            [row['segment'] for row in segment_rows],
-            [{'label': 'Клиентов', 'data': [row['clients'] for row in segment_rows], 'format': NUMBER_FORMAT}],
-        ),
-        _chart(
-            'client_pareto',
-            'Концентрация выручки по клиентским бакетам',
-            'bar',
-            [row['bucket'] for row in pareto_rows],
-            [{'label': 'Выручка', 'data': [row['revenue'] for row in pareto_rows], 'format': MONEY_FORMAT}],
-        ),
-    ]
-    base['tables'] = [
-        _table(
-            'client_segments',
-            'Сегменты клиентов',
-            [
-                ('segment', 'Сегмент', 'text'),
-                ('clients', 'Клиентов', NUMBER_FORMAT),
-                ('visits', 'Визиты', NUMBER_FORMAT),
-                ('revenue', 'Выручка', MONEY_FORMAT),
-                ('avg_revenue_per_client', 'Доход на клиента', MONEY_FORMAT),
-                ('avg_visits_per_client', 'Визитов на клиента', DECIMAL_FORMAT),
-            ],
-            segment_rows,
-        ),
-        _table(
-            'client_pareto',
-            'Pareto-бакеты клиентов',
-            [
-                ('bucket', 'Бакет', 'text'),
-                ('clients', 'Клиентов', NUMBER_FORMAT),
-                ('clients_pct', 'Доля клиентов', PERCENT_FORMAT),
-                ('revenue', 'Выручка', MONEY_FORMAT),
-                ('revenue_pct', 'Доля выручки', PERCENT_FORMAT),
-                ('avg_revenue_per_client', 'Доход на клиента', MONEY_FORMAT),
-            ],
-            pareto_rows,
-        ),
-        _table(
-            'visit_frequency',
-            'Частотность визитов за всю историю',
-            [
-                ('bucket', 'Частотность', 'text'),
-                ('clients', 'Клиентов', NUMBER_FORMAT),
-                ('clients_pct', 'Доля клиентов', PERCENT_FORMAT),
-                ('revenue', 'Выручка', MONEY_FORMAT),
-            ],
-            frequency_rows,
-        ),
-    ]
-    base['notes'].append({
-        'kind': 'formula',
-        'title': 'Выручка услуг без персональных данных',
-        'text': (
-            'Клиентская выручка считается по дате физической оплаты услуг, как в Обзоре '
-            'и План/факт; отчет показывает только агрегированные сегменты.'
-        ),
-    })
-    base['raw'] = {
-        'segments': segment_rows,
-        'pareto': pareto_rows,
-        'visit_frequency': frequency_rows,
-        'anonymous_residual': {
-            'visits': anonymous_visits,
-            'revenue': anonymous_revenue,
-        },
-        'revenue_scope': 'services',
-    }
-    return base
-
-
-async def _last_staff_by_client(
-    db: AsyncSession,
-    client_ids: list[int],
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-) -> dict[int, dict[str, Any]]:
-    if not client_ids:
-        return {}
-    conditions = [
-        Appointment.client_id.in_(client_ids),
-        Appointment.attendance == COMPLETED_ATTENDANCE,
-        _appointment_factual_at_condition(factual_at),
-        # This query has no date floor of its own, so it guards itself: today's callers
-        # only pass clients that already have a reportable visit, but nothing enforces it.
-        reporting_window_clause(Appointment.company_id, Appointment.date),
-    ]
-    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
-    if scope is not None:
-        conditions.append(scope)
-    if staff_id is not None:
-        conditions.append(Appointment.staff_id == staff_id)
-    stmt = (
-        select(Appointment.client_id, Appointment.staff_id, Staff.name, Appointment.date)
-        .outerjoin(Staff, Staff.id == Appointment.staff_id)
-        .where(and_(*conditions))
-        .order_by(Appointment.client_id.asc(), Appointment.date.asc(), Appointment.id.asc())
-    )
-    out: dict[int, dict[str, Any]] = {}
-    for row in (await db.execute(stmt)).all():
-        out[row.client_id] = {'staff_id': row.staff_id, 'staff_name': row.name, 'date': row.date}
-    return out
-
-
-async def _churn_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-) -> dict[str, Any]:
-    clients = await _clients_rows(
-        db,
-        # `_service_paid_filters` in this same helper has no open-ended form, so the
-        # revenue half still needs a real lower bound.
-        date(2000, 1, 1),
-        end,
-        company_id,
-        staff_id,
-        allowed_company_ids,
-        factual_at,
-    )
-    risk_rows = [
-        row for row in clients
-        if (
-            row.get('client_id') is not None
-            and row.get('days_since_last_visit') is not None
-            and int(row['days_since_last_visit']) >= 60
-        )
-    ]
-    client_ids = [int(row['client_id']) for row in risk_rows if row.get('client_id') is not None]
-    last_staff = await _last_staff_by_client(
-        db,
-        client_ids,
-        company_id,
-        staff_id,
-        allowed_company_ids,
-        factual_at,
-    )
-    staff_losses: dict[str, dict[str, Any]] = defaultdict(lambda: {'staff_name': 'Без мастера', 'clients': 0, 'revenue': 0.0})
-    segment_rows_by_name: dict[str, dict[str, Any]] = defaultdict(lambda: {
-        'segment': '',
-        'clients': 0,
-        'visits': 0,
-        'revenue': 0.0,
-    })
-    for row in risk_rows:
-        days = int(row['days_since_last_visit'])
-        row['segment'] = 'Под риском' if days < 90 else 'Спящие' if days < 180 else 'Потерянные'
-        info = last_staff.get(int(row['client_id'] or 0), {})
-        row['last_staff'] = info.get('staff_name') or 'Без мастера'
-        bucket = staff_losses[row['last_staff']]
-        bucket['staff_name'] = row['last_staff']
-        bucket['clients'] += 1
-        bucket['revenue'] += float(row.get('revenue') or 0)
-        segment_bucket = segment_rows_by_name[row['segment']]
-        segment_bucket['segment'] = row['segment']
-        segment_bucket['clients'] += 1
-        segment_bucket['visits'] += int(row.get('visits') or 0)
-        segment_bucket['revenue'] += float(row.get('revenue') or 0)
-    # staff_name is the dict key staff_losses was grouped under, so it is already unique
-    # and makes a tie on lost revenue deterministic instead of plan-order-dependent.
-    staff_rows = sorted(
-        staff_losses.values(),
-        key=lambda item: (-float(item['revenue'] or 0), item['staff_name']),
-    )
-    segment_rows = []
-    for item in segment_rows_by_name.values():
-        clients_count = int(item['clients'] or 0)
-        item['avg_revenue_per_client'] = float(item['revenue'] or 0) / clients_count if clients_count else 0.0
-        item['avg_visits_per_client'] = float(item['visits'] or 0) / clients_count if clients_count else 0.0
-        segment_rows.append(item)
-    # Same reasoning: 'segment' is the grouping key, already unique among these rows.
-    segment_rows.sort(key=lambda item: (-int(item['clients'] or 0), item['segment']))
-    at_risk = sum(1 for row in risk_rows if row['segment'] == 'Под риском')
-    sleeping = sum(1 for row in risk_rows if row['segment'] == 'Спящие')
-    lost = sum(1 for row in risk_rows if row['segment'] == 'Потерянные')
-    revenue_at_risk = sum(float(row.get('revenue') or 0) for row in risk_rows)
-    base['cards'] = [
-        _card('Под риском', at_risk, NUMBER_FORMAT),
-        _card('Спящие', sleeping, NUMBER_FORMAT),
-        _card('Потерянные', lost, NUMBER_FORMAT),
-        _card('Выручка под риском', revenue_at_risk, MONEY_FORMAT),
-    ]
-    base['charts'] = [
-        _chart(
-            'churn_segments',
-            'Клиенты по сегментам оттока',
-            'doughnut',
-            ['Под риском', 'Спящие', 'Потерянные'],
-            [{'label': 'Клиентов', 'data': [at_risk, sleeping, lost], 'format': NUMBER_FORMAT}],
-        ),
-        _chart(
-            'losses_by_staff',
-            'Потери по последнему мастеру',
-            'bar',
-            [row['staff_name'] for row in staff_rows[:12]],
-            [{'label': 'Выручка', 'data': [row['revenue'] for row in staff_rows[:12]], 'format': MONEY_FORMAT}],
-        ),
-    ]
-    base['tables'] = [
-        _table(
-            'risk_segments',
-            'Сегменты оттока',
-            [
-                ('segment', 'Сегмент', 'text'),
-                ('clients', 'Клиентов', NUMBER_FORMAT),
-                ('visits', 'Визиты', NUMBER_FORMAT),
-                ('revenue', 'Выручка', MONEY_FORMAT),
-                ('avg_revenue_per_client', 'Доход на клиента', MONEY_FORMAT),
-                ('avg_visits_per_client', 'Визитов на клиента', DECIMAL_FORMAT),
-            ],
-            segment_rows,
-        ),
-        _table(
-            'losses_by_staff',
-            'Потери по мастерам',
-            [
-                ('staff_name', 'Мастер', 'text'),
-                ('clients', 'Клиентов', NUMBER_FORMAT),
-                ('revenue', 'Выручка под риском', MONEY_FORMAT),
-            ],
-            staff_rows,
-        ),
-    ]
-    base['notes'].append({
-        'kind': 'formula',
-        'title': 'Обезличенный отток',
-        'text': 'Отчет считает клиентов по сегментам оттока и мастерам без раскрытия клиентских карточек.',
-    })
-    base['raw'] = {'segments': segment_rows, 'staff': staff_rows}
-    return base
-
-
-async def _goods_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    granularity: str,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-) -> dict[str, Any]:
-    conditions = [
-        GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
-        *day_window(GoodTransaction.date, start, end),
-        GoodTransaction.date <= factual_at,
-        _business_staff_id_condition(GoodTransaction.master_id),
-        reporting_window_clause(GoodTransaction.company_id, GoodTransaction.date),
-    ]
-    scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
-    if scope is not None:
-        conditions.append(scope)
-    if staff_id is not None:
-        conditions.append(GoodTransaction.master_id == staff_id)
-    stmt = (
-        select(
-            GoodTransaction.company_id,
-            GoodTransaction.good_id,
-            GoodTransaction.good_title,
-            GoodTransaction.amount,
-            GoodTransaction.date,
-            GoodTransaction.master_id,
-            Staff.name.label('staff_name'),
-        )
-        .outerjoin(Staff, Staff.id == GoodTransaction.master_id)
-        .where(and_(*conditions))
-    )
-    inventory_rows = (await db.execute(stmt)).all()
-    inventory_title_by_key = {
-        (row.company_id, row.good_id): row.good_title
-        for row in inventory_rows
-        if row.good_title
-    }
-    paid_rows = await fetch_paid_goods_rows(
-        db,
-        start,
-        end,
-        company_id,
-        staff_id,
-        allowed_company_ids,
-        factual_at,
-    )
-
-    goods: dict[str, dict[str, Any]] = defaultdict(lambda: {'good_title': 'Товар', 'sales_count': 0, 'units': 0.0, 'revenue': 0.0})
-    by_staff: dict[str, dict[str, Any]] = defaultdict(lambda: {'staff_name': 'Без продавца', 'sales_count': 0, 'revenue': 0.0})
-    by_period: dict[str, dict[str, Any]] = defaultdict(lambda: {'period': '', 'sales_count': 0, 'units': 0.0, 'revenue': 0.0})
-    for row in inventory_rows:
-        key = f'{row.company_id}:{row.good_id or row.good_title or "unknown"}'
-        title = row.good_title or f"Товар {row.good_id or '—'}"
-        units = abs(float(row.amount or 0))
-        goods[key]['good_title'] = title
-        goods[key]['units'] += units
-        period = _period_key(row.date, granularity)
-        if period:
-            by_period[period]['period'] = period
-            by_period[period]['units'] += units
-
-    for row in paid_rows:
-        good_id = row.get('good_id')
-        item_company_id = row.get('company_id')
-        key = f'{item_company_id}:{good_id or row.get("good_title") or "unknown"}'
-        title = (
-            row.get('good_title')
-            or inventory_title_by_key.get((item_company_id, good_id))
-            or f"Товар {good_id or '—'}"
-        )
-        revenue = float(row.get('amount') or 0)
-        goods[key]['good_title'] = title
-        goods[key]['sales_count'] += 1
-        goods[key]['revenue'] += revenue
-        staff_key = str(row.get('master_id') or 'none')
-        by_staff[staff_key]['staff_name'] = row.get('staff_name') or 'Без продавца'
-        by_staff[staff_key]['sales_count'] += 1
-        by_staff[staff_key]['revenue'] += revenue
-        period = _period_key(row.get('date'), granularity)
-        if period:
-            by_period[period]['period'] = period
-            by_period[period]['sales_count'] += 1
-            by_period[period]['revenue'] += revenue
-    # Confirmed bug (golden-snapshot comparison): revenue-only sorting has no tiebreaker,
-    # so goods/sellers tied on revenue swap places whenever the query plan reorders the
-    # rows feeding `goods`/`by_staff` (e.g. a new index or plan_cache_mode). The dict key
-    # each row was grouped under (company:good_id / staff_id) is already unique, so using
-    # it as the final tiebreaker — after the meaningful title/name — makes the order
-    # depend only on the data, never on incidental scan order.
-    goods_rows = [
-        item
-        for _key, item in sorted(
-            goods.items(),
-            key=lambda pair: (-float(pair[1]['revenue'] or 0), pair[1]['good_title'], pair[0]),
-        )
-    ]
-    staff_rows = [
-        item
-        for _key, item in sorted(
-            by_staff.items(),
-            key=lambda pair: (-float(pair[1]['revenue'] or 0), pair[1]['staff_name'], pair[0]),
-        )
-    ]
-    period_rows = [by_period[key] for key in sorted(by_period)]
-    total_revenue = sum(row['revenue'] for row in goods_rows)
-    total_units = sum(row['units'] for row in goods_rows)
-    base['cards'] = [
-        _card('Выручка товаров', total_revenue, MONEY_FORMAT),
-        _card('Единиц продано', total_units, NUMBER_FORMAT),
-        _card('Уникальных товаров', len(goods_rows), NUMBER_FORMAT),
-        _card('Сотрудников с продажами', len(staff_rows), NUMBER_FORMAT),
-    ]
-    base['charts'] = [
-        _chart(
-            'goods_revenue',
-            'Товары по выручке',
-            'bar',
-            [row['good_title'] for row in goods_rows[:12]],
-            [{'label': 'Выручка', 'data': [row['revenue'] for row in goods_rows[:12]], 'format': MONEY_FORMAT}],
-        ),
-        _chart(
-            'goods_dynamics',
-            'Динамика продаж товаров',
-            'line',
-            [row['period'] for row in period_rows],
-            [
-                {'label': 'Выручка', 'data': [row['revenue'] for row in period_rows], 'format': MONEY_FORMAT},
-                {'label': 'Единиц', 'data': [row['units'] for row in period_rows], 'format': NUMBER_FORMAT, 'axis': 'y1'},
-            ],
-        ),
-    ]
-    base['tables'] = [
-        _table(
-            'goods',
-            'Товары',
-            [
-                ('good_title', 'Товар', 'text'),
-                ('sales_count', 'Продаж', NUMBER_FORMAT),
-                ('units', 'Единиц', DECIMAL_FORMAT),
-                ('revenue', 'Выручка', MONEY_FORMAT),
-            ],
-            goods_rows,
-        ),
-        _table(
-            'goods_by_staff',
-            'Продажи по сотрудникам',
-            [
-                ('staff_name', 'Продавец', 'text'),
-                ('sales_count', 'Продаж', NUMBER_FORMAT),
-                ('revenue', 'Выручка', MONEY_FORMAT),
-            ],
-            staff_rows,
-        ),
-    ]
-    base['raw'] = {'goods': goods_rows, 'by_staff': staff_rows, 'by_period': period_rows}
-    return base
-
-
-async def _operations_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    granularity: str,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-) -> dict[str, Any]:
-    stmt = (
-        select(Appointment.id, Appointment.date, Appointment.datetime, Appointment.attendance, Appointment.staff_id, Staff.name)
-        .outerjoin(Staff, Staff.id == Appointment.staff_id)
-        .where(and_(*_appointment_conditions(
-            start,
-            end,
-            company_id,
-            staff_id,
-            allowed_company_ids=allowed_company_ids,
-            factual_at=factual_at,
-        )))
-    )
-    by_hour = defaultdict(lambda: {'hour': 0, 'records': 0, 'completed': 0, 'cancelled': 0})
-    by_period = defaultdict(lambda: {'period': '', 'records': 0, 'completed': 0, 'cancelled': 0})
-    by_staff = defaultdict(lambda: {'staff_name': 'Без мастера', 'records': 0, 'completed': 0, 'cancelled': 0})
-    for row in (await db.execute(stmt)).all():
-        hour = row.datetime.hour if row.datetime else 0
-        by_hour[hour]['hour'] = hour
-        by_hour[hour]['records'] += 1
-        period = _period_key(row.date, granularity)
-        by_period[period]['period'] = period
-        by_period[period]['records'] += 1
-        staff_key = str(row.staff_id or 'none')
-        by_staff[staff_key]['staff_name'] = row.name or 'Без мастера'
-        by_staff[staff_key]['records'] += 1
-        if row.attendance == COMPLETED_ATTENDANCE:
-            by_hour[hour]['completed'] += 1
-            by_period[period]['completed'] += 1
-            by_staff[staff_key]['completed'] += 1
-        elif row.attendance and row.attendance < 0:
-            by_hour[hour]['cancelled'] += 1
-            by_period[period]['cancelled'] += 1
-            by_staff[staff_key]['cancelled'] += 1
-    hour_rows = [by_hour[key] for key in sorted(by_hour)]
-    period_rows = [by_period[key] for key in sorted(by_period)]
-    # Same fix as _goods_payload: the grouping key (staff_id, as a string) is a unique
-    # final tiebreaker for staff tied on record count.
-    staff_rows = [
-        item
-        for _key, item in sorted(
-            by_staff.items(),
-            key=lambda pair: (-int(pair[1]['records'] or 0), pair[1]['staff_name'], pair[0]),
-        )
-    ]
-    local_totals = {
-        'available_records': sum(row['records'] for row in period_rows),
-        'completed': sum(row['completed'] for row in period_rows),
-        'no_show': sum(row['cancelled'] for row in period_rows),
-    }
-    exact = await fetch_appointments_breakdown(
-        db,
-        start,
-        end,
-        company_id,
-        staff_id,
-        allowed_company_ids=allowed_company_ids,
-        factual_at=factual_at,
-    )
-    if exact['source_status'] in {'ready', 'local'}:
-        base['cards'] = [
-            _card('Всего записей', exact['total'], NUMBER_FORMAT),
-            _card('Завершено', exact['completed'], NUMBER_FORMAT),
-            _card('Отменено', exact['cancelled'], NUMBER_FORMAT),
-            _card('Незавершено', exact['incomplete'], NUMBER_FORMAT),
-        ]
-    else:
-        base['source_status'] = 'partial'
-        base['cards'] = [
-            _card('Всего записей', None, NUMBER_FORMAT),
-            _card('Завершено', None, NUMBER_FORMAT),
-            _card('Отменено', None, NUMBER_FORMAT),
-            _card('Незавершено', None, NUMBER_FORMAT),
-        ]
-        base['notes'].append({
-            'kind': 'warning',
-            'title': 'Точные агрегаты недоступны',
-            'text': 'YCLIENTS не вернул record_stats для выбранного периода.',
-        })
-    base['notes'].append({
-        'kind': 'info',
-        'title': 'Состав детализации',
-        'text': (
-            'Карточки рассчитаны по точным record_stats YCLIENTS. '
-            'Графики и таблица содержат только записи, доступные в локальной базе; '
-            'удаленные отмены невозможно распределить по часу и сотруднику.'
-        ),
-    })
-    base['charts'] = [
-        _chart(
-            'records_by_period',
-            'Записи по периодам',
-            'line',
-            [row['period'] for row in period_rows],
-            [
-                {'label': 'Доступные записи', 'data': [row['records'] for row in period_rows], 'format': NUMBER_FORMAT},
-                {'label': 'Завершено', 'data': [row['completed'] for row in period_rows], 'format': NUMBER_FORMAT},
-                {'label': 'Неявки', 'data': [row['cancelled'] for row in period_rows], 'format': NUMBER_FORMAT},
-            ],
-        ),
-        _chart(
-            'records_by_hour',
-            'Загрузка по часам',
-            'bar',
-            [f"{row['hour']}:00" for row in hour_rows],
-            [{'label': 'Записи', 'data': [row['records'] for row in hour_rows], 'format': NUMBER_FORMAT}],
-        ),
-    ]
-    base['tables'] = [
-        _table(
-            'staff_records',
-            'Записи по мастерам',
-            [
-                ('staff_name', 'Мастер', 'text'),
-                ('records', 'Доступные записи', NUMBER_FORMAT),
-                ('completed', 'Завершено', NUMBER_FORMAT),
-                ('cancelled', 'Неявки', NUMBER_FORMAT),
-            ],
-            staff_rows,
-        )
-    ]
-    base['raw'] = {
-        'exact_aggregates': exact,
-        'local_available_aggregates': local_totals,
-        'by_period': period_rows,
-        'by_hour': hour_rows,
-        'by_staff': staff_rows,
-    }
     return base
 
 
@@ -3775,76 +2707,3 @@ async def _leaderboard_payload_impl(
     return base
 
 
-async def _nps_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    definition: ReportDefinition,
-    start: date,
-    end: date,
-    company_id: int | None,
-    allowed_company_ids: list[int] | None,
-) -> dict[str, Any]:
-    base['missing_sources'] = ['telegram_nps']
-    conditions = [
-        *day_window(Comment.date, start, end),
-        reporting_window_clause(Comment.company_id, Comment.date),
-    ]
-    scope = _company_scope_clause(Comment.company_id, company_id, allowed_company_ids)
-    if scope is not None:
-        conditions.append(scope)
-    stmt = (
-        select(Comment.rating, Comment.text, Comment.date, Comment.master_id, Staff.name.label('staff_name'))
-        .outerjoin(Staff, Staff.id == Comment.master_id)
-        .where(and_(*conditions))
-    )
-    ratings = []
-    negative_rows = []
-    distribution = defaultdict(int)
-    for row in (await db.execute(stmt)).all():
-        rating = float(row.rating or 0)
-        if rating > 0:
-            ratings.append(rating)
-            distribution[str(int(round(rating)))] += 1
-        if rating and rating <= 3:
-            negative_rows.append({
-                'rating': rating,
-                'comment': row.text,
-                'date': row.date.isoformat() if row.date else None,
-                'staff_name': row.staff_name,
-            })
-    avg_rating = sum(ratings) / len(ratings) if ratings else None
-    base['cards'] = [
-        _card('Отзывы YClients', len(ratings), NUMBER_FORMAT),
-        _card('Средний рейтинг', avg_rating or 0, DECIMAL_FORMAT),
-        _card('Низкие оценки', len(negative_rows), NUMBER_FORMAT),
-        _card('NPS Telegram', None, 'text'),
-    ]
-    base['charts'] = [
-        _chart(
-            'ratings',
-            'Распределение оценок',
-            'bar',
-            [str(i) for i in range(1, 6)],
-            [{'label': 'Отзывов', 'data': [distribution[str(i)] for i in range(1, 6)], 'format': NUMBER_FORMAT}],
-        )
-    ]
-    base['tables'] = [
-        _table(
-            'negative_reviews',
-            'Низкие оценки',
-            [
-                ('date', 'Дата', 'date'),
-                ('staff_name', 'Мастер', 'text'),
-                ('rating', 'Оценка', DECIMAL_FORMAT),
-                ('comment', 'Комментарий', 'text'),
-            ],
-            negative_rows,
-        )
-    ]
-    base['notes'].append({
-        'kind': 'partial',
-        'title': 'NPS-опросы не подключены',
-        'text': 'Показаны отзывы и оценки из YClients. Для NPS нужен отдельный источник telegram_nps.',
-    })
-    base['raw'] = {'required_sources': list(definition.required_sources)}
-    return base

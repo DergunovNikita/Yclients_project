@@ -154,6 +154,13 @@ def init_async_database(host: str, port: int, name: str, user: str, password: st
     _async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
 
+def get_async_session_factory() -> async_sessionmaker[AsyncSession]:
+    """Session factory for work that must outlive or stay apart from the request session."""
+    if _async_session_factory is None:
+        raise RuntimeError("Async database not initialized. Call init_async_database() first.")
+    return _async_session_factory
+
+
 async def get_async_db() -> AsyncGenerator[AsyncSession, None]:
     if _async_session_factory is None:
         raise RuntimeError("Async database not initialized. Call init_async_database() first.")

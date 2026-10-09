@@ -20,6 +20,7 @@ from auth_scope import (
     AccessContext,
     can_view_branch_payments,
     can_view_financials,
+    can_view_report_usage,
     effective_staff_id,
     hidden_money_codes,
     manual_fact_staff_keys,
@@ -60,10 +61,12 @@ from dashboard_reports import (
     BRANCH_PAYMENT_REPORTS,
     DEMO_UNAVAILABLE_REPORTS,
     REPORT_GRANULARITIES,
+    REPORT_USAGE_ID,
     ReportCalculationError,
     fetch_report_data,
     fetch_report_registry,
     report_requires_financials,
+    resolve_report_id,
 )
 from database import get_async_db
 from models import Company, PortalAccount, PortalMetricVisibility, Staff
@@ -83,6 +86,7 @@ from payment_methods import (
     save_yandex_pay,
 )
 from portal_audit import log_portal_audit
+from report_usage import fetch_report_usage, track_report_usage
 from sync_jobs import SyncJobService
 from sync_orchestrator import get_sync_status
 
@@ -275,6 +279,10 @@ class ServiceManagementPayload(BaseModel):
 def _parse_range(start: date, end: date) -> tuple[date, date]:
     if start > end:
         raise HTTPException(status_code=400, detail='start_date must be <= end_date')
+    # Every window is half-open (`end + 1 day`) and has a baseline before `start`; at the ends of the
+    # calendar that arithmetic overflows into a 500.
+    if start <= date.min or end >= date.max:
+        raise HTTPException(status_code=400, detail='start_date and end_date are out of the supported range')
     return start, end
 
 
@@ -770,6 +778,7 @@ async def dashboard_reports(
             is_demo,
             hide_financials=not can_view_financials(ctx),
             hide_branch_payments=not can_view_branch_payments(ctx),
+            hide_report_usage=not can_view_report_usage(ctx),
         ),
     }
 
@@ -785,27 +794,53 @@ async def dashboard_report_data(
     compare_start_date: date | None = Query(None),
     compare_end_date: date | None = Query(None),
     compare_staff_id: int | None = Query(None),
+    compare_previous: bool = Query(
+        False, description='Compare with the Overview baseline of the period; an explicit compare window wins'
+    ),
     period_preset: PeriodPreset = None,
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
     is_demo: bool = Depends(is_demo_request),
 ):
     start, end = _parse_range(start_date, end_date)
+    # Every gate speaks about the canonical report: a retired id must not dodge the check
+    # of the report it now resolves to, nor inherit the one it used to have.
+    canonical_id = resolve_report_id(report_id)
+    if canonical_id is None:
+        raise HTTPException(status_code=400, detail='unknown report_id')
     # The catalog already hides these for demo; block the direct URL too so a
     # bookmark cannot surface a report the demo data can never populate.
-    if is_demo and report_id in DEMO_UNAVAILABLE_REPORTS:
+    if is_demo and canonical_id in DEMO_UNAVAILABLE_REPORTS:
         raise HTTPException(status_code=404, detail='Report is not available in the demo tenant')
-    if report_requires_financials(report_id):
+    if report_requires_financials(canonical_id):
         require_financial_access(ctx)
-    if report_id in BRANCH_PAYMENT_REPORTS:
+    if canonical_id in BRANCH_PAYMENT_REPORTS:
         _require_branch_payments_access(ctx)
-    scope = query_scope(ctx, company_id)
-    staff_id = effective_staff_id(ctx, staff_id)
-    compare_staff_id = effective_staff_id(ctx, compare_staff_id)
     if granularity not in REPORT_GRANULARITIES:
         raise HTTPException(status_code=400, detail='granularity must be one of day, week, month')
+    if canonical_id == REPORT_USAGE_ID:
+        # Tenant-wide analytics: no branch scope to resolve, and the registry builder cannot run it.
+        if not can_view_report_usage(ctx):
+            raise HTTPException(status_code=403, detail='Report usage is not available for this role')
+        return {
+            'success': True,
+            'data': await fetch_report_usage(db, require_tenant_context(ctx), start, end, granularity),
+        }
+    # What the client asked for, noted before the clamps below rewrite it.
+    requested_staff_filter = staff_id is not None
+    compare_requested = bool(
+        compare_start_date or compare_end_date or compare_staff_id is not None or compare_previous
+    )
+    scope = query_scope(ctx, company_id)
+    staff_id = effective_staff_id(ctx, staff_id)
+    if compare_staff_id is not None:
+        # Clamping an absent value would turn "no staff comparison" into a comparison with oneself.
+        compare_staff_id = effective_staff_id(ctx, compare_staff_id)
     if (compare_start_date is None) ^ (compare_end_date is None):
         raise HTTPException(status_code=400, detail='compare_start_date and compare_end_date must be passed together')
+    if compare_end_date is not None and compare_end_date >= date.max:
+        # The comparison window is half-open too; its start has no baseline, so only the end can overflow.
+        raise HTTPException(status_code=400, detail='compare_end_date is out of the supported range')
     await _validate_dashboard_scope(
         db,
         scope['company_id'],
@@ -813,33 +848,48 @@ async def dashboard_report_data(
         compare_staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
     )
-    try:
-        data = await fetch_report_data(
-            db,
-            report_id,
-            start,
-            end,
-            scope['company_id'],
-            staff_id,
-            granularity,
-            compare_start_date,
-            compare_end_date,
-            compare_staff_id,
-            allowed_company_ids=scope['allowed_company_ids'],
-            period_preset=period_preset,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except ReportCalculationError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                'code': 'report_calculation_failed',
-                'message': 'Не удалось рассчитать рейтинги за выбранный период.',
-                'retryable': True,
-            },
-        ) from exc
-    if report_id == 'staff_leaderboard':
+    with track_report_usage(
+        ctx,
+        is_demo=is_demo,
+        report_id=canonical_id,
+        requested_report_id=report_id,
+        start=start,
+        end=end,
+        granularity=granularity,
+        period_preset=period_preset,
+        compare_used=compare_requested,
+        staff_filter=requested_staff_filter,
+        company_filter=company_id is not None,
+    ) as usage:
+        try:
+            data = await fetch_report_data(
+                db,
+                report_id,
+                start,
+                end,
+                scope['company_id'],
+                staff_id,
+                granularity,
+                compare_start_date,
+                compare_end_date,
+                compare_staff_id,
+                allowed_company_ids=scope['allowed_company_ids'],
+                period_preset=period_preset,
+                compare_previous=compare_previous,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ReportCalculationError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    'code': 'report_calculation_failed',
+                    'message': 'Не удалось рассчитать рейтинги за выбранный период.',
+                    'retryable': True,
+                },
+            ) from exc
+        usage.source_status = data.get('source_status')
+    if canonical_id == 'staff_leaderboard':
         data = _hide_staff_leaderboard_financials(data, hidden_money_codes(ctx))
     return {'success': True, 'data': data}
 

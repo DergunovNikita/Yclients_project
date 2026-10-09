@@ -16,13 +16,17 @@ import {
 
 import { formatValue } from './format.js';
 import {
+  COMPARE_DASH,
   axisMax,
   axisValueFormat,
   chartRenderType,
   chartSeriesColor,
+  mutedColor,
   shouldRenderChartDataLabels,
   tooltipSeriesLabel,
+  withComparisonDatasets,
 } from './chartSpec.js';
+import { t } from '../i18n.js';
 import { chartTooltipValue, shouldRenderReportDataLabel } from '../dashboardRequestState.js';
 // Side-effect only: registers the global responsive tick/legend plugin (Chart.js dedupes
 // the module, so main.js importing it too does not register it twice) — see that file for
@@ -50,7 +54,7 @@ const dataLabelsPlugin = {
 
     chart.data.datasets.forEach((dataset, datasetIndex) => {
       const meta = chart.getDatasetMeta(datasetIndex);
-      if (meta.hidden) return;
+      if (meta.hidden || dataset.reportCompare) return;
 
       meta.data.forEach((element, index) => {
         const raw = dataset.data?.[index];
@@ -95,6 +99,18 @@ Chart.defaults.font.family = 'Inter, ui-sans-serif, system-ui, -apple-system, Bl
 Chart.defaults.color = '#64748b';
 Chart.defaults.borderColor = '#e2e8f0';
 
+function compareStyle(colorIndex) {
+  const color = chartSeriesColor(colorIndex);
+  return {
+    borderColor: mutedColor(color),
+    backgroundColor: mutedColor(color, 0.3),
+    borderDash: COMPARE_DASH,
+    pointRadius: 2,
+    pointStyle: 'rectRot',
+    borderWidth: 1.5,
+  };
+}
+
 export class ReportChartManager {
   constructor() {
     this.instances = new Map();
@@ -121,12 +137,14 @@ export class ReportChartManager {
     });
   }
 
-  render(canvas, spec) {
-    if (!canvas || !spec) return;
-    const previous = this.instances.get(spec.id);
+  render(canvas, baseSpec, comparisonChart = null) {
+    if (!canvas || !baseSpec) return;
+    const previous = this.instances.get(baseSpec.id);
     if (previous) previous.destroy();
 
-    const type = chartRenderType(spec);
+    // The type follows the current window alone: a comparison series must not turn bars into a line.
+    const type = chartRenderType(baseSpec);
+    const spec = withComparisonDatasets(baseSpec, comparisonChart, t('reports.compareSuffix'));
     const isArc = type === 'doughnut' || type === 'pie';
     const chart = new Chart(canvas, {
       type,
@@ -136,10 +154,11 @@ export class ReportChartManager {
           label: dataset.label,
           data: dataset.data || [],
           // Arc charts colour each segment individually; other charts colour per series.
-          borderColor: isArc ? '#ffffff' : chartSeriesColor(index),
+          borderColor: isArc ? '#ffffff' : chartSeriesColor(dataset.colorIndex ?? index),
           backgroundColor: isArc
             ? (dataset.data || []).map((_, i) => chartSeriesColor(i))
-            : chartSeriesColor(index),
+            : chartSeriesColor(dataset.colorIndex ?? index),
+          ...(dataset.compare ? compareStyle(dataset.colorIndex) : {}),
           borderWidth: isArc ? 2 : undefined,
           tension: 0.28,
           // Never filled: stacked areas hid the series drawn under them, and an area
@@ -149,6 +168,7 @@ export class ReportChartManager {
           borderRadius: type === 'bar' ? 4 : 0,
           yAxisID: dataset.axis || 'y',
           reportFormat: dataset.format || 'number',
+          reportCompare: dataset.compare === true,
         })),
       },
       options: this.optionsFor(spec, type),
