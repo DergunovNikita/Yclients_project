@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from datetime import date, datetime, time
 
 import pytest
@@ -51,6 +52,21 @@ def pg_session_factory():
         yield session_local
     finally:
         engine.dispose()
+
+
+def test_bootstrap_stamps_the_database_it_built(pg_session_factory):
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    root = Path(__file__).resolve().parent.parent
+    cfg = Config(str(root / 'alembic.ini'))
+    cfg.set_main_option('script_location', str(root / 'alembic'))
+    session = pg_session_factory()
+    try:
+        stamped = session.execute(text('SELECT version_num FROM alembic_version')).scalar_one()
+    finally:
+        session.close()
+    assert stamped == ScriptDirectory.from_config(cfg).get_current_head()
 
 
 def test_migration_creates_sync_jobs_and_typed_columns(pg_session_factory):
