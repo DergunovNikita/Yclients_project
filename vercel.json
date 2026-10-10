@@ -6,7 +6,6 @@
   "functions": {
     "api/auth-proxy.js": { "maxDuration": 180 },
     "api/auth/**/*.js": { "maxDuration": 180 },
-    "api/[...path].js": { "maxDuration": 180 },
     "api/dashboard/**/*.js": { "maxDuration": 180 }
   },
   "headers": [

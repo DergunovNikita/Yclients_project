@@ -388,7 +388,7 @@ def test_run_sync_job_locks_on_a_connection_no_pooled_session_can_take(monkeypat
     repeatedly (create_run, set_state, every progress_callback) while the pipeline session
     works on the same pool, so a lock taken on that Session gets released on whichever
     connection it happens to hold at the end: pg_advisory_unlock() answers false, the lock
-    stays on an abandoned pooled connection that init_database's module-level global keeps
+    stays on an abandoned pooled connection that the worker's long-lived engine keeps
     open, and every later run reports 'already_running' until the process dies.
 
     Reproduced against real PostgreSQL. This test needs no database: it pins the structural
@@ -605,8 +605,8 @@ def test_run_sync_job_closes_connections_when_already_running_status_lookup_rais
     """The already_running early return used to call get_status_payload(control_db) before
     closing anything. That helper issues three queries; if any of them raised, neither
     lock_conn nor control_db was closed. acquire_lock() returned False here, so no advisory
-    lock is at stake, but both pooled connections leaked -- and since init_database keeps the
-    engine alive in a module-level global, a long-running worker leaks one connection per
+    lock is at stake, but both pooled connections leaked -- and since the worker keeps its
+    engine alive for the whole process, a long-running worker leaks one connection per
     failed attempt until the pool is exhausted.
     """
     import sync_orchestrator

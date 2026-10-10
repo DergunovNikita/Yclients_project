@@ -2240,7 +2240,7 @@ async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom 
       retry: () => loadPlanSettings({ month, copyFrom, dirty }),
       signal: request.signal,
     });
-    if (!request.isCurrent()) return;
+    if (!request.isCurrent()) return false;
     renderPlanSettings(payload.data, { updateSnapshot: !copyFrom, dirty });
     viewsWithData.add('planSettings');
     clearError();
@@ -2248,9 +2248,11 @@ async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom 
       empty: !(payload.data?.branches?.length || payload.data?.staff?.length),
     });
     await syncStatus;
+    return true;
   } catch (error) {
-    if (isSupersededRequest(error) || !request.isCurrent()) return;
+    if (isSupersededRequest(error) || !request.isCurrent()) return false;
     showError(error.message, { apiStatus: error.apiStatus, retry: () => loadPlanSettings({ month, copyFrom, dirty }) });
+    return false;
   } finally {
     if (request.isCurrent()) {
       setPlanSettingsLoading(false);
@@ -2273,7 +2275,14 @@ async function savePlanSettings() {
     renderPlanSettings(payload.data);
     setApiState(t('dash.apiConnected'), 'ok');
   } catch (error) {
-    showError(error.message, { apiStatus: error.apiStatus, retry: () => savePlanSettings() });
+    if (error.status === 409) {
+      // Someone saved the same month first. Their plan wins; what we typed is not merged in,
+      // because the sum of two people's edits is nobody's intent. The server's detail is English.
+      const reloaded = await loadPlanSettings({ month: planSettingsData?.month || els.planSettingsMonth.value });
+      if (reloaded) showError(t('dash.planSettingsConflict'), { apiStatus: 'ready' });
+    } else {
+      showError(error.message, { apiStatus: error.apiStatus, retry: () => savePlanSettings() });
+    }
   } finally {
     planSettingsSaving = false;
     setPlanSettingsLoading(false);

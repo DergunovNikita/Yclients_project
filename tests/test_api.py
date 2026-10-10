@@ -1621,6 +1621,7 @@ async def test_csv_export_neutralises_spreadsheet_formulas(async_session):
         Comment(id=1, company_id=1, text='=HYPERLINK("http://evil","x")', user_name='+cmd', rating=-5.0),
         Comment(id=2, company_id=1, text='@SUM(A1)', user_name='-1+1', date=datetime(2026, 9, 5)),
         Comment(id=3, company_id=1, text='\tTabbed', user_name='plain'),
+        Comment(id=4, company_id=1, text='+79991234567', user_name='+7 (999) 123-45-67'),
     ])
     await async_session.commit()
 
@@ -1643,6 +1644,27 @@ async def test_csv_export_neutralises_spreadsheet_formulas(async_session):
     assert rows['3']['user_name'] == 'plain'
     # A negative number is a number, not text that starts with "-".
     assert rows['1']['rating'] == '-5.0'
+    # A phone number is not a formula, and prefixing it would corrupt the clients export.
+    assert rows['4']['text'] == '+79991234567'
+    assert rows['4']['user_name'] == '+7 (999) 123-45-67'
+
+
+@pytest.mark.parametrize('value', ['+79991234567', '+7 (999) 123-45-67', '8-800-555-35-35', '-5', '+(495) 123.45.67'])
+def test_neutralize_formula_leaves_phone_like_text_alone(value):
+    assert api.neutralize_formula(value) == value
+
+
+@pytest.mark.parametrize(
+    'value',
+    ['=1+1', '@SUM(A1)', '+cmd|calc', '-1+1', '+7 999 abc', '-', '+', '\t12', '\r12', '=7999', "+7\n=1+1", '+7 (999)\t1'],
+)
+def test_neutralize_formula_still_guards_everything_else(value):
+    assert api.neutralize_formula(value) == "'" + value
+
+
+def test_neutralize_formula_ignores_non_strings():
+    assert api.neutralize_formula(-5.0) == -5.0
+    assert api.neutralize_formula(None) is None
 
 
 @pytest.mark.asyncio

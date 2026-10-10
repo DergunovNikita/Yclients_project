@@ -333,19 +333,15 @@ def test_invalid_log_level_is_refused_at_import():
     assert 'LOG_LEVEL must be one of' in result.stderr
 
 
-def test_garbage_db_port_falls_back_like_every_other_integer():
-    env = {'APP_ENV': 'local', 'DB_PORT': 'five'}
-    result = subprocess.run(
-        [sys.executable, '-c', 'import config; print(config.DB_PORT)'],
-        cwd=os.getcwd(),
-        env={**os.environ, 'PYTHONPATH': os.getcwd(), **env},
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+def test_garbage_db_port_is_refused_not_replaced_by_the_default():
+    # 5432 is a different PostgreSQL on a developer machine; a silent fallback would connect there.
+    result = _run_import_config({'APP_ENV': 'local', 'DB_PORT': 'five'})
 
+    assert result.returncode != 0
+    assert "DB_PORT must be an integer, got 'five'" in result.stderr
+
+    result = _run_import_config({'APP_ENV': 'local', 'DB_PORT': '5433'})
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == '5432'
 
 
 def test_env_example_is_importable_as_local_config():

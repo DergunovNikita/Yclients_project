@@ -737,9 +737,14 @@ test('both vercel.json files agree, and the auth proxy outlasts a YClients crede
   // The proxy aborts its own upstream call at PROXY_TIMEOUT_MS (160 s) and must still have time to
   // answer; a shorter function limit turns every slow call into a bare Vercel timeout.
   // The direct credential functions (api/auth/admin/yclients-credentials/**) run the same slow
-  // YClients login check, and the catch-all serves whatever has no function of its own.
-  for (const fn of ['api/auth-proxy.js', 'api/auth/**/*.js', 'api/dashboard/**/*.js', 'api/[...path].js']) {
+  // YClients login check.
+  for (const fn of ['api/auth-proxy.js', 'api/auth/**/*.js', 'api/dashboard/**/*.js']) {
     assert.ok(root.functions[fn].maxDuration > 160, `${fn} maxDuration must exceed the 160 s proxy timeout`);
+  }
+  // A `functions` key is a glob, and Vercel fails the whole build when one matches no function.
+  // `[...path]` reads as a character class, not a file name, so bracketed paths stay out of the keys.
+  for (const key of Object.keys(root.functions)) {
+    assert.ok(!key.includes('['), `${key}: bracketed function paths are globs that match nothing`);
   }
 });
 

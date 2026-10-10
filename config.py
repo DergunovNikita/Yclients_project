@@ -44,6 +44,17 @@ def _get_int(name: str, default: int) -> int:
         return default
 
 
+def _get_strict_int(name: str, default: int) -> int:
+    """Unlike `_get_int`, refuse garbage: a silent fallback would point the app at a different database."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        raise RuntimeError(f'{name} must be an integer, got {value!r}') from None
+
+
 def _get_float(name: str, default: float) -> float:
     value = os.getenv(name)
     if value is None:
@@ -137,7 +148,7 @@ YCLIENTS_RETRY_AFTER_MAX = _get_float('YCLIENTS_RETRY_AFTER_MAX', 60.0)
 # Настройки PostgreSQL
 # ============================================================================
 DB_HOST = os.getenv('DB_HOST', 'localhost')
-DB_PORT = _get_int('DB_PORT', 5432)
+DB_PORT = _get_strict_int('DB_PORT', 5432)
 DB_NAME = os.getenv('DB_NAME', 'yclients_db')
 DB_USER = os.getenv('DB_USER', 'postgres')
 DB_PASSWORD = os.getenv('DB_PASSWORD', '')

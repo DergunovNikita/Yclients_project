@@ -7,6 +7,7 @@ import asyncio
 import csv
 import io
 import logging
+import re
 import sys
 import time as perf_time
 from datetime import date, datetime, time
@@ -1208,6 +1209,9 @@ def csv_export_stmt(model, ctx: AccessContext | None):
 
 
 CSV_FORMULA_PREFIXES = ('=', '+', '-', '@', '\t', '\r')
+# A phone number (`+79991234567`, `+7 (999) 123-45-67`) starts with a formula character but carries nothing
+# executable: no letters, no `|`, a sign only in front. Prefixing it would break every `clients.phone` export.
+PHONE_LIKE = re.compile(r'[+-]?\(?\d[\d ()\-.]*')
 
 
 def neutralize_formula(value: Any) -> Any:
@@ -1215,7 +1219,7 @@ def neutralize_formula(value: Any) -> Any:
 
     Only strings are touched, so negative numbers stay numbers.
     """
-    if isinstance(value, str) and value.startswith(CSV_FORMULA_PREFIXES):
+    if isinstance(value, str) and value.startswith(CSV_FORMULA_PREFIXES) and not PHONE_LIKE.fullmatch(value):
         return "'" + value
     return value
 

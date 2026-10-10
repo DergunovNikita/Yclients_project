@@ -232,11 +232,11 @@ def test_run_sync_job_releases_its_lock_when_execute_sync_shares_the_pool(monkey
     _create_full_schema(schema_db.engine)
     schema_db.engine.dispose()
 
-    # Production keeps this Database alive: init_database() stores it in database.py's
-    # module-level `db_instance`, so its pooled connections are never closed. Hold a
-    # reference here too — without it the Database is garbage-collected the moment
-    # run_sync_job returns, the connections close, PostgreSQL drops the advisory lock with
-    # them, and this test passes even when the lock was released on the wrong connection.
+    # Production keeps this Database alive: the worker builds one engine and reuses it for every
+    # job, so its pooled connections are never closed. Hold a reference here too — without it
+    # the Database is garbage-collected the moment run_sync_job returns, the connections close,
+    # PostgreSQL drops the advisory lock with them, and this test passes even when the lock was
+    # released on the wrong connection.
     held_databases = []
 
     def _held_database(*args, **kwargs):
