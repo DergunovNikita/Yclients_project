@@ -532,6 +532,9 @@ async def test_postgres_administrator_attribution_uses_local_shifts_and_role_per
                 attendance=1,
             ))
             await db.commit()
+            # The per-session caches in db.info assume a session is one request and facts do not change
+            # under it; a new fact means a new request in production, so start from an empty cache.
+            db.info.clear()
             scope = await dashboard_service._administrator_service_scope(
                 db,
                 date(2025, 1, 1),
