@@ -1243,6 +1243,10 @@ async def admin_distribute_credentials(
             # The raw message can carry the SMTP host or DB internals; it must not reach the browser.
             logger.warning('invite email failed user_id=%s error=%s', user_object_id, type(exc).__name__)
             errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Email delivery failed'})
+            # The sender rolled the session back, which expired every loaded row; reading an expired
+            # attribute in the next iteration would raise MissingGreenlet and 500 the whole batch.
+            for loaded in (actor, *users_by_id.values()):
+                await db.refresh(loaded)
             continue
 
         sent.append({'user_id': user_object_id, 'email': user_email})

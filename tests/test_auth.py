@@ -3038,6 +3038,56 @@ async def test_distribute_credentials_reports_invite_failures_after_rollback(aut
 
 
 @pytest.mark.asyncio
+async def test_distribute_credentials_keeps_going_after_a_failed_invite_rolled_the_session_back(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    for user_id in (12, 13):
+        auth_db.add(
+            PortalUser(
+                id=user_id,
+                portal_account_id=1,
+                email=f'invite{user_id}@example.com',
+                password_hash=hash_password('Rollback123!'),
+                full_name='Invite',
+                role='barber',
+                is_active=True,
+                email_verified_at=datetime.utcnow(),
+                created_at=datetime.utcnow(),
+            )
+        )
+        auth_db.add(PortalUserBranch(user_id=user_id, company_id=1))
+    await auth_db.commit()
+    attempts = []
+
+    async def _fail_first_after_rollback(db, user):
+        attempts.append(user.id)
+        if len(attempts) == 1:
+            await db.rollback()
+            raise RuntimeError('smtp unavailable')
+
+    monkeypatch.setattr('auth_routes.send_account_invite_email', _fail_first_after_rollback)
+    token = create_access_token(1, 'owner')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post(
+            '/auth/admin/distribute-credentials',
+            headers={'Authorization': f'Bearer {token}'},
+            json={'user_ids': [12, 13]},
+        )
+    app.dependency_overrides.clear()
+
+    # The rollback expires the loaded rows; the second recipient must still be processed, not 500 the batch.
+    assert response.status_code == 200
+    data = response.json()['data']
+    assert [item['user_id'] for item in data['sent']] == [13]
+    assert [item['user_id'] for item in data['errors']] == [12]
+
+
+@pytest.mark.asyncio
 async def test_distribute_credentials_does_not_leak_cross_tenant_email(auth_db, monkeypatch):
     """The select behind distribute-credentials must be tenant-scoped.
 

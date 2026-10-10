@@ -12,7 +12,7 @@ from datetime import datetime
 
 from sqlalchemy import select
 
-from auth_service import hash_password, normalize_email
+from auth_service import PASSWORD_MAX_BYTES, hash_password, normalize_email
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from database import init_database
 from models import PortalUser
@@ -49,6 +49,11 @@ def main() -> int:
     db = database.get_db()
     try:
         user = db.execute(select(PortalUser).where(PortalUser.email == email)).scalar_one_or_none()
+        # Only where a hash is made: an existing user is skipped, and that must stay true of a deploy
+        # whose environment password is long.
+        if (user is None or args.reset_password) and len(args.password.encode('utf-8')) > PASSWORD_MAX_BYTES:
+            print(f'Password must not exceed {PASSWORD_MAX_BYTES} bytes in UTF-8')
+            return 2
         if user is None:
             user = PortalUser(
                 email=email,

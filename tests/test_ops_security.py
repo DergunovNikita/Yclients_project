@@ -166,3 +166,22 @@ def test_bootstrap_without_a_password_is_a_usage_error(monkeypatch, admin_db):
         run_bootstrap(monkeypatch, '--email', 'admin@example.com')
 
     assert excinfo.value.code == 2
+
+
+def test_bootstrap_refuses_a_password_bcrypt_cannot_hash_in_full(monkeypatch, admin_db):
+    monkeypatch.setenv('PORTAL_ADMIN_PASSWORD', 'ж' * 40)  # 80 bytes in UTF-8, 40 characters
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert run_bootstrap(monkeypatch, '--email', 'admin@example.com') == 2
+
+    with admin_db() as db:
+        assert db.execute(select(PortalUser)).first() is None
+
+
+def test_bootstrap_skips_an_existing_user_whatever_the_environment_password(monkeypatch, admin_db):
+    monkeypatch.setenv('PORTAL_ADMIN_PASSWORD', 'first-password-1')
+    run_bootstrap(monkeypatch, '--email', 'admin@example.com')
+    monkeypatch.setenv('PORTAL_ADMIN_PASSWORD', 'ж' * 40)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert run_bootstrap(monkeypatch, '--email', 'admin@example.com') == 0

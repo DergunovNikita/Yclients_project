@@ -161,7 +161,7 @@ cd web && npm run dev
 - **Бутстрап платформенного админа при деплое — create-only.** `create_portal_admin.py` существующего пользователя не трогает
   (пароль, роль, тенант, активность; печатает `exists, skipped`), иначе каждый деплой откатывал бы смену пароля и
   включал бы деактивированного админа. Перезапись — только явным `--reset-password`, вручную. Пароль берётся из
-  `PORTAL_ADMIN_PASSWORD` в окружении контейнера (`env_file: .env`), не из argv. Деплой заводит только `PORTAL_ADMIN_EMAIL`
+  `PORTAL_ADMIN_PASSWORD` в окружении контейнера (`env_file: .env`), не из argv. Длиннее 72 байт он может быть только у уже существующего админа (его пропускают): при заведении и `--reset-password` такой пароль отклоняется с кодом 2. Деплой заводит только `PORTAL_ADMIN_EMAIL`
   и список `PORTAL_EXTRA_ADMIN_EMAILS` (через запятую); зашитых адресов нет.
 - **Prod fail-closed**: в production `config` требует сильные `AUTH_JWT_SECRET`/`SYNC_API_TOKEN`, `AUTH_COOKIE_SECURE=true` и выключенную публичную регистрацию; `AUTH_REQUIRE_LOGIN=false` допустим только при заданном сильном `API_KEY`; при отправке почты через SMTP (не console) `APP_PUBLIC_URL` обязан быть публичным https-адресом (ссылки в письмах), `LOG_LEVEL` — известным именем уровня
 
