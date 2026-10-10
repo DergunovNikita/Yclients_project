@@ -55,6 +55,11 @@ def _fernet_from_key(raw_key: str) -> Fernet:
         return Fernet(derived)
 
 
+def _looks_generated(raw_key: str) -> bool:
+    """A 256-bit hex string (`openssl rand -hex 32`) is already full-entropy; the fallback hash is harmless there."""
+    return len(raw_key) >= 64 and all(char in '0123456789abcdefABCDEF' for char in raw_key)
+
+
 def warn_if_passphrase_keys() -> None:
     """Log (never the key itself) when a production key is not a Fernet key and falls back to a bare SHA-256.
 
@@ -67,7 +72,7 @@ def warn_if_passphrase_keys() -> None:
         ('PORTAL_CREDENTIALS_ENCRYPTION_KEY', PORTAL_CREDENTIALS_ENCRYPTION_KEY),
         ('PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD', PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD),
     ):
-        if not raw_key:
+        if not raw_key or _looks_generated(raw_key):
             continue
         try:
             Fernet(raw_key.encode('utf-8'))

@@ -1,6 +1,7 @@
 """Admin listing, staff mirroring, bulk provisioning, tenant claims and credential-route plumbing."""
 
 import logging
+import secrets
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -604,3 +605,15 @@ def test_a_real_fernet_key_or_a_dev_environment_is_not_warned_about(monkeypatch,
         yclients_credentials.warn_if_passphrase_keys()
 
     assert caplog.text == ''
+
+
+def test_a_full_entropy_hex_key_is_not_warned_about(monkeypatch, caplog):
+    # `openssl rand -hex 32` is what the env examples tell operators to generate; its hash fallback is harmless.
+    monkeypatch.setattr(yclients_credentials, 'IS_PRODUCTION', True)
+    monkeypatch.setattr(yclients_credentials, 'PORTAL_CREDENTIALS_ENCRYPTION_KEY', secrets.token_hex(32))
+    monkeypatch.setattr(yclients_credentials, 'PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD', 'ab' * 16)
+    with caplog.at_level(logging.WARNING, logger='yclients_credentials'):
+        yclients_credentials.warn_if_passphrase_keys()
+
+    assert 'PORTAL_CREDENTIALS_ENCRYPTION_KEY is not' not in caplog.text
+    assert 'PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD is not' in caplog.text
