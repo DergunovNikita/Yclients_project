@@ -131,6 +131,10 @@ cd web && npm run dev
 - **Schemas**: `public` (данные YClients) + `system` (sync state/jobs/runs + портал: аккаунты, пользователи, сессии, email-токены, филиалы)
 - **ORM**: SQLAlchemy 2.0 — sync (`Session`) для ETL, async (`AsyncSession`) для API
 - **Batch operations**: chunked по DB_BATCH_SIZE (1000)
+- **Справочники YClients** (категории и услуги, должности, кассы, склады, категории товаров, товары) живут только в
+  филиальных `*_catalog`; их читают дашборд, JSON-списки и `/export/csv/*` (под именами `*_catalog`). Старых
+  глобальных двойников нет (миграция `0054`); остался один `services` — на него смотрит FK `service_labels`, синк его
+  не пишет, строку при разметке услуги создаёт `_apply_service_label`
 - **Concurrency**: pg_advisory_lock, один sync за раз
 
 ### Migrations (Alembic)

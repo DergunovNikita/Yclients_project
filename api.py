@@ -58,28 +58,21 @@ from onboarding_routes import router as onboarding_router
 from database import get_async_db, init_async_database
 from portal_audit import log_portal_audit
 from models import (
-    Account,
     Appointment,
     Client,
     Comment,
     Company,
     FinancialTransaction,
-    Good,
     GoodCatalog,
-    GoodCategory,
     GoodCategoryCatalog,
     GoodTransaction,
     Group,
     AccountCatalog,
-    Service,
     ServiceCatalog,
-    ServiceCategory,
     ServiceCategoryCatalog,
     Staff,
-    StaffPosition,
     StaffPositionCatalog,
     StaffSchedule,
-    Storage,
     StorageCatalog,
     Transaction,
 )
@@ -968,21 +961,14 @@ async def api_stats(request: Request, db: AsyncSession = Depends(get_async_db)):
     return {
         "groups": await count_of(Group),
         "companies": await count_of(Company),
-        "service_categories": await count_of(ServiceCategory),
         "service_category_catalog": await count_of(ServiceCategoryCatalog),
-        "services": await count_of(Service),
         "service_catalog": await count_of(ServiceCatalog),
-        "staff_positions": await count_of(StaffPosition),
         "staff_position_catalog": await count_of(StaffPositionCatalog),
         "staff": await count_of(Staff),
         "clients": await count_of(Client),
-        "accounts": await count_of(Account),
         "account_catalog": await count_of(AccountCatalog),
-        "storages": await count_of(Storage),
         "storage_catalog": await count_of(StorageCatalog),
-        "good_categories": await count_of(GoodCategory),
         "good_category_catalog": await count_of(GoodCategoryCatalog),
-        "goods": await count_of(Good),
         "good_catalog": await count_of(GoodCatalog),
         "appointments": appointments_total,
         "appointments_attended": attended_result.scalar_one(),
@@ -1081,21 +1067,14 @@ async def sync_status(
 TABLE_MAP = {
     "groups": Group,
     "companies": Company,
-    "service_categories": ServiceCategory,
     "service_category_catalog": ServiceCategoryCatalog,
-    "services": Service,
     "service_catalog": ServiceCatalog,
-    "staff_positions": StaffPosition,
     "staff_position_catalog": StaffPositionCatalog,
     "staff": Staff,
     "clients": Client,
-    "accounts": Account,
     "account_catalog": AccountCatalog,
-    "storages": Storage,
     "storage_catalog": StorageCatalog,
-    "good_categories": GoodCategory,
     "good_category_catalog": GoodCategoryCatalog,
-    "goods": Good,
     "good_catalog": GoodCatalog,
     "appointments": Appointment,
     "transactions": Transaction,
@@ -1155,9 +1134,7 @@ EXPORT_WINDOW_EXEMPT_MODELS = frozenset({Company})
 # api_goods above). The CSV column must stay present — only the value is blanked, so a column
 # position parser doesn't break.
 MONEY_EXPORT_COLUMNS: dict[type, frozenset[str]] = {
-    Service: frozenset({Service.price_min.key}),
     ServiceCatalog: frozenset({ServiceCatalog.price_min.key}),
-    Good: frozenset({Good.cost.key, Good.actual_cost.key}),
     GoodCatalog: frozenset({GoodCatalog.cost.key, GoodCatalog.actual_cost.key}),
 }
 
@@ -1181,6 +1158,11 @@ def scope_model_stmt(
         stmt = apply_company_scope(stmt, company_column, company_id, ctx)
     elif model is Company:
         stmt = apply_company_scope(stmt, Company.id, company_id, ctx)
+    elif model is Group:
+        # Same rule as /groups: a group is visible through the branches it contains.
+        if ctx is not None and not ctx.full_access:
+            stmt = stmt.join(Company, Company.group_id == Group.id).distinct()
+            stmt = apply_company_scope(stmt, Company.id, None, ctx)
     elif ctx is not None and not ctx.full_access:
         stmt = stmt.where(False)
     if company_column is not None and model not in EXPORT_WINDOW_EXEMPT_MODELS:

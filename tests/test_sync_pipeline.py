@@ -2319,7 +2319,8 @@ def test_sync_services_writes_shared_ids_to_branch_scoped_catalog():
         assert sync_services(FakeServicesAPI(service_payload), db, '1') is True
         assert sync_services(FakeServicesAPI(service_payload), db, '2') is True
 
-        assert db.query(Service).count() == 1
+        # The legacy `services` table is only the label FK's target and is no longer filled by the sync.
+        assert db.query(Service).count() == 0
         rows = (
             db.query(ServiceCatalog)
             .filter(ServiceCatalog.service_id == 10)

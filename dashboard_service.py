@@ -604,7 +604,8 @@ def _financial_appointment_branches_union(build_select):
     duplicate the NULL-extended row for every branch that fails to match).
 
     Three eligible sites are deliberately still on the plain OR join:
-    dashboard_reports.py's _year_over_year_activity_bounds, _staff_rows and _clients_rows.
+    reports_finance.py's _year_over_year_activity_bounds, reports_operations.py's _staff_rows
+    and reports_clients.py's _clients_rows.
     They qualify by the rule above, but they sit in report builders outside the set whose
     latency was actually measured, and each conversion carries the same risk as the nine
     that were done. Converting them is a follow-up with its own before/after, not an

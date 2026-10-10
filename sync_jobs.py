@@ -60,7 +60,6 @@ class SyncJobService:
             progress_pct=0,
             current_stage='queued',
             step_results=[],
-            cancel_requested=False,
         )
 
     def claim_next_job(self, db) -> Optional[SyncJob]:
@@ -268,7 +267,6 @@ class SyncJobService:
             'progress_pct': job.progress_pct,
             'current_stage': job.current_stage,
             'step_results': job.step_results or [],
-            'cancel_requested': bool(job.cancel_requested),
             'requested_at': serialize_dt(job.requested_at),
             'started_at': serialize_dt(job.started_at),
             'finished_at': serialize_dt(job.finished_at),

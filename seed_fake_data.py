@@ -13,24 +13,22 @@ from sqlalchemy import func
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from database import init_database, quote_identifier
 from models import (
-    Account,
+    AccountCatalog,
     Appointment,
     Client,
     Comment,
     Company,
     FinancialTransaction,
-    Good,
-    GoodCategory,
+    GoodCatalog,
+    GoodCategoryCatalog,
     GoodTransaction,
     Group,
-    Service,
-    ServiceCategory,
-    ServiceCategoryCatalog,
     ServiceCatalog,
+    ServiceCategoryCatalog,
     Staff,
-    StaffPosition,
+    StaffPositionCatalog,
     StaffSchedule,
-    Storage,
+    StorageCatalog,
     Transaction,
 )
 
@@ -38,12 +36,12 @@ from models import (
 @dataclass
 class CompanyRefs:
     company: Company
-    services: list[Service]
+    services: list[ServiceCatalog]
     staff: list[Staff]
     clients: list[Client]
-    goods: list[Good]
-    accounts: list[Account]
-    storages: list[Storage]
+    goods: list[GoodCatalog]
+    accounts: list[AccountCatalog]
+    storages: list[StorageCatalog]
 
 
 FIRST_NAMES = [
@@ -88,15 +86,15 @@ WIPE_TABLES = [
     'goods_transactions',
     'comments',
     'staff_schedules',
-    'services',
-    'service_categories',
+    'service_catalog',
+    'service_category_catalog',
     'staff',
-    'staff_positions',
+    'staff_position_catalog',
     'clients',
-    'accounts',
-    'storages',
-    'goods',
-    'good_categories',
+    'account_catalog',
+    'storage_catalog',
+    'good_catalog',
+    'good_category_catalog',
     'companies',
     'groups',
 ]
@@ -155,7 +153,6 @@ def seed_companies(
         portal_account_id=portal_account_id,
         external_id=1,
         title=f"Synthetic Group {group_id}",
-        access={"mode": "fake"},
     )
     db.add(group)
     db.flush()
@@ -163,21 +160,21 @@ def seed_companies(
     refs: list[CompanyRefs] = []
     company_id = next_negative_pk(db, Company, "id") if negative_ids else max(1000, next_pk(db, Company, "id", 1000))
     if negative_catalog_ids:
-        service_cat_id = next_negative_pk(db, ServiceCategory, "id")
-        service_id = next_negative_pk(db, Service, "id")
-        position_id = next_negative_pk(db, StaffPosition, "id")
-        account_id = next_negative_pk(db, Account, "id")
-        good_category_id = next_negative_pk(db, GoodCategory, "id")
-        storage_id = next_negative_pk(db, Storage, "id")
-        good_id = next_negative_pk(db, Good, "good_id")
+        service_cat_id = next_negative_pk(db, ServiceCategoryCatalog, "category_id")
+        service_id = next_negative_pk(db, ServiceCatalog, "service_id")
+        position_id = next_negative_pk(db, StaffPositionCatalog, "position_id")
+        account_id = next_negative_pk(db, AccountCatalog, "account_id")
+        good_category_id = next_negative_pk(db, GoodCategoryCatalog, "category_id")
+        storage_id = next_negative_pk(db, StorageCatalog, "storage_id")
+        good_id = next_negative_pk(db, GoodCatalog, "good_id")
     else:
-        service_cat_id = next_pk(db, ServiceCategory, "id", 1)
-        service_id = next_pk(db, Service, "id", 1)
-        position_id = next_pk(db, StaffPosition, "id", 1)
-        account_id = next_pk(db, Account, "id", 1)
-        good_category_id = next_pk(db, GoodCategory, "id", 1)
-        storage_id = next_pk(db, Storage, "id", 1)
-        good_id = next_pk(db, Good, "good_id", 1)
+        service_cat_id = next_pk(db, ServiceCategoryCatalog, "category_id", 1)
+        service_id = next_pk(db, ServiceCatalog, "service_id", 1)
+        position_id = next_pk(db, StaffPositionCatalog, "position_id", 1)
+        account_id = next_pk(db, AccountCatalog, "account_id", 1)
+        good_category_id = next_pk(db, GoodCategoryCatalog, "category_id", 1)
+        storage_id = next_pk(db, StorageCatalog, "storage_id", 1)
+        good_id = next_pk(db, GoodCatalog, "good_id", 1)
     staff_id = next_negative_pk(db, Staff, "id") if negative_ids else next_pk(db, Staff, "id", 1)
     client_id = next_negative_pk(db, Client, "id") if negative_ids else next_pk(db, Client, "id", 1)
     shared_service_categories = ["Hair", "Nails", "Cosmetology", "Body"]
@@ -198,68 +195,46 @@ def seed_companies(
         db.add(company)
         db.flush()
 
-        categories: list[ServiceCategory] = []
+        categories: list[ServiceCategoryCatalog] = []
         now = datetime.now()
         for c_idx, category_name in enumerate(shared_service_categories):
-            current_category_id = service_cat_id
-            cat = ServiceCategory(
-                id=current_category_id,
+            cat = ServiceCategoryCatalog(
+                company_id=company.id,
+                category_id=service_cat_id,
                 title=category_name,
                 weight=c_idx + 1,
                 api_id=f"demo-cat-{company.id}-{c_idx + 1}",
-                company_id=company.id,
+                updated_at=now,
             )
             db.add(cat)
-            db.add(
-                ServiceCategoryCatalog(
-                    company_id=company.id,
-                    category_id=current_category_id,
-                    title=category_name,
-                    weight=c_idx + 1,
-                    api_id=cat.api_id,
-                    updated_at=now,
-                )
-            )
             categories.append(cat)
             service_cat_id = advance_pk(service_cat_id, negative=negative_catalog_ids)
 
-        services: list[Service] = []
+        services: list[ServiceCatalog] = []
         for s_idx in range(max(8, len(SERVICE_NAMES))):
             category = categories[s_idx % len(categories)]
             duration = rng.choice([1800, 2700, 3600, 5400])
-            current_service_id = service_id
-            title = f"{SERVICE_NAMES[s_idx % len(SERVICE_NAMES)]} #{s_idx + 1}"
-            price_min = round(rng.uniform(20, 120), 2)
-            service = Service(
-                id=current_service_id,
-                title=title,
-                price_min=price_min,
-                duration=duration,
-                category_title=category.title,
+            service = ServiceCatalog(
                 company_id=company.id,
+                service_id=service_id,
+                title=f"{SERVICE_NAMES[s_idx % len(SERVICE_NAMES)]} #{s_idx + 1}",
+                price_min=round(rng.uniform(20, 120), 2),
+                duration=duration,
+                category_id=category.category_id,
+                category_title=category.title,
+                updated_at=now,
             )
             db.add(service)
-            db.add(
-                ServiceCatalog(
-                    company_id=company.id,
-                    service_id=current_service_id,
-                    title=title,
-                    price_min=price_min,
-                    duration=duration,
-                    category_id=category.id,
-                    category_title=category.title,
-                    updated_at=now,
-                )
-            )
             services.append(service)
             service_id = advance_pk(service_id, negative=negative_catalog_ids)
 
         for p_idx, title in enumerate(shared_positions):
             db.add(
-                StaffPosition(
-                    id=position_id,
-                    title=title,
+                StaffPositionCatalog(
                     company_id=company.id,
+                    position_id=position_id,
+                    title=title,
+                    updated_at=now,
                 )
             )
             position_id = advance_pk(position_id, negative=negative_catalog_ids)
@@ -306,14 +281,15 @@ def seed_companies(
             clients.append(client)
             client_id = advance_pk(client_id, negative=negative_ids)
 
-        accounts: list[Account] = []
-        for acc_idx, acc_title in enumerate(["Main Cash", "Card", "Online"]):
-            account = Account(
-                id=account_id,
-                title=acc_title,
-                type=acc_idx + 1,
-                comment="synthetic",
+        accounts: list[AccountCatalog] = []
+        for acc_title, acc_type in [("Main Cash", 0), ("Card", 1), ("Online", 1)]:
+            account = AccountCatalog(
                 company_id=company.id,
+                account_id=account_id,
+                title=acc_title,
+                type=acc_type,
+                comment="synthetic",
+                updated_at=now,
             )
             db.add(account)
             accounts.append(account)
@@ -323,32 +299,35 @@ def seed_companies(
         for s_idx, storage_title in enumerate(["Retail", "Care"]):
             company_good_category_ids.append(good_category_id)
             db.add(
-                GoodCategory(
-                    id=good_category_id,
+                GoodCategoryCatalog(
+                    company_id=company.id,
+                    category_id=good_category_id,
                     title=storage_title,
                     parent_category_id=None,
-                    company_id=company.id,
+                    updated_at=now,
                 )
             )
             good_category_id = advance_pk(good_category_id, negative=negative_catalog_ids)
 
-        storages: list[Storage] = []
+        storages: list[StorageCatalog] = []
         for s_idx, storage_title in enumerate(["Main Storage", "Retail Shelf"]):
-            storage = Storage(
-                id=storage_id,
+            storage = StorageCatalog(
+                company_id=company.id,
+                storage_id=storage_id,
                 title=storage_title,
                 for_services=True,
                 for_sale=True,
                 comment="synthetic",
-                company_id=company.id,
+                updated_at=now,
             )
             db.add(storage)
             storages.append(storage)
             storage_id = advance_pk(storage_id, negative=negative_catalog_ids)
 
-        goods: list[Good] = []
+        goods: list[GoodCatalog] = []
         for g_idx in range(goods_per_company):
-            good = Good(
+            good = GoodCatalog(
+                company_id=company.id,
                 good_id=good_id,
                 title=f"{GOOD_NAMES[g_idx % len(GOOD_NAMES)]} #{g_idx + 1}",
                 cost=round(rng.uniform(5, 60), 2),
@@ -356,8 +335,8 @@ def seed_companies(
                 barcode=f"{company_id}{g_idx:08d}"[:13],
                 unit_short_title=rng.choice(["pcs", "ml", "g"]),
                 category_id=company_good_category_ids[g_idx % len(company_good_category_ids)],
-                last_change_date=datetime.now() - timedelta(days=rng.randint(0, 45)),
-                company_id=company.id,
+                last_change_date=now - timedelta(days=rng.randint(0, 45)),
+                updated_at=now,
             )
             db.add(good)
             goods.append(good)
@@ -413,8 +392,8 @@ def seed_activity(
         clients = company_ref.clients
         services = company_ref.services
         goods = company_ref.goods
-        account_ids = [item.id for item in company_ref.accounts]
-        storage_ids = [item.id for item in company_ref.storages]
+        account_ids = [item.account_id for item in company_ref.accounts]
+        storage_ids = [item.storage_id for item in company_ref.storages]
         source_type = company.source_type or "yclients"
         appointment_external_id = 1
         financial_external_id = 1
@@ -455,14 +434,14 @@ def seed_activity(
                 for _tx in range(rng.randint(1, 3)):
                     srv = rng.choice(services)
                     if first_service_id is None:
-                        first_service_id = srv.id
+                        first_service_id = srv.service_id
                     cost = round(float(srv.price_min or 0) * rng.uniform(0.9, 1.25), 2)
                     first_cost = round(cost * rng.uniform(1.05, 1.2), 2)
                     db.add(
                         Transaction(
                             id=transaction_id,
                             appointment_id=current_appointment_id,
-                            service_id=srv.id,
+                            service_id=srv.service_id,
                             service_title=srv.title,
                             cost=cost,
                             first_cost=first_cost,

@@ -152,7 +152,7 @@ def test_purge_old_runs_nulls_the_dangling_sync_job_reference():
         session.add(SyncJob(
             mode='incremental', initiator='auto-worker', status='success',
             company_ids=[], progress_pct=100, current_stage='success', step_results=[],
-            cancel_requested=False, requested_at=old, finished_at=old, run_id=1,
+            requested_at=old, finished_at=old, run_id=1,
         ))
         session.commit()
 
@@ -266,7 +266,6 @@ async def test_async_enqueue_job_persists_normalized_queued_defaults(async_sessi
     assert saved.progress_pct == 0
     assert saved.current_stage == 'queued'
     assert saved.step_results == []
-    assert saved.cancel_requested is False
     assert saved.requested_at is not None
 
 
@@ -296,13 +295,13 @@ def test_reap_stale_jobs_fails_orphaned_running_and_keeps_fresh():
         stale = SyncJob(
             mode='incremental', initiator='auto-worker', status='running',
             portal_account_id=7, company_ids=[], progress_pct=50,
-            current_stage='Сотрудники', step_results=[], cancel_requested=False,
+            current_stage='Сотрудники', step_results=[],
             requested_at=now - timedelta(hours=30), started_at=now - timedelta(hours=30),
         )
         fresh = SyncJob(
             mode='incremental', initiator='auto-worker', status='running',
             portal_account_id=8, company_ids=[], progress_pct=10,
-            current_stage='Клиенты', step_results=[], cancel_requested=False,
+            current_stage='Клиенты', step_results=[],
             requested_at=now - timedelta(minutes=3), started_at=now - timedelta(minutes=3),
         )
         session.add_all([stale, fresh])
@@ -335,7 +334,6 @@ def test_auto_sync_skips_recent_or_active_jobs(monkeypatch):
             progress_pct=100,
             current_stage='success',
             step_results=[],
-            cancel_requested=False,
             requested_at=now - timedelta(hours=1),
             finished_at=now - timedelta(hours=1),
         ))
@@ -348,7 +346,6 @@ def test_auto_sync_skips_recent_or_active_jobs(monkeypatch):
             progress_pct=0,
             current_stage='queued',
             step_results=[],
-            cancel_requested=False,
             requested_at=now - timedelta(hours=5),
         ))
         session.commit()
@@ -1004,7 +1001,6 @@ def _job(job_id, status, activity_at, *, portal_account_id=1, requested_at=None)
         progress_pct=100 if status == 'success' else 0,
         current_stage=status,
         step_results=[],
-        cancel_requested=False,
         requested_at=requested_at or activity_at,
         started_at=activity_at,
         finished_at=activity_at if status not in ('queued', 'running') else None,
@@ -1221,7 +1217,7 @@ def test_has_running_job_sees_only_running_status():
         assert jobs.has_running_job(session) is False
         session.add(SyncJob(
             mode='full', initiator='x', status='queued', portal_account_id=7, company_ids=[], progress_pct=0,
-            current_stage='queued', step_results=[], cancel_requested=False, requested_at=datetime(2026, 1, 1),
+            current_stage='queued', step_results=[], requested_at=datetime(2026, 1, 1),
         ))
         session.commit()
         assert jobs.has_running_job(session) is False

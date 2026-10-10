@@ -17,7 +17,6 @@ from models import (
     Comment,
     Company,
     FinancialTransaction,
-    Good,
     GoodCatalog,
     GoodTransaction,
     Group,
@@ -27,7 +26,6 @@ from models import (
     PortalMetricVisibility,
     PortalUser,
     PortalUserBranch,
-    Service,
     ServiceCatalog,
     Staff,
     StaffSchedule,
@@ -494,7 +492,7 @@ async def test_catalog_money_fields_are_hidden_from_non_financial_roles(async_se
 @pytest.mark.asyncio
 async def test_csv_export_blanks_money_columns_for_non_financial_roles(async_session):
     """/services and /goods (JSON) already redact price/cost by role; the CSV export of the
-    same four models did not, dumping every column to any authenticated role. Prices are
+    same two catalogs did not, dumping every column to any authenticated role. Prices are
     seeded NON-NULL here — the old CSV test used NULL prices, which is exactly why a leak of
     an already-empty cell went unnoticed. The money column must survive in the CSV header;
     only the value may be blanked, or a column-position parser downstream would break."""
@@ -530,11 +528,9 @@ async def test_csv_export_blanks_money_columns_for_non_financial_roles(async_ses
         PortalUserBranch(user_id=151, company_id=1),
         PortalUserBranch(user_id=152, company_id=1),
     ])
-    async_session.add(Service(id=1, title='Haircut', price_min=1500.0, company_id=1))
     async_session.add(
         ServiceCatalog(company_id=1, service_id=10, title='Cut', price_min=1500.0, updated_at=datetime.utcnow())
     )
-    async_session.add(Good(good_id=1, title='Wax', cost=100.0, actual_cost=80.0, company_id=1))
     async_session.add(
         GoodCatalog(company_id=1, good_id=20, title='Wax', cost=100.0, actual_cost=80.0, updated_at=datetime.utcnow())
     )
@@ -548,9 +544,7 @@ async def test_csv_export_blanks_money_columns_for_non_financial_roles(async_ses
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     cases = [
-        ('services', ['price_min']),
         ('service_catalog', ['price_min']),
-        ('goods', ['cost', 'actual_cost']),
         ('good_catalog', ['cost', 'actual_cost']),
     ]
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -897,6 +891,53 @@ async def test_stats_scopes_group_count_to_accessible_branches(async_session):
     payload = scoped.json()
     assert payload['groups'] == 1
     assert payload['companies'] == 1
+
+
+@pytest.mark.asyncio
+async def test_groups_csv_matches_the_scoped_groups_listing(async_session):
+    """A scoped principal got an empty `/export/csv/groups` while `/groups` listed their groups."""
+    async_session.add_all([
+        Group(id=1, title='Tenant A Group'),
+        Group(id=2, title='Tenant B Group'),
+        Company(id=1, title='Tenant A Branch 1', group_id=1),
+        Company(id=3, title='Tenant A Branch 2', group_id=1),
+        Company(id=2, title='Tenant B Branch', group_id=2),
+        PortalAccount(id=1, label='Tenant A', created_at=datetime.utcnow()),
+        PortalBranch(portal_account_id=1, company_id=1),
+        PortalBranch(portal_account_id=1, company_id=3),
+        PortalUser(
+            id=162,
+            portal_account_id=1,
+            email='branch-admin-groups-csv@example.com',
+            password_hash=hash_password('BranchAdmin123!'),
+            full_name='Branch Admin',
+            role='branch_admin',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+        PortalUserBranch(user_id=162, company_id=1),
+        PortalUserBranch(user_id=162, company_id=3),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    headers = {'Authorization': f'Bearer {create_access_token(162, "branch_admin")}'}
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        listing = await client.get('/groups', headers=headers)
+        exported = await client.get('/export/csv/groups', headers=headers)
+        full_access = await client.get('/export/csv/groups')
+
+    app.dependency_overrides.clear()
+
+    assert [row['id'] for row in listing.json()['data']] == [1]
+    # Two branches of the same group must not repeat the group row.
+    assert [row['id'] for row in csv.DictReader(io.StringIO(exported.text))] == ['1']
+    assert [row['id'] for row in csv.DictReader(io.StringIO(full_access.text))] == ['1', '2']
 
 
 @pytest.mark.asyncio

@@ -33,7 +33,6 @@ from models import (  # noqa: E402
     PortalUser,
     Service,
     ServiceCatalog,
-    ServiceCategory,
     ServiceCategoryCatalog,
     Transaction,
 )
@@ -156,38 +155,12 @@ def ensure_branches(db, account_id: int, company_ids: list[int]) -> None:
 def repair_demo_data(db, company_ids: list[int]) -> None:
     """Backfill dashboard-facing demo rows and repair older demo payment links."""
     now = datetime.utcnow()
-    categories = (
-        db.execute(select(ServiceCategory).where(ServiceCategory.company_id.in_(company_ids))).scalars().all()
-    )
-    category_catalogs = {
-        (row.company_id, row.category_id): row
+    category_by_company_title = {
+        (row.company_id, row.title): row.category_id
         for row in db.execute(
             select(ServiceCategoryCatalog).where(ServiceCategoryCatalog.company_id.in_(company_ids))
         ).scalars()
-    }
-    for category in categories:
-        catalog = category_catalogs.get((category.company_id, category.id))
-        if catalog is None:
-            db.add(
-                ServiceCategoryCatalog(
-                    company_id=category.company_id,
-                    category_id=category.id,
-                    title=category.title,
-                    weight=category.weight,
-                    api_id=category.api_id,
-                    updated_at=now,
-                )
-            )
-        else:
-            catalog.title = category.title
-            catalog.weight = category.weight
-            catalog.api_id = category.api_id
-            catalog.updated_at = now
-
-    category_by_company_title = {
-        (category.company_id, category.title): category.id
-        for category in categories
-        if category.title
+        if row.title
     }
     services = db.execute(select(Service).where(Service.company_id.in_(company_ids))).scalars().all()
     service_catalogs = {

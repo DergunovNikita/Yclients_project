@@ -28,10 +28,8 @@ from yclients_credentials import (
 from database import Database, init_database
 from models import (
     Group, Company,
-    ServiceCategory, ServiceCategoryCatalog, Service,
-    ServiceCatalog, StaffPosition, StaffPositionCatalog, Staff, Client,
-    Account, AccountCatalog, Storage, StorageCatalog,
-    GoodCategory, GoodCategoryCatalog, Good, GoodCatalog,
+    ServiceCategoryCatalog, ServiceCatalog, StaffPositionCatalog, Staff, Client,
+    AccountCatalog, StorageCatalog, GoodCategoryCatalog, GoodCatalog,
     Appointment, Transaction, FinancialTransaction, GoodTransaction,
     Comment, StaffSchedule,
     SyncState, SyncSourceState, YClientsCredential,
@@ -829,13 +827,11 @@ def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int | Non
                 ):
                     group = legacy_group
                     group.title = group_data.get('title', '') or group.title
-                    group.access = group_data.get('access')
                     group.portal_account_id = portal_account_id
                     group.external_id = group_id
                 else:
                     group_kwargs = {
                         'title': group_data.get('title', ''),
-                        'access': group_data.get('access'),
                         'portal_account_id': portal_account_id,
                         'external_id': group_id,
                     }
@@ -846,7 +842,6 @@ def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int | Non
                     db.flush()
             else:
                 group.title = group_data.get('title', '')
-                group.access = group_data.get('access')
                 group.portal_account_id = group.portal_account_id or portal_account_id
                 group.external_id = group.external_id or group_id
 
@@ -916,12 +911,6 @@ def sync_service_categories(api: YClientsAPI, db, company_id: str, db_company_id
     try:
         cid = _db_company_id(company_id, db_company_id)
         now = datetime.now()
-        existing_categories = load_existing_map(
-            db,
-            ServiceCategory,
-            (category.get('id') for category in categories),
-            ServiceCategory.id,
-        )
         existing_catalog = load_existing_branch_map(
             db,
             ServiceCategoryCatalog,
@@ -950,21 +939,6 @@ def sync_service_categories(api: YClientsAPI, db, company_id: str, db_company_id
                 catalog_obj.weight = c.get('weight')
                 catalog_obj.api_id = c.get('api_id')
                 catalog_obj.updated_at = now
-
-            obj = existing_categories.get(cat_id)
-            if not obj:
-                obj = ServiceCategory(
-                    id=cat_id,
-                    title=c.get('title', ''),
-                    weight=c.get('weight'),
-                    api_id=c.get('api_id'),
-                    company_id=cid,
-                )
-                db.add(obj)
-            else:
-                obj.title = c.get('title', '')
-                obj.weight = c.get('weight')
-                obj.api_id = c.get('api_id')
 
         db.commit()
         print(f"  ✓ Категории услуг сохранены ({len(categories)} шт.)")
@@ -1025,12 +999,6 @@ def sync_services(api: YClientsAPI, db, company_id: str, db_company_id: int | No
                         'title': category.title,
                     }
 
-        existing_services = load_existing_map(
-            db,
-            Service,
-            (service.get('id') for service in services),
-            Service.id,
-        )
         existing_catalog = load_existing_branch_map(
             db,
             ServiceCatalog,
@@ -1081,23 +1049,6 @@ def sync_services(api: YClientsAPI, db, company_id: str, db_company_id: int | No
                 catalog_obj.is_active = True
                 catalog_obj.updated_at = now
 
-            obj = existing_services.get(service_id)
-            if not obj:
-                obj = Service(
-                    id=service_id,
-                    title=service_data.get('title', ''),
-                    price_min=service_data.get('price_min'),
-                    duration=service_data.get('duration'),
-                    category_title=category_title,
-                    company_id=cid,
-                )
-                db.add(obj)
-            else:
-                obj.title = service_data.get('title', '')
-                obj.price_min = service_data.get('price_min')
-                obj.duration = service_data.get('duration')
-                obj.category_title = category_title
-
         db.commit()
         print(f"  ✓ Услуги сохранены ({len(services)} шт.)")
         return True
@@ -1125,12 +1076,6 @@ def sync_positions(api: YClientsAPI, db, company_id: str, db_company_id: int | N
     try:
         cid = _db_company_id(company_id, db_company_id)
         now = datetime.now()
-        existing_positions = load_existing_map(
-            db,
-            StaffPosition,
-            (position.get('id') for position in positions),
-            StaffPosition.id,
-        )
         existing_catalog = load_existing_branch_map(
             db,
             StaffPositionCatalog,
@@ -1155,13 +1100,6 @@ def sync_positions(api: YClientsAPI, db, company_id: str, db_company_id: int | N
             else:
                 catalog_obj.title = p.get('title', '')
                 catalog_obj.updated_at = now
-
-            obj = existing_positions.get(pid)
-            if not obj:
-                obj = StaffPosition(id=pid, title=p.get('title', ''), company_id=cid)
-                db.add(obj)
-            else:
-                obj.title = p.get('title', '')
 
         db.commit()
         print(f"  ✓ Должности сохранены ({len(positions)} шт.)")
@@ -1219,7 +1157,6 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
                     email=email,
                     specialization=s.get('specialization'),
                     position=position_title,
-                    avatar_url=s.get('avatar'),
                     rating=s.get('rating'),
                     votes_count=s.get('votes_count'),
                     bookable=s.get('bookable', True),
@@ -1235,7 +1172,6 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
                 obj.email = email
                 obj.specialization = s.get('specialization')
                 obj.position = position_title
-                obj.avatar_url = s.get('avatar')
                 obj.rating = s.get('rating')
                 obj.votes_count = s.get('votes_count')
                 obj.bookable = s.get('bookable', True)
@@ -1348,12 +1284,6 @@ def sync_accounts(api: YClientsAPI, db, company_id: str, db_company_id: int | No
     try:
         cid = _db_company_id(company_id, db_company_id)
         now = datetime.now()
-        existing_accounts = load_existing_map(
-            db,
-            Account,
-            (account.get('id') for account in accounts),
-            Account.id,
-        )
         existing_catalog = load_existing_branch_map(
             db,
             AccountCatalog,
@@ -1383,19 +1313,6 @@ def sync_accounts(api: YClientsAPI, db, company_id: str, db_company_id: int | No
                 catalog_obj.comment = a.get('comment')
                 catalog_obj.updated_at = now
 
-            obj = existing_accounts.get(aid)
-            if not obj:
-                obj = Account(
-                    id=aid, title=a.get('title', ''),
-                    type=a.get('type'), comment=a.get('comment'),
-                    company_id=cid,
-                )
-                db.add(obj)
-            else:
-                obj.title = a.get('title', '')
-                obj.type = a.get('type')
-                obj.comment = a.get('comment')
-
         db.commit()
         print(f"  ✓ Кассы сохранены ({len(accounts)} шт.)")
         return True
@@ -1423,12 +1340,6 @@ def sync_storages(api: YClientsAPI, db, company_id: str, db_company_id: int | No
     try:
         cid = _db_company_id(company_id, db_company_id)
         now = datetime.now()
-        existing_storages = load_existing_map(
-            db,
-            Storage,
-            (storage.get('id') for storage in storages),
-            Storage.id,
-        )
         existing_catalog = load_existing_branch_map(
             db,
             StorageCatalog,
@@ -1460,22 +1371,6 @@ def sync_storages(api: YClientsAPI, db, company_id: str, db_company_id: int | No
                 catalog_obj.comment = s.get('comment')
                 catalog_obj.updated_at = now
 
-            obj = existing_storages.get(sid)
-            if not obj:
-                obj = Storage(
-                    id=sid, title=s.get('title', ''),
-                    for_services=s.get('for_services', False),
-                    for_sale=s.get('for_sale', False),
-                    comment=s.get('comment'),
-                    company_id=cid,
-                )
-                db.add(obj)
-            else:
-                obj.title = s.get('title', '')
-                obj.for_services = s.get('for_services', False)
-                obj.for_sale = s.get('for_sale', False)
-                obj.comment = s.get('comment')
-
         db.commit()
         print(f"  ✓ Склады сохранены ({len(storages)} шт.)")
         return True
@@ -1503,12 +1398,6 @@ def sync_good_categories(api: YClientsAPI, db, company_id: str, db_company_id: i
     try:
         cid = _db_company_id(company_id, db_company_id)
         now = datetime.now()
-        existing_categories = load_existing_map(
-            db,
-            GoodCategory,
-            (category.get('id') for category in categories),
-            GoodCategory.id,
-        )
         existing_catalog = load_existing_branch_map(
             db,
             GoodCategoryCatalog,
@@ -1535,18 +1424,6 @@ def sync_good_categories(api: YClientsAPI, db, company_id: str, db_company_id: i
                 catalog_obj.title = c.get('title', '')
                 catalog_obj.parent_category_id = c.get('parent_category_id')
                 catalog_obj.updated_at = now
-
-            obj = existing_categories.get(cat_id)
-            if not obj:
-                obj = GoodCategory(
-                    id=cat_id, title=c.get('title', ''),
-                    parent_category_id=c.get('parent_category_id'),
-                    company_id=cid,
-                )
-                db.add(obj)
-            else:
-                obj.title = c.get('title', '')
-                obj.parent_category_id = c.get('parent_category_id')
 
         db.commit()
         print(f"  ✓ Категории товаров сохранены ({len(categories)} шт.)")
@@ -1580,7 +1457,6 @@ def sync_goods(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
             for g in goods
             if g.get('good_id') or g.get('id')
         ]
-        existing_goods = load_existing_map(db, Good, good_ids, Good.good_id)
         existing_catalog = load_existing_branch_map(
             db,
             GoodCatalog,
@@ -1619,27 +1495,6 @@ def sync_goods(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
                 catalog_obj.category_id = g.get('category_id')
                 catalog_obj.last_change_date = last_change_date
                 catalog_obj.updated_at = now
-
-            obj = existing_goods.get(gid)
-            if not obj:
-                obj = Good(
-                    good_id=gid, title=g.get('title', ''),
-                    cost=g.get('cost'), actual_cost=g.get('actual_cost'),
-                    barcode=g.get('barcode'),
-                    unit_short_title=g.get('unit_short_title'),
-                    category_id=g.get('category_id'),
-                    last_change_date=last_change_date,
-                    company_id=cid,
-                )
-                db.add(obj)
-            else:
-                obj.title = g.get('title', '')
-                obj.cost = g.get('cost')
-                obj.actual_cost = g.get('actual_cost')
-                obj.barcode = g.get('barcode')
-                obj.unit_short_title = g.get('unit_short_title')
-                obj.category_id = g.get('category_id')
-                obj.last_change_date = last_change_date
 
         db.commit()
         print(f"  ✓ Товары сохранены ({len(goods)} шт.)")

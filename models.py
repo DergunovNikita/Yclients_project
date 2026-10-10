@@ -46,7 +46,6 @@ class Group(Base):
     portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), index=True)
     external_id = Column(Integer, index=True)
     title = Column(String, nullable=False)
-    access = Column(JSON)
 
     __table_args__ = (
         Index('uq_groups_account_external', 'portal_account_id', 'external_id', unique=True),
@@ -62,9 +61,6 @@ class Company(Base):
     title = Column(String, nullable=False)
     group_id = Column(Integer, ForeignKey('groups.id'), index=True)
     source_type = _source_type_column()
-    country = Column(String)
-    locale = Column(String)
-    currency = Column(String)
     timezone = Column(String)
     # Upstream keeps records that predate the branch opening (test bookings, a previous
     # location on the same YClients id). Reports must not treat them as branch history.
@@ -82,16 +78,6 @@ class Company(Base):
             unique=True,
         ),
     )
-
-
-class ServiceCategory(Base):
-    __tablename__ = 'service_categories'
-
-    id = Column(Integer, primary_key=True)
-    title = Column(String, nullable=False)
-    weight = Column(Integer)
-    api_id = Column(String)
-    company_id = Column(Integer, ForeignKey('companies.id'), index=True)
 
 
 class ServiceCategoryCatalog(Base):
@@ -193,14 +179,6 @@ class ServiceKpiAssignment(Base):
     )
 
 
-class StaffPosition(Base):
-    __tablename__ = 'staff_positions'
-
-    id = Column(Integer, primary_key=True)
-    title = Column(String, nullable=False)
-    company_id = Column(Integer, ForeignKey('companies.id'), index=True)
-
-
 class StaffPositionCatalog(Base):
     __tablename__ = 'staff_position_catalog'
 
@@ -224,7 +202,6 @@ class Staff(Base):
     email = Column(String)
     specialization = Column(String)
     position = Column(String, index=True)
-    avatar_url = Column(String)
     rating = Column(Float)
     votes_count = Column(Integer)
     bookable = Column(Boolean, default=True)
@@ -258,16 +235,6 @@ class Client(Base):
     )
 
 
-class Account(Base):
-    __tablename__ = 'accounts'
-
-    id = Column(Integer, primary_key=True)
-    title = Column(String, nullable=False)
-    type = Column(Integer, index=True)
-    comment = Column(Text)
-    company_id = Column(Integer, ForeignKey('companies.id'), index=True)
-
-
 class AccountCatalog(Base):
     __tablename__ = 'account_catalog'
 
@@ -281,17 +248,6 @@ class AccountCatalog(Base):
     __table_args__ = (
         Index('ix_account_catalog_account_id', 'account_id'),
     )
-
-
-class Storage(Base):
-    __tablename__ = 'storages'
-
-    id = Column(Integer, primary_key=True)
-    title = Column(String, nullable=False)
-    for_services = Column(Boolean, default=False)
-    for_sale = Column(Boolean, default=False)
-    comment = Column(Text)
-    company_id = Column(Integer, ForeignKey('companies.id'), index=True)
 
 
 class StorageCatalog(Base):
@@ -310,15 +266,6 @@ class StorageCatalog(Base):
     )
 
 
-class GoodCategory(Base):
-    __tablename__ = 'good_categories'
-
-    id = Column(Integer, primary_key=True)
-    title = Column(String, nullable=False)
-    parent_category_id = Column(Integer, index=True)
-    company_id = Column(Integer, ForeignKey('companies.id'), index=True)
-
-
 class GoodCategoryCatalog(Base):
     __tablename__ = 'good_category_catalog'
 
@@ -331,20 +278,6 @@ class GoodCategoryCatalog(Base):
     __table_args__ = (
         Index('ix_good_category_catalog_category_id', 'category_id'),
     )
-
-
-class Good(Base):
-    __tablename__ = 'goods'
-
-    good_id = Column(Integer, primary_key=True)
-    title = Column(String, nullable=False)
-    cost = Column(Float)
-    actual_cost = Column(Float)
-    barcode = Column(String, index=True)
-    unit_short_title = Column(String)
-    category_id = Column(Integer, index=True)
-    last_change_date = Column(DateTime, index=True)
-    company_id = Column(Integer, ForeignKey('companies.id'), index=True)
 
 
 class GoodCatalog(Base):
@@ -923,7 +856,6 @@ class SyncJob(Base):
     progress_pct = Column(Integer, nullable=False, default=0)
     current_stage = Column(String)
     step_results = Column(JSON)
-    cancel_requested = Column(Boolean, nullable=False, default=False)
     requested_at = Column(DateTime, nullable=False, index=True)
     started_at = Column(DateTime, index=True)
     finished_at = Column(DateTime, index=True)

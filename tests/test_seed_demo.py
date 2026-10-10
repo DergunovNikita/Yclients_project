@@ -8,15 +8,15 @@ from sqlalchemy.pool import StaticPool
 
 import scripts.seed_demo as seed_demo
 from models import (
-    Account,
+    AccountCatalog,
     Appointment,
     Base,
     Client,
     Comment,
     Company,
     FinancialTransaction,
-    Good,
-    GoodCategory,
+    GoodCatalog,
+    GoodCategoryCatalog,
     GoodTransaction,
     Group,
     PortalAccount,
@@ -24,12 +24,11 @@ from models import (
     PortalUser,
     Service,
     ServiceCatalog,
-    ServiceCategory,
     ServiceCategoryCatalog,
     Staff,
-    StaffPosition,
+    StaffPositionCatalog,
     StaffSchedule,
-    Storage,
+    StorageCatalog,
     Transaction,
 )
 from sync_pipeline import sync_services
@@ -38,17 +37,16 @@ from sync_pipeline import sync_services
 SEED_TABLES = [
     Group.__table__,
     Company.__table__,
-    ServiceCategory.__table__,
     ServiceCategoryCatalog.__table__,
     Service.__table__,
     ServiceCatalog.__table__,
-    StaffPosition.__table__,
+    StaffPositionCatalog.__table__,
     Staff.__table__,
     Client.__table__,
-    Account.__table__,
-    Storage.__table__,
-    GoodCategory.__table__,
-    Good.__table__,
+    AccountCatalog.__table__,
+    StorageCatalog.__table__,
+    GoodCategoryCatalog.__table__,
+    GoodCatalog.__table__,
     Appointment.__table__,
     Transaction.__table__,
     FinancialTransaction.__table__,
@@ -290,8 +288,7 @@ def test_seed_demo_child_primary_keys_do_not_scale_from_large_company_ids():
         assert demo_company_id < 0
         assert db.scalar(select(func.max(Client.id)).where(Client.company_id == demo_company_id)) < 0
         assert db.scalar(select(func.max(Staff.id)).where(Staff.company_id == demo_company_id)) < 0
-        assert db.scalar(select(func.max(Service.id)).where(Service.company_id == demo_company_id)) < 0
-        assert db.scalar(select(func.max(Good.good_id)).where(Good.company_id == demo_company_id)) < 0
+        assert db.scalar(select(func.max(GoodCatalog.good_id)).where(GoodCatalog.company_id == demo_company_id)) < 0
         assert db.scalar(select(func.max(Appointment.id)).where(Appointment.company_id == demo_company_id)) < 0
         assert db.scalar(select(func.max(Transaction.id)).where(Transaction.company_id == demo_company_id)) < 0
         assert db.scalar(select(func.max(StaffSchedule.id)).where(StaffSchedule.company_id == demo_company_id)) < 0
@@ -315,8 +312,10 @@ def test_seed_demo_catalog_ids_do_not_collide_with_later_real_sync_ids():
         _account, _user, company_ids = provision_demo(db)
         demo_company_id = company_ids[0]
         demo_services_before = {
-            service.id: service.title
-            for service in db.execute(select(Service).where(Service.company_id == demo_company_id)).scalars()
+            service.service_id: service.title
+            for service in db.execute(
+                select(ServiceCatalog).where(ServiceCatalog.company_id == demo_company_id)
+            ).scalars()
         }
 
         assert demo_services_before
@@ -338,14 +337,15 @@ def test_seed_demo_catalog_ids_do_not_collide_with_later_real_sync_ids():
 
         assert sync_services(FakeServicesAPI([{'id': 1, 'title': 'Real Cut', 'price_min': 10.0}]), db, '100') is True
 
-        real_service = db.get(Service, 1)
+        real_service = db.get(ServiceCatalog, {'company_id': 100, 'service_id': 1})
         assert real_service is not None
-        assert real_service.company_id == 100
         assert real_service.title == 'Real Cut'
 
         demo_services_after = {
-            service.id: service.title
-            for service in db.execute(select(Service).where(Service.company_id == demo_company_id)).scalars()
+            service.service_id: service.title
+            for service in db.execute(
+                select(ServiceCatalog).where(ServiceCatalog.company_id == demo_company_id)
+            ).scalars()
         }
         assert demo_services_after == demo_services_before
 
@@ -355,6 +355,11 @@ def test_seed_demo_repairs_existing_demo_catalog_and_payment_links():
         _account, _user, company_ids = provision_demo(db)
         demo_company_id = company_ids[0]
 
+        # A demo tenant seeded before the catalogs existed only has the legacy `services` rows.
+        for row in db.execute(select(ServiceCatalog).where(ServiceCatalog.company_id == demo_company_id)).scalars():
+            db.add(Service(id=row.service_id, title=row.title, price_min=row.price_min, duration=row.duration,
+                           category_title=row.category_title, company_id=row.company_id))
+        db.commit()
         db.query(ServiceCatalog).filter(ServiceCatalog.company_id == demo_company_id).delete()
         db.query(ServiceCategoryCatalog).filter(ServiceCategoryCatalog.company_id == demo_company_id).delete()
         payment = (
