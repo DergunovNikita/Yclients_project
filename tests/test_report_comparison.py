@@ -68,7 +68,7 @@ def test_percent_change_keeps_precision_for_the_one_rounding_the_page_does():
 
 
 def test_comparison_carries_charts_and_tables_only_for_ids_the_current_payload_has():
-    current = _payload(charts=[{'id': 'a'}], tables=[{'id': 't1'}, {'id': 'events'}])
+    current = _payload(charts=[{'id': 'a'}], tables=[{'id': 't1', 'row_key': 'k', 'rows': [{'k': 1}]}, {'id': 'events'}])
     previous = _payload(
         charts=[
             {'id': 'a', 'labels': ['x'], 'datasets': [{'label': 'L', 'data': [1]}], 'title': 'dropped'},
@@ -86,6 +86,24 @@ def test_comparison_carries_charts_and_tables_only_for_ids_the_current_payload_h
     assert comparison['tables'] == [{'id': 't1', 'rows': [{'k': 1}]}]
     assert 'raw' not in comparison
     assert comparison['source_status'] == 'ready'
+
+
+def test_comparison_table_carries_only_rows_the_current_table_can_pair_with():
+    # The comparison run of `service_combos` returns every pair; the page reads only those of the current top.
+    current = _payload(tables=[
+        {'id': 'combos', 'row_key': 'pair', 'rows': [{'pair': 'A + B'}, {'pair': 'C + D'}]},
+        {'id': 'periods', 'row_key': 'period', 'x_kind': 'time', 'rows': [{'period': '2026-09-01'}]},
+    ])
+    previous = _payload(tables=[
+        {'id': 'combos', 'row_key': 'pair', 'rows': [{'pair': 'A + B'}, {'pair': 'X + Y'}, {'pair': 'C + D'}]},
+        {'id': 'periods', 'row_key': 'period', 'x_kind': 'time', 'rows': [{'period': '2026-08-01'}, {'period': '2026-08-02'}]},
+    ])
+    comparison = _comparison_payload(current, previous, None)
+    assert comparison['tables'] == [
+        {'id': 'combos', 'rows': [{'pair': 'A + B'}, {'pair': 'C + D'}]},
+        # Consecutive periods are paired by position, so they are carried whole.
+        {'id': 'periods', 'rows': [{'period': '2026-08-01'}, {'period': '2026-08-02'}]},
+    ]
 
 
 @pytest.mark.asyncio

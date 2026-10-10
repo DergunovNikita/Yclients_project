@@ -535,3 +535,15 @@ def test_undated_pagination_still_reads_distinct_pages_to_the_end():
     api._get = lambda _url, params: {'success': True, 'data': pages[params['page']]}
 
     assert len(api._get_all_pages('https://api.example.test/clients/1')) == api.MAX_PER_PAGE + 5
+
+
+def test_undated_pagination_tolerates_a_short_last_page_that_overlaps_the_previous_one():
+    """A row added while the listing is read shifts the offsets, so the last page can repeat one known id."""
+    api = YClientsAPI('token', 'login', 'password')
+    pages = {
+        1: [{'id': i} for i in range(api.MAX_PER_PAGE)],
+        2: [{'id': api.MAX_PER_PAGE - 1}],
+    }
+    api._get = lambda _url, params: {'success': True, 'data': pages[params['page']]}
+
+    assert len(api._get_all_pages('https://api.example.test/clients/1')) == api.MAX_PER_PAGE + 1

@@ -588,7 +588,7 @@ def _comparison_payload(data: dict[str, Any], compare_data: dict[str, Any], staf
     such as the negative reviews would only ship the previous window's rows for nothing).
     """
     chart_ids = {item.get('id') for item in data.get('charts', [])}
-    table_ids = {item.get('id') for item in data.get('tables', [])}
+    current_tables = {item.get('id'): item for item in data.get('tables', [])}
     return {
         'period': compare_data['period'],
         'staff_id': staff_id,
@@ -601,11 +601,26 @@ def _comparison_payload(data: dict[str, Any], compare_data: dict[str, Any], staf
             if item.get('id') in chart_ids
         ],
         'tables': [
-            {'id': item['id'], 'rows': item.get('rows', [])}
+            {'id': item['id'], 'rows': _comparison_table_rows(current_tables[item['id']], item)}
             for item in compare_data.get('tables', [])
-            if item.get('id') in table_ids and item.get('row_key')
+            if item.get('id') in current_tables and item.get('row_key')
         ],
     }
+
+
+def _comparison_table_rows(current: dict[str, Any], previous: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rows of the comparison table that the page can pair with a row of the current one.
+
+    The comparison run of a long-tailed table (`service_combos` returns every pair) carries rows the current window
+    does not show; the page looks the current rows up by key and never reads the rest. Tables of consecutive periods
+    are paired by position, so they go whole.
+    """
+    rows = previous.get('rows', [])
+    if previous.get('x_kind') == 'time':
+        return rows
+    row_key = previous['row_key']
+    shown = {str(row.get(row_key)) for row in current.get('rows', [])}
+    return [row for row in rows if str(row.get(row_key)) in shown]
 
 
 async def _fetch_report_payload(

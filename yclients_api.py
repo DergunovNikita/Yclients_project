@@ -190,7 +190,9 @@ class YClientsAPI:
             if seen_ids is not None:
                 ids = [item.get('id') if isinstance(item, dict) else None for item in data]
                 if None not in ids:
-                    if seen_ids.issuperset(ids):
+                    # Only a full page can keep the loop going; a short last page that overlaps the one before
+                    # it is what a row inserted mid-read looks like, and it ends the read anyway.
+                    if len(data) >= self.MAX_PER_PAGE and seen_ids.issuperset(ids):
                         raise RuntimeError(f"YClients endpoint {url} page {page} repeated rows already returned")
                     seen_ids.update(ids)
 
