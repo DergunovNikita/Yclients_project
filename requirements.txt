@@ -1,6 +1,6 @@
 # Direct runtime dependencies, pinned to the versions the test suite runs on. Bump deliberately.
 requests==2.34.2
-urllib3==2.7.0  # Retry(retry_after_max=...) caps honored 429 Retry-After; missing in 2.2.2, present in 2.7.0 (oldest checked)
+urllib3==2.8.0  # Retry(retry_after_max=...) caps honored 429 Retry-After; missing in 2.2.2, present in 2.7.0 (oldest checked)
 sqlalchemy==2.0.50
 alembic==1.18.4
 psycopg2-binary==2.9.12
@@ -12,6 +12,6 @@ pydantic==2.13.4
 python-dotenv==1.2.2
 httpx==0.28.1
 bcrypt==5.0.0
-PyJWT==2.13.0
+PyJWT==2.15.1
 email-validator==2.3.0
-cryptography==49.0.0
+cryptography==50.0.2
