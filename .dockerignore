@@ -13,7 +13,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 logs/
-nginx/ssl/
 # Not needed at runtime: the SPA ships through Vercel, the tests and docs are for development.
 web/
 api/
