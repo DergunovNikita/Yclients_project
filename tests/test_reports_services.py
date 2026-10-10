@@ -334,9 +334,9 @@ async def test_combos_report_is_counts_only(seeded):
     assert all(
         dataset.get('format') != 'money' for item in data['charts'] for dataset in item['datasets']
     )
-    # No money-ish key or amount anywhere in the payload, raw included.
+    # No money-ish key or amount anywhere in the payload.
     payload = json.dumps(data, ensure_ascii=False)
     for forbidden in ('revenue', 'amount', 'money', 'price'):
         assert forbidden not in payload
     for amount in ('1000', '5000'):
-        assert amount not in json.dumps(data['raw'])
+        assert amount not in payload

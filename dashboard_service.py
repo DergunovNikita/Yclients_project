@@ -259,7 +259,8 @@ class AdministratorServiceScope:
 
 def _pct_change(current: float, previous: float) -> Optional[float]:
     if previous == 0:
-        return None if current == 0 else 100.0
+        # No base to compare with: a made-up "+100 %" would contradict the report comparison block, which shows a dash.
+        return None
     return round(100.0 * (current - previous) / previous, 2)
 
 
@@ -1334,31 +1335,9 @@ async def _average_check_block(
             select(
                 func.count(func.distinct(Appointment.id)).label('completed_appointments'),
                 func.count(func.distinct(Appointment.client_id)).label('unique_clients'),
-                func.coalesce(
-                    func.sum(case((Appointment.client_id.is_(None), 1), else_=0)),
-                    0,
-                ).label('appointments_without_client'),
             ).where(visit_condition)
         )
     ).one()
-
-    goods_filters = _goods_revenue_filters(
-        dr.start,
-        dr.end,
-        company_id,
-        staff_id if created_user_id is None else None,
-        company_ids,
-        factual_at,
-    )
-    goods_checks = int(
-        await db.scalar(
-            select(func.count(func.distinct(GoodTransaction.document_id))).where(
-                goods_filters,
-                GoodTransaction.document_id.is_not(None),
-            )
-        )
-        or 0
-    )
 
     service_revenue_branches = _service_revenue_union(
         dr, company_id, staff_id, created_user_id, company_ids, factual_at
@@ -1370,21 +1349,17 @@ async def _average_check_block(
         or 0
     )
 
-    # goods_revenue, topup_revenue and unclassified_operations all scan financial_transactions
-    # directly (no Appointment join, unlike service_revenue above) and share the exact same
-    # base row filter, direct_payment_filters; they used to run as three sequential scalar
-    # queries differing only in which condition classifies a row. Folding them into one scan
-    # with per-bucket CASE expressions is safe independent of whether the three classifying
-    # conditions can overlap for a given row (they are not asserted mutually exclusive here):
-    # each bucket is its own SUM(CASE ...)/COUNT(CASE ...) column, and AND is associative, so
-    # moving a condition from a query's WHERE into that same bucket's CASE cannot change what
-    # that bucket computes — it stays byte-identical to the separate query it replaces.
+    # goods_revenue and topup_revenue both scan financial_transactions directly (no Appointment
+    # join, unlike service_revenue above) and share the exact same base row filter,
+    # direct_payment_filters, so they run as one scan with a SUM(CASE ...) column per bucket.
+    # Moving a classifying condition from a WHERE into its bucket's CASE cannot change what
+    # that bucket computes, whether or not the two conditions can overlap for a row.
     #
     # service_revenue is deliberately NOT folded in: it requires an INNER JOIN to Appointment,
-    # which goods/topup/unclassified transactions mostly do not have (an INNER JOIN would
-    # silently drop them), and its base filter is a materially different rule — completed
-    # attendance, business_appointment_condition, the visit-side reporting window — rather
-    # than just one more classifying condition layered on direct_payment_filters.
+    # which goods/topup transactions mostly do not have (an INNER JOIN would silently drop
+    # them), and its base filter is a materially different rule — completed attendance,
+    # business_appointment_condition, the visit-side reporting window — rather than just one
+    # more classifying condition layered on direct_payment_filters.
     direct_payment_filters = _direct_payment_filters(dr, company_id, company_ids, factual_at)
 
     staff_attribution_active = staff_id is not None and created_user_id is None
@@ -1397,16 +1372,6 @@ async def _average_check_block(
         staff_condition = _financial_staff_attribution_condition(staff_id)
         goods_condition = and_(goods_condition, staff_condition)
         topup_condition = and_(topup_condition, staff_condition)
-    known_condition = or_(
-        func.coalesce(FinancialTransaction.sold_item_type, '') == SERVICE_SOLD_ITEM_TYPE,
-        func.coalesce(FinancialTransaction.sold_item_type, '') == GOODS_SOLD_ITEM_TYPE,
-        _personal_account_condition(),
-    )
-    unclassified_condition = ~known_condition
-    if staff_attribution_active:
-        # Deliberately FinancialTransaction.master_id, not _financial_staff_attribution_condition:
-        # mirrors the pre-existing unclassified_filters rule, which used the raw column here.
-        unclassified_condition = and_(unclassified_condition, FinancialTransaction.master_id == staff_id)
 
     classification_row = (
         await db.execute(
@@ -1419,10 +1384,6 @@ async def _average_check_block(
                     func.sum(case((topup_condition, FinancialTransaction.amount), else_=0.0)),
                     0.0,
                 ).label('topup_revenue'),
-                func.coalesce(
-                    func.sum(case((unclassified_condition, 1), else_=0)),
-                    0,
-                ).label('unclassified_operations'),
             )
             .select_from(FinancialTransaction)
             .outerjoin(AccountCatalog, _financial_account_join())
@@ -1433,11 +1394,9 @@ async def _average_check_block(
         'goods_revenue': float(classification_row.goods_revenue or 0),
         'topup_revenue': float(classification_row.topup_revenue or 0),
     }
-    unclassified_operations = int(classification_row.unclassified_operations or 0)
 
     unique_clients = int(visit_row.unique_clients or 0)
     completed_appointments = int(visit_row.completed_appointments or 0)
-    appointments_without_client = int(visit_row.appointments_without_client or 0)
     numerator = (
         service_revenue
         + classified_revenue['goods_revenue']
@@ -1460,14 +1419,8 @@ async def _average_check_block(
         'topup_revenue': classified_revenue['topup_revenue'],
         'completed_appointments': completed_appointments,
         'unique_clients': unique_clients,
-        'appointments_without_client': appointments_without_client,
-        'goods_checks': goods_checks,
         'numerator': numerator,
         'denominator': denominator,
-        'formula': (
-            'income / completed_appointments'
-        ),
-        'unclassified_operations': unclassified_operations,
         'total': _safe_div(numerator, denominator),
     }
 
@@ -2273,7 +2226,6 @@ async def fetch_summary(
         block['goods_revenue'] = average_check['goods_revenue']
         block['topup_revenue'] = average_check['topup_revenue']
         block['revenue'] = average_check['numerator']
-    local_completed = int(cur['appointments'] or 0)
     # Awaited inline, deliberately. This used to be an asyncio.create_task() launched ~150
     # lines above and joined here, so it ran while the revenue/average-check blocks were
     # awaiting on the SAME AsyncSession. One AsyncSession is one connection: two coroutines
@@ -2299,21 +2251,6 @@ async def fetch_summary(
         appointments_breakdown = await _local_appointments_breakdown(
             db, appointment_company_ids, start, end, staff_id
         )
-    exact_completed = appointments_breakdown.get('completed')
-    appointments_breakdown = {
-        **appointments_breakdown,
-        'local_completed': local_completed,
-        'completed_difference': (
-            int(exact_completed) - local_completed
-            if appointments_breakdown['source_status'] == 'ready'
-            else None
-        ),
-        'is_consistent': (
-            int(exact_completed) == local_completed
-            if appointments_breakdown['source_status'] == 'ready'
-            else None
-        ),
-    }
 
     cur_rev = cur['revenue']
     prev_rev = prev['revenue']
@@ -2545,11 +2482,6 @@ async def fetch_summary(
             'extra_service_appointments': (
                 cur['extra_service_appointments'] if current_extra_ready else None
             ),
-            'specialized_formulas': {
-                'services': 'service_revenue / completed_appointments',
-                'goods': 'goods_revenue / goods_units',
-                'extra_services': 'extra_service_revenue / extra_service_units',
-            },
         },
         'appointments_breakdown': appointments_breakdown,
     }
@@ -3226,32 +3158,6 @@ async def fetch_dashboard_services(
     }
 
 
-async def save_service_label(
-    db: AsyncSession,
-    company_id: int,
-    service_id: int,
-    *,
-    is_extra: bool,
-    allowed_company_ids: list[int] | None = None,
-    portal_account_id: int,
-) -> dict[str, Any]:
-    catalog = await _editable_service_catalog(
-        db,
-        company_id,
-        service_id,
-        allowed_company_ids=allowed_company_ids,
-    )
-    await _apply_service_label(db, catalog, is_extra=is_extra, now=factual_now())
-    await db.commit()
-    return await fetch_dashboard_services(
-        db,
-        company_id=company_id,
-        q=str(service_id),
-        allowed_company_ids=allowed_company_ids,
-        portal_account_id=portal_account_id,
-    )
-
-
 async def _editable_service_catalog(
     db: AsyncSession,
     company_id: int,
@@ -3355,35 +3261,6 @@ async def create_service_kpi_group(
     return _service_kpi_group_payload(group)
 
 
-async def update_service_kpi_group(
-    db: AsyncSession,
-    group_id: int,
-    *,
-    portal_account_id: int,
-    title: str | None = None,
-    code: str | None = None,
-    description: str | None = None,
-    sort_order: int | None = None,
-    is_active: bool | None = None,
-) -> dict[str, Any]:
-    group = await _editable_service_kpi_group(db, group_id, portal_account_id=portal_account_id)
-    fields = {
-        key: value
-        for key, value in {
-            'title': title,
-            'code': code,
-            'description': description,
-            'sort_order': sort_order,
-            'is_active': is_active,
-        }.items()
-        if value is not None
-    }
-    await _apply_service_kpi_group_change(db, group, fields=fields, now=factual_now())
-    await db.commit()
-    await db.refresh(group)
-    return _service_kpi_group_payload(group)
-
-
 async def _editable_service_kpi_group(
     db: AsyncSession,
     group_id: int,
@@ -3423,60 +3300,6 @@ async def _apply_service_kpi_group_change(
     if 'is_active' in fields:
         group.is_active = bool(fields['is_active'])
     group.updated_at = now
-
-
-async def archive_service_kpi_group(
-    db: AsyncSession,
-    group_id: int,
-    *,
-    portal_account_id: int,
-) -> dict[str, Any]:
-    return await update_service_kpi_group(
-        db,
-        group_id,
-        portal_account_id=portal_account_id,
-        is_active=False,
-    )
-
-
-async def save_service_kpi_assignment(
-    db: AsyncSession,
-    company_id: int,
-    service_id: int,
-    *,
-    group_id: int | None,
-    allowed_company_ids: list[int] | None = None,
-    portal_account_id: int,
-) -> dict[str, Any]:
-    catalog = await _editable_service_catalog(
-        db,
-        company_id,
-        service_id,
-        allowed_company_ids=allowed_company_ids,
-    )
-    if group_id is not None:
-        await _active_service_kpi_group(db, group_id, portal_account_id=portal_account_id)
-    await _apply_service_kpi_assignment(db, catalog, group_id=group_id, now=factual_now())
-    await db.commit()
-    return await fetch_dashboard_services(
-        db,
-        company_id=company_id,
-        q=str(service_id),
-        allowed_company_ids=allowed_company_ids,
-        portal_account_id=portal_account_id,
-    )
-
-
-async def _active_service_kpi_group(
-    db: AsyncSession,
-    group_id: int,
-    *,
-    portal_account_id: int,
-) -> ServiceKpiGroup:
-    group = await db.get(ServiceKpiGroup, group_id)
-    if group is None or not group.is_active or group.portal_account_id != portal_account_id:
-        raise ValueError('unknown active KPI group')
-    return group
 
 
 async def _apply_service_kpi_assignment(
@@ -6807,27 +6630,18 @@ def _staff_leaderboards_payload(
     revenue_barber = top_rows(value_rows(barbers, 'revenue', 'money'), 'value')
     revenue_admin = top_rows(value_rows(admins, 'revenue', 'money'), 'value')
     reviews_admin = top_rows(value_rows(admins, REVIEWS_QTY_CODE, 'number'), 'value')
-    avg_check_legacy = top_rows(value_rows(barbers, 'avg_check_total', 'money'), 'value')
     payload = {
-        'extra_services': extra_barber_rankings['qty'],
-        'extra_services_rankings': extra_barber_rankings,
-        'extra_services_barber': extra_barber_rankings['qty'],
         'extra_services_barber_rankings': extra_barber_rankings,
         'extra_services_admin': extra_admin_rankings['qty'],
         'extra_services_admin_rankings': extra_admin_rankings,
-        'cosmo_barber': cosmo_barber_rankings['sum'],
         'cosmo_barber_rankings': cosmo_barber_rankings,
-        'cosmo_admin': cosmo_admin_rankings['sum'],
         'cosmo_admin_rankings': cosmo_admin_rankings,
-        'opz_barber': opz_barber_rankings['qty'],
         'opz_barber_rankings': opz_barber_rankings,
         'opz_admin': opz_admin_rankings['qty'],
         'opz_admin_rankings': opz_admin_rankings,
         'reviews_admin': reviews_admin,
         'revenue_barber': revenue_barber,
         'revenue_admin': revenue_admin,
-        'revenue_top': revenue_barber,
-        'avg_check_top': avg_check_legacy,
         'avg_check_plan_branch': avg_check_plan_rows(branch_groups),
         'avg_check_plan_staff': avg_check_plan_rows(barbers),
     }
@@ -8901,8 +8715,10 @@ async def fetch_plan_fact(
     force_allowed: bool = False,
     include_extra_service_revenue: bool = False,
     include_all_staff_in_leaderboards: bool = False,
+    include_staff_leaderboards: bool = False,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
+    """Plan/fact payload; `staff_leaderboards` is built only for the ratings report, the SPA never reads it."""
     factual_at = factual_at or factual_now()
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
     # A branch that left the tenant contributes neither plan nor fact, so its row could only
@@ -8936,7 +8752,7 @@ async def fetch_plan_fact(
 
     if company_id is not None:
         if not company_ids:
-            return {
+            empty = {
                 'period': {'start': start.isoformat(), 'end': end.isoformat()},
                 'plan_period': {'start': plan_start.isoformat(), 'end': plan_end.isoformat()},
                 'view_scope': 'staff',
@@ -8945,10 +8761,12 @@ async def fetch_plan_fact(
                 'metrics': list(PLAN_FACT_METRICS),
                 'metric_sets': _metric_sets_payload(),
                 'diagnostics': [],
-                'staff_leaderboards': _staff_leaderboards_payload([]),
                 'goods_kpi_execution': _goods_kpi_execution_payload([]),
                 'groups': [],
             }
+            if include_staff_leaderboards:
+                empty['staff_leaderboards'] = _staff_leaderboards_payload([])
+            return empty
 
         branch_id = company_ids[0]
         branch = branches[0]
@@ -9029,7 +8847,7 @@ async def fetch_plan_fact(
             if include_extra_service_revenue else {}
         )
 
-        return {
+        payload = {
             'period': {'start': start.isoformat(), 'end': end.isoformat()},
             'plan_period': {'start': plan_start.isoformat(), 'end': plan_end.isoformat()},
             'view_scope': 'staff',
@@ -9040,15 +8858,17 @@ async def fetch_plan_fact(
             'metrics': list(PLAN_FACT_METRICS),
             'metric_sets': _metric_sets_payload(),
             'diagnostics': diagnostics,
-            'staff_leaderboards': _staff_leaderboards_payload(
+            'goods_kpi_execution': _goods_kpi_execution_payload(groups),
+            'groups': groups,
+        }
+        if include_staff_leaderboards:
+            payload['staff_leaderboards'] = _staff_leaderboards_payload(
                 groups,
                 extra_revenue_by_staff=extra_revenue_result or {},
                 extra_revenue_available=extra_revenue_result is not None,
                 branch_groups=[] if staff_id is not None else [parent_group],
-            ),
-            'goods_kpi_execution': _goods_kpi_execution_payload(groups),
-            'groups': groups,
-        }
+            )
+        return payload
 
     facts_by_company: dict[int, dict[str, float]] = {}
     opz_events_by_company: dict[int, list[OpzEvent]] = {}
@@ -9170,22 +8990,24 @@ async def fetch_plan_fact(
         if schedule_diagnostic is not None:
             diagnostics.append(schedule_diagnostic)
 
-    return {
+    payload = {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
         'plan_period': {'start': plan_start.isoformat(), 'end': plan_end.isoformat()},
         'view_scope': 'branch',
         'metrics': list(PLAN_FACT_METRICS),
         'metric_sets': _metric_sets_payload(),
         'diagnostics': diagnostics,
-        'staff_leaderboards': _staff_leaderboards_payload(
+        'goods_kpi_execution': _goods_kpi_execution_payload(all_staff_groups),
+        'groups': groups,
+    }
+    if include_staff_leaderboards:
+        payload['staff_leaderboards'] = _staff_leaderboards_payload(
             all_staff_groups,
             extra_revenue_by_staff=extra_revenue_result or {},
             extra_revenue_available=extra_revenue_result is not None,
             branch_groups=[group for group in groups if group.get('scope') == 'branch'],
-        ),
-        'goods_kpi_execution': _goods_kpi_execution_payload(all_staff_groups),
-        'groups': groups,
-    }
+        )
+    return payload
 
 
 UNDEFINED_TABLE_SQLSTATE = '42P01'

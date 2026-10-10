@@ -11,13 +11,7 @@ export const GROUP_LABELS = {
   diagnostics: t('reports.groups.diagnostics'),
 };
 
-export const STATUS_LABELS = {
-  ready: t('reports.status.ready'),
-  partial: t('reports.status.partial'),
-};
-
 const SOURCE_LABELS = {
-  yclients: 'YClients',
   appointments_detail: t('reports.sources.appointmentsDetail'),
   financial_transactions_detail: t('reports.sources.financialTransactionsDetail'),
   goods_transactions_detail: t('reports.sources.goodsTransactionsDetail'),

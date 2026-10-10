@@ -10,9 +10,6 @@ from sqlalchemy.pool import StaticPool
 
 from models import (
     Base,
-    AnalyticsDailyMetric,
-    AnalyticsSourceMetric,
-    AnalyticsStatusMetric,
     Appointment,
     Client,
     Comment,
@@ -39,8 +36,6 @@ from sync_pipeline import (
     purge_full_refresh_window,
     run_sync_step,
     purge_source_window,
-    sync_analytics_daily_charts,
-    sync_analytics_sources_and_statuses,
     sync_financial_transactions,
     sync_comments,
     sync_clients,
@@ -156,10 +151,6 @@ SYNC_STEP_FUNCTIONS = (
     'sync_goods_transactions',
     'sync_comments',
     'sync_staff_schedules',
-    'sync_analytics_overall',
-    'sync_analytics_daily_charts',
-    'sync_analytics_sources_and_statuses',
-    'sync_z_report',
 )
 
 
@@ -853,7 +844,6 @@ def test_execute_sync_does_not_checkpoint_when_full_cleanup_fails(monkeypatch):
         patch_execute_sync_dependencies(monkeypatch, db, credential, purge_result=False)
         skipped_calls = []
         monkeypatch.setattr(sync_pipeline, 'sync_service_categories', lambda *_args, **_kwargs: skipped_calls.append('company') or True)
-        monkeypatch.setattr(sync_pipeline, 'sync_analytics_overall', lambda *_args, **_kwargs: skipped_calls.append('analytics') or True)
 
         result = execute_sync(mode='full', end_date=date(2026, 6, 30), portal_account_id=7)
 
@@ -2466,162 +2456,6 @@ def test_sync_goods_transactions_preserves_embedded_titles():
         engine.dispose()
 
 
-class FakeAnalyticsChartsAPI:
-    """Each chart getter is independently empty/non-empty, like a real per-endpoint failure."""
-
-    def __init__(self, income=None, records=None, fullness=None):
-        self._income = income or []
-        self._records = records or []
-        self._fullness = fullness or []
-
-    def get_analytics_income_daily(self, company_id, date_from, date_to):
-        return self._income
-
-    def get_analytics_records_daily(self, company_id, date_from, date_to):
-        return self._records
-
-    def get_analytics_fullness_daily(self, company_id, date_from, date_to):
-        return self._fullness
-
-
-def test_sync_analytics_daily_charts_all_empty_keeps_existing_rows():
-    """Every getter empty in one cycle (a transient failure) must not wipe the table."""
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(engine, tables=[AnalyticsDailyMetric.__table__])
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
-        db.add(AnalyticsDailyMetric(
-            date=date(2026, 6, 1), metric_type='income', label='income', value=100.0, company_id=1,
-        ))
-        db.commit()
-
-        assert sync_analytics_daily_charts(
-            FakeAnalyticsChartsAPI(), db, '1', '2026-06-01', '2026-06-30', db_company_id=1,
-        ) is False
-
-        rows = db.query(AnalyticsDailyMetric).all()
-        assert len(rows) == 1
-        assert rows[0].value == 100.0
-    finally:
-        db.close()
-        engine.dispose()
-
-
-def test_sync_analytics_daily_charts_keeps_a_metric_type_whose_own_getter_came_back_empty():
-    """One getter failing empty must not delete a sibling metric_type's already-stored rows."""
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(engine, tables=[AnalyticsDailyMetric.__table__])
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
-        db.add(AnalyticsDailyMetric(
-            date=date(2026, 6, 1), metric_type='records', label='records', value=5.0, company_id=1,
-        ))
-        db.commit()
-
-        assert sync_analytics_daily_charts(
-            FakeAnalyticsChartsAPI(income=[{'label': 'income', 'data': [[1717286400000, 250.0]]}]),
-            db, '1', '2026-06-01', '2026-06-30', db_company_id=1,
-        ) is True
-
-        rows = {row.metric_type: row.value for row in db.query(AnalyticsDailyMetric).all()}
-        assert rows == {'records': 5.0, 'income': 250.0}
-    finally:
-        db.close()
-        engine.dispose()
-
-
-def test_sync_analytics_daily_charts_still_replaces_stale_points_when_data_present():
-    """The conditional delete must not regress the ordinary replace-on-refetch behaviour."""
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(engine, tables=[AnalyticsDailyMetric.__table__])
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
-        db.add(AnalyticsDailyMetric(
-            date=date(2026, 5, 1), metric_type='income', label='income', value=1.0, company_id=1,
-        ))
-        db.commit()
-
-        assert sync_analytics_daily_charts(
-            FakeAnalyticsChartsAPI(income=[{'label': 'income', 'data': [[1717286400000, 500.0]]}]),
-            db, '1', '2026-06-01', '2026-06-30', db_company_id=1,
-        ) is True
-
-        rows = db.query(AnalyticsDailyMetric).filter(AnalyticsDailyMetric.metric_type == 'income').all()
-        assert [row.value for row in rows] == [500.0]
-    finally:
-        db.close()
-        engine.dispose()
-
-
-class FakeAnalyticsSourcesStatusesAPI:
-    def __init__(self, sources=None, statuses=None):
-        self._sources = sources or []
-        self._statuses = statuses or []
-
-    def get_analytics_record_source(self, company_id, date_from, date_to):
-        return self._sources
-
-    def get_analytics_record_status(self, company_id, date_from, date_to):
-        return self._statuses
-
-
-def test_sync_analytics_sources_and_statuses_all_empty_keeps_existing_rows():
-    """Every getter empty in one cycle must not wipe either table."""
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine, tables=[AnalyticsSourceMetric.__table__, AnalyticsStatusMetric.__table__],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
-        db.add(AnalyticsSourceMetric(
-            date_from=date(2026, 6, 1), date_to=date(2026, 6, 30), label='Site', value=10, company_id=1,
-        ))
-        db.add(AnalyticsStatusMetric(
-            date_from=date(2026, 6, 1), date_to=date(2026, 6, 30), label='Completed', value=20, company_id=1,
-        ))
-        db.commit()
-
-        assert sync_analytics_sources_and_statuses(
-            FakeAnalyticsSourcesStatusesAPI(), db, '1', '2026-06-01', '2026-06-30', db_company_id=1,
-        ) is False
-
-        assert db.query(AnalyticsSourceMetric).count() == 1
-        assert db.query(AnalyticsStatusMetric).count() == 1
-    finally:
-        db.close()
-        engine.dispose()
-
-
-def test_sync_analytics_sources_and_statuses_keeps_the_table_whose_own_fetch_came_back_empty():
-    """Statuses failing empty this cycle must not delete sources that were just fetched."""
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine, tables=[AnalyticsSourceMetric.__table__, AnalyticsStatusMetric.__table__],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
-        db.add(AnalyticsStatusMetric(
-            date_from=date(2026, 6, 1), date_to=date(2026, 6, 30), label='Completed', value=20, company_id=1,
-        ))
-        db.commit()
-
-        assert sync_analytics_sources_and_statuses(
-            FakeAnalyticsSourcesStatusesAPI(sources=[{'label': 'Site', 'data': 99}]),
-            db, '1', '2026-06-01', '2026-06-30', db_company_id=1,
-        ) is True
-
-        assert [row.value for row in db.query(AnalyticsSourceMetric).all()] == [99]
-        assert [row.value for row in db.query(AnalyticsStatusMetric).all()] == [20]
-    finally:
-        db.close()
-        engine.dispose()
-
-
 def test_empty_window_keeps_rows_when_not_refreshing():
     """Incremental mode appends; an empty lookback must not wipe what it did not ask for."""
     with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
@@ -3066,6 +2900,32 @@ def test_declined_non_checkpoint_step_still_leaves_the_run_successful(monkeypatc
 
         assert result['success'] is True
         assert all(item.get('error') is None for item in result['step_results'])
+
+
+def test_sync_no_longer_runs_analytics_or_z_report_steps(monkeypatch):
+    """Their tables were write-only and are dropped by migration 0052; the run must not call YClients for them."""
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2022, 1, 1))
+    monkeypatch.setattr(sync_pipeline, 'SYNC_INCREMENTAL', True)
+    monkeypatch.setattr(sync_pipeline, 'SYNC_REFRESH_DAYS', 90)
+
+    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+        _certified_company(db)
+
+        credential = YClientsCredentialValue(
+            id=11, title='Tenant credential', partner_token='partner',
+            login='login', password='password', company_ids=(1,), portal_account_id=7,
+        )
+        patch_execute_sync_dependencies(monkeypatch, db, credential)
+
+        result = execute_sync(mode='refresh', end_date=date(2026, 7, 1), portal_account_id=7)
+
+        assert result['success'] is True
+        assert not [
+            item for item in result['step_results']
+            if 'Аналитика' in item['name'] or 'Z-Отчёт' in item['name']
+        ]
+    assert not [name for name in dir(sync_pipeline) if 'analytics' in name or 'z_report' in name.lower()]
+    assert not [name for name in dir(sync_pipeline.YClientsAPI) if 'analytics' in name or 'z_report' in name]
 
 
 def test_counter_sale_without_a_visit_is_stored_as_unlinked():

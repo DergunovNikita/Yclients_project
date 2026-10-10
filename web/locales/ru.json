@@ -694,10 +694,6 @@
       "goods": "Товары",
       "diagnostics": "Диагностика"
     },
-    "status": {
-      "ready": "Работает",
-      "partial": "Частично"
-    },
     "sources": {
       "appointmentsDetail": "детализация записей",
       "financialTransactionsDetail": "детализация платежей",

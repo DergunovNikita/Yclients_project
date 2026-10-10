@@ -199,7 +199,7 @@ async def test_kpi_group_functions_require_a_tenant(async_session):
     with pytest.raises(TypeError):
         await dashboard_service.fetch_service_kpi_groups(async_session)
     with pytest.raises(TypeError):
-        await dashboard_service.update_service_kpi_group(async_session, 1, title='x')
+        await dashboard_service._editable_service_kpi_group(async_session, 1)
 
     async_session.add(PortalAccount(id=1, label='a', created_at=datetime(2025, 1, 1)))
     async_session.add(PortalAccount(id=2, label='b', created_at=datetime(2025, 1, 1)))
@@ -209,9 +209,7 @@ async def test_kpi_group_functions_require_a_tenant(async_session):
     assert [row['id'] for row in await dashboard_service.fetch_service_kpi_groups(async_session, portal_account_id=1)] == [group['id']]
     assert await dashboard_service.fetch_service_kpi_groups(async_session, portal_account_id=2) == []
     with pytest.raises(ValueError, match='unknown KPI group'):
-        await dashboard_service.update_service_kpi_group(
-            async_session, group['id'], portal_account_id=2, title='stolen'
-        )
+        await dashboard_service._editable_service_kpi_group(async_session, group['id'], portal_account_id=2)
 
 
 @pytest.mark.asyncio

@@ -694,10 +694,6 @@
       "goods": "Goods",
       "diagnostics": "Diagnostics"
     },
-    "status": {
-      "ready": "Ready",
-      "partial": "Partial"
-    },
     "sources": {
       "appointmentsDetail": "appointment details",
       "financialTransactionsDetail": "payment details",

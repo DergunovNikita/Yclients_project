@@ -29,7 +29,6 @@ def _payload(**overrides):
         'cards': [],
         'charts': [],
         'tables': [],
-        'raw': {'big': list(range(100))},
     }
     return {**base, **overrides}
 

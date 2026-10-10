@@ -236,7 +236,6 @@ async def build_bookings_dynamics(req: ReportRequest) -> dict[str, Any]:
             row_key='staff_id',
         ),
     ]
-    base['raw'] = {'exact_aggregates': exact, 'by_period': period_rows, 'by_staff': staff_rows}
     return base
 
 
@@ -369,13 +368,6 @@ async def build_peak_load(req: ReportRequest) -> dict[str, Any]:
             row_key='hour',
         )
     ]
-    base['raw'] = {
-        'cells': [
-            {'weekday': day, 'hour': hour, 'visits': cell[0], 'booked_seconds': cell[1]}
-            for (day, hour), cell in sorted(cells.items())
-        ],
-        'visits_without_time': unplaced[0],
-    }
     return base
 
 
@@ -450,7 +442,6 @@ async def build_booking_channels(req: ReportRequest) -> dict[str, Any]:
         {'unknown'},
     )
     base['tables'] = [table('periods', 'Записи по каналам и периодам', columns, period_rows, row_key='period', x_kind='time')]
-    base['raw'] = {'by_period': period_rows}
     return base
 
 
@@ -551,5 +542,4 @@ async def build_staff_efficiency(req: ReportRequest) -> dict[str, Any]:
             row_key='staff_id',
         )
     ]
-    base['raw'] = {'staff': rows, 'revenue_scope': 'services'}
     return base

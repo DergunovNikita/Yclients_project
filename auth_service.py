@@ -20,6 +20,7 @@ from config import (
     AUTH_EMAIL_RESEND_COOLDOWN_SECONDS,
     AUTH_JWT_EXPIRE_MINUTES,
     AUTH_JWT_SECRET,
+    IS_PRODUCTION,
     SMTP_FROM,
     SMTP_HOST,
     SMTP_PASSWORD,
@@ -237,7 +238,12 @@ def _email_delivery_mode() -> str:
 
 def send_auth_email(to_email: str, subject: str, body: str) -> None:
     if _email_delivery_mode() == 'console':
-        print(f'[auth-email] To: {to_email}\nSubject: {subject}\n{body}\n')
+        # The body carries a bearer token (reset/invite/verify link); anyone who reads the container
+        # logs could take the account over, so only local development gets to see it.
+        if IS_PRODUCTION:
+            print(f'[auth-email] To: {to_email}\nSubject: {subject}\n(body withheld in production)\n')
+        else:
+            print(f'[auth-email] To: {to_email}\nSubject: {subject}\n{body}\n')
         return
 
     message = EmailMessage()

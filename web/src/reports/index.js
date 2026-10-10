@@ -18,7 +18,7 @@ import {
   nextComparePeriod,
   shouldAdoptComparePeriod,
 } from '../period.js';
-import { GROUP_LABELS, STATUS_LABELS, sourceLabel } from './registry.js';
+import { GROUP_LABELS } from './registry.js';
 import { decodePathSegment, migrateFavorites, resolveReportRoute } from './routing.js';
 import { renderReportData } from './renderers/generic.js';
 import { intlLocale, t } from '../i18n.js';
@@ -79,14 +79,6 @@ function uniqueSorted(values) {
 
 function optionHtml(value, label, selectedValue) {
   return `<option value="${escapeHtml(value)}"${String(value) === String(selectedValue) ? ' selected' : ''}>${escapeHtml(label)}</option>`;
-}
-
-function statusText(report) {
-  return STATUS_LABELS[report.status] || report.status;
-}
-
-function sourceText(report) {
-  return (report.required_sources || []).map(sourceLabel).join(', ');
 }
 
 function reportMatches(report, filters, favorites) {
@@ -482,15 +474,13 @@ export function initReports({
         </div>
         <div class="reports-grid">
           ${reports.map((report) => `
-            <article class="report-card report-card--${escapeHtml(report.status)}" data-report-id="${escapeHtml(report.id)}">
+            <article class="report-card" data-report-id="${escapeHtml(report.id)}">
               <button class="report-card__pin${favorites.has(report.id) ? ' active' : ''}" type="button" data-report-pin="${escapeHtml(report.id)}" title="${favorites.has(report.id) ? t('reports.removeFavorite') : t('reports.addFavorite')}">★</button>
-              <div class="report-card__status">${escapeHtml(statusText(report))}</div>
               <h4>${escapeHtml(report.title)}</h4>
               <p>${escapeHtml(report.description)}</p>
               <div class="report-card__tags">
                 ${(report.themes || []).slice(0, 3).map((theme) => `<span>${escapeHtml(theme)}</span>`).join('')}
               </div>
-              <div class="report-card__source">${escapeHtml(sourceText(report))}</div>
             </article>
           `).join('')}
         </div>

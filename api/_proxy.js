@@ -34,12 +34,10 @@ const AUTH_ROUTE_RULES = [
 ];
 
 const DASHBOARD_ROUTE_RULES = [
-  { methods: ['GET'], pattern: /^(branches|staff|services|services\/kpi_groups|reports|reports\/data|widget\/sync_status|widget\/summary|widget\/revenue_daily|widget\/top_services|widget\/extra_services|widget\/plan_fact|plan\/settings|plan\/reviews_fact|plan\/opz_fact|payments\/yandex_pay|bundle)$/ },
+  { methods: ['GET'], pattern: /^(branches|staff|services|reports|reports\/data|widget\/sync_status|widget\/plan_fact|plan\/settings|plan\/reviews_fact|plan\/opz_fact|payments\/yandex_pay|bundle)$/ },
   { methods: ['GET', 'PUT'], pattern: /^metric-visibility$/ },
   { methods: ['POST'], pattern: /^(services\/kpi_groups|plan\/settings|plan\/reviews_fact|plan\/opz_fact|payments\/yandex_pay)$/ },
   { methods: ['PATCH'], pattern: /^services$/ },
-  { methods: ['PATCH'], pattern: /^services\/[^/]+\/[^/]+\/(labels|kpi_group)$/ },
-  { methods: ['PATCH', 'DELETE'], pattern: /^services\/kpi_groups\/[^/]+$/ },
 ];
 
 const ONBOARDING_ROUTE_RULES = [

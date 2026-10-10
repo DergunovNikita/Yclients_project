@@ -87,6 +87,7 @@ def init_database(host: str, port: int, name: str, user: str, password: str = ''
 # --- Async singleton (FastAPI) ---
 
 _async_session_factory: async_sessionmaker[AsyncSession] | None = None
+API_STATEMENT_TIMEOUT_MS = 170_000
 
 
 def init_async_database(host: str, port: int, name: str, user: str, password: str = '') -> None:
@@ -110,6 +111,13 @@ def init_async_database(host: str, port: int, name: str, user: str, password: st
     #     baseline) + max_overflow=15 (burst room for concurrent heavy dashboard reports) = 30,
     #     so API (30) + worker (30) = 60 -- the low end of the ~60-70 ceiling for the two
     #     together, leaving margin for migrations/psql and Postgres's own reserved connections.
+    # statement_timeout=170s (above nginx's 150s and below Vercel's 180s) is what frees a connection
+    # when the client has given up: Starlette does not cancel a non-streaming handler on disconnect,
+    # so an abandoned slow report would otherwise hold its pooled connection to the end, and ~30 of
+    # them (the whole pool) starve /auth/me. The limit applies per statement and, on the extended
+    # protocol, per Execute message, so CSV export (a server-side cursor, 1000 rows per fetch) is
+    # bounded per chunk, not per download. API engine only: the ETL engine legitimately runs
+    # multi-minute statements and must not inherit it.
     # pool_timeout=10 fails a queued request in 10s instead of SQLAlchemy's 30s default, so a
     # cheap call like /auth/me errors quickly rather than stalling behind a few 6s dashboard
     # reports holding every pooled connection.
@@ -133,7 +141,13 @@ def init_async_database(host: str, port: int, name: str, user: str, password: st
         pool_size=15,
         max_overflow=15,
         pool_timeout=10,
-        connect_args={'server_settings': {'jit': 'off', 'plan_cache_mode': 'force_custom_plan'}},
+        connect_args={
+            'server_settings': {
+                'jit': 'off',
+                'plan_cache_mode': 'force_custom_plan',
+                'statement_timeout': str(API_STATEMENT_TIMEOUT_MS),
+            },
+        },
     )
     _async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 

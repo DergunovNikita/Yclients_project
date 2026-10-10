@@ -1,7 +1,13 @@
-"""Create or update a platform_admin portal user (also the production bootstrap run by the auto-deploy script)."""
+"""Create a platform_admin portal user (also the production bootstrap run by the auto-deploy script).
+
+An existing user is left untouched: the deploy runs this on every push, and rewriting the password,
+role, tenant or active flag there would undo a password the admin changed and re-enable a deactivated
+account. `--reset-password` is the explicit, manual way to do that.
+"""
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import datetime
 
 from sqlalchemy import select
@@ -13,11 +19,23 @@ from models import PortalUser
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Create or update a platform_admin portal user')
+    parser = argparse.ArgumentParser(description='Create a platform_admin portal user (existing users are skipped)')
     parser.add_argument('--email', required=True)
-    parser.add_argument('--password', required=True)
+    parser.add_argument(
+        '--password',
+        help='Password; defaults to the PORTAL_ADMIN_PASSWORD environment variable (keeps it out of argv)',
+    )
     parser.add_argument('--full-name', default='Local Super Admin')
-    return parser.parse_args()
+    parser.add_argument(
+        '--reset-password',
+        action='store_true',
+        help='For an existing user: overwrite password, role, tenant and active flag (manual use only)',
+    )
+    args = parser.parse_args()
+    args.password = args.password or os.environ.get('PORTAL_ADMIN_PASSWORD', '')
+    if not args.password:
+        parser.error('a password is required: pass --password or set PORTAL_ADMIN_PASSWORD')
+    return args
 
 
 def main() -> int:
@@ -45,6 +63,8 @@ def main() -> int:
             db.commit()
             db.refresh(user)
             print(f'Created platform_admin user id={user.id} email={email}')
+        elif not args.reset_password:
+            print(f'platform_admin user id={user.id} email={email} exists, skipped')
         else:
             user.password_hash = hash_password(args.password)
             user.role = 'platform_admin'
@@ -53,7 +73,7 @@ def main() -> int:
             user.email_verified_at = user.email_verified_at or datetime.utcnow()
             user.full_name = args.full_name
             db.commit()
-            print(f'Updated platform_admin user id={user.id} email={email}')
+            print(f'Reset platform_admin user id={user.id} email={email}')
 
         print(f'Email: {email}')
         return 0

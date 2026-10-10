@@ -404,8 +404,8 @@ async def test_tracking_since_note_warns_when_the_period_starts_earlier(async_se
     data, _, _ = await _usage_report()
     later, _, _ = await _usage_report(start_date='2026-03-10')
 
-    assert data['raw']['tracking_since'] == '2026-03-10'
     assert [n['kind'] for n in data['notes']] == ['info', 'warning']
+    assert 'с 10.03.2026' in data['notes'][1]['text']
     # A period that starts at the first record still has a «not opened for 60 days» list reaching before it.
     assert [n['kind'] for n in later['notes']] == ['info', 'warning']
 
@@ -421,7 +421,7 @@ async def test_tracking_since_ignores_platform_admin_events(async_session, usage
     data, _, _ = await _usage_report()
 
     # Support clicks say nothing about when the tenant's own usage started being counted.
-    assert data['raw']['tracking_since'] == '2026-03-10'
+    assert 'с 10.03.2026' in data['notes'][1]['text']
 
 
 @pytest.mark.asyncio
@@ -438,8 +438,7 @@ async def test_no_tracking_note_once_the_log_covers_the_period_and_the_unused_wi
 async def test_empty_log_says_so(async_session, usage_app):
     data, rows, _ = await _usage_report()
 
-    assert data['raw']['tracking_since'] is None
-    assert any(n['kind'] == 'warning' for n in data['notes'])
+    assert any(n['title'] == 'Данных пока нет' for n in data['notes'])
     assert all(row['calls'] == 0 for row in rows.values())
 
 

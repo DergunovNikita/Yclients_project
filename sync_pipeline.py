@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import or_
 from config import (
     DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD,
-    SYNC_DAYS, SCHEDULE_DAYS, ANALYTICS_DAYS, DB_BATCH_SIZE,
+    SYNC_DAYS, SCHEDULE_DAYS, DB_BATCH_SIZE,
     SYNC_HISTORY_START_DATE, SYNC_INCREMENTAL, SYNC_LOOKBACK_DAYS,
     SYNC_REFRESH_DAYS,
     YCLIENTS_REQUEST_DELAY, YCLIENTS_TIMEOUT,
@@ -33,8 +33,7 @@ from models import (
     GoodCategory, GoodCategoryCatalog, Good, GoodCatalog,
     Appointment, Transaction, FinancialTransaction, GoodTransaction,
     Comment, StaffSchedule,
-    AnalyticsOverall, AnalyticsDailyMetric, AnalyticsSourceMetric,
-    AnalyticsStatusMetric, ZReport, ZReportPayment, SyncState, SyncSourceState,
+    SyncState, SyncSourceState,
 )
 from sync_parsing import (
     parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_int,
@@ -209,7 +208,7 @@ def run_sync_step(results, name: str, fn, *args, **kwargs):
     step_api = _step_api(args, kwargs)
     if step_api is not None:
         # The flag describes the window this step is about to read. Steps that never do a
-        # dated fetch — catalogs, analytics — would otherwise inherit the verdict of
+        # dated fetch — catalogs — would otherwise inherit the verdict of
         # whichever step ran before them, on the client they all share.
         step_api.last_dated_fetch_complete = True
     try:
@@ -220,7 +219,7 @@ def run_sync_step(results, name: str, fn, *args, **kwargs):
         # step's own try. Letting that unwind aborted every branch and tenant left in the
         # run over one endpoint's bad day, so the step is recorded as failed instead — the
         # same standing a step that returns False gets, no more. That is a real change for
-        # steps outside `checkpoint_step_names` (clients, goods, schedules, analytics): a
+        # steps outside `checkpoint_step_names` (clients, goods, schedules): a
         # raise anywhere used to abort the run outright; it now costs only this step, while
         # `error` keeps it distinguishable from a soft False so the run is still reported
         # failed. The traceback is printed because a raise here is as likely to be a bug in
@@ -2249,321 +2248,6 @@ def sync_staff_schedules(api: YClientsAPI, db, company_id: str,
 
 
 # ===================================================================
-# 23. Аналитика: основные показатели
-# ===================================================================
-
-def sync_analytics_overall(api: YClientsAPI, db, company_id: str,
-                           date_from: str, date_to: str,
-                           db_company_id: int | None = None):
-    print("\n── Аналитика: основные показатели ──")
-
-    data = api.get_analytics_overall(company_id, date_from, date_to)
-    if not data:
-        print("  Нет данных")
-        return False
-
-    try:
-        cid = _db_company_id(company_id, db_company_id)
-        db.query(AnalyticsOverall).filter(AnalyticsOverall.company_id == cid).delete()
-
-        def _parse_stat(stat_key):
-            s = data.get(stat_key) or {}
-            return s
-
-        inc_total = _parse_stat('income_total_stats')
-        inc_svc   = _parse_stat('income_services_stats')
-        inc_goods = _parse_stat('income_goods_stats')
-        inc_avg   = _parse_stat('income_average_stats')
-        inc_avg_s = _parse_stat('income_average_services_stats')
-        fullness  = _parse_stat('fullness_stats')
-        rec       = _parse_stat('record_stats')
-        cli       = _parse_stat('client_stats')
-
-        def _f(val):
-            if val is None:
-                return None
-            try:
-                return float(val)
-            except (ValueError, TypeError):
-                return None
-
-        obj = AnalyticsOverall(
-            date_from=parse_date(date_from),
-            date_to=parse_date(date_to),
-            fetched_at=datetime.now(),
-            income_total=_f(inc_total.get('current_sum')),
-            income_total_prev=_f(inc_total.get('previous_sum')),
-            income_total_change=_f(inc_total.get('change_percent')),
-            income_services=_f(inc_svc.get('current_sum')),
-            income_services_prev=_f(inc_svc.get('previous_sum')),
-            income_goods=_f(inc_goods.get('current_sum')),
-            income_goods_prev=_f(inc_goods.get('previous_sum')),
-            income_average=_f(inc_avg.get('current_sum')),
-            income_average_prev=_f(inc_avg.get('previous_sum')),
-            income_average_services=_f(inc_avg_s.get('current_sum')),
-            income_average_services_prev=_f(inc_avg_s.get('previous_sum')),
-            fullness_current=_f(fullness.get('current_percent')),
-            fullness_previous=_f(fullness.get('previous_percent')),
-            fullness_change=_f(fullness.get('change_percent')),
-            records_completed=rec.get('current_completed_count'),
-            records_pending=rec.get('current_pending_count'),
-            records_canceled=rec.get('current_canceled_count'),
-            records_total=rec.get('current_total_count'),
-            records_total_prev=rec.get('previous_total_count'),
-            records_change=_f(rec.get('change_percent')),
-            clients_total=cli.get('total_count'),
-            clients_new=cli.get('new_count'),
-            clients_new_percent=_f(cli.get('new_percent')),
-            clients_return=cli.get('return_count'),
-            clients_return_percent=_f(cli.get('return_percent')),
-            clients_active=cli.get('active_count'),
-            clients_lost=cli.get('lost_count'),
-            clients_lost_percent=_f(cli.get('lost_percent')),
-            company_id=cid,
-        )
-        db.add(obj)
-        db.commit()
-        print("  ✓ Основные показатели сохранены")
-        return True
-
-    except Exception as e:
-        db.rollback()
-        print(f"  ✗ Ошибка: {e}")
-        return False
-
-
-# ===================================================================
-# 24. Аналитика: дневные графики (выручка, записи, заполненность)
-# ===================================================================
-
-def sync_analytics_daily_charts(api: YClientsAPI, db, company_id: str,
-                                date_from: str, date_to: str,
-                                db_company_id: int | None = None):
-    print("\n── Аналитика: дневные графики ──")
-
-    charts = {
-        'income': api.get_analytics_income_daily,
-        'records': api.get_analytics_records_daily,
-        'fullness': api.get_analytics_fullness_daily,
-    }
-
-    cid = _db_company_id(company_id, db_company_id)
-    total = 0
-    any_data = False
-
-    try:
-        for metric_type, getter in charts.items():
-            series_list = getter(company_id, date_from, date_to)
-            if not series_list:
-                print(f"  {metric_type}: нет данных")
-                continue
-
-            any_data = True
-            # Delete only this metric_type's rows, and only now that its replacement
-            # data is in hand — an empty getter (transient failure) must not wipe out
-            # what a sibling metric_type already fetched this cycle.
-            db.query(AnalyticsDailyMetric).filter(
-                AnalyticsDailyMetric.company_id == cid,
-                AnalyticsDailyMetric.metric_type == metric_type,
-            ).delete()
-
-            for series in series_list:
-                label = series.get('label', metric_type)
-                points = series.get('data', [])
-                for point in points:
-                    if not isinstance(point, (list, tuple)) or len(point) < 2:
-                        continue
-                    ts_ms, value = point[0], point[1]
-                    day_str = datetime.utcfromtimestamp(ts_ms / 1000).strftime('%Y-%m-%d')
-                    db.add(AnalyticsDailyMetric(
-                        date=parse_date(day_str),
-                        metric_type=metric_type,
-                        label=label,
-                        value=value,
-                        company_id=cid,
-                    ))
-                    total += 1
-
-            print(f"  {metric_type}: ок")
-
-        # The delete is now per metric_type and conditional on that type having returned
-        # data, which fixes the transient-outage case but leaves the opposite one open: a
-        # metric_type that upstream stops returning for good, or one dropped from `charts`,
-        # keeps its old rows forever, where the previous company-wide delete cleared them.
-        # Accepted rather than fixed. Sweeping types absent from the current fetch is the
-        # real answer, but it has to be gated on at least one chart having returned data or
-        # it reintroduces exactly the wipe this change exists to prevent. Low stakes today:
-        # AnalyticsDailyMetric is written only here and read nowhere else in the repo, so a
-        # stale row reaches no dashboard.
-        if not any_data:
-            # False, matching sync_analytics_overall's existing convention, and chosen rather
-            # than inherited: a fetch that returned nothing for every chart is indistinguishable
-            # here from an upstream outage, and reporting it as success is how a silent stall
-            # starts. The cost is that a branch which structurally has no analytics — one that
-            # left the tenant but is still synced, say — logs a warning on every run. That is
-            # noisy but visible; the opposite error is quiet and is not.
-            print("  Нет данных")
-            return False
-
-        db.commit()
-        print(f"  ✓ Дневные метрики сохранены ({total} точек)")
-        return True
-
-    except Exception as e:
-        db.rollback()
-        print(f"  ✗ Ошибка: {e}")
-        return False
-
-
-# ===================================================================
-# 25. Аналитика: источники и статусы записей
-# ===================================================================
-
-def sync_analytics_sources_and_statuses(api: YClientsAPI, db, company_id: str,
-                                        date_from: str, date_to: str,
-                                        db_company_id: int | None = None):
-    print("\n── Аналитика: источники и статусы ──")
-
-    cid = _db_company_id(company_id, db_company_id)
-
-    try:
-        sources = api.get_analytics_record_source(company_id, date_from, date_to)
-        statuses = api.get_analytics_record_status(company_id, date_from, date_to)
-
-        if not sources and not statuses:
-            print("  Нет данных")
-            return False
-
-        # Each table is only cleared once its own replacement data is in hand — an
-        # empty fetch for one must not wipe out the other's already-fetched rows.
-        if sources:
-            db.query(AnalyticsSourceMetric).filter(
-                AnalyticsSourceMetric.company_id == cid
-            ).delete()
-            for s in sources:
-                db.add(AnalyticsSourceMetric(
-                    date_from=parse_date(date_from),
-                    date_to=parse_date(date_to),
-                    label=s.get('label', ''),
-                    value=s.get('data'),
-                    company_id=cid,
-                ))
-            print(f"  Источники: {len(sources)} шт.")
-        else:
-            print("  Источники: нет данных")
-
-        if statuses:
-            db.query(AnalyticsStatusMetric).filter(
-                AnalyticsStatusMetric.company_id == cid
-            ).delete()
-            for s in statuses:
-                db.add(AnalyticsStatusMetric(
-                    date_from=parse_date(date_from),
-                    date_to=parse_date(date_to),
-                    label=s.get('label', ''),
-                    value=s.get('data'),
-                    company_id=cid,
-                ))
-            print(f"  Статусы: {len(statuses)} шт.")
-        else:
-            print("  Статусы: нет данных")
-
-        db.commit()
-        print("  ✓ Источники и статусы сохранены")
-        return True
-
-    except Exception as e:
-        db.rollback()
-        print(f"  ✗ Ошибка: {e}")
-        return False
-
-
-# ===================================================================
-# 26. Z-Отчёт
-# ===================================================================
-
-def sync_z_report(
-    api: YClientsAPI,
-    db,
-    company_id: str,
-    report_date: str,
-    db_company_id: int | None = None,
-):
-    print(f"\n── Z-Отчёт ({report_date}) ──")
-
-    data = api.get_z_report(company_id, report_date)
-    if not data:
-        print("  Нет данных")
-        return False
-
-    try:
-        cid = _db_company_id(company_id, db_company_id)
-        report_bound = parse_date(report_date)
-        db.query(ZReport).filter(
-            ZReport.company_id == cid, ZReport.report_date == report_bound
-        ).delete()
-        db.query(ZReportPayment).filter(
-            ZReportPayment.company_id == cid, ZReportPayment.report_date == report_bound
-        ).delete()
-
-        stats = data.get('stats') or {}
-        paids = data.get('paids') or {}
-        total_paid = paids.get('total') or {}
-
-        obj = ZReport(
-            report_date=report_bound,
-            clients=stats.get('clients'),
-            clients_average=stats.get('clients_average'),
-            records=stats.get('records'),
-            records_average=stats.get('records_average'),
-            visit_records=stats.get('visit_records'),
-            visit_records_average=stats.get('visit_records_average'),
-            non_visit_records=stats.get('non_visit_records'),
-            non_visit_records_average=stats.get('non_visit_records_average'),
-            targets=stats.get('targets'),
-            targets_paid=stats.get('targets_paid'),
-            goods_count=stats.get('goods'),
-            goods_paid=stats.get('goods_paid'),
-            certificates_count=stats.get('certificates'),
-            certificates_paid=stats.get('certificates_paid'),
-            abonement_count=stats.get('abonement'),
-            abonement_paid=stats.get('abonement_paid'),
-            total_accounts=total_paid.get('accounts'),
-            total_discount=total_paid.get('discount'),
-            currency=data.get('currency'),
-            company_id=cid,
-        )
-        db.add(obj)
-
-        for acc in (paids.get('accounts') or []):
-            db.add(ZReportPayment(
-                report_date=report_bound,
-                payment_group='account',
-                title=acc.get('title'),
-                amount=acc.get('amount'),
-                company_id=cid,
-            ))
-
-        for disc in (paids.get('discount') or []):
-            db.add(ZReportPayment(
-                report_date=report_bound,
-                payment_group='discount',
-                title=disc.get('title'),
-                amount=disc.get('amount'),
-                company_id=cid,
-            ))
-
-        db.commit()
-        print("  ✓ Z-Отчёт сохранён")
-        return True
-
-    except Exception as e:
-        db.rollback()
-        print(f"  ✗ Ошибка: {e}")
-        return False
-
-
-# ===================================================================
 # Основная функция
 # ===================================================================
 
@@ -2608,8 +2292,6 @@ def execute_sync(
     default_sd = default_start.isoformat()
     ed = end.isoformat()
     schedule_end = end + timedelta(days=SCHEDULE_DAYS)
-    analytics_start = end - timedelta(days=ANALYTICS_DAYS)
-    analytics_sd = analytics_start.isoformat()
     result_window_start: date | None = None
     result_modes: set[str] = set()
     checkpoint_step_names = {
@@ -2665,7 +2347,6 @@ def execute_sync(
             "Параметры: "
             f"SYNC_DAYS={SYNC_DAYS}, "
             f"SCHEDULE_DAYS={SCHEDULE_DAYS}, "
-            f"ANALYTICS_DAYS={ANALYTICS_DAYS}, "
             f"REQUEST_DELAY={YCLIENTS_REQUEST_DELAY}, "
             f"TIMEOUT={YCLIENTS_TIMEOUT}"
         )
@@ -2682,17 +2363,6 @@ def execute_sync(
             f'Active credentials: {len(credentials)}',
             payload={'credentials_count': len(credentials)},
         )
-
-        analytics_steps = [
-            ("Аналитика overall", sync_analytics_overall, {'date_from': analytics_sd, 'date_to': ed}),
-            ("Аналитика daily", sync_analytics_daily_charts, {'date_from': analytics_sd, 'date_to': ed}),
-            (
-                "Аналитика source/status",
-                sync_analytics_sources_and_statuses,
-                {'date_from': analytics_sd, 'date_to': ed},
-            ),
-            ("Z-Отчёт", sync_z_report, {'report_date': ed}),
-        ]
 
         for credential in credentials:
             tenant_label = f"#{credential.portal_account_id} · {credential.title}"
@@ -2901,33 +2571,12 @@ def execute_sync(
                         **kwargs,
                     )
 
-                print(f"\n── Аналитика: период {analytics_sd} .. {ed} ({ANALYTICS_DAYS} дней) [{company_label}] ──")
-                for name, fn, kwargs in analytics_steps:
-                    run_sync_step(
-                        step_results,
-                        f"{name} [{company_label}]",
-                        fn,
-                        company_api,
-                        db,
-                        company_id,
-                        db_company_id=company.id,
-                        step_key=name,
-                        progress_callback=progress_callback,
-                        progress_context={
-                            'portal_account_id': credential.portal_account_id,
-                            'credential_id': credential.id,
-                            'company_id': company.id,
-                        },
-                        progress_pct=85,
-                        **kwargs,
-                    )
-
                 company_step_results = step_results[company_step_start:]
                 if is_full_refresh_mode(company_sync_mode):
                     # The marker asserts one thing only — that the coverage rows span the
                     # branch's whole history — and that is read back from the rows
                     # themselves. Restoring it is therefore independent of whether every
-                    # step succeeded: a source that owns no coverage (comments, analytics)
+                    # step succeeded: a source that owns no coverage (comments)
                     # failing must not cost the branch a full history pass tomorrow, now
                     # that the nightly job is a narrow window rather than that pass.
                     if has_complete_historical_source_coverage(db, company.id, end):

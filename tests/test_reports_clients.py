@@ -57,7 +57,7 @@ async def _base(session, staff=((1, 'Anna'), (2, 'Anna'), (3, 'Boris')), window_
 def request(session, start, end, staff_id=None, factual_at=NOW):
     return ReportRequest(
         db=session,
-        base={'cards': [], 'charts': [], 'tables': [], 'notes': [], 'raw': {}},
+        base={'cards': [], 'charts': [], 'tables': [], 'notes': []},
         start=start,
         end=end,
         company_id=None,
@@ -109,7 +109,7 @@ async def _seed_cohorts(session):
 async def test_cohort_size_equals_overview_new_clients_for_each_month(async_session):
     await _seed_cohorts(async_session)
     payload = await build_retention_3_6_12(request(async_session, date(2025, 1, 1), date(2025, 3, 31)))
-    sizes = {row['cohort_month']: row['size'] for row in payload['raw']['cohorts']}
+    sizes = {row['cohort_month']: row['size'] for row in table_rows(payload, 'retention_cohorts')}
     assert sizes == {'2025-01': 5, '2025-02': 1, '2025-03': 0}
     for month in (1, 2, 3):
         overview = await dashboard_service._client_recency_block(
@@ -127,7 +127,7 @@ async def test_cohort_size_equals_overview_new_clients_for_each_month(async_sess
 async def test_returns_within_horizons_and_immature_cells_are_none(async_session):
     await _seed_cohorts(async_session)
     payload = await build_retention_3_6_12(request(async_session, date(2025, 1, 1), date(2026, 1, 31)))
-    rows = {row['cohort_month']: row for row in payload['raw']['cohorts']}
+    rows = {row['cohort_month']: row for row in table_rows(payload, 'retention_cohorts')}
     january = rows['2025-01']
     assert january['returned_1'] == 1
     assert january['pct_1'] == pytest.approx(20.0)
@@ -164,12 +164,12 @@ async def test_a_horizon_ending_today_is_not_mature_until_the_day_is_over(async_
     on_the_horizon = await build_retention_3_6_12(request(
         async_session, *window, factual_at=datetime(2026, 1, 31, 9, 0, 0)
     ))
-    assert on_the_horizon['raw']['cohorts'][0]['pct_1'] is None
+    assert table_rows(on_the_horizon, 'retention_cohorts')[0]['pct_1'] is None
 
     day_after = await build_retention_3_6_12(request(
         async_session, *window, factual_at=datetime(2026, 2, 1, 9, 0, 0)
     ))
-    assert day_after['raw']['cohorts'][0]['pct_1'] == 0.0
+    assert table_rows(day_after, 'retention_cohorts')[0]['pct_1'] == 0.0
 
 
 @pytest.mark.asyncio
@@ -184,11 +184,12 @@ async def test_retention_staff_filter_selects_cohort_by_first_master_but_counts_
     await async_session.commit()
 
     payload = await build_retention_3_6_12(request(async_session, date(2025, 1, 1), date(2025, 1, 31), staff_id=1))
-    january = payload['raw']['cohorts'][0]
+    january = table_rows(payload, 'retention_cohorts')[0]
     assert january['size'] == 1 and january['pct_1'] == pytest.approx(100.0)
     other = await build_retention_3_6_12(request(async_session, date(2025, 1, 1), date(2025, 1, 31), staff_id=2))
-    assert other['raw']['cohorts'][0]['size'] == 1
-    assert other['raw']['cohorts'][0]['pct_1'] == 0.0 and other['raw']['cohorts'][0]['pct_3'] == pytest.approx(100.0)
+    other_january = table_rows(other, 'retention_cohorts')[0]
+    assert other_january['size'] == 1
+    assert other_january['pct_1'] == 0.0 and other_january['pct_3'] == pytest.approx(100.0)
 
 
 @pytest.mark.asyncio
@@ -216,7 +217,7 @@ async def test_retention_waits_for_a_branch_that_left_only_until_its_window_end(
     async_session.add_all(seed.rows)
     await async_session.commit()
     payload = await build_retention_3_6_12(request(async_session, date(2025, 1, 1), date(2025, 1, 31)))
-    january = payload['raw']['cohorts'][0]
+    january = table_rows(payload, 'retention_cohorts')[0]
     # Six months after January is past the window end, so nothing is known about month 6 and beyond.
     assert january['pct_3'] == 0.0
     assert january['pct_6'] is None
@@ -243,7 +244,6 @@ async def test_only_mature_clients_with_no_return_are_churned(async_session):
     # The share's base is the clients old enough to have left: 1 and 3. Client 2 (89 days) is neither
     # churned nor part of the base, so a recent window is not diluted by people who could not have left yet.
     assert values['Доля от клиентов периода'] == pytest.approx(50.0)
-    assert payload['raw']['share_base_clients'] == 2
     notes = [note['title'] for note in payload['notes']]
     assert 'Недавние клиенты пока не учтены' in notes
     months = table_rows(payload, 'churn_by_month')

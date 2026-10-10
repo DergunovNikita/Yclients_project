@@ -410,9 +410,4 @@ async def build_goods_dynamics(req: ReportRequest) -> dict[str, Any]:
                 'или оплата визита вне периода. В долю визитов с покупкой они не входят.'
             ),
         })
-    base['raw'] = {
-        'completed_visits': completed_visits,
-        'visits_with_goods': visits_with_goods,
-        'unlinked_sales': {'count': unlinked_count, 'amount': unlinked_amount},
-    }
     return base

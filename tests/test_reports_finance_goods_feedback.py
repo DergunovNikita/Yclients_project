@@ -201,7 +201,7 @@ async def test_financial_payload_ships_neither_top_services_nor_the_daily_series
 
     assert [item['id'] for item in report['charts']] == ['revenue_periods', 'avg_check_periods']
     assert [item['id'] for item in report['tables']] == ['periods']
-    assert set(report['raw']) == {'average_check'}
+    assert 'raw' not in report
     assert report['notes'][0]['kind'] == 'formula'
 
 
@@ -247,7 +247,8 @@ async def test_goods_cards_reconcile_with_the_overview(async_session):
     cards = _cards(report)
     assert cards['Выручка товаров'] == overview['revenue']['goods_revenue'] == 1100.0
     assert cards['Единиц продано'] == overview['revenue']['goods_count'] == 5.0
-    assert report['raw']['completed_visits'] == overview['revenue']['appointments'] == 3
+    completed = sum(row['completed_visits'] for row in _table(report, 'periods')['rows'])
+    assert completed == overview['revenue']['appointments'] == 3
 
 
 @pytest.mark.asyncio
@@ -276,7 +277,6 @@ async def test_goods_note_names_sales_without_a_visit(async_session):
 
     report = await _report(async_session, 'goods_dynamics')
 
-    assert report['raw']['unlinked_sales'] == {'count': 2, 'amount': 300.0}
     note = next(item for item in report['notes'] if item['title'] == 'Продажи без визита')
     assert note['text'].startswith('2 продаж товаров на 300 ₽')
 
@@ -289,7 +289,7 @@ async def test_goods_staff_filter_picks_visits_of_the_master(async_session):
 
     cards = _cards(report)
     # Anna's visits are 1 and 3; only visit 1 carries goods.
-    assert report['raw']['completed_visits'] == 2
+    assert sum(row['completed_visits'] for row in _table(report, 'periods')['rows']) == 2
     assert cards['Визитов с покупкой товара'] == 1
     assert cards['Доля визитов с покупкой товара'] == 50.0
     assert cards['Выручка товаров'] == 700.0
@@ -304,7 +304,6 @@ async def test_goods_sales_without_a_visit_follow_the_seller_filter(async_sessio
     report = await _report(async_session, 'goods_dynamics', staff_id=1, allowed_company_ids=None)
 
     # Anna sold the 200 gel; Boris's 100 gel in the other branch is not hers.
-    assert report['raw']['unlinked_sales'] == {'count': 1, 'amount': 200.0}
     note = next(item for item in report['notes'] if item['title'] == 'Продажи без визита')
     assert note['text'].startswith('1 продаж товаров на 200 ₽')
     assert '300' not in note['text']

@@ -694,10 +694,6 @@
       "goods": "Prodotti",
       "diagnostics": "Diagnostica"
     },
-    "status": {
-      "ready": "Attivo",
-      "partial": "Parziale"
-    },
     "sources": {
       "appointmentsDetail": "dettaglio degli appuntamenti",
       "financialTransactionsDetail": "dettaglio dei pagamenti",

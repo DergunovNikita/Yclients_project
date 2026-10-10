@@ -32,26 +32,21 @@ MONEY_METRICS: tuple[dict[str, Any], ...] = (
         'label': 'Выручка',
         'summary': ('revenue',),
         'plan': ('revenue',),
-        'leaderboard': ('revenue_top', 'revenue_barber', 'revenue_admin'),
+        'leaderboard': ('revenue_barber', 'revenue_admin'),
     },
     {
         'code': 'avg_check',
         'label': 'Средний чек',
         'summary': ('average_check', 'average_check_source_status'),
         'plan': ('avg_check_total',),
-        'leaderboard': ('avg_check_top', 'avg_check_plan_branch', 'avg_check_plan_staff'),
+        'leaderboard': ('avg_check_plan_branch', 'avg_check_plan_staff'),
     },
     {
         'code': 'cosmo_sum',
         'label': 'Космо, сумма',
         'summary': (),
         'plan': ('cosmo_sum', 'cosmo_price'),
-        'leaderboard': (
-            'cosmo_barber',
-            'cosmo_barber_rankings',
-            'cosmo_admin',
-            'cosmo_admin_rankings',
-        ),
+        'leaderboard': ('cosmo_barber', 'cosmo_admin'),
     },
 )
 
@@ -90,7 +85,11 @@ def default_money_codes_for_role(role: str | None) -> frozenset[str]:
 
 
 def money_payload_keys(hidden_codes: frozenset[str], group: str) -> set[str]:
-    """Payload keys (summary/plan/leaderboard) governed by the given hidden money codes."""
+    """Payload keys governed by the given hidden money codes.
+
+    `summary` and `plan` name keys of the Overview and Plan/fact payloads; `leaderboard` names
+    the tables of the ratings report.
+    """
     keys: set[str] = set()
     for metric in MONEY_METRICS:
         if metric['code'] in hidden_codes:

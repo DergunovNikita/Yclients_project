@@ -206,8 +206,14 @@ def _table(payload, table_id):
     return next(table for table in payload['tables'] if table['id'] == table_id)
 
 
-def _by_company(payload):
-    return {branch['company_id']: branch for branch in payload['raw']['branches']}
+async def _breakdown(session, start=AUGUST[0], end=AUGUST[1], company_id=None):
+    """What the report is built from: its tables carry the figures, not the reasons, dates or missing months."""
+    company_ids = [company_id] if company_id else [1, 2, 3, 4, 6]
+    return await payment_methods.fetch_payment_breakdown(session, start, end, company_ids, FROZEN_NOW)
+
+
+def _by_company(breakdown):
+    return {branch['company_id']: branch for branch in breakdown['branches']}
 
 
 # --- revenue reconciliation -------------------------------------------------------------
@@ -257,7 +263,7 @@ async def test_report_matches_overview_per_branch_and_for_the_network(client, se
     response = await _report(client)
     assert response.status_code == 200, response.text
     payload = response.json()['data']
-    branches = _by_company(payload)
+    branches = _by_company(await _breakdown(seeded))
     assert set(branches) == {1, 2, 3}  # Delta not opened yet, Left already gone
     for company_id, expected in EXPECTED.items():
         for key, value in expected.items():
@@ -292,7 +298,8 @@ async def test_report_matches_overview_per_branch_and_for_the_network(client, se
 async def test_yandex_pay_is_carved_out_of_cashless_for_whole_months(client, seeded):
     await _store(seeded, 1, 600.5)
     payload = (await _report(client)).json()['data']
-    alpha, beta = _by_company(payload)[1], _by_company(payload)[2]
+    breakdown = await _breakdown(seeded)
+    alpha, beta = _by_company(breakdown)[1], _by_company(breakdown)[2]
     assert alpha['yandex_pay'] == 600.5
     assert alpha['cashless'] == pytest.approx(2650.0 - 600.5)
     assert alpha['cashless_yclients'] == 2650.0
@@ -300,8 +307,8 @@ async def test_yandex_pay_is_carved_out_of_cashless_for_whole_months(client, see
     assert beta['yandex_pay'] is None and beta['cashless'] == 700.0
     assert beta['yandex_pay_missing_months'] == ['2026-08']
     assert alpha['yandex_pay_missing_months'] == []
-    assert payload['raw']['yandex_pay_applied'] is True
-    assert payload['raw']['countable_months'] == ['2026-08']
+    assert breakdown['yandex_pay_applied'] is True
+    assert breakdown['countable_months'] == ['2026-08']
     warnings = [note['title'] for note in payload['notes'] if note['kind'] == 'warning']
     assert warnings == ['Яндекс Пэй введён не за все месяцы']
     shares = {row['metric']: row for row in _table(payload, 'payment_shares')['rows']}
@@ -316,8 +323,9 @@ async def test_yandex_pay_is_carved_out_of_cashless_for_whole_months(client, see
 async def test_partial_period_leaves_yandex_pay_unknown(client, seeded):
     await _store(seeded, 1, 600.0)
     payload = (await _report(client, end=date(2026, 8, 15))).json()['data']
-    alpha = _by_company(payload)[1]
-    assert payload['raw']['yandex_pay_applied'] is False
+    breakdown = await _breakdown(seeded, end=date(2026, 8, 15))
+    alpha = _by_company(breakdown)[1]
+    assert breakdown['yandex_pay_applied'] is False
     assert alpha['yandex_pay'] is None
     assert alpha['cashless'] == alpha['cashless_yclients']
     assert alpha['yandex_pay_missing_months'] == []
@@ -325,7 +333,7 @@ async def test_partial_period_leaves_yandex_pay_unknown(client, seeded):
     assert alpha['yandex_pay_unapplied_reason'] == 'value_beyond_period'
     assert alpha['yandex_pay_unapplied_data_through'] == '2026-08-31'
     # Beta has no value: nothing blocks it, it is simply not entered.
-    assert _by_company(payload)[2]['yandex_pay_applied'] is True
+    assert _by_company(breakdown)[2]['yandex_pay_applied'] is True
     titles = [note['title'] for note in payload['notes'] if note['kind'] == 'warning']
     assert titles == ['Яндекс Пэй не учтён', 'Яндекс Пэй введён не за все месяцы']
     text = next(note['text'] for note in payload['notes'] if note['title'] == 'Яндекс Пэй не учтён')
@@ -339,9 +347,10 @@ async def test_partial_period_leaves_yandex_pay_unknown(client, seeded):
 async def test_month_to_date_counts_the_current_month(client, seeded):
     await _store(seeded, 1, 90.0, month=9, through=date(2026, 9, 14))
     payload = (await _report(client, start=date(2026, 9, 1), end=date(2026, 9, 15), company_id=1)).json()['data']
-    assert payload['raw']['yandex_pay_applied'] is True
-    assert _by_company(payload)[1]['yandex_pay'] == 90.0
-    assert _by_company(payload)[1]['yandex_pay_data_through'] == {'2026-09': '2026-09-14'}
+    breakdown = await _breakdown(seeded, date(2026, 9, 1), date(2026, 9, 15), company_id=1)
+    assert breakdown['yandex_pay_applied'] is True
+    assert _by_company(breakdown)[1]['yandex_pay'] == 90.0
+    assert _by_company(breakdown)[1]['yandex_pay_data_through'] == {'2026-09': '2026-09-14'}
     note = next(note for note in payload['notes'] if note['title'] == 'Яндекс Пэй внесён не за весь месяц')
     assert note['kind'] == 'info'
     assert note['text'].startswith('сентябрь 2026: данные по 14.09 — Alpha.')
@@ -353,8 +362,7 @@ async def test_month_to_date_counts_the_current_month(client, seeded):
 @pytest.mark.asyncio
 async def test_period_spanning_a_missing_month_lists_it(client, seeded):
     await _store(seeded, 1, 100.0, month=8)
-    payload = (await _report(client, start=date(2026, 7, 1), end=date(2026, 8, 31))).json()['data']
-    alpha = _by_company(payload)[1]
+    alpha = _by_company(await _breakdown(seeded, date(2026, 7, 1), date(2026, 8, 31)))[1]
     assert alpha['yandex_pay'] == 100.0
     assert alpha['yandex_pay_missing_months'] == ['2026-07']
 
@@ -364,7 +372,8 @@ async def test_months_that_have_not_started_are_not_listed_as_missing(client, se
     await _store(seeded, 1, 100.0, month=8)
     payload = (await _report(client, start=date(2026, 8, 1), end=date(2026, 12, 31), company_id=1)).json()['data']
     # Today is 15.09: September can be entered, October to December cannot yet.
-    assert _by_company(payload)[1]['yandex_pay_missing_months'] == ['2026-09']
+    breakdown = await _breakdown(seeded, date(2026, 8, 1), date(2026, 12, 31), company_id=1)
+    assert _by_company(breakdown)[1]['yandex_pay_missing_months'] == ['2026-09']
     note = next(note for note in payload['notes'] if note['title'] == 'Яндекс Пэй введён не за все месяцы')
     assert 'сентябрь 2026' in note['text'] and 'октябрь' not in note['text'] and 'декабрь' not in note['text']
 
@@ -373,7 +382,7 @@ async def test_months_that_have_not_started_are_not_listed_as_missing(client, se
 async def test_yandex_pay_above_cashless_is_shown_as_is_with_a_warning(client, seeded):
     await _store(seeded, 2, 5000.0)
     payload = (await _report(client)).json()['data']
-    beta = _by_company(payload)[2]
+    beta = _by_company(await _breakdown(seeded))[2]
     assert beta['cashless'] == pytest.approx(700.0 - 5000.0)
     excess = [note for note in payload['notes'] if note['title'] == 'Яндекс Пэй больше безналичных YClients']
     assert len(excess) == 1 and 'Beta' in excess[0]['text']
@@ -383,8 +392,7 @@ async def test_yandex_pay_above_cashless_is_shown_as_is_with_a_warning(client, s
 async def test_stored_value_outside_the_reporting_window_is_not_applied(client, seeded):
     # Gamma left on 20.08: its August row is anchored on 31.08, outside the window.
     await _store(seeded, 3, 700.0)
-    payload = (await _report(client)).json()['data']
-    gamma = _by_company(payload)[3]
+    gamma = _by_company(await _breakdown(seeded))[3]
     assert gamma['yandex_pay'] is None
     assert gamma['yandex_pay_missing_months'] == []
 
@@ -424,7 +432,7 @@ async def test_report_shape_for_one_branch_and_the_stacked_chart(client, seeded)
 async def test_report_ignores_the_staff_filter(client):
     plain = (await _report(client)).json()['data']
     filtered = (await _report(client, staff_id=1)).json()['data']
-    assert filtered['raw'] == plain['raw']
+    assert filtered['tables'] == plain['tables']
     assert filtered['cards'] == plain['cards']
 
 
@@ -434,7 +442,7 @@ async def test_report_ignores_the_staff_filter(client):
 def test_report_registry_flags():
     definition = dashboard_reports.REPORT_REGISTRY['payment_methods']
     assert definition.title == 'Формы оплаты'
-    assert definition.status == 'ready' and definition.group == 'finance'
+    assert definition.group == 'finance'
     assert definition.staff_filter is False
     assert definition.compare is False and definition.granularity is False
     assert definition.to_payload()['filters']['staff'] is False
@@ -531,7 +539,8 @@ async def test_branch_outside_the_scope_is_refused(client):
     assert post.status_code == 403
     # The branch admin's report covers only the branches they hold.
     scoped = (await _report(client, 'branch_admin')).json()['data']
-    assert set(_by_company(scoped)) == {1, 2}
+    amounts = _table(scoped, 'payment_amounts')
+    assert [column['key'] for column in amounts['columns']] == ['metric', 'total', 'company_1', 'company_2']
 
 
 @pytest.mark.asyncio
@@ -863,9 +872,9 @@ async def test_bad_month_on_read_is_400_and_selected_company_is_enforced(client)
 @pytest.mark.asyncio
 async def test_editor_row_follows_the_stored_value_into_the_report(client, seeded):
     await _save(client, [{'company_id': 1, 'value': 1000, 'previous_value': None}])
-    payload = (await _report(client)).json()['data']
-    assert _by_company(payload)[1]['yandex_pay'] == 1000.0
-    assert _by_company(payload)[1]['cashless'] == pytest.approx(1650.0)
+    alpha = _by_company(await _breakdown(seeded))[1]
+    assert alpha['yandex_pay'] == 1000.0
+    assert alpha['cashless'] == pytest.approx(1650.0)
 
 
 # --- review regressions -----------------------------------------------------------------
@@ -955,10 +964,10 @@ async def test_a_lost_insert_race_after_an_update_undoes_the_update(client, seed
 
 
 @pytest.mark.asyncio
-async def test_a_branch_outside_the_period_gets_an_empty_state_not_empty_tables(client):
+async def test_a_branch_outside_the_period_gets_an_empty_state_not_empty_tables(client, seeded):
     # Gamma left on 20.08; September has nothing of it. No column, no zero-width charts.
     payload = (await _report(client, start=date(2026, 9, 1), end=date(2026, 9, 30), company_id=3)).json()['data']
-    assert payload['raw']['branches'] == []
+    assert (await _breakdown(seeded, date(2026, 9, 1), date(2026, 9, 30), company_id=3))['branches'] == []
     assert payload['cards'] == [] and payload['charts'] == [] and payload['tables'] == []
     warnings = [note for note in payload['notes'] if note['kind'] == 'warning']
     assert len(warnings) == 1 and 'нет данных' in warnings[0]['text'].lower()
@@ -971,7 +980,8 @@ async def test_months_in_the_warnings_read_like_a_calendar(client, seeded):
     missing = next(note for note in payload['notes'] if note['title'] == 'Яндекс Пэй введён не за все месяцы')
     assert 'июль 2026' in missing['text'] and '2026-07' not in missing['text']
     # The machine-readable part keeps the ISO month.
-    assert _by_company(payload)[1]['yandex_pay_missing_months'] == ['2026-07']
+    breakdown = await _breakdown(seeded, date(2026, 7, 1), date(2026, 8, 31))
+    assert _by_company(breakdown)[1]['yandex_pay_missing_months'] == ['2026-07']
 
 
 def test_describe_months_squeezes_runs_of_three_or_more():
@@ -994,7 +1004,8 @@ async def test_a_long_period_names_untouched_branches_once_and_squeezes_gaps(cli
     assert 'Не введён ни за один месяц периода: Beta' in note['text']
     assert note['text'].count('2026') == 2
     # The machine-readable list is not squeezed.
-    assert len(_by_company(payload)[1]['yandex_pay_missing_months']) == 7
+    breakdown = await _breakdown(seeded, date(2026, 1, 1), date(2026, 8, 31))
+    assert len(_by_company(breakdown)[1]['yandex_pay_missing_months']) == 7
 
 
 @pytest.mark.asyncio
@@ -1012,11 +1023,12 @@ async def test_a_negative_cashless_share_is_not_drawn_as_a_doughnut_segment(clie
 
 
 @pytest.mark.asyncio
-async def test_a_period_without_revenue_draws_no_empty_charts(client):
+async def test_a_period_without_revenue_draws_no_empty_charts(client, seeded):
     # Branch 1 exists in September but has no facts yet: tables of zeros are honest, empty charts are not.
     payload = (await _report(client, start=date(2026, 9, 1), end=date(2026, 9, 30), company_id=1)).json()['data']
     assert payload['charts'] == []
-    assert payload['tables'] and payload['raw']['branches'][0]['revenue'] == 0
+    assert payload['tables']
+    assert (await _breakdown(seeded, date(2026, 9, 1), date(2026, 9, 30), company_id=1))['branches'][0]['revenue'] == 0
 
 
 @pytest.mark.asyncio
@@ -1037,7 +1049,7 @@ async def test_a_float_sum_a_hair_under_yandex_pay_reads_as_zero_not_minus_zero(
 
     monkeypatch.setattr(payment_methods, 'fetch_revenue_by_account_type', hair_under)
     payload = (await _report(client, company_id=1)).json()['data']
-    (alpha,) = payload['raw']['branches']
+    (alpha,) = (await _breakdown(seeded, company_id=1))['branches']
     assert alpha['cashless'] == 0.0 and math.copysign(1.0, alpha['cashless']) > 0
     assert not [note for note in payload['notes'] if note['title'] == 'Яндекс Пэй больше безналичных YClients']
     cells = [row[column] for table in payload['tables'] for row in table['rows'] for column in row if column != 'metric']
@@ -1211,7 +1223,7 @@ async def test_a_month_where_yandex_pay_exceeds_cashless_is_named_even_if_the_pe
     await _store(seeded, 1, 500.0, month=7)  # July's cashless is 100
     await _store(seeded, 1, 100.0, month=8)
     payload = (await _report(client, start=JULY_AUGUST[0], end=JULY_AUGUST[1], company_id=1)).json()['data']
-    (alpha,) = payload['raw']['branches']
+    (alpha,) = (await _breakdown(seeded, JULY_AUGUST[0], JULY_AUGUST[1], company_id=1))['branches']
     assert alpha['cashless'] > 0
     assert not [note for note in payload['notes'] if note['title'] == 'Яндекс Пэй больше безналичных YClients']
     note = next(note for note in payload['notes'] if note['title'] == 'Яндекс Пэй больше безналичных YClients по месяцам')
@@ -1433,13 +1445,11 @@ def test_the_database_keeps_data_through_inside_its_month():
 async def test_a_total_through_the_middle_of_a_month_counts_from_the_first_to_that_day_and_later(client, seeded):
     await _store(seeded, 1, 300.0, through=date(2026, 8, 15))
     for end in (date(2026, 8, 15), date(2026, 8, 20), AUGUST[1]):
-        payload = (await _report(client, end=end, company_id=1)).json()['data']
-        alpha = _by_company(payload)[1]
+        alpha = _by_company(await _breakdown(seeded, end=end, company_id=1))[1]
         assert alpha['yandex_pay'] == 300.0, end
         assert alpha['yandex_pay_data_through'] == {'2026-08': '2026-08-15'}
     # A period that ends before the total's last day cannot carry it.
-    payload = (await _report(client, end=date(2026, 8, 14), company_id=1)).json()['data']
-    alpha = _by_company(payload)[1]
+    alpha = _by_company(await _breakdown(seeded, end=date(2026, 8, 14), company_id=1))[1]
     assert alpha['yandex_pay'] is None and alpha['yandex_pay_applied'] is False
     assert alpha['yandex_pay_unapplied_reason'] == 'value_beyond_period'
     assert alpha['yandex_pay_unapplied_data_through'] == '2026-08-15'
@@ -1450,13 +1460,14 @@ async def test_a_total_through_the_middle_of_a_month_counts_from_the_first_to_th
 async def test_a_period_starting_after_the_first_blocks_that_branch_even_without_a_value(client, seeded):
     await _store(seeded, 1, 300.0)
     payload = (await _report(client, start=date(2026, 8, 2))).json()['data']
-    branches = _by_company(payload)
+    breakdown = await _breakdown(seeded, start=date(2026, 8, 2))
+    branches = _by_company(breakdown)
     for company_id in (1, 2):
         assert branches[company_id]['yandex_pay'] is None
         assert branches[company_id]['yandex_pay_unapplied_reason'] == 'period_starts_mid_month'
     # Gamma left on 20.08: August is not its month to count, so nothing about it is blocked.
     assert branches[3]['yandex_pay_applied'] is True
-    assert payload['raw']['yandex_pay_applied'] is False
+    assert breakdown['yandex_pay_applied'] is False
     text = next(note['text'] for note in payload['notes'] if note['title'] == 'Яндекс Пэй не учтён')
     assert 'Alpha, Beta: Яндекс Пэй вводится за месяц с 1-го числа' in text and 'период начинается позже' in text
     single = (await _report(client, start=date(2026, 8, 2), company_id=1)).json()['data']
@@ -1469,7 +1480,8 @@ async def test_a_blocked_branch_does_not_block_its_neighbours(client, seeded):
     await _store(seeded, 1, 300.0, through=date(2026, 8, 31))
     await _store(seeded, 2, 100.0, through=date(2026, 8, 10))
     payload = (await _report(client, end=date(2026, 8, 20))).json()['data']
-    alpha, beta = _by_company(payload)[1], _by_company(payload)[2]
+    breakdown = await _breakdown(seeded, end=date(2026, 8, 20))
+    alpha, beta = _by_company(breakdown)[1], _by_company(breakdown)[2]
     assert alpha['yandex_pay'] is None and beta['yandex_pay'] == 100.0
     assert beta['cashless'] == pytest.approx(700.0 - 100.0)
     assert alpha['cashless'] == alpha['cashless_yclients']
@@ -1481,8 +1493,7 @@ async def test_a_blocked_branch_does_not_block_its_neighbours(client, seeded):
 @pytest.mark.asyncio
 async def test_a_month_without_a_value_does_not_block_the_others(client, seeded):
     await _store(seeded, 1, 100.0, month=8)
-    payload = (await _report(client, start=date(2026, 7, 1), end=date(2026, 8, 31), company_id=1)).json()['data']
-    alpha = _by_company(payload)[1]
+    alpha = _by_company(await _breakdown(seeded, date(2026, 7, 1), date(2026, 8, 31), company_id=1))[1]
     assert alpha['yandex_pay'] == 100.0 and alpha['yandex_pay_missing_months'] == ['2026-07']
     assert alpha['yandex_pay_applied'] is True
 
@@ -1517,7 +1528,8 @@ async def test_a_partial_month_gets_a_note_naming_the_dates_by_month(client, see
     )
     assert 'Gamma' not in note['text']
     assert 'Выручка YClients посчитана по 31.08' in note['text']
-    assert _by_company(payload)[1]['yandex_pay_data_through'] == {'2026-07': '2026-07-20', '2026-08': '2026-08-20'}
+    alpha = _by_company(await _breakdown(seeded, JULY_AUGUST[0], JULY_AUGUST[1]))[1]
+    assert alpha['yandex_pay_data_through'] == {'2026-07': '2026-07-20', '2026-08': '2026-08-20'}
 
 
 @pytest.mark.asyncio

@@ -45,13 +45,8 @@ from dashboard_service import (
     fetch_plan_settings,
     fetch_revenue_daily,
     fetch_dashboard_services,
-    fetch_service_kpi_groups,
-    save_service_label,
     save_service_management,
     create_service_kpi_group,
-    update_service_kpi_group,
-    archive_service_kpi_group,
-    save_service_kpi_assignment,
     save_plan_settings,
     save_manual_facts,
     fetch_staff,
@@ -213,20 +208,12 @@ class PlanSettingsPayload(BaseModel):
     staff: list[PlanSettingsStaffPayload]
 
 
-class ServiceLabelPayload(BaseModel):
-    is_extra: bool
-
-
 class ServiceKpiGroupPayload(BaseModel):
     title: str | None = None
     code: str | None = None
     description: str | None = None
     sort_order: int | None = None
     is_active: bool | None = None
-
-
-class ServiceKpiAssignmentPayload(BaseModel):
-    group_id: int | None = None
 
 
 class ServiceManagementRowChange(BaseModel):
@@ -366,16 +353,11 @@ def _hide_summary_financials(summary: dict[str, Any], hidden_codes: frozenset[st
     return payload
 
 
-def _strip_plan_fact_financials(
-    value: Any,
-    hidden_plan_codes: set[str],
-    hidden_leaderboard_keys: set[str],
-    drop_all_money: bool,
-) -> Any:
+def _strip_plan_fact_financials(value: Any, hidden_plan_codes: set[str], drop_all_money: bool) -> Any:
     if isinstance(value, list):
         items = []
         for item in value:
-            stripped = _strip_plan_fact_financials(item, hidden_plan_codes, hidden_leaderboard_keys, drop_all_money)
+            stripped = _strip_plan_fact_financials(item, hidden_plan_codes, drop_all_money)
             if stripped is not None:
                 items.append(stripped)
         return items
@@ -385,62 +367,19 @@ def _strip_plan_fact_financials(
             return None
         result: dict[str, Any] = {}
         for key, item in value.items():
-            if key in hidden_leaderboard_keys:
-                continue
-            if key == 'staff_leaderboards' and isinstance(item, dict):
-                filtered = {
-                    board_key: _strip_plan_fact_financials(
-                        board_value, hidden_plan_codes, hidden_leaderboard_keys, drop_all_money
-                    )
-                    for board_key, board_value in item.items()
-                    if board_key not in hidden_leaderboard_keys
-                }
-                result[key] = {k: v for k, v in filtered.items() if v is not None}
-                continue
-            stripped = _strip_plan_fact_financials(item, hidden_plan_codes, hidden_leaderboard_keys, drop_all_money)
+            stripped = _strip_plan_fact_financials(item, hidden_plan_codes, drop_all_money)
             if stripped is not None:
                 result[key] = stripped
         return result
     return value
 
 
-def _strip_extra_service_revenue(leaderboards: Any) -> None:
-    """Drop the ruble `sum` from the extra-service boards.
-
-    No money metric claims these keys, so neither the per-code nor the drop-all net reaches
-    them; the ratings report strips the same field by hand
-    (`_hide_staff_leaderboard_financials`). Today the widget leaves the field at zero — it
-    calls `fetch_plan_fact` without `include_extra_service_revenue`, which only the report
-    sets — so this guards the flag, not a live leak: flip it on for the widget and the boards
-    would carry every barber's extra-service revenue to a role with revenue hidden.
-    """
-    if not isinstance(leaderboards, dict):
-        return
-    for key, value in leaderboards.items():
-        if not key.startswith('extra_services'):
-            continue
-        if isinstance(value, dict):
-            # The board ranked *by* `sum` is the revenue order itself — emptying its rows would
-            # still answer "who earns most", so the bucket goes with the values.
-            value.pop('sum', None)
-            row_lists = list(value.values())
-        else:
-            row_lists = [value]
-        for rows in row_lists:
-            for row in rows or []:
-                if isinstance(row, dict):
-                    row.pop('sum', None)
-
-
 def _hide_plan_fact_financials(plan_fact: dict[str, Any], hidden_codes: frozenset[str]) -> dict[str, Any]:
+    # The widget never carries `staff_leaderboards` (only the ratings report asks `fetch_plan_fact` for them,
+    # and `_hide_staff_leaderboard_financials` covers that report), so only plan cells are money here.
     hidden_plan_codes = money_payload_keys(hidden_codes, 'plan')
-    hidden_leaderboard_keys = money_payload_keys(hidden_codes, 'leaderboard')
     drop_all_money = ALL_MONEY_CODES <= hidden_codes
-    payload = _strip_plan_fact_financials(
-        plan_fact, hidden_plan_codes, hidden_leaderboard_keys, drop_all_money
-    ) or {}
-    if 'revenue' in hidden_codes:
-        _strip_extra_service_revenue(payload.get('staff_leaderboards'))
+    payload = _strip_plan_fact_financials(plan_fact, hidden_plan_codes, drop_all_money) or {}
     payload['financials_hidden'] = True
     return payload
 
@@ -479,7 +418,6 @@ def _hide_staff_leaderboard_financials(
             _remove_table_field(extra_table, 'sum', metric='sum')
 
     payload['tables'] = [table for table in tables if table.get('id') not in hidden_table_ids]
-    payload['raw'] = {}
     if hidden_codes:
         payload['financials_hidden'] = True
     return payload
@@ -641,22 +579,6 @@ async def dashboard_services_save(
     return {'success': True, 'data': data}
 
 
-@router.get('/services/kpi_groups')
-async def dashboard_service_kpi_groups(
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
-    _require_settings_admin(ctx)
-    return {
-        'success': True,
-        'data': await fetch_service_kpi_groups(
-            db,
-            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
-            include_inactive=True,
-        ),
-    }
-
-
 @router.post('/services/kpi_groups', dependencies=[Depends(forbid_demo)])
 async def dashboard_service_kpi_group_create(
     payload: ServiceKpiGroupPayload,
@@ -673,96 +595,6 @@ async def dashboard_service_kpi_group_create(
             description=payload.description,
             sort_order=payload.sort_order,
             is_active=True if payload.is_active is None else payload.is_active,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {'success': True, 'data': data}
-
-
-@router.patch('/services/kpi_groups/{group_id}', dependencies=[Depends(forbid_demo)])
-async def dashboard_service_kpi_group_update(
-    group_id: int,
-    payload: ServiceKpiGroupPayload,
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
-    _require_settings_admin(ctx)
-    try:
-        data = await update_service_kpi_group(
-            db,
-            group_id,
-            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
-            title=payload.title,
-            code=payload.code,
-            description=payload.description,
-            sort_order=payload.sort_order,
-            is_active=payload.is_active,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {'success': True, 'data': data}
-
-
-@router.delete('/services/kpi_groups/{group_id}', dependencies=[Depends(forbid_demo)])
-async def dashboard_service_kpi_group_delete(
-    group_id: int,
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
-    _require_settings_admin(ctx)
-    try:
-        data = await archive_service_kpi_group(
-            db,
-            group_id,
-            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {'success': True, 'data': data}
-
-
-@router.patch('/services/{company_id}/{service_id}/labels', dependencies=[Depends(forbid_demo)])
-async def dashboard_service_label_save(
-    company_id: int,
-    service_id: int,
-    payload: ServiceLabelPayload,
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
-    _require_settings_admin(ctx)
-    scope = query_scope(ctx, company_id)
-    try:
-        data = await save_service_label(
-            db,
-            company_id,
-            service_id,
-            is_extra=payload.is_extra,
-            allowed_company_ids=scope['branch_ids'],
-            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {'success': True, 'data': data}
-
-
-@router.patch('/services/{company_id}/{service_id}/kpi_group', dependencies=[Depends(forbid_demo)])
-async def dashboard_service_kpi_assignment_save(
-    company_id: int,
-    service_id: int,
-    payload: ServiceKpiAssignmentPayload,
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
-    _require_settings_admin(ctx)
-    scope = query_scope(ctx, company_id)
-    try:
-        data = await save_service_kpi_assignment(
-            db,
-            company_id,
-            service_id,
-            group_id=payload.group_id,
-            allowed_company_ids=scope['branch_ids'],
-            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -909,129 +741,6 @@ async def dashboard_widget_sync_status(ctx: AccessContext = Depends(get_dashboar
         'last_successful_sync_at': sync_payload.get('last_successful_sync_at'),
         'last_run': {'status': last_run['status'], 'finished_at': last_run['finished_at']} if last_run else None,
     }}}
-
-
-@router.get('/widget/summary')
-async def dashboard_widget_summary(
-    start_date: date = Query(..., description='Inclusive period start'),
-    end_date: date = Query(..., description='Inclusive period end'),
-    company_id: int | None = Query(None, description='Optional YClients company (salon) id'),
-    staff_id: int | None = Query(None, description='Optional active staff id'),
-    period_preset: PeriodPreset = None,
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
-    start, end = _parse_range(start_date, end_date)
-    scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
-    factual_at = dashboard_service.factual_now()
-    summary = await fetch_summary(
-        db,
-        start,
-        end,
-        scope['company_id'],
-        staff_id,
-        allowed_company_ids=scope['allowed_company_ids'],
-        factual_at=factual_at,
-        period_preset=period_preset,
-    )
-    hidden = hidden_money_codes(ctx)
-    if hidden:
-        summary = _hide_summary_financials(summary, hidden)
-    return {
-        'success': True,
-        'data': summary,
-    }
-
-
-@router.get('/widget/revenue_daily')
-async def dashboard_widget_revenue_daily(
-    start_date: date = Query(...),
-    end_date: date = Query(...),
-    company_id: int | None = Query(None),
-    staff_id: int | None = Query(None),
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
-    require_financial_access(ctx)
-    start, end = _parse_range(start_date, end_date)
-    scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
-    return {
-        'success': True,
-        'data': await fetch_revenue_daily(
-            db,
-            start,
-            end,
-            scope['company_id'],
-            staff_id,
-            allowed_company_ids=scope['allowed_company_ids'],
-        ),
-    }
-
-
-@router.get('/widget/top_services')
-async def dashboard_widget_top_services(
-    start_date: date = Query(...),
-    end_date: date = Query(...),
-    company_id: int | None = Query(None),
-    staff_id: int | None = Query(None),
-    limit: int = Query(10, ge=1, le=50),
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
-    require_financial_access(ctx)
-    start, end = _parse_range(start_date, end_date)
-    scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
-    factual_at = dashboard_service.factual_now()
-    rows = await fetch_top_services(
-        db,
-        start,
-        end,
-        scope['company_id'],
-        limit,
-        staff_id,
-        allowed_company_ids=scope['allowed_company_ids'],
-        factual_at=factual_at,
-    )
-    return {
-        'success': True,
-        'data': rows,
-        'mode': 'master',
-        'source_status': 'ready',
-        'missing_sources': [],
-    }
-
-
-@router.get('/widget/extra_services')
-async def dashboard_widget_extra_services(
-    start_date: date = Query(...),
-    end_date: date = Query(...),
-    company_id: int | None = Query(None),
-    staff_id: int | None = Query(None),
-    limit: int | None = Query(None, ge=1, le=1000),
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
-    require_financial_access(ctx)
-    start, end = _parse_range(start_date, end_date)
-    scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
-    factual_at = dashboard_service.factual_now()
-    rows = await fetch_extra_services(
-        db,
-        start,
-        end,
-        scope['company_id'],
-        limit,
-        staff_id,
-        allowed_company_ids=scope['allowed_company_ids'],
-        factual_at=factual_at,
-    )
-    return {
-        'success': True,
-        'data': rows,
-        'mode': 'master',
-        'source_status': 'ready',
-        'missing_sources': [],
-    }
 
 
 @router.get('/widget/plan_fact')

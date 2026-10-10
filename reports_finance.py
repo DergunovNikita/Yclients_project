@@ -49,7 +49,7 @@ async def build_financial_overview(req: ReportRequest) -> dict[str, Any]:
 
     base['average_check_source_status'] = avg['source_status']
     base['missing_sources'] = sorted(avg['missing_components'] or [])
-    base['notes'].append({'kind': 'formula', 'title': 'Средний чек общий', 'text': avg['formula']})
+    base['notes'].append({'kind': 'formula', 'title': 'Средний чек общий', 'text': 'income / completed_appointments'})
     base['cards'] = [
         card('Выручка', avg['numerator'], MONEY_FORMAT),
         card('Услуги', avg['service_revenue'], MONEY_FORMAT),
@@ -104,5 +104,4 @@ async def build_financial_overview(req: ReportRequest) -> dict[str, Any]:
             x_kind='time',
         ),
     ]
-    base['raw'] = {'average_check': avg}
     return base

@@ -133,11 +133,6 @@ async def build_avg_check_by_service(req: ReportRequest) -> dict[str, Any]:
             row_key='title',
         ),
     ]
-    req.base['raw'] = {
-        'services': rows,
-        'extra_services': extra_rows,
-        'service_attribution': {'mode': 'master', 'source_status': 'ready', 'missing_sources': []},
-    }
     return req.base
 
 
@@ -333,9 +328,4 @@ async def build_service_combos(req: ReportRequest) -> dict[str, Any]:
             row_key='pair',
         )
     ]
-    req.base['raw'] = {
-        'pairs': rows,
-        'visits_with_services': visits,
-        'multi_service_visits': multi_visits,
-    }
     return req.base

@@ -18,6 +18,7 @@ import sync_pipeline
 from auth_scope import AccessContext
 from auth_service import create_access_token, hash_password
 from dashboard_service import _staff_leaderboards_payload, fetch_plan_fact
+from report_helpers import get_summary, table_rows
 from api import app
 from models import (
     AccountCatalog,
@@ -107,24 +108,19 @@ def _paid_service_revenue_filter_rows() -> list[FinancialTransaction]:
 # a deny-list of today's four names would not notice a fifth.
 MONEY_FREE_AVERAGE_CHECK_KEYS = {
     'appointments',
-    'appointments_without_client',
     'completed_appointments',
     'denominator',
     'extra_service_appointments',
     'extra_services',
     'extra_services_change_pct',
-    'formula',
     'goods',
     'goods_change_pct',
-    'goods_checks',
     'missing_components',
     'services',
     'services_change_pct',
     'source_status',
-    'specialized_formulas',
     'total',
     'total_change_pct',
-    'unclassified_operations',
     'unique_clients',
 }
 
@@ -203,11 +199,7 @@ async def test_dashboard_reports_registry_contract(async_session):
     ]
     by_id = {item['id']: item for item in data}
     for item in data:
-        assert set(item) == {
-            'id', 'title', 'description', 'group', 'type', 'themes', 'roles', 'filters', 'status',
-            'required_sources', 'aliases',
-        }
-        assert item['status'] == 'ready'
+        assert set(item) == {'id', 'title', 'description', 'group', 'themes', 'roles', 'filters', 'aliases'}
         assert item['description'] and item['description'] != 'Отчет строится на текущих данных YClients в PostgreSQL.'
         assert set(item['filters']) == {'date_range', 'branch', 'staff', 'granularity', 'compare'}
     assert by_id['financial_overview']['filters']['compare'] is True
@@ -671,7 +663,7 @@ async def test_dashboard_client_reports_revenue_uses_paid_service_rows(async_ses
     # Buckets follow the whole history of the clients who visited in the period, like the Overview.
     # The client who only paid in the period for an earlier visit is not one of them: their revenue
     # sits on its own row instead of inflating a bucket.
-    frequency_by_bucket = {row['bucket']: row for row in data['raw']['visit_frequency']}
+    frequency_by_bucket = {row['bucket']: row for row in table_rows(data, 'visit_frequency')}
     assert '0 визитов' not in frequency_by_bucket
     assert frequency_by_bucket['1 визит']['clients'] == 1
     assert frequency_by_bucket['1 визит']['revenue'] == 0.0
@@ -776,13 +768,9 @@ async def test_dashboard_year_over_year_uses_actual_history_and_overview_formula
     assert data['report_id'] == 'year_over_year'
     assert statement_count <= 16
     assert data['source_status'] == 'ready'
-    assert data['raw']['service_detail_excluded'] is True
-    assert [row['year'] for row in data['raw']['years']] == [2023, 2024, 2025, 2026]
-    assert data['raw']['activity_start'] == '2023-05-10'
-    assert data['raw']['activity_end'] == '2026-08-01'
-    assert data['raw']['latest_year'] == 2026
-    assert data['raw']['months_in_scope'] == [f'{month:02d}' for month in range(1, 13)]
-    years_by_year = {row['year']: row for row in data['raw']['years']}
+    assert [row['year'] for row in table_rows(data, 'years')] == [2023, 2024, 2025, 2026]
+    assert table_rows(data, 'years')[0]['period_start'] == '2023-05-10'
+    years_by_year = {row['year']: row for row in table_rows(data, 'years')}
     assert years_by_year[2023]['period_start'] == '2023-05-10'
     assert years_by_year[2023]['is_partial_year'] is True
     assert years_by_year[2023]['revenue'] == 2300.0
@@ -1034,7 +1022,7 @@ async def test_year_over_year_current_december_31_remains_partial(
         date(2026, 12, 31),
         allowed_company_ids=[1],
     )
-    years = {row['year']: row for row in report['raw']['years']}
+    years = {row['year']: row for row in table_rows(report, 'years')}
 
     assert years[2025]['is_partial_year'] is False
     assert years[2026]['is_partial_year'] is True
@@ -1064,9 +1052,7 @@ async def test_dashboard_year_over_year_empty_scope_returns_empty_actual_history
     assert response.status_code == 200
     data = response.json()['data']
     assert data['source_status'] == 'partial'
-    assert data['raw']['years'] == []
-    assert data['raw']['months'] == []
-    assert data['raw']['latest_year'] is None
+    assert data['tables'] == []
 
 
 def _yoy_source_states(company_id: int, period_start: date, period_end: date, synced_at: datetime):
@@ -1132,7 +1118,7 @@ async def test_reporting_start_keeps_overview_and_year_over_year_in_agreement(
         date(2026, 1, 31),
         allowed_company_ids=[1],
     )
-    year_2025 = next(row for row in report['raw']['years'] if row['year'] == 2025)
+    year_2025 = next(row for row in table_rows(report, 'years') if row['year'] == 2025)
 
     assert summary['revenue']['total'] == 700.0
     assert summary['revenue']['appointments'] == 1
@@ -1253,9 +1239,9 @@ async def test_reporting_start_cuts_service_revenue_paid_across_the_boundary(
     # Visits follow the same rule, so the average check divides 700 by one visit.
     assert summary['revenue']['appointments'] == 2
     assert summary['average_check']['services'] == 350.0
-    assert report['raw']['activity_start'] == '2025-06-10'
-    assert [row['year'] for row in report['raw']['years']] == [2025, 2026]
-    year_2025 = report['raw']['years'][0]
+    assert table_rows(report, 'years')[0]['period_start'] == '2025-06-10'
+    assert [row['year'] for row in table_rows(report, 'years')] == [2025, 2026]
+    year_2025 = table_rows(report, 'years')[0]
     assert year_2025['revenue'] == summary['revenue']['total']
     assert year_2025['source_status'] == 'ready'
 
@@ -1381,9 +1367,9 @@ async def test_reporting_start_keeps_pre_opening_direct_revenue_out_of_years_and
     )
 
     # The scope opens with the older branch, not with the newer branch's pre-opening money.
-    assert report['raw']['activity_start'] == '2024-02-01'
-    assert sum(row['revenue'] or 0 for row in report['raw']['years']) == 800.0
-    year_2025 = next(row for row in report['raw']['years'] if row['year'] == 2025)
+    assert table_rows(report, 'years')[0]['period_start'] == '2024-02-01'
+    assert sum(row['revenue'] or 0 for row in table_rows(report, 'years')) == 800.0
+    year_2025 = next(row for row in table_rows(report, 'years') if row['year'] == 2025)
     assert year_2025['revenue'] == 700.0
     assert year_2025['topup_revenue'] == 0.0
     assert year_2025['goods_revenue'] == 0.0
@@ -1430,7 +1416,7 @@ async def test_reporting_start_certifies_the_opening_year_of_a_branch_synced_fro
         date(2026, 1, 31),
         allowed_company_ids=[1],
     )
-    year_2025 = next(row for row in report['raw']['years'] if row['year'] == 2025)
+    year_2025 = next(row for row in table_rows(report, 'years') if row['year'] == 2025)
 
     assert year_2025['source_status'] == 'ready'
     assert year_2025['missing_components'] == []
@@ -1491,7 +1477,7 @@ async def test_reporting_start_clamps_coverage_for_a_branch_opened_mid_year(
         date(2026, 1, 31),
         allowed_company_ids=[1, 2],
     )
-    year_2025 = next(row for row in report['raw']['years'] if row['year'] == 2025)
+    year_2025 = next(row for row in table_rows(report, 'years') if row['year'] == 2025)
 
     assert year_2025['source_status'] == 'ready'
     assert year_2025['missing_components'] == []
@@ -1571,7 +1557,6 @@ async def test_reporting_start_trims_breakdown_cards_client_blocks_and_staff_fac
     assert summary['visit_metrics']['unique_clients'] == 1
     assert summary['revenue']['topup_revenue'] == 300.0
     assert summary['revenue']['goods_revenue'] == 200.0
-    assert summary['average_check']['goods_checks'] == 1
     # The client blocks are separate queries from the visit KPI above.
     assert summary['visit_metrics']['client_visit_frequency']['total_clients'] == 1
     # A client whose only visit predates the opening is not a new client of this branch.
@@ -1584,8 +1569,8 @@ async def test_reporting_start_trims_breakdown_cards_client_blocks_and_staff_fac
         date(2025, 12, 31),
         allowed_company_ids=[1],
     )
-    assert sum(row['records'] for row in operations['raw']['by_staff']) == 1
-    assert sum(row['records'] for row in operations['raw']['by_period']) == 1
+    assert sum(row['records'] for row in table_rows(operations, 'staff_records')) == 1
+    assert sum(row['records'] for row in table_rows(operations, 'periods')) == 1
 
     staff_facts = await dashboard_service._staff_fact_components_by_branch(
         async_session,
@@ -1625,7 +1610,7 @@ async def test_reporting_start_trims_breakdown_cards_client_blocks_and_staff_fac
         date(2025, 12, 31),
         allowed_company_ids=[1],
     )
-    assert sum(row['clients'] for row in churn['raw']['staff']) == 1
+    assert sum(row['clients'] for row in table_rows(churn, 'churn_by_staff')) == 1
 
     # Goods revenue reaches the summary through _average_check_block's classification query,
     # and admin attribution counts finished appointments directly — both must see the trimmed
@@ -1756,7 +1741,7 @@ async def test_reporting_start_does_not_blank_years_a_branch_predates(
         date(2026, 1, 31),
         allowed_company_ids=[1, 2],
     )
-    years = {row['year']: row for row in report['raw']['years']}
+    years = {row['year']: row for row in table_rows(report, 'years')}
 
     assert years[2024]['source_status'] == 'ready'
     assert years[2024]['missing_components'] == []
@@ -1806,16 +1791,16 @@ async def test_year_over_year_reporting_start_trims_pre_opening_history(
         allowed_company_ids=[1],
     )
 
-    assert report['raw']['activity_start'] == '2025-06-10'
-    assert [row['year'] for row in report['raw']['years']] == [2025, 2026]
-    year_2025 = report['raw']['years'][0]
+    assert table_rows(report, 'years')[0]['period_start'] == '2025-06-10'
+    assert [row['year'] for row in table_rows(report, 'years')] == [2025, 2026]
+    year_2025 = table_rows(report, 'years')[0]
     assert year_2025['revenue'] == 700.0
     assert year_2025['appointments'] == 1
     assert year_2025['avg_check'] == 700.0
 
     months_2025 = {
         row['month']: row
-        for row in report['raw']['months']
+        for row in table_rows(report, 'months')
         if row['year'] == 2025
     }
     assert months_2025[4]['revenue'] is None
@@ -1863,8 +1848,8 @@ async def test_year_over_year_reporting_start_cuts_each_branch_separately(
         allowed_company_ids=[1, 2],
     )
 
-    years = {row['year']: row for row in report['raw']['years']}
-    assert report['raw']['activity_start'] == '2024-03-04'
+    years = {row['year']: row for row in table_rows(report, 'years')}
+    assert table_rows(report, 'years')[0]['period_start'] == '2024-03-04'
     # Branch 2 opened in 2025, so its 2024 payment stays out of the shared 2024 row.
     assert years[2024]['revenue'] == 100.0
     assert years[2024]['appointments'] == 1
@@ -1911,9 +1896,9 @@ async def test_year_over_year_without_reporting_start_keeps_full_history(
         allowed_company_ids=[1],
     )
 
-    assert report['raw']['activity_start'] == '2023-03-04'
-    assert report['raw']['years'][0]['year'] == 2023
-    assert report['raw']['years'][0]['revenue'] == 900.0
+    assert table_rows(report, 'years')[0]['period_start'] == '2023-03-04'
+    assert table_rows(report, 'years')[0]['year'] == 2023
+    assert table_rows(report, 'years')[0]['revenue'] == 900.0
 
 
 @pytest.mark.asyncio
@@ -1976,7 +1961,7 @@ async def test_reporting_end_keeps_history_and_drops_facts_after_the_handover(
         date(2026, 1, 31),
         allowed_company_ids=[1],
     )
-    year_2025 = next(row for row in report['raw']['years'] if row['year'] == 2025)
+    year_2025 = next(row for row in table_rows(report, 'years') if row['year'] == 2025)
 
     assert summary['revenue']['total'] == 700.0
     assert summary['revenue']['appointments'] == 1
@@ -2279,15 +2264,13 @@ async def test_year_over_year_history_can_start_with_direct_revenue_only(
         allowed_company_ids=[1],
     )
 
-    assert report['raw']['activity_start'] == fact_day.isoformat()
-    assert report['raw']['activity_end'] == fact_day.isoformat()
-    assert report['raw']['latest_year'] == 2021
-    assert report['raw']['years'][0]['revenue'] == 250.0
-    assert report['raw']['years'][0]['goods_revenue'] == 250.0
-    assert report['raw']['years'][0]['appointments'] == 0
+    assert table_rows(report, 'years')[0]['period_start'] == fact_day.isoformat()
+    assert table_rows(report, 'years')[0]['revenue'] == 250.0
+    assert table_rows(report, 'years')[0]['goods_revenue'] == 250.0
+    assert table_rows(report, 'years')[0]['appointments'] == 0
     # No completed visits means no average check, matching the monthly rows and leaving
     # the average-check chart without a misleading zero bar.
-    assert report['raw']['years'][0]['avg_check'] is None
+    assert table_rows(report, 'years')[0]['avg_check'] is None
 
 
 @pytest.mark.asyncio
@@ -2347,13 +2330,12 @@ async def test_year_over_year_history_includes_payment_before_completed_visit(
         date(2026, 1, 31),
         allowed_company_ids=[1],
     )
-    years = {row['year']: row for row in report['raw']['years']}
+    years = {row['year']: row for row in table_rows(report, 'years')}
 
-    assert report['raw']['activity_start'] == '2023-12-30'
-    assert report['raw']['activity_end'] == '2024-01-02'
+    assert table_rows(report, 'years')[0]['period_start'] == '2023-12-30'
     december = next(
         row
-        for row in report['raw']['months']
+        for row in table_rows(report, 'months')
         if row['year'] == 2023 and row['month'] == 12
     )
     assert years[2023]['source_status'] == 'partial'
@@ -2369,7 +2351,7 @@ async def test_year_over_year_history_includes_payment_before_completed_visit(
         date(2026, 1, 31),
         allowed_company_ids=[1],
     )
-    covered_years = {row['year']: row for row in covered_report['raw']['years']}
+    covered_years = {row['year']: row for row in table_rows(covered_report, 'years')}
     assert covered_years[2023]['revenue'] == 100.0
     assert covered_years[2024]['appointments'] == 1
 
@@ -2439,8 +2421,8 @@ async def test_year_over_year_masks_linked_direct_revenue_without_appointment_co
         date(2026, 1, 31),
         allowed_company_ids=[1],
     )
-    annual = report['raw']['years'][0]
-    january = next(row for row in report['raw']['months'] if row['month'] == 1)
+    annual = table_rows(report, 'years')[0]
+    january = next(row for row in table_rows(report, 'months') if row['month'] == 1)
 
     assert annual['source_status'] == 'partial'
     assert annual['goods_revenue'] is None
@@ -2604,11 +2586,9 @@ async def test_factual_cutoff_is_shared_by_overview_plan_fact_daily_and_years(
         for group in network_plan_fact['groups']
         if group['scope'] == 'branch'
     )
-    assert year_report['raw']['latest_year'] == 2025
     assert year_report['period']['end'] == '2026-08-01'
-    assert year_report['raw']['activity_end'] == '2025-01-10'
-    assert [row['year'] for row in year_report['raw']['years']] == [2025, 2026]
-    years = {row['year']: row for row in year_report['raw']['years']}
+    assert [row['year'] for row in table_rows(year_report, 'years')] == [2025, 2026]
+    years = {row['year']: row for row in table_rows(year_report, 'years')}
     assert years[2025]['revenue'] == 100.0
     assert years[2026]['revenue'] == 0.0
     assert years[2026]['appointments'] == 0
@@ -2689,9 +2669,8 @@ async def test_year_over_year_uses_configured_branch_scope_when_access_is_unrest
         date(2025, 1, 31),
     )
 
-    assert report['raw']['latest_year'] == 2024
-    assert [row['year'] for row in report['raw']['years']] == [2024, 2025, 2026]
-    years = {row['year']: row for row in report['raw']['years']}
+    assert [row['year'] for row in table_rows(report, 'years')] == [2024, 2025, 2026]
+    years = {row['year']: row for row in table_rows(report, 'years')}
     assert years[2024]['revenue'] == 100.0
     assert years[2025]['revenue'] is None
     assert years[2026]['revenue'] is None
@@ -2776,8 +2755,8 @@ async def test_dashboard_year_over_year_keeps_partial_multi_company_year(
     data = response.json()['data']
     assert data['source_status'] == 'partial'
     assert 'financial_transactions_detail' in data['missing_sources']
-    assert [row['year'] for row in data['raw']['years']] == [2023, 2024, 2025, 2026]
-    years = {row['year']: row for row in data['raw']['years']}
+    assert [row['year'] for row in table_rows(data, 'years')] == [2023, 2024, 2025, 2026]
+    years = {row['year']: row for row in table_rows(data, 'years')}
     # Company 3 has no local facts or coverage and still participates in scope.
     assert years[2023]['source_status'] == 'partial'
     assert 'appointments_detail' in years[2023]['missing_components']
@@ -2794,7 +2773,7 @@ async def test_dashboard_year_over_year_keeps_partial_multi_company_year(
     assert charts['year_appointments']['datasets'][0]['data'] == [None, None, None, None]
     december_2024 = next(
         row
-        for row in data['raw']['months']
+        for row in table_rows(data, 'months')
         if row['year'] == 2024 and row['month'] == 12
     )
     assert december_2024['revenue'] is None
@@ -2856,8 +2835,7 @@ async def test_year_over_year_query_count_does_not_grow_with_history_years(
     finally:
         event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
 
-    assert [row['year'] for row in data['raw']['years']] == list(range(2015, 2027))
-    assert data['raw']['latest_year'] == 2026
+    assert [row['year'] for row in table_rows(data, 'years')] == list(range(2015, 2027))
     assert statement_count <= 16
 
 
@@ -2946,7 +2924,7 @@ async def test_year_over_year_opz_deduplicates_repeated_client_per_year(
         date(2025, 1, 31),
         allowed_company_ids=[1],
     )
-    years = {row['year']: row for row in report['raw']['years']}
+    years = {row['year']: row for row in table_rows(report, 'years')}
     overview_2024 = await dashboard_service.fetch_summary(
         async_session,
         date(2024, 1, 10),
@@ -3021,7 +2999,7 @@ async def test_year_over_year_opz_fact_advances_latest_year(
         date(2025, 1, 1),
         allowed_company_ids=[1],
     )
-    years = {row['year']: row for row in report['raw']['years']}
+    years = {row['year']: row for row in table_rows(report, 'years')}
     overview = await dashboard_service.fetch_summary(
         async_session,
         date(2025, 1, 1),
@@ -3037,8 +3015,6 @@ async def test_year_over_year_opz_fact_advances_latest_year(
         opz_override=await dashboard_service._opz_count(async_session, date(2025, 1, 1), date(2025, 1, 1), 1),
     )
 
-    assert report['raw']['activity_end'] == '2025-01-01'
-    assert report['raw']['latest_year'] == 2025
     assert years[2025]['opz_qty'] == overview['visit_metrics']['opz_qty'] == 1.0
     assert years[2025]['opz_qty'] == plan_fact['opz_qty']
 
@@ -3099,7 +3075,7 @@ async def test_year_over_year_masks_opz_when_dependent_appointments_are_uncovere
         date(2026, 1, 31),
         allowed_company_ids=[1],
     )
-    year_2025 = next(row for row in report['raw']['years'] if row['year'] == 2025)
+    year_2025 = next(row for row in table_rows(report, 'years') if row['year'] == 2025)
 
     assert year_2025['source_status'] == 'partial'
     assert year_2025['missing_components'] == ['appointments_detail']
@@ -3119,7 +3095,7 @@ async def test_year_over_year_masks_opz_when_dependent_appointments_are_uncovere
         allowed_company_ids=[1],
     )
     covered_2025 = next(
-        row for row in covered_report['raw']['years'] if row['year'] == 2025
+        row for row in table_rows(covered_report, 'years') if row['year'] == 2025
     )
 
     assert covered_2025['source_status'] == 'ready'
@@ -3196,8 +3172,8 @@ async def test_year_over_year_monthly_opz_counts_a_client_once_per_month(
         date(2026, 1, 31),
         allowed_company_ids=[1],
     )
-    years = {row['year']: row for row in report['raw']['years']}
-    months = {(row['year'], row['month']): row for row in report['raw']['months']}
+    years = {row['year']: row for row in table_rows(report, 'years')}
+    months = {(row['year'], row['month']): row for row in table_rows(report, 'months')}
 
     # The client rebooked in two months of 2025: two monthly events, one annual event.
     assert months[(2025, 1)]['opz_qty'] == 1.0
@@ -3335,7 +3311,7 @@ async def test_year_over_year_masks_monthly_opz_without_hiding_revenue_and_visit
             allowed_company_ids=[1],
         )
         return {
-            (row['year'], row['month']): row for row in report['raw']['months']
+            (row['year'], row['month']): row for row in table_rows(report, 'months')
         }
 
     months = await month_rows()
@@ -3389,8 +3365,8 @@ async def test_year_over_year_monthly_opz_carries_manual_top_up_except_under_sta
         date(2026, 1, 31),
         allowed_company_ids=[1],
     )
-    months = {(row['year'], row['month']): row for row in report['raw']['months']}
-    years = {row['year']: row for row in report['raw']['years']}
+    months = {(row['year'], row['month']): row for row in table_rows(report, 'months')}
+    years = {row['year']: row for row in table_rows(report, 'years')}
     assert months[(2025, 1)]['opz_qty'] == 1.0
     assert months[(2025, 2)]['opz_qty'] == 5.0
     assert years[2025]['opz_qty'] == 5.0
@@ -3428,7 +3404,7 @@ async def test_year_over_year_payload_exposes_opz_charts_columns_and_cards(
         allowed_company_ids=[1],
     )
     charts = {chart['id']: chart for chart in report['charts']}
-    years = [str(row['year']) for row in report['raw']['years']]
+    years = [str(row['year']) for row in table_rows(report, 'years')]
 
     # Two-column grid: every row pairs a by-year bar with its monthly year-over-year line.
     assert [chart['id'] for chart in report['charts']] == [
@@ -3591,13 +3567,12 @@ async def test_year_over_year_goods_source_controls_count_and_latest_year(
         date(2026, 1, 31),
         allowed_company_ids=[1],
     )
-    missing_years = {row['year']: row for row in missing_goods['raw']['years']}
+    missing_years = {row['year']: row for row in table_rows(missing_goods, 'years')}
     july_2026 = next(
         row
-        for row in missing_goods['raw']['months']
+        for row in table_rows(missing_goods, 'months')
         if row['year'] == 2026 and row['month'] == 7
     )
-    assert missing_goods['raw']['latest_year'] == 2026
     assert missing_years[2026]['goods_count'] is None
     assert missing_years[2026]['source_status'] == 'partial'
     assert 'goods_transactions_detail' in missing_years[2026]['missing_components']
@@ -3619,7 +3594,7 @@ async def test_year_over_year_goods_source_controls_count_and_latest_year(
         date(2026, 1, 31),
         allowed_company_ids=[1],
     )
-    ready_2026 = next(row for row in ready_goods['raw']['years'] if row['year'] == 2026)
+    ready_2026 = next(row for row in table_rows(ready_goods, 'years') if row['year'] == 2026)
     overview = await dashboard_service.fetch_summary(
         async_session,
         date(2026, 1, 1),
@@ -3627,7 +3602,6 @@ async def test_year_over_year_goods_source_controls_count_and_latest_year(
         company_id=1,
         include_appointments_breakdown=False,
     )
-    assert ready_goods['raw']['activity_end'] == '2026-07-20'
     assert ready_2026['source_status'] == 'ready'
     assert ready_2026['goods_count'] == overview['revenue']['goods_count'] == 2.0
 
@@ -3702,19 +3676,16 @@ async def test_year_over_year_nonfactual_visits_do_not_advance_latest_year(
         allowed_company_ids=[1],
     )
 
-    assert report['raw']['activity_end'] == '2024-01-10'
-    assert report['raw']['latest_year'] == 2024
-    assert [row['year'] for row in report['raw']['years']] == [2024, 2025, 2026]
-    years = {row['year']: row for row in report['raw']['years']}
+    assert [row['year'] for row in table_rows(report, 'years')] == [2024, 2025, 2026]
+    years = {row['year']: row for row in table_rows(report, 'years')}
     assert years[2024]['revenue'] == 0.0
     assert years[2024]['appointments'] == 1
-    assert years[2024]['is_latest_year'] is True
     assert years[2025]['revenue'] == 0.0
     assert years[2026]['revenue'] == 0.0
     assert years[2026]['is_partial_year'] is True
     current_months = [
         row
-        for row in report['raw']['months']
+        for row in table_rows(report, 'months')
         if row['year'] == 2026
     ]
     assert [row['revenue'] for row in current_months[:8]] == [0.0] * 8
@@ -3933,7 +3904,7 @@ async def test_dashboard_staff_efficiency_revenue_uses_paid_service_rows(async_s
 
     assert r.status_code == 200
     data = r.json()['data']
-    rows = data['raw']['staff']
+    rows = table_rows(data, 'staff')
     assert rows == [
         {
             'staff_id': 1,
@@ -3941,7 +3912,6 @@ async def test_dashboard_staff_efficiency_revenue_uses_paid_service_rows(async_s
             'company_title': 'Salon',
             'appointments': 2,
             'completed': 2,
-            'not_completed': 0,
             'clients': 1,
             'revenue': 1500.0,
             'avg_check': 750.0,
@@ -3952,7 +3922,6 @@ async def test_dashboard_staff_efficiency_revenue_uses_paid_service_rows(async_s
             'company_title': 'Salon',
             'appointments': 0,
             'completed': 0,
-            'not_completed': 0,
             'clients': 0,
             'revenue': 700.0,
             # Paid in the period for a visit outside it: no completed visit here, so no average either.
@@ -4401,7 +4370,7 @@ async def test_staff_leaderboard_applies_component_money_permissions_without_raw
     assert extra_admin['rows'][0]['staff'] == 'Admin'
     assert {option['key'] for option in extra_admin['ranking']['options']} == {'qty', 'pct'}
     assert data['cards'] == []
-    assert data['raw'] == {}
+    assert 'raw' not in data
 
 
 def test_staff_leaderboards_sort_stably_and_require_positive_average_check_plan():
@@ -4496,8 +4465,6 @@ def test_staff_leaderboard_metric_variants_sort_by_the_selected_measure():
     assert boards['extra_services_admin_rankings']['qty'][0]['staff'] == 'Admin leader'
     assert boards['extra_services_admin_rankings']['pct'][0]['staff'] == 'Admin leader'
     assert 'sum' not in boards['extra_services_admin_rankings']
-    assert boards['extra_services'] == boards['extra_services_barber']
-    assert boards['extra_services_rankings'] == boards['extra_services_barber_rankings']
     assert boards['cosmo_barber_rankings']['qty'][0]['staff'] == 'Quantity leader'
     assert boards['cosmo_barber_rankings']['sum'][0]['staff'] == 'Percent leader'
     assert boards['cosmo_barber_rankings']['pct'][0]['staff'] == 'Percent leader'
@@ -4684,10 +4651,6 @@ async def test_platform_admin_dashboard_bundle_requires_selected_tenant(async_se
 @pytest.mark.parametrize(
     'path',
     [
-        '/dashboard/widget/summary',
-        '/dashboard/widget/revenue_daily',
-        '/dashboard/widget/top_services',
-        '/dashboard/widget/extra_services',
         '/dashboard/widget/plan_fact',
         '/dashboard/bundle',
     ],
@@ -4852,24 +4815,19 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        viewer_summary = await client.get(
-            '/dashboard/widget/summary',
+        viewer_summary = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
             headers={'Authorization': f'Bearer {viewer_token}'},
         )
-        forbidden_other_staff = await client.get(
-            '/dashboard/widget/summary',
+        forbidden_other_staff = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'staff_id': 2},
             headers={'Authorization': f'Bearer {viewer_token}'},
         )
-        manager_other_staff = await client.get(
-            '/dashboard/widget/summary',
+        manager_other_staff = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'staff_id': 2},
-            headers={'Authorization': f'Bearer {manager_token}'},
-        )
-        manager_revenue_daily = await client.get(
-            '/dashboard/widget/revenue_daily',
-            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
             headers={'Authorization': f'Bearer {manager_token}'},
         )
         manager_bundle = await client.get(
@@ -4887,11 +4845,6 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             params={'company_id': 1},
             headers={'Authorization': f'Bearer {manager_token}'},
         )
-        manager_service_label = await client.patch(
-            '/dashboard/services/1/10/labels',
-            json={'is_extra': True},
-            headers={'Authorization': f'Bearer {manager_token}'},
-        )
         manager_service_batch = await client.patch(
             '/dashboard/services',
             json={'row_changes': [], 'group_changes': []},
@@ -4902,8 +4855,8 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             params={'month': '2025-01'},
             headers={'Authorization': f'Bearer {manager_token}'},
         )
-        owner_revenue_daily = await client.get(
-            '/dashboard/widget/revenue_daily',
+        owner_bundle = await client.get(
+            '/dashboard/bundle',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
             headers={'Authorization': f'Bearer {owner_token}'},
         )
@@ -4944,7 +4897,6 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     assert manager_other_staff.status_code == 200
     assert manager_other_staff.json()['data']['financials_hidden'] is True
     assert 'revenue' not in manager_other_staff.json()['data']
-    assert manager_revenue_daily.status_code == 403
     assert manager_bundle.status_code == 200
     manager_bundle_data = manager_bundle.json()['data']
     # The bundle is what the dashboard loads, so the same guard has to hold on this route.
@@ -4961,13 +4913,12 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     assert all('revenue' not in row for row in manager_bundle_data['revenue_daily'])
     assert manager_plan_settings.status_code == 403
     assert manager_services.status_code == 403
-    assert manager_service_label.status_code == 403
     assert manager_service_batch.status_code == 403
     # Settings stay shut for a manager, but the manual-fact editors are its own tab:
     # branch reporting is what a branch manager controls.
     assert manager_review_facts.status_code == 200
-    assert owner_revenue_daily.status_code == 200
-    assert sum(row['revenue'] for row in owner_revenue_daily.json()['data']) == 3000.0
+    assert owner_bundle.status_code == 200
+    assert sum(row['revenue'] for row in owner_bundle.json()['data']['revenue_daily']) == 3000.0
     # branch_admin sees every money metric by default; a manager gets the average check only.
     assert branch_admin_bundle.status_code == 200
     assert branch_admin_bundle.json()['data'].get('financials_hidden') is not True
@@ -4977,7 +4928,8 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     assert branch_admin_operations_report.status_code == 200
     assert branch_admin_plan_settings.status_code == 200
     assert branch_admin_plan_fact.status_code == 200
-    assert 'avg_check_top' in branch_admin_plan_fact.json()['data'].get('staff_leaderboards', {})
+    # Only the ratings report asks for the leaderboards; the widget never carries them.
+    assert 'staff_leaderboards' not in branch_admin_plan_fact.json()['data']
 
 
 @pytest.mark.asyncio
@@ -5065,10 +5017,7 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        manager_default = await client.get('/dashboard/widget/summary', params=summary_params, headers=manager_headers)
-        manager_revenue_default = await client.get(
-            '/dashboard/widget/revenue_daily', params=summary_params, headers=manager_headers
-        )
+        manager_default = await get_summary(client, params=summary_params, headers=manager_headers)
         manager_plan_fact = await client.get(
             '/dashboard/widget/plan_fact', params=summary_params, headers=manager_headers
         )
@@ -5093,10 +5042,7 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
             json={'role': 'manager', 'visible_codes': ['avg_check']},
             headers=owner_headers,
         )
-        manager_after = await client.get('/dashboard/widget/summary', params=summary_params, headers=manager_headers)
-        manager_revenue_after = await client.get(
-            '/dashboard/widget/revenue_daily', params=summary_params, headers=manager_headers
-        )
+        manager_after = await get_summary(client, params=summary_params, headers=manager_headers)
         hide_all = await client.put(
             '/dashboard/metric-visibility',
             json={'role': 'manager', 'visible_codes': []},
@@ -5122,7 +5068,6 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
     # list of forbidden names: `average_check` carries the income it was divided from, so a new
     # field in `_average_check_block` has to be classified before it can ship to this role.
     assert set(average_check) <= MONEY_FREE_AVERAGE_CHECK_KEYS, sorted(set(average_check))
-    assert manager_revenue_default.status_code == 403
 
     # Holding `avg_check` retires the blanket "drop everything formatted as money" net, so the
     # per-code path is now the only guard on Plan/fact. Nothing priced in rubles may survive it.
@@ -5141,15 +5086,9 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
                 yield from _money_codes(item)
 
     assert list(_money_codes(plan_fact_data)) == []
-    # The extra-service boards price their rows in rubles under a key no money metric claims.
-    leaderboards = plan_fact_data.get('staff_leaderboards') or {}
-    for key, value in leaderboards.items():
-        if not key.startswith('extra_services'):
-            continue
-        row_lists = value.values() if isinstance(value, dict) else [value]
-        for rows in row_lists:
-            for row in rows or []:
-                assert 'sum' not in row, (key, row)
+    # The leaderboards price their rows in rubles under keys no money metric claims, so the widget does not
+    # carry them at all: only the ratings report builds them, and it strips money by table (checked below).
+    assert 'staff_leaderboards' not in plan_fact_data
 
     # Config surface reports money metrics, per-role state and defaults.
     assert config.status_code == 200
@@ -5169,7 +5108,6 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
     assert manager_after.json()['data']['financials_hidden'] is True
     assert 'average_check' in manager_after.json()['data']
     assert 'revenue' not in manager_after.json()['data']
-    assert manager_revenue_after.status_code == 403
 
     # With every money code hidden, the staff_leaderboard report must not keep a single
     # money-formatted column in any table, regardless of that table's id.
@@ -5242,8 +5180,8 @@ async def test_dashboard_summary_matches_financial_transactions_by_external_reco
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        response = await client.get(
-            '/dashboard/widget/summary',
+        response = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
     app.dependency_overrides.clear()
@@ -5298,8 +5236,8 @@ async def test_dashboard_summary_revenue_and_change(async_session):
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        r = await client.get(
-            '/dashboard/widget/summary',
+        r = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
     app.dependency_overrides.clear()
@@ -5400,8 +5338,8 @@ async def test_dashboard_summary_split_revenue_and_average_checks(async_session)
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        r = await client.get(
-            '/dashboard/widget/summary',
+        r = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
     app.dependency_overrides.clear()
@@ -5463,8 +5401,8 @@ async def test_dashboard_summary_counts_new_and_repeat_clients(async_session):
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        response = await client.get(
-            '/dashboard/widget/summary',
+        response = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
     app.dependency_overrides.clear()
@@ -5504,8 +5442,8 @@ async def test_dashboard_summary_staff_filter_counts_new_clients_by_business_sco
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        response = await client.get(
-            '/dashboard/widget/summary',
+        response = await get_summary(
+            client,
             params={
                 'start_date': '2025-01-01',
                 'end_date': '2025-01-31',
@@ -5560,16 +5498,16 @@ async def test_dashboard_summary_client_visit_frequency_respects_branch_and_date
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        company_1_response = await client.get(
-            '/dashboard/widget/summary',
+        company_1_response = await get_summary(
+            client,
             params={
                 'start_date': '2025-01-01',
                 'end_date': '2025-01-31',
                 'company_id': 1,
             },
         )
-        company_2_response = await client.get(
-            '/dashboard/widget/summary',
+        company_2_response = await get_summary(
+            client,
             params={
                 'start_date': '2025-01-01',
                 'end_date': '2025-01-31',
@@ -5730,7 +5668,7 @@ async def test_new_vs_returning_report_uses_the_same_baseline_as_the_overview_ca
     transport = ASGITransport(app=app)
     period = {'start_date': '2026-08-31', 'end_date': '2026-09-05', 'period_preset': 'week'}
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        overview = await client.get('/dashboard/widget/summary', params=period)
+        overview = await get_summary(client, params=period)
         report = await client.get(
             '/dashboard/reports/data',
             params={'report_id': 'new_vs_returning_cross', 'granularity': 'month', **period},
@@ -5740,7 +5678,7 @@ async def test_new_vs_returning_report_uses_the_same_baseline_as_the_overview_ca
     assert overview.status_code == 200
     assert report.status_code == 200
     visits = overview.json()['data']['visit_metrics']
-    segments = {row['segment']: row for row in report.json()['data']['raw']['segments']}
+    segments = {row['segment']: row for row in table_rows(report.json()['data'], 'segments')}
     assert segments['Новые']['clients'] == visits['new_clients']
     assert segments['Новые']['clients_change_pct'] == visits['new_clients_change_pct']
     assert segments['Повторные']['clients_change_pct'] == visits['repeat_clients_change_pct']
@@ -5785,7 +5723,7 @@ async def test_overview_and_clients_report_bucket_visits_the_same_way(async_sess
     transport = ASGITransport(app=app)
     window = {'start_date': '2026-03-01', 'end_date': '2026-03-31'}
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        overview = await client.get('/dashboard/widget/summary', params=window)
+        overview = await get_summary(client, params=window)
         report = await client.get(
             '/dashboard/reports/data',
             params={'report_id': 'top_clients_pareto', 'granularity': 'month', **window},
@@ -5795,7 +5733,7 @@ async def test_overview_and_clients_report_bucket_visits_the_same_way(async_sess
     assert overview.status_code == 200
     assert report.status_code == 200
     frequency = overview.json()['data']['visit_metrics']['client_visit_frequency']
-    buckets = {row['bucket']: row['clients'] for row in report.json()['data']['raw']['visit_frequency']}
+    buckets = {row['bucket']: row['clients'] for row in table_rows(report.json()['data'], 'visit_frequency')}
     assert (frequency['one_visit']['count'], frequency['two_to_three_visits']['count'],
             frequency['four_plus_visits']['count']) == (1, 1, 1)
     assert buckets['1 визит'] == frequency['one_visit']['count']
@@ -5819,13 +5757,13 @@ async def test_bundle_and_summary_read_the_period_preset_the_same_way(async_sess
     window = {'start_date': '2026-09-01', 'end_date': '2026-09-05'}
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         bundle = await client.get('/dashboard/bundle', params={**window, 'period_preset': 'month'})
-        summary = await client.get(
-            '/dashboard/widget/summary', params={**window, 'period_preset': 'month'}
+        summary = await get_summary(
+            client, params={**window, 'period_preset': 'month'}
         )
         # Query() must stay inside the Annotated, or a bare `period_preset=` 422s the view
-        blank = await client.get('/dashboard/widget/summary', params={**window, 'period_preset': ''})
-        absent = await client.get('/dashboard/widget/summary', params=window)
-        typo = await client.get('/dashboard/widget/summary', params={**window, 'period_preset': 'MONTH'})
+        blank = await get_summary(client, params={**window, 'period_preset': ''})
+        absent = await get_summary(client, params=window)
+        typo = await get_summary(client, params={**window, 'period_preset': 'MONTH'})
     app.dependency_overrides.clear()
 
     assert bundle.status_code == 200
@@ -5885,7 +5823,7 @@ async def test_explicit_compare_window_overrides_the_preset_in_reports(async_ses
     assert without_compare.status_code == 200
     assert with_compare.status_code == 200
     delta = lambda r: {  # noqa: E731
-        row['segment']: row['clients_change_pct'] for row in r.json()['data']['raw']['segments']
+        row['segment']: row['clients_change_pct'] for row in table_rows(r.json()['data'], 'segments')
     }
     # the preset still rules when nothing else was asked for...
     assert delta(without_compare)['Новые'] == 50.0
@@ -6028,8 +5966,8 @@ async def test_average_check_uses_cash_income_and_business_denominator(async_ses
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        partial = await client.get(
-            '/dashboard/widget/summary',
+        partial = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
         async_session.add(
@@ -6042,8 +5980,8 @@ async def test_average_check_uses_cash_income_and_business_denominator(async_ses
             )
         )
         await async_session.commit()
-        ready = await client.get(
-            '/dashboard/widget/summary',
+        ready = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
     app.dependency_overrides.clear()
@@ -6060,13 +5998,9 @@ async def test_average_check_uses_cash_income_and_business_denominator(async_ses
     assert avg['topup_revenue'] == 250.0
     assert avg['completed_appointments'] == 5
     assert avg['unique_clients'] == 1
-    assert avg['appointments_without_client'] == 2
-    assert avg['goods_checks'] == 1
     assert avg['numerator'] == 1250.0
     assert avg['denominator'] == 5
     assert avg['total'] == 250.0
-    assert avg['formula'] == 'income / completed_appointments'
-    assert avg['unclassified_operations'] == 1
 
 
 @pytest.mark.asyncio
@@ -6103,26 +6037,21 @@ async def test_summary_excludes_placeholder_admin_appointments_from_revenue_and_
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        summary_response = await client.get(
-            '/dashboard/widget/summary',
-            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
-        )
-        daily_response = await client.get(
-            '/dashboard/widget/revenue_daily',
+        bundle_response = await client.get(
+            '/dashboard/bundle',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
     app.dependency_overrides.clear()
 
-    assert summary_response.status_code == 200
-    summary = summary_response.json()['data']
+    assert bundle_response.status_code == 200
+    summary = bundle_response.json()['data']['summary']
     assert summary['revenue']['total'] == 1000.0
     assert summary['revenue']['appointments'] == 1
     assert summary['average_check']['numerator'] == 1000.0
     assert summary['average_check']['denominator'] == 1
     assert summary['average_check']['total'] == 1000.0
 
-    assert daily_response.status_code == 200
-    daily = daily_response.json()['data']
+    daily = bundle_response.json()['data']['revenue_daily']
     assert daily == [{
         'date': '2025-01-05',
         'revenue': 1000.0,
@@ -6247,17 +6176,13 @@ async def test_dashboard_top_services_merges_same_service_name_across_branches(a
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         r = await client.get(
-            '/dashboard/widget/top_services',
-            params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
-        )
-        r_extra = await client.get(
-            '/dashboard/widget/extra_services',
+            '/dashboard/bundle',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
     app.dependency_overrides.clear()
 
     assert r.status_code == 200
-    rows = r.json()['data']
+    rows = r.json()['data']['top_services']
     assert len(rows) == 3
 
     black_mask = next(row for row in rows if row['title'] == 'Black Mask')
@@ -6272,8 +6197,7 @@ async def test_dashboard_top_services_merges_same_service_name_across_branches(a
     assert wash['service_count'] == 2
     assert wash['branch_count'] == 2
 
-    assert r_extra.status_code == 200
-    extra_rows = r_extra.json()['data']
+    extra_rows = r.json()['data']['extra_services']
     assert len(extra_rows) == 1
     assert extra_rows[0]['title'] == 'Black Mask'
     assert extra_rows[0]['sold'] == 3
@@ -6351,16 +6275,10 @@ async def test_dashboard_bundle_returns_all_extra_services_without_default_limit
             '/dashboard/bundle',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
-        limited = await client.get(
-            '/dashboard/widget/extra_services',
-            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'limit': 10},
-        )
     app.dependency_overrides.clear()
 
     assert bundle.status_code == 200
     assert len(bundle.json()['data']['extra_services']) == 55
-    assert limited.status_code == 200
-    assert len(limited.json()['data']) == 10
 
 
 @pytest.mark.asyncio
@@ -6414,20 +6332,20 @@ async def test_extra_service_labels_are_scoped_to_branch_in_calculations(async_s
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        all_summary = await client.get(
-            '/dashboard/widget/summary',
+        all_summary = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
-        branch_summary = await client.get(
-            '/dashboard/widget/summary',
+        branch_summary = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
-        other_branch_summary = await client.get(
-            '/dashboard/widget/summary',
+        other_branch_summary = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 2},
         )
         extra_services = await client.get(
-            '/dashboard/widget/extra_services',
+            '/dashboard/bundle',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
     app.dependency_overrides.clear()
@@ -6448,7 +6366,7 @@ async def test_extra_service_labels_are_scoped_to_branch_in_calculations(async_s
     assert other_branch_data['revenue']['extra_service_count'] == 0.0
 
     assert extra_services.status_code == 200
-    extra_rows = extra_services.json()['data']
+    extra_rows = extra_services.json()['data']['extra_services']
     assert len(extra_rows) == 1
     assert extra_rows[0]['sold'] == 1
     assert extra_rows[0]['revenue'] == 100.0
@@ -7136,16 +7054,16 @@ async def test_dashboard_plan_fact_uses_plan_and_fact_formulas(async_session):
             '/dashboard/widget/plan_fact',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'staff_id': 1},
         )
-        r_selected_staff_summary = await client.get(
-            '/dashboard/widget/summary',
+        r_selected_staff_summary = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'staff_id': 1},
         )
         r_partial = await client.get(
             '/dashboard/widget/plan_fact',
             params={'start_date': '2025-01-15', 'end_date': '2025-01-20'},
         )
-        r_summary = await client.get(
-            '/dashboard/widget/summary',
+        r_summary = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
     app.dependency_overrides.clear()
@@ -7464,8 +7382,11 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
 
     assert network_response.status_code == 200
     network_data = network_response.json()['data']
-    network_boards = network_data['staff_leaderboards']
-    assert network_boards['revenue_top'] == network_boards['revenue_barber']
+    # The widget leaves the leaderboards to the ratings report; the board builder is asked for them explicitly.
+    assert 'staff_leaderboards' not in network_data
+    network_boards = (await fetch_plan_fact(
+        async_session, date(2025, 1, 1), date(2025, 1, 31), include_staff_leaderboards=True
+    ))['staff_leaderboards']
     assert [row['staff'] for row in network_boards['revenue_barber']] == [
         'Bravo',
         'Charlie',
@@ -7473,14 +7394,9 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
     ]
     assert [row['staff'] for row in network_boards['revenue_admin']] == ['Delta Admin']
     assert network_boards['revenue_admin'][0]['value'] == 4000.0
-    assert network_boards['cosmo_admin'][0]['pct'] == 25.0
-    assert [row['staff'] for row in network_boards['avg_check_top']] == [
-        'Bravo',
-        'Charlie',
-        'Alpha',
-    ]
-    # The plan/fact widget skips the extra-service revenue query (report-only): qty is present, sum is 0.
-    extra_top = network_boards['extra_services']
+    assert network_boards['cosmo_admin_rankings']['sum'][0]['pct'] == 25.0
+    # Without `include_extra_service_revenue` the revenue query is skipped (report-only): qty is present, sum is 0.
+    extra_top = network_boards['extra_services_barber_rankings']['qty']
     assert [(row['staff'], row['qty']) for row in extra_top] == [
         ('Charlie', 4.0),
         ('Alpha', 3.0),
@@ -7524,8 +7440,10 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
 
     assert branch_response.status_code == 200
     branch_data = branch_response.json()['data']
-    branch_boards = branch_data['staff_leaderboards']
-    assert branch_boards['revenue_top'] == branch_boards['revenue_barber']
+    assert 'staff_leaderboards' not in branch_data
+    branch_boards = (await fetch_plan_fact(
+        async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1, include_staff_leaderboards=True
+    ))['staff_leaderboards']
     assert [row['staff'] for row in branch_boards['revenue_barber']] == ['Bravo', 'Alpha']
     assert [row['staff'] for row in branch_boards['revenue_admin']] == ['Delta Admin']
     branch_goods = {row['code']: row for row in branch_data['goods_kpi_execution']}
@@ -7806,16 +7724,16 @@ async def test_manual_opz_facts_add_to_calculated_opz(async_session):
             '/dashboard/widget/plan_fact',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
-        summary_response = await client.get(
-            '/dashboard/widget/summary',
+        summary_response = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
         mid_month_response = await client.get(
             '/dashboard/widget/plan_fact',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-13', 'company_id': 1},
         )
-        mid_month_summary = await client.get(
-            '/dashboard/widget/summary',
+        mid_month_summary = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-13', 'company_id': 1},
         )
     app.dependency_overrides.clear()
@@ -7973,8 +7891,8 @@ async def test_manual_opz_facts_cleared_value_restores_calculated_fact(async_ses
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': None, 'previous_value': 5}],
             },
         )
-        summary_response = await client.get(
-            '/dashboard/widget/summary',
+        summary_response = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
     app.dependency_overrides.clear()
@@ -8281,8 +8199,8 @@ async def test_manual_opz_ignores_months_when_the_staff_was_not_an_administrator
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        summary_response = await client.get(
-            '/dashboard/widget/summary',
+        summary_response = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
     app.dependency_overrides.clear()
@@ -8341,8 +8259,8 @@ async def test_manual_opz_counts_only_whole_or_running_months(async_session, mon
         app.dependency_overrides[api.get_async_db] = override_db
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url='http://test') as client:
-            summary = await client.get(
-                '/dashboard/widget/summary',
+            summary = await get_summary(
+                client,
                 params={'start_date': start_date, 'end_date': end_date, 'company_id': 1},
             )
             plan = await client.get(
@@ -8437,19 +8355,15 @@ async def test_manual_opz_daily_series_stays_calculated(async_session):
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        daily_response = await client.get(
-            '/dashboard/widget/revenue_daily',
-            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
-        )
-        summary_response = await client.get(
-            '/dashboard/widget/summary',
+        bundle_response = await client.get(
+            '/dashboard/bundle',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
     app.dependency_overrides.clear()
 
-    daily_rows = daily_response.json()['data']
-    assert sum(row['opz_qty'] for row in daily_rows) == 1.0
-    assert summary_response.json()['data']['visit_metrics']['opz_qty'] == 8.0
+    bundle = bundle_response.json()['data']
+    assert sum(row['opz_qty'] for row in bundle['revenue_daily']) == 1.0
+    assert bundle['summary']['visit_metrics']['opz_qty'] == 8.0
 
 
 @pytest.mark.asyncio
@@ -8570,8 +8484,8 @@ async def test_a_personal_role_without_a_staff_row_sees_nothing(async_session):
     transport = ASGITransport(app=app)
     params = {'start_date': '2025-01-01', 'end_date': '2025-01-31'}
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        branch_wide = await client.get('/dashboard/widget/summary', params=params)
-        colleague = await client.get('/dashboard/widget/summary', params={**params, 'staff_id': 2})
+        branch_wide = await get_summary(client, params=params)
+        colleague = await get_summary(client, params={**params, 'staff_id': 2})
         editor = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01'})
     app.dependency_overrides.clear()
 
@@ -9940,8 +9854,8 @@ async def test_manual_opz_editor_totals_count_only_what_reports_count(async_sess
             '/dashboard/plan/opz_fact',
             params={'month': '2025-01', 'company_id': 1},
         )
-        summary_response = await client.get(
-            '/dashboard/widget/summary',
+        summary_response = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
     app.dependency_overrides.clear()
@@ -9986,12 +9900,12 @@ async def test_manual_opz_overview_staff_filter_stays_on_one_attribution(async_s
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        branch_summary = await client.get(
-            '/dashboard/widget/summary',
+        branch_summary = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
-        staff_summary = await client.get(
-            '/dashboard/widget/summary',
+        staff_summary = await get_summary(
+            client,
             params={
                 'start_date': '2025-01-01',
                 'end_date': '2025-01-31',
@@ -10137,8 +10051,8 @@ async def test_manual_opz_delta_compares_like_periods(async_session, monkeypatch
         app.dependency_overrides[api.get_async_db] = override_db
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url='http://test') as client:
-            response = await client.get(
-                '/dashboard/widget/summary',
+            response = await get_summary(
+                client,
                 params={'start_date': start_date, 'end_date': end_date, 'company_id': 1},
             )
         app.dependency_overrides.clear()
@@ -10208,23 +10122,23 @@ async def test_manual_opz_delta_uses_the_matching_previous_months(async_session)
         app.dependency_overrides[api.get_async_db] = override_db
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url='http://test') as client:
-            response = await client.get(
-                '/dashboard/widget/summary',
+            response = await get_summary(
+                client,
                 params={'start_date': start_date, 'end_date': end_date, 'company_id': 1},
             )
         app.dependency_overrides.clear()
         return response.json()['data']['visit_metrics']
 
-    # The quarter that holds every top-up is compared with the empty quarter before it.
+    # The quarter that holds every top-up is compared with the empty quarter before it: no base, no percent.
     fourth_quarter = await metrics('2025-10-01', '2025-12-31')
-    assert (fourth_quarter['opz_qty'], fourth_quarter['opz_qty_change_pct']) == (30.0, 100.0)
+    assert (fourth_quarter['opz_qty'], fourth_quarter['opz_qty_change_pct']) == (30.0, None)
 
     # An empty quarter stays empty — the following one must not leak into its base.
     third_quarter = await metrics('2025-07-01', '2025-09-30')
     assert third_quarter['opz_qty'] == 0.0
 
     year = await metrics('2025-01-01', '2025-12-31')
-    assert (year['opz_qty'], year['opz_qty_change_pct']) == (30.0, 100.0)
+    assert (year['opz_qty'], year['opz_qty_change_pct']) == (30.0, None)
 
 
 @pytest.mark.asyncio
@@ -10262,12 +10176,12 @@ async def test_manual_opz_respects_the_branch_reporting_start(async_session):
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        before_opening = await client.get(
-            '/dashboard/widget/summary',
+        before_opening = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
-        after_opening = await client.get(
-            '/dashboard/widget/summary',
+        after_opening = await get_summary(
+            client,
             params={'start_date': '2025-07-01', 'end_date': '2025-07-31', 'company_id': 1},
         )
         editor_before = await client.get(
@@ -10343,12 +10257,12 @@ async def test_manual_facts_respect_the_branch_reporting_end(async_session):
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        before_handover = await client.get(
-            '/dashboard/widget/summary',
+        before_handover = await get_summary(
+            client,
             params={'start_date': '2025-07-01', 'end_date': '2025-07-31', 'company_id': 1},
         )
-        after_handover = await client.get(
-            '/dashboard/widget/summary',
+        after_handover = await get_summary(
+            client,
             params={'start_date': '2025-09-01', 'end_date': '2025-09-30', 'company_id': 1},
         )
         editor_before = await client.get(
@@ -12040,15 +11954,6 @@ async def test_administrator_service_scope_is_explicitly_separated_from_personal
                 'staff_id': 2,
             },
         )
-        extra_response = await client.get(
-            '/dashboard/widget/extra_services',
-            params={
-                'start_date': '2025-01-10',
-                'end_date': '2025-01-10',
-                'company_id': 1,
-                'staff_id': 2,
-            },
-        )
     app.dependency_overrides.clear()
 
     assert summary['source_status'] == 'ready'
@@ -12066,7 +11971,6 @@ async def test_administrator_service_scope_is_explicitly_separated_from_personal
     )
     assert service_report['source_status'] == 'ready'
     assert service_report['calculation_scope']['mode'] == 'personal'
-    assert service_report['raw']['service_attribution']['mode'] == 'master'
     assert report_cards['Услуг оказано'] == 0.0
     assert report_cards['Выручка услуг'] == 0.0
     assert report_extra['rows'] == []
@@ -12077,10 +11981,6 @@ async def test_administrator_service_scope_is_explicitly_separated_from_personal
     assert bundle['summary']['revenue']['extra_service_count'] == 2.0
     assert {row['title'] for row in bundle['top_services']} == {'Extra', 'Regular'}
     assert bundle['extra_services'][0]['sold'] == 2
-    assert extra_response.status_code == 200
-    assert extra_response.json()['source_status'] == 'ready'
-    assert extra_response.json()['mode'] == 'master'
-    assert extra_response.json()['data'] == []
 
 
 @pytest.mark.asyncio
@@ -12163,24 +12063,6 @@ async def test_administrator_service_scope_fails_closed_without_schedule_coverag
                 'staff_id': 2,
             },
         )
-        extra_response = await client.get(
-            '/dashboard/widget/extra_services',
-            params={
-                'start_date': '2025-01-01',
-                'end_date': '2025-01-31',
-                'company_id': 1,
-                'staff_id': 2,
-            },
-        )
-        top_response = await client.get(
-            '/dashboard/widget/top_services',
-            params={
-                'start_date': '2025-01-01',
-                'end_date': '2025-01-31',
-                'company_id': 1,
-                'staff_id': 2,
-            },
-        )
     app.dependency_overrides.clear()
 
     assert summary['source_status'] == 'partial'
@@ -12190,17 +12072,10 @@ async def test_administrator_service_scope_fails_closed_without_schedule_coverag
     assert report['source_status'] == 'ready'
     assert report['calculation_scope']['mode'] == 'personal'
     assert report['missing_sources'] == []
-    assert report['raw']['services'] == []
-    assert report['raw']['extra_services'] == []
+    assert table_rows(report, 'services') == []
+    assert table_rows(report, 'extra_services') == []
     assert bundle_response.json()['data']['source_status'] == 'partial'
     assert bundle_response.json()['data']['extra_services'] == []
-    assert extra_response.json()['source_status'] == 'ready'
-    assert extra_response.json()['mode'] == 'master'
-    assert extra_response.json()['missing_sources'] == []
-    assert extra_response.json()['data'] == []
-    assert top_response.json()['source_status'] == 'ready'
-    assert top_response.json()['mode'] == 'master'
-    assert top_response.json()['data'] == []
 
 
 @pytest.mark.asyncio
@@ -12316,6 +12191,7 @@ async def test_administrator_service_scope_follows_monthly_role_transitions(
         date(2025, 2, 28),
         company_id=1,
         factual_at=datetime(2025, 3, 1),
+        include_staff_leaderboards=True,
     )
 
     assert rows[0]['sold'] == expected_qty
@@ -12325,19 +12201,14 @@ async def test_administrator_service_scope_follows_monthly_role_transitions(
     )
     cells = {cell['code']: cell for cell in staff_group['metrics']}
     assert cells['extra_services_qty']['fact'] == expected_qty
-    leaderboard_key = (
-        'extra_services_admin'
-        if staff_group['category'] == 'administrator'
-        else 'extra_services_barber'
+    boards = plan_fact['staff_leaderboards']
+    admin_board = boards['extra_services_admin']
+    barber_board = boards['extra_services_barber_rankings']['qty']
+    leaderboard, other = (
+        (admin_board, barber_board) if staff_group['category'] == 'administrator' else (barber_board, admin_board)
     )
-    leaderboard = plan_fact['staff_leaderboards'][leaderboard_key]
     assert next(row for row in leaderboard if row['staff_id'] == 2)['qty'] == expected_qty
-    other_key = (
-        'extra_services_barber'
-        if staff_group['category'] == 'administrator'
-        else 'extra_services_admin'
-    )
-    assert all(row['staff_id'] != 2 for row in plan_fact['staff_leaderboards'][other_key])
+    assert all(row['staff_id'] != 2 for row in other)
 
 
 @pytest.mark.asyncio
@@ -12574,6 +12445,7 @@ async def test_admin_extra_services_are_unavailable_without_schedule_coverage(as
         date(2025, 1, 1),
         date(2025, 1, 31),
         company_id=1,
+        include_staff_leaderboards=True,
     )
 
     admin = next(group for group in result['groups'] if group['staff_id'] == 2)
@@ -12717,8 +12589,8 @@ async def test_plan_fact_branch_opz_matches_overview_even_with_hidden_staff(asyn
             '/dashboard/widget/plan_fact',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
-        overview = await client.get(
-            '/dashboard/widget/summary',
+        overview = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
     app.dependency_overrides.clear()
@@ -12751,8 +12623,8 @@ async def test_plan_fact_network_opz_matches_overview_even_with_hidden_staff(asy
             '/dashboard/widget/plan_fact',
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
-        overview = await client.get(
-            '/dashboard/widget/summary',
+        overview = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
         )
     app.dependency_overrides.clear()
@@ -12949,6 +12821,7 @@ async def test_staff_scoped_plan_fact_omits_branch_average_check_leaderboard(asy
         company_id=1,
         staff_id=1,
         include_all_staff_in_leaderboards=True,
+        include_staff_leaderboards=True,
     )
 
     boards = result['staff_leaderboards']
@@ -13829,7 +13702,9 @@ async def test_dashboard_services_api_updates_extra_label_and_metrics(async_sess
         assert row['service_id'] == 10
         assert row['is_extra'] is False
 
-        patched = await client.patch('/dashboard/services/1/10/labels', json={'is_extra': True})
+        patched = await client.patch('/dashboard/services', json={
+            'row_changes': [{'company_id': 1, 'service_id': 10, 'is_extra': True}],
+        })
         assert patched.status_code == 200
 
         summary = await client.get('/dashboard/bundle', params={
@@ -13842,7 +13717,9 @@ async def test_dashboard_services_api_updates_extra_label_and_metrics(async_sess
         assert revenue['extra_service_count'] == 2.0
         assert revenue['extra_service_revenue'] == 1000.0
 
-        unpatched = await client.patch('/dashboard/services/1/10/labels', json={'is_extra': False})
+        unpatched = await client.patch('/dashboard/services', json={
+            'row_changes': [{'company_id': 1, 'service_id': 10, 'is_extra': False}],
+        })
         assert unpatched.status_code == 200
         listed_again = await client.get('/dashboard/services', params={'company_id': 1})
         assert listed_again.json()['data']['rows'][0]['is_extra'] is False
@@ -13893,19 +13770,25 @@ async def test_dashboard_service_kpi_groups_and_single_assignment(async_session)
         assert second.status_code == 200
         second_group = second.json()['data']
 
-        assigned = await client.patch('/dashboard/services/1/10/kpi_group', json={'group_id': first_group['id']})
+        assigned = await client.patch('/dashboard/services', json={
+            'row_changes': [{'company_id': 1, 'service_id': 10, 'kpi_group_id': first_group['id']}],
+        })
         assert assigned.status_code == 200
         listed = await client.get('/dashboard/services', params={'company_id': 1, 'kpi_group_id': first_group['id']})
         assert [row['service_id'] for row in listed.json()['data']['rows']] == [10]
 
-        reassigned = await client.patch('/dashboard/services/1/10/kpi_group', json={'group_id': second_group['id']})
+        reassigned = await client.patch('/dashboard/services', json={
+            'row_changes': [{'company_id': 1, 'service_id': 10, 'kpi_group_id': second_group['id']}],
+        })
         assert reassigned.status_code == 200
         assignments = (await async_session.execute(select(ServiceKpiAssignment))).scalars().all()
         assert [(row.company_id, row.service_id, row.group_id) for row in assignments] == [(1, 10, second_group['id'])]
 
-        archived = await client.delete(f'/dashboard/services/kpi_groups/{first_group["id"]}')
+        archived = await client.patch('/dashboard/services', json={
+            'group_changes': [{'id': first_group['id'], 'is_active': False}],
+        })
         assert archived.status_code == 200
-        assert archived.json()['data']['is_active'] is False
+        assert [group['is_active'] for group in archived.json()['data']['groups']] == [False]
 
     app.dependency_overrides.clear()
 
@@ -14495,7 +14378,7 @@ async def test_ready_report_slices_share_one_factual_cutoff(
     assert staff_cards['Выручка услуг'] == 100.0
     assert client_cards['Визитов'] == 1
     assert client_cards['Выручка клиентов'] == 100.0
-    assert recency_report['raw']['summary_metrics']['unique_clients'] == 1
+    assert {card['label']: card['value'] for card in recency_report['cards']}['Уникальные клиенты'] == 1
     assert churn_cards['Ушедших клиентов'] == 1
     assert churn_cards['Ежемесячная выручка под риском'] == pytest.approx(60.0 / 12)
     assert booking_cards['Визитов'] == 1
@@ -14574,16 +14457,11 @@ async def test_client_report_exposes_anonymous_residual_and_reconciles_totals(
     assert cards['Клиентов'] == overview['visit_metrics']['unique_clients'] == 1
     assert cards['Визитов'] == overview['revenue']['appointments'] == 2
     assert cards['Выручка клиентов'] == overview['revenue']['service_revenue'] == 300.0
-    assert report['raw']['anonymous_residual'] == {
-        'visits': 1,
-        'revenue': 200.0,
-    }
     # The part without a client card is one residual line, so the table still adds up to the whole.
-    residual = [row for row in report['raw']['pareto'] if row['bucket'] == 'Оплаты без клиента']
+    pareto = table_rows(report, 'client_pareto')
+    residual = [row for row in pareto if row['bucket'] == 'Оплаты без клиента']
     assert [(row['clients'], row['revenue']) for row in residual] == [(None, 200.0)]
-    assert sum(
-        row['revenue_pct'] for row in report['raw']['pareto']
-    ) == pytest.approx(100.0)
+    assert sum(row['revenue_pct'] for row in pareto) == pytest.approx(100.0)
 
 
 @pytest.mark.asyncio
@@ -14693,7 +14571,7 @@ async def test_yoy_changes_remain_available_for_metrics_with_complete_sources(
         date(2026, 1, 31),
         company_id=1,
     )
-    years = {row['year']: row for row in report['raw']['years']}
+    years = {row['year']: row for row in table_rows(report, 'years')}
 
     assert years[2024]['source_status'] == 'partial'
     assert years[2025]['source_status'] == 'partial'
@@ -14787,14 +14665,12 @@ async def test_linked_masterless_topup_reconciles_staff_overview_plan_fact_and_y
     }
     staff_group = next(group for group in plan_fact['groups'] if group['staff_id'] == 1)
     staff_cells = {cell['code']: cell for cell in staff_group['metrics']}
-    yoy_2025 = next(row for row in yoy['raw']['years'] if row['year'] == 2025)
+    yoy_2025 = next(row for row in table_rows(yoy, 'years') if row['year'] == 2025)
 
     assert branch_overview['revenue']['topup_revenue'] == 250.0
     assert staff_overview['revenue']['topup_revenue'] == 250.0
     assert parent_cells['revenue']['fact'] == 250.0
     assert staff_cells['revenue']['fact'] == 250.0
-    assert yoy['raw']['activity_end'] == '2025-07-01'
-    assert yoy['raw']['latest_year'] == 2025
     assert yoy_2025['topup_revenue'] == 250.0
     assert yoy_2025['revenue'] == 250.0
     # A tenant that does use personal accounts keeps the column: it is a
@@ -14855,10 +14731,9 @@ async def test_yoy_keeps_uncovered_current_year_unknown_after_last_fact(
         date(2026, 1, 31),
         company_id=1,
     )
-    years = {row['year']: row for row in report['raw']['years']}
+    years = {row['year']: row for row in table_rows(report, 'years')}
 
     assert report['source_status'] == 'partial'
-    assert report['raw']['latest_year'] == 2025
     assert set(years) == {2025, 2026}
     assert years[2025]['revenue'] == 100.0
     assert years[2026]['is_partial_year'] is True
@@ -14867,7 +14742,7 @@ async def test_yoy_keeps_uncovered_current_year_unknown_after_last_fact(
     assert years[2026]['appointments'] is None
     assert all(
         row['revenue'] is None
-        for row in report['raw']['months']
+        for row in table_rows(report, 'months')
         if row['year'] == 2026
     )
 
@@ -14980,7 +14855,7 @@ async def test_yoy_admin_scope_matches_personal_overview_and_plan_fact(
 
     admin_group = next(group for group in plan_fact['groups'] if group['staff_id'] == 2)
     admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
-    yoy_2025 = next(row for row in yoy['raw']['years'] if row['year'] == 2025)
+    yoy_2025 = next(row for row in table_rows(yoy, 'years') if row['year'] == 2025)
     overview = await dashboard_service.fetch_summary(
         async_session,
         date(2025, 1, 1),
@@ -15006,7 +14881,6 @@ async def test_yoy_admin_scope_matches_personal_overview_and_plan_fact(
     assert admin_cells['revenue']['fact'] == overview['revenue']['total'] == 300.0
     assert admin_cells['clients']['fact'] == 1.0
     assert yoy['calculation_scope']['mode'] == 'personal'
-    assert yoy['raw']['latest_year'] == 2025
     assert yoy_2025['revenue'] == overview['revenue']['total'] == 300.0
     assert yoy_2025['service_revenue'] == 0.0
     assert yoy_2025['goods_revenue'] == 300.0
@@ -15070,3 +14944,78 @@ async def test_cosmetics_metrics_drop_certificates_but_goods_revenue_keeps_them(
 
     assert cosmo == {'cosmo_qty': 2.0, 'cosmo_sum': 600.0}
     assert goods_count == 4.0
+
+
+def test_pct_change_without_a_base_is_none():
+    """A zero base has no percent: never a made-up +100 %, whatever the current value."""
+    for current in (0.0, 5.0, -5.0):
+        assert dashboard_service._pct_change(current, 0.0) is None
+    assert dashboard_service._pct_change(10.0, 5.0) == 100.0
+    assert dashboard_service._pct_change(0.0, 5.0) == -100.0
+    assert dashboard_service._optional_pct_change(5.0, 0.0) is None
+
+
+@pytest.mark.asyncio
+async def test_no_report_ships_a_raw_block(async_session):
+    """The page renders cards, charts and tables; a `raw` copy only doubled the payload."""
+    async_session.add_all([Group(id=1, title='G1'), Company(id=1, title='Salon', group_id=1)])
+    await async_session.commit()
+
+    for definition in dashboard_reports.REPORT_DEFINITIONS:
+        if definition.id == dashboard_reports.REPORT_USAGE_ID:
+            continue
+        data = await dashboard_reports.fetch_report_data(
+            async_session, definition.id, date(2025, 1, 1), date(2025, 1, 31), granularity='month'
+        )
+        assert 'raw' not in data, definition.id
+
+
+@pytest.mark.asyncio
+async def test_removed_dashboard_routes_stay_removed(async_session):
+    """The SPA reads the Overview through /bundle and edits services through the bulk PATCH."""
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    params = {'start_date': '2025-01-01', 'end_date': '2025-01-31'}
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        gone = [
+            await client.get(f'/dashboard/widget/{name}', params=params)
+            for name in ('summary', 'revenue_daily', 'top_services', 'extra_services')
+        ]
+        gone.append(await client.get('/dashboard/services/kpi_groups'))
+        gone.append(await client.patch('/dashboard/services/kpi_groups/1', json={'title': 'x'}))
+        gone.append(await client.delete('/dashboard/services/kpi_groups/1'))
+        gone.append(await client.patch('/dashboard/services/1/10/labels', json={'is_extra': True}))
+        gone.append(await client.patch('/dashboard/services/1/10/kpi_group', json={'group_id': None}))
+        kept = await client.get('/dashboard/bundle', params=params)
+    app.dependency_overrides.clear()
+
+    assert [response.status_code for response in gone] == [404, 404, 404, 404, 405, 404, 404, 404, 404]
+    assert kept.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_builds_staff_leaderboards_only_when_asked(async_session):
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Barber', position='Барбер', company_id=1),
+    ])
+    await async_session.commit()
+    window = (date(2025, 1, 1), date(2025, 1, 31))
+
+    for company_id in (None, 1):
+        plain = await fetch_plan_fact(async_session, *window, company_id=company_id)
+        asked = await fetch_plan_fact(
+            async_session, *window, company_id=company_id, include_staff_leaderboards=True
+        )
+        assert 'staff_leaderboards' not in plain
+        assert 'goods_kpi_execution' in plain
+        # The legacy aliases of the ranked boards are gone; the report reads the ranked ones.
+        assert not {'revenue_top', 'avg_check_top', 'extra_services', 'extra_services_barber', 'cosmo_barber'} & set(
+            asked['staff_leaderboards']
+        )
+        assert {'revenue_barber', 'cosmo_barber_rankings', 'opz_barber_rankings'} <= set(asked['staff_leaderboards'])
+

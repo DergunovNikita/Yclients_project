@@ -78,6 +78,9 @@ for attempt in $(seq 1 "$health_retries"); do
   sleep "$health_interval_seconds"
 done
 
+# Create-only bootstrap: an existing user is skipped, so a deploy never rewrites a password an admin
+# changed or re-enables a deactivated account. The password is not on the command line: the
+# container reads PORTAL_ADMIN_PASSWORD from the same .env through compose's env_file.
 ensure_portal_admin() {
   local email="$1"
   local full_name="$2"
@@ -88,17 +91,11 @@ ensure_portal_admin() {
   echo "Ensuring portal platform_admin (${email})..."
   docker compose run --rm --no-deps --entrypoint python api create_portal_admin.py \
     --email "$email" \
-    --password "$PORTAL_ADMIN_PASSWORD" \
     --full-name "$full_name"
 }
 
 if [ -n "${PORTAL_ADMIN_PASSWORD:-}" ]; then
   ensure_portal_admin "${PORTAL_ADMIN_EMAIL:-}" "${PORTAL_ADMIN_NAME:-Portal Admin}"
-  if [ "${PORTAL_CREATE_DERGUNOV_ADMIN:-true}" = "true" ]; then
-    ensure_portal_admin \
-      "${PORTAL_DERGUNOV_ADMIN_EMAIL:-dergunovnt@yandex.ru}" \
-      "${PORTAL_DERGUNOV_ADMIN_NAME:-Nikita Super Admin}"
-  fi
   if [ -n "${PORTAL_EXTRA_ADMIN_EMAILS:-}" ]; then
     IFS=',' read -ra extra_admin_emails <<< "$PORTAL_EXTRA_ADMIN_EMAILS"
     for extra_admin_email in "${extra_admin_emails[@]}"; do

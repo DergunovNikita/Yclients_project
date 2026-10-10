@@ -377,13 +377,27 @@ test('catch-all proxy enforces dashboard and auth route allowlists', () => {
     assert.equal(serviceBatch.ok, true);
     assert.equal(serviceBatch.target.href, 'https://vm.example.test/dashboard/services');
 
-    const serviceLabel = buildRootProxyTarget(requestStub('PATCH', {}, '/api/dashboard/services/1/10/labels'));
-    assert.equal(serviceLabel.ok, true);
-    assert.equal(serviceLabel.target.href, 'https://vm.example.test/dashboard/services/1/10/labels');
-
-    const serviceGroup = buildWebProxyTarget(requestStub('DELETE', {}, '/api/dashboard/services/kpi_groups/3'));
+    const serviceGroup = buildWebProxyTarget(requestStub('POST', {}, '/api/dashboard/services/kpi_groups'));
     assert.equal(serviceGroup.ok, true);
-    assert.equal(serviceGroup.target.href, 'https://vm.example.test/dashboard/services/kpi_groups/3');
+    assert.equal(serviceGroup.target.href, 'https://vm.example.test/dashboard/services/kpi_groups');
+
+    // Routes the SPA no longer calls are not proxied: the bulk PATCH /services replaced them.
+    for (const [method, path] of [
+      ['PATCH', '/api/dashboard/services/1/10/labels'],
+      ['PATCH', '/api/dashboard/services/1/10/kpi_group'],
+      ['PATCH', '/api/dashboard/services/kpi_groups/3'],
+      ['DELETE', '/api/dashboard/services/kpi_groups/3'],
+      ['GET', '/api/dashboard/services/kpi_groups'],
+      ['GET', '/api/dashboard/widget/summary'],
+      ['GET', '/api/dashboard/widget/revenue_daily'],
+      ['GET', '/api/dashboard/widget/top_services'],
+      ['GET', '/api/dashboard/widget/extra_services'],
+    ]) {
+      for (const buildTarget of [buildWebProxyTarget, buildRootProxyTarget]) {
+        const result = buildTarget(requestStub(method, {}, path));
+        assert.equal(result.ok, false, `${method} ${path}`);
+      }
+    }
 
     const auth = buildRootProxyTarget(requestStub('POST', {}, '/api/auth/admin/users'));
     assert.equal(auth.ok, true);
@@ -422,9 +436,9 @@ test('catch-all proxy rejects encoded traversal and encoded separators', () => {
     const blockedUrls = [
       '/api/dashboard/%2e%2e/auth/login',
       '/api/auth/admin/%2e%2e/users',
-      '/api/dashboard/services/company%2fservice/labels',
-      '/api/dashboard/services/company%5cservice/labels',
-      '/api/dashboard/services//labels',
+      '/api/dashboard/payments%2fyandex_pay',
+      '/api/dashboard/payments%5cyandex_pay',
+      '/api/dashboard/payments//yandex_pay',
     ];
 
     for (const url of blockedUrls) {
@@ -460,14 +474,10 @@ test('catch-all proxy handler delegates service mutations to the shared target',
 
   try {
     const cases = [
-      [rootProxyHandler, 'PATCH', '/api/dashboard/services/1/10/labels'],
-      [rootProxyHandler, 'PATCH', '/api/dashboard/services/1/10/kpi_group'],
-      [rootProxyHandler, 'PATCH', '/api/dashboard/services/kpi_groups/3'],
-      [rootProxyHandler, 'DELETE', '/api/dashboard/services/kpi_groups/3'],
-      [webProxyHandler, 'PATCH', '/api/dashboard/services/1/10/labels'],
-      [webProxyHandler, 'PATCH', '/api/dashboard/services/1/10/kpi_group'],
-      [webProxyHandler, 'PATCH', '/api/dashboard/services/kpi_groups/3'],
-      [webProxyHandler, 'DELETE', '/api/dashboard/services/kpi_groups/3'],
+      [rootProxyHandler, 'PATCH', '/api/dashboard/services'],
+      [rootProxyHandler, 'POST', '/api/dashboard/services/kpi_groups'],
+      [webProxyHandler, 'PATCH', '/api/dashboard/services'],
+      [webProxyHandler, 'POST', '/api/dashboard/services/kpi_groups'],
     ];
 
     for (const [handler, method, url] of cases) {

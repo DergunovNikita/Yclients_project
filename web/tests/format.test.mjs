@@ -127,3 +127,18 @@ test('a change that rounds to zero reads as a plain zero, never -0 or +0', async
   assert.doesNotMatch(format.formatPct(-0), /-0(?!\.)/);
   assert.doesNotMatch(format.formatPct(-0.0001), /-/);
 });
+
+test('a change without a base is a dash or a "no baseline" label, never a number', async (t) => {
+  const { format, server } = await loadFormat();
+  t.after(() => server.close());
+
+  for (const missing of [null, undefined]) {
+    assert.equal(format.formatDeltaPct(missing), '—');
+    assert.equal(format.deltaClass(missing), '');
+    assert.equal(format.deltaClass(missing, 1), '');
+    assert.equal(format.formatValue(missing, 'percent'), '—');
+    const sentence = format.formatPct(missing);
+    assert.doesNotMatch(sentence, /\d|NaN/);
+    assert.notEqual(sentence, '');
+  }
+});

@@ -379,38 +379,7 @@ async def fetch_page(db: AsyncSession, stmt, limit: int, offset: int) -> tuple[i
 
 @app.get("/")
 async def root():
-    return {
-        "message": "YClients BI System API",
-        "endpoints": {
-            "/groups": "Сети",
-            "/companies": "Компании",
-            "/service_categories": "Категории услуг",
-            "/services": "Услуги",
-            "/staff_positions": "Должности",
-            "/staff": "Сотрудники",
-            "/clients": "Клиенты",
-            "/accounts": "Кассы",
-            "/storages": "Склады",
-            "/good_categories": "Категории товаров",
-            "/goods": "Товары",
-            "/appointments": "Записи (визиты)",
-            "/transactions": "Услуги внутри записей",
-            "/financial_transactions": "Финансовые транзакции",
-            "/goods_transactions": "Товарные транзакции",
-            "/comments": "Комментарии / отзывы",
-            "/staff_schedules": "Графики работы",
-            "/stats": "Общая статистика",
-            "/sync/trigger": "Поставить sync в очередь",
-            "/sync/status": "Статус sync и очереди",
-            "/export/csv/{table}": "Экспорт таблицы в CSV",
-            "/dashboard/branches": "Филиалы (компании) для портала",
-            "/dashboard/bundle": "Сводка дашборда за период (JSON)",
-            "/dashboard/widget/plan_fact": "План/факт по филиалам за период",
-            "/dashboard/plan/reviews_fact": "Ручной факт по отзывам администраторов",
-            "/dashboard/plan/opz_fact": "Дополнительные ОПЗ администраторов",
-            "/dashboard/widget/sync_status": "Статус синка для UI",
-        },
-    }
+    return {"name": "YClients BI System API", "status": "ok"}
 
 
 # Bounded so a stuck database cannot hold the probe open past the caller's own timeout.

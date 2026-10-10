@@ -346,7 +346,6 @@ async def fetch_report_usage(
                 ),
             }
         ],
-        'raw': {'tracking_since': tracking_since.isoformat() if tracking_since else None},
     }
     if tracking_since is None:
         base['notes'].append(

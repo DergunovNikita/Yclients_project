@@ -6,6 +6,7 @@ from httpx import ASGITransport, AsyncClient
 import api
 import dashboard_service
 from api import app
+from report_helpers import table_rows
 from dashboard_service import (
     _appointment_company_ids,
     _fetch_appointments_breakdown,
@@ -172,7 +173,7 @@ async def test_dashboard_summary_exposes_exact_appointment_contract(async_sessio
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         response = await client.get(
-            '/dashboard/widget/summary',
+            '/dashboard/bundle',
             params={
                 'start_date': '2026-06-01',
                 'end_date': '2026-06-30',
@@ -182,7 +183,7 @@ async def test_dashboard_summary_exposes_exact_appointment_contract(async_sessio
     app.dependency_overrides.clear()
 
     assert response.status_code == 200
-    breakdown = response.json()['data']['appointments_breakdown']
+    breakdown = response.json()['data']['summary']['appointments_breakdown']
     assert breakdown == {
         'source_status': 'ready',
         'total': 10,
@@ -196,9 +197,6 @@ async def test_dashboard_summary_exposes_exact_appointment_contract(async_sessio
         'shares_total_pct': 100,
         'attended': 6,
         'pending': 1,
-        'local_completed': 0,
-        'completed_difference': 6,
-        'is_consistent': False,
     }
 
 
@@ -287,9 +285,6 @@ async def test_confirmed_appointment_is_not_counted_as_completed_visit(async_ses
     assert data['summary']['revenue']['appointments'] == 1
     assert data['summary']['appointments_breakdown']['completed'] == 1
     assert data['summary']['appointments_breakdown']['incomplete'] == 1
-    assert data['summary']['appointments_breakdown']['local_completed'] == 1
-    assert data['summary']['appointments_breakdown']['completed_difference'] == 0
-    assert data['summary']['appointments_breakdown']['is_consistent'] is True
     assert sum(item['appointments'] for item in data['revenue_daily']) == 1
     assert data['summary']['revenue']['service_count'] == 1
     assert data['top_services'][0]['sold'] == 1
@@ -351,12 +346,11 @@ async def test_cancellation_report_uses_exact_aggregate_counts(async_session, mo
     assert response.status_code == 200
     data = response.json()['data']
     assert [card['value'] for card in data['cards']] == [10, 1, 7, 70.0]
-    june_10 = next(row for row in data['raw']['by_period'] if row['period'] == '2026-06-10')
+    june_10 = next(row for row in table_rows(data, 'periods') if row['period'] == '2026-06-10')
     assert june_10['completed'] == 1
     assert june_10['records'] == 3
     assert june_10['no_show'] == 1
-    assert len(data['raw']['by_period']) == 18
-    assert data['raw']['exact_aggregates']['total'] == 10
+    assert len(table_rows(data, 'periods')) == 18
     assert data['notes'][0]['title'] == 'Что считается'
     assert 'агрегатов YClients' in data['notes'][0]['text']
 

@@ -41,12 +41,10 @@ PERIODS: tuple[tuple[str, str, str], ...] = (
     ('year', '2025-01-01', '2025-12-31'),
 )
 
+# `bundle` is what the Overview reads (summary, revenue by day, top and extra services in one call).
 WIDGETS = (
-    'widget/summary',
+    'bundle',
     'widget/plan_fact',
-    'widget/revenue_daily',
-    'widget/top_services',
-    'widget/extra_services',
 )
 
 

@@ -216,12 +216,6 @@ async def build_top_clients_pareto(req: ReportRequest) -> dict[str, Any]:
             'в филиале за всю историю до конца периода, поэтому её доли совпадают с блоком частотности в Обзоре.'
         ),
     })
-    base['raw'] = {
-        'pareto': pareto_rows,
-        'visit_frequency': frequency_rows,
-        'anonymous_residual': {'visits': sum(row['visits'] for row in anonymous), 'revenue': anonymous_revenue},
-        'revenue_scope': 'services',
-    }
     return base
 
 
@@ -382,7 +376,6 @@ async def build_retention_3_6_12(req: ReportRequest) -> dict[str, Any]:
                 'возвращение засчитывается к любому мастеру филиала.'
             ),
         })
-    base['raw'] = {'cohorts': cohort_rows, 'horizons': list(RETENTION_HORIZONS)}
     return base
 
 
@@ -625,10 +618,4 @@ async def build_revenue_at_risk(req: ReportRequest) -> dict[str, Any]:
                 'Доля — от клиентов, которых мастер обслужил в периоде.'
             ),
         })
-    base['raw'] = {
-        'months': month_rows,
-        'staff': staff_rows,
-        'churn_days': CHURN_DAYS,
-        'share_base_clients': share_base_clients,
-    }
     return base

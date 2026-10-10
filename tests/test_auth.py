@@ -18,6 +18,7 @@ from api import app
 from auth_sessions import ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME
 from auth_service import TOKEN_PURPOSE_RESET, create_access_token, create_email_token, hash_password
 from config import AUTH_CSRF_COOKIE_NAME
+from report_helpers import get_summary
 from yclients_credentials import new_credential
 from models import (
     Company,
@@ -1100,8 +1101,8 @@ async def test_branch_user_cannot_access_other_branch(auth_db, monkeypatch):
         assert allowed.status_code == 200
         assert [item['id'] for item in allowed.json()['data']] == [1]
 
-        forbidden = await client.get(
-            '/dashboard/widget/summary',
+        forbidden = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 2},
             headers={'Authorization': f'Bearer {token}'},
         )
@@ -3589,8 +3590,8 @@ async def test_me_ignores_a_staff_row_outside_the_assigned_branches(auth_db, mon
         headers = {'Authorization': f'Bearer {create_access_token(9103, "barber")}'}
         me = await client.get('/auth/me', headers=headers)
         editor = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01'}, headers=headers)
-        summary = await client.get(
-            '/dashboard/widget/summary',
+        summary = await get_summary(
+            client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},
             headers=headers,
         )

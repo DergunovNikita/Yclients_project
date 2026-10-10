@@ -493,22 +493,6 @@ def test_snapshot_getter_returns_the_list_of_a_valid_answer():
     assert api.get_staff('1') == [{'id': 1}]
 
 
-def test_analytics_record_charts_share_the_chart_helper():
-    api = YClientsAPI('token', 'login', 'password')
-    api.user_token = 'user'
-    urls = []
-
-    def fake_get(url, params=None):
-        urls.append(url)
-        return {'data': [{'x': 1}]}
-
-    api._get = fake_get
-
-    assert api.get_analytics_record_source('1', 'a', 'b') == [{'x': 1}]
-    assert api.get_analytics_record_status('1', 'a', 'b') == [{'x': 1}]
-    assert [u.rsplit('/charts/', 1)[1] for u in urls] == ['record_source/', 'record_status/']
-
-
 def test_undated_pagination_stops_when_a_page_repeats_known_rows():
     """An endpoint that ignores `page` would otherwise re-read the same rows forever."""
     api = YClientsAPI('token', 'login', 'password')

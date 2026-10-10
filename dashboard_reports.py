@@ -125,7 +125,6 @@ class ReportDefinition:
     title: str
     description: str
     group: str
-    type: str
     themes: tuple[str, ...]
     roles: tuple[str, ...]
     builder: str
@@ -137,8 +136,6 @@ class ReportDefinition:
     staff_filter: bool = True
     date_range: bool = True
     aliases: tuple[str, ...] = ()
-    status: str = 'ready'
-    required_sources: tuple[str, ...] = ('yclients',)
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -146,7 +143,6 @@ class ReportDefinition:
             'title': self.title,
             'description': self.description,
             'group': self.group,
-            'type': self.type,
             'themes': list(self.themes),
             'roles': list(self.roles),
             'filters': {
@@ -156,8 +152,6 @@ class ReportDefinition:
                 'granularity': self.granularity,
                 'compare': self.compare,
             },
-            'status': self.status,
-            'required_sources': list(self.required_sources),
             'aliases': list(self.aliases),
         }
 
@@ -178,7 +172,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
             'с динамикой по дням, неделям или месяцам.'
         ),
         group='finance',
-        type='финансовый',
         themes=('выручка', 'средний чек'),
         roles=_OWNER_ROLES,
         builder='reports_finance:build_financial_overview',
@@ -192,7 +185,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         title='Формы оплаты',
         description='Доли наличных, безналичных платежей, Яндекс Пэй и прочих касс в выручке по филиалам и месяцам.',
         group='finance',
-        type='финансовый',
         themes=('выручка',),
         roles=_OWNER_ROLES,
         builder='dashboard_reports:build_payment_methods',
@@ -205,7 +197,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         title='Сравнение по годам',
         description='Выручка, визиты, средний чек и ОПЗ по годам и по месяцам года к году.',
         group='finance',
-        type='финансовый',
         themes=('выручка', 'средний чек'),
         roles=_OWNER_ROLES,
         builder='dashboard_reports:build_year_over_year',
@@ -221,7 +212,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
             'дополнительные услуги отдельно.'
         ),
         group='services',
-        type='операционный',
         themes=('услуги', 'средний чек'),
         roles=_OWNER_ROLES,
         builder='reports_services:build_avg_check_by_service',
@@ -234,7 +224,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         title='Услуги по мастерам',
         description='Услуги в разрезе мастеров: сколько раз каждый мастер оказал услугу, выручка и средняя цена.',
         group='services',
-        type='операционный',
         themes=('услуги', 'мастера'),
         roles=_OWNER_ROLES,
         builder='reports_services:build_service_staff_profit',
@@ -247,7 +236,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         title='Комбинации услуг',
         description='Какие услуги клиенты берут вместе в одном визите и как часто встречается каждая пара.',
         group='services',
-        type='операционный',
         themes=('услуги',),
         roles=_OWNER_ROLES,
         builder='reports_services:build_service_combos',
@@ -259,7 +247,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         title='Эффективность сотрудников',
         description='Сводка по сотрудникам: завершённые записи, клиенты, выручка услуг и выручка на запись.',
         group='team',
-        type='управленческий',
         themes=('мастера',),
         roles=_MANAGER_ROLES,
         builder='reports_operations:build_staff_efficiency',
@@ -274,7 +261,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
             'и выполнению плана среднего чека.'
         ),
         group='team',
-        type='управленческий',
         themes=('мастера',),
         roles=_MANAGER_ROLES,
         builder='dashboard_reports:build_staff_leaderboard',
@@ -289,7 +275,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
             'когда загрузка пиковая, а когда кресла простаивают.'
         ),
         group='operations',
-        type='операционный',
         themes=('записи',),
         roles=_MANAGER_ROLES,
         builder='reports_operations:build_peak_load',
@@ -302,7 +287,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         title='Записи и неявки',
         description='Динамика записей по периодам и мастерам: сколько записано, сколько завершено и сколько не пришло.',
         group='operations',
-        type='операционный',
         themes=('записи',),
         roles=_MANAGER_ROLES,
         builder='reports_operations:build_bookings_dynamics',
@@ -316,7 +300,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         title='Каналы записи: онлайн и администратор',
         description='Сколько записей клиенты оформили сами онлайн и сколько создали сотрудники: по периодам и в долях.',
         group='operations',
-        type='операционный',
         themes=('записи',),
         roles=_MANAGER_ROLES,
         builder='reports_operations:build_booking_channels',
@@ -330,7 +313,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         title='Новые и повторные клиенты',
         description='Сколько клиентов пришло впервые и сколько вернулось, их доли и изменение к прошлому периоду.',
         group='clients',
-        type='клиентский',
         themes=('клиенты',),
         roles=_FRONT_DESK_ROLES,
         builder='dashboard_reports:build_new_vs_returning_cross',
@@ -343,7 +325,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         title='Клиентская база: концентрация и частотность',
         description='Какую долю выручки дают лучшие клиенты (принцип Парето) и как часто клиенты возвращаются.',
         group='clients',
-        type='клиентский',
         themes=('клиенты', 'выручка'),
         roles=_FRONT_DESK_ROLES,
         builder='reports_clients:build_top_clients_pareto',
@@ -356,7 +337,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         title='Возвратность новых клиентов',
         description='Какая доля новых клиентов каждого месяца вернулась в течение 1, 3, 6 и 12 месяцев.',
         group='clients',
-        type='клиентский',
         themes=('клиенты',),
         roles=_FRONT_DESK_ROLES,
         builder='reports_clients:build_retention_3_6_12',
@@ -372,7 +352,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
             'выручка под риском и мастера, у которых они были в последний раз.'
         ),
         group='clients',
-        type='клиентский',
         themes=('клиенты', 'отток'),
         roles=_FRONT_DESK_ROLES,
         builder='reports_clients:build_revenue_at_risk',
@@ -388,7 +367,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
             'в разрезе периодов, товаров и продавцов.'
         ),
         group='goods',
-        type='товарный',
         themes=('товары', 'выручка'),
         roles=_OWNER_ROLES,
         builder='reports_goods:build_goods_dynamics',
@@ -402,7 +380,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         title='Отзывы',
         description='Отзывы клиентов из YClients: количество, средняя оценка, распределение оценок и низкие оценки.',
         group='clients',
-        type='клиентский',
         themes=('клиенты', 'отзывы'),
         roles=_OWNER_ROLES,
         builder='reports_feedback:build_nps_dashboard',
@@ -417,7 +394,6 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
             'время ответа и отчёты, которые давно не открывали.'
         ),
         group='diagnostics',
-        type='служебный',
         themes=('диагностика',),
         roles=_PLATFORM_ADMIN_ROLES,
         # Dispatched by the route with an explicit tenant (the registry builder refuses to run without one).
@@ -610,9 +586,6 @@ def _comparison_payload(data: dict[str, Any], compare_data: dict[str, Any], staf
 
     A table without a `row_key` cannot be paired row by row, so it is not carried at all (a list of events
     such as the negative reviews would only ship the previous window's rows for nothing).
-
-    `raw` is left out on purpose: the page renders only cards, charts and tables, and the raw block
-    of a long window is the largest part of a payload.
     """
     chart_ids = {item.get('id') for item in data.get('charts', [])}
     table_ids = {item.get('id') for item in data.get('tables', [])}
@@ -653,13 +626,12 @@ async def _fetch_report_payload(
         'report_id': definition.id,
         'title': definition.title,
         'period': {'start': start.isoformat(), 'end': end.isoformat(), 'granularity': granularity},
-        'source_status': definition.status,
+        'source_status': 'ready',
         'missing_sources': [],
         'cards': [],
         'charts': [],
         'tables': [],
         'notes': [],
-        'raw': {},
     }
     if not definition.staff_filter:
         # No employee filter, and the roles that may open such a report are not clamped to a
@@ -872,10 +844,10 @@ async def _year_over_year_activity_bounds(
     staff_id: int | None,
     allowed_company_ids: list[int] | None,
     now: datetime,
-) -> tuple[date, date, dict[str, Any]] | None:
-    """Return the first YClients record, the latest factual metric activity and the OPZ facts.
+) -> tuple[date, dict[str, Any]] | None:
+    """Return the first YClients record and the OPZ facts.
 
-    Both boundaries include every factual component used by Overview/plan-fact:
+    The first record includes every factual component used by Overview/plan-fact:
     completed visits, paid services, goods/top-up payments and goods movements.
     """
     today = now.date()
@@ -904,7 +876,6 @@ async def _year_over_year_activity_bounds(
         await db.execute(
             select(
                 func.min(Appointment.date).label('activity_start'),
-                func.max(Appointment.date).label('activity_end'),
             ).where(*appointment_conditions)
         )
     ).one()
@@ -933,7 +904,6 @@ async def _year_over_year_activity_bounds(
         await db.execute(
             select(
                 func.min(payment_day).label('activity_start'),
-                func.max(payment_day).label('activity_end'),
             )
             .select_from(FinancialTransaction)
             .join(Appointment, financial_appointment_match_condition())
@@ -978,7 +948,6 @@ async def _year_over_year_activity_bounds(
         await db.execute(
             select(
                 func.min(payment_day).label('activity_start'),
-                func.max(payment_day).label('activity_end'),
             )
             .select_from(FinancialTransaction)
             .outerjoin(
@@ -1009,7 +978,6 @@ async def _year_over_year_activity_bounds(
         await db.execute(
             select(
                 func.min(goods_day).label('activity_start'),
-                func.max(goods_day).label('activity_end'),
             ).where(*goods_conditions)
         )
     ).one()
@@ -1030,12 +998,7 @@ async def _year_over_year_activity_bounds(
         for bounds in component_bounds
         if (parsed := as_date(bounds.activity_start)) is not None
     ]
-    ends = [
-        parsed
-        for bounds in component_bounds
-        if (parsed := as_date(bounds.activity_end)) is not None
-    ]
-    if not starts or not ends:
+    if not starts:
         return None
 
     activity_start = min(starts)
@@ -1048,9 +1011,7 @@ async def _year_over_year_activity_bounds(
         allowed_company_ids,
         factual_at=now,
     )
-    if opz_facts['latest_date'] is not None:
-        ends.append(opz_facts['latest_date'])
-    return activity_start, max(ends), opz_facts
+    return activity_start, opz_facts
 
 
 async def _year_over_year_source_states(
@@ -1155,81 +1116,66 @@ def _mask_unknown_year_metrics(
         row['extra_service_revenue'] = None
 
 
-def _year_periods(
-    activity_start: date,
-    activity_end: date,
-    current_date: date,
-    latest_fact_year: int | None = None,
-) -> list[dict[str, Any]]:
+def _year_periods(activity_start: date, report_end: date) -> list[dict[str, Any]]:
     periods = []
-    for year in range(activity_start.year, activity_end.year + 1):
+    for year in range(activity_start.year, report_end.year + 1):
         calendar_start = date(year, 1, 1)
         calendar_end = date(year, 12, 31)
         period_start = max(calendar_start, activity_start)
-        period_end = min(calendar_end, activity_end)
+        period_end = min(calendar_end, report_end)
         is_partial_year = (
             period_start != calendar_start
             or period_end != calendar_end
-            or year == current_date.year
+            or year == report_end.year
         )
         periods.append({
             'year': year,
             'start': period_start,
             'end': period_end,
             'is_partial_year': is_partial_year,
-            'is_opening_year': year == activity_start.year,
-            'is_latest_year': year == (
-                latest_fact_year if latest_fact_year is not None else activity_end.year
-            ),
         })
     return periods
 
 
-def _year_row_from_summary(
+def _year_row(
     year: int,
-    period_start: date,
-    period_end: date,
-    summary: dict[str, Any],
-    *,
-    is_partial_year: bool,
-    is_opening_year: bool,
-    is_latest_year: bool,
+    period: dict[str, Any],
+    annual: dict[str, Any],
+    opz_qty: float,
 ) -> dict[str, Any]:
-    revenue = summary.get('revenue', {})
-    average_check = summary.get('average_check', {})
-    visits = summary.get('visit_metrics', {})
-    appointments = int(revenue.get('appointments') or 0)
+    appointments = int(annual.get('appointments') or 0)
+    revenue = float(annual.get('revenue') or 0)
+    unique_clients = int(annual.get('unique_clients') or 0)
+    is_partial_year = bool(period['is_partial_year'])
     return {
         'year': year,
-        'period_start': period_start.isoformat(),
-        'period_end': period_end.isoformat(),
-        'revenue': float(revenue.get('total') or 0),
-        'service_revenue': float(revenue.get('service_revenue') or 0),
-        'goods_revenue': float(revenue.get('goods_revenue') or 0),
-        'topup_revenue': float(revenue.get('topup_revenue') or 0),
+        'period_start': period['start'].isoformat(),
+        'period_end': period['end'].isoformat(),
+        'revenue': revenue,
+        'service_revenue': float(annual.get('service_revenue') or 0),
+        'goods_revenue': float(annual.get('goods_revenue') or 0),
+        'topup_revenue': float(annual.get('topup_revenue') or 0),
         'appointments': appointments,
-        'service_count': float(revenue.get('service_count') or 0),
-        'goods_count': float(revenue.get('goods_count') or 0),
-        'extra_service_count': float(revenue.get('extra_service_count') or 0),
-        'extra_service_revenue': float(revenue.get('extra_service_revenue') or 0),
-        'unique_clients': int(visits.get('unique_clients') or 0),
+        'service_count': float(annual.get('service_count') or 0),
+        'goods_count': float(annual.get('goods_count') or 0),
+        'extra_service_count': float(annual.get('extra_service_count') or 0),
+        'extra_service_revenue': float(annual.get('extra_service_revenue') or 0),
+        'unique_clients': unique_clients,
         # No completed visits means no average check; a zero would draw a real bar.
-        'avg_check': float(average_check.get('total') or 0) if appointments else None,
-        'visits_per_client': float(visits.get('visits_per_client') or 0),
-        'opz_qty': float(visits.get('opz_qty') or 0),
-        'opz_pct': float(visits.get('opz_pct') or 0),
-        'source_status': average_check.get('source_status') or 'ready',
-        'missing_components': list(average_check.get('missing_components') or []),
+        'avg_check': revenue / appointments if appointments else None,
+        'visits_per_client': appointments / unique_clients if unique_clients else 0.0,
+        'opz_qty': opz_qty,
+        'opz_pct': 100.0 * opz_qty / appointments if appointments else 0.0,
+        'source_status': 'ready',
+        'missing_components': [],
         'is_partial_year': is_partial_year,
         'period_status': 'Неполный' if is_partial_year else 'Полный',
-        'is_opening_year': is_opening_year,
-        'is_latest_year': is_latest_year,
     }
 
 
 def _monthly_yoy_rows(
     year: int,
-    daily: list[dict[str, Any]],
+    monthly_facts: dict[int, dict[str, Any]],
     period_start: date,
     period_end: date,
     state_by_key: dict[tuple[int, str], SyncSourceState],
@@ -1239,24 +1185,11 @@ def _monthly_yoy_rows(
     opz_counts: dict[int, float] | None = None,
     opz_dependencies: dict[int, dict[int, tuple[date, date]]] | None = None,
 ) -> list[dict[str, Any]]:
-    months = list(range(1, 13))
+    metrics = ('revenue', 'service_revenue', 'goods_revenue', 'topup_revenue', 'appointments')
     monthly = {
-        month: {
-            'revenue': 0.0,
-            'service_revenue': 0.0,
-            'goods_revenue': 0.0,
-            'topup_revenue': 0.0,
-            'appointments': 0.0,
-        }
-        for month in months
+        month: {metric: float(monthly_facts.get(month, {}).get(metric) or 0) for metric in metrics}
+        for month in range(1, 13)
     }
-    for row in _aggregate_daily(daily, 'month'):
-        month = date.fromisoformat(row['period']).month
-        monthly[month]['revenue'] += float(row.get('revenue') or 0)
-        monthly[month]['service_revenue'] += float(row.get('service_revenue') or 0)
-        monthly[month]['goods_revenue'] += float(row.get('goods_revenue') or 0)
-        monthly[month]['topup_revenue'] += float(row.get('topup_revenue') or 0)
-        monthly[month]['appointments'] += float(row.get('appointments') or 0)
 
     rows = []
     for month, values in monthly.items():
@@ -1407,27 +1340,13 @@ async def _year_over_year_payload(
             'title': 'Нет фактических записей YClients',
             'text': 'Для выбранного среза пока нельзя определить границы истории.',
         })
-        base['raw'] = {
-            'years': [],
-            'months': [],
-            'latest_year': None,
-            'activity_start': None,
-            'activity_end': None,
-            'months_in_scope': [],
-            'service_detail_excluded': True,
-        }
         return base
 
-    activity_start, activity_end, opz_facts = activity_bounds
+    activity_start, opz_facts = activity_bounds
     opz_by_year = opz_facts['counts']
     opz_dependencies_by_year = opz_facts['appointment_dependencies']
     report_end = report_now.date()
-    periods = _year_periods(
-        activity_start,
-        report_end,
-        report_end,
-        latest_fact_year=activity_end.year,
-    )
+    periods = _year_periods(activity_start, report_end)
     state_by_key = await _year_over_year_source_states(db, scope_company_ids)
     reporting_windows = await fetch_reporting_windows(db, scope_company_ids)
     fact_rows = await fetch_year_over_year_facts(
@@ -1446,48 +1365,11 @@ async def _year_over_year_payload(
         period_start = period['start']
         period_end = period['end']
         year = int(period['year'])
-        annual = fact_rows['annual'].get(year, {})
-        completed = int(annual.get('appointments') or 0)
-        unique_clients = int(annual.get('unique_clients') or 0)
-        revenue = float(annual.get('revenue') or 0)
-        extra_service_count = float(annual.get('extra_service_count') or 0)
-        extra_service_revenue = float(annual.get('extra_service_revenue') or 0)
-        summary = {
-            'revenue': {
-                'total': revenue,
-                'service_revenue': float(annual.get('service_revenue') or 0),
-                'goods_revenue': float(annual.get('goods_revenue') or 0),
-                'topup_revenue': float(annual.get('topup_revenue') or 0),
-                'extra_service_revenue': extra_service_revenue,
-                'appointments': completed,
-                'service_count': float(annual.get('service_count') or 0),
-                'goods_count': float(annual.get('goods_count') or 0),
-                'extra_service_count': extra_service_count,
-            },
-            'average_check': {
-                'total': revenue / completed if completed else 0.0,
-                'source_status': 'ready',
-                'missing_components': [],
-            },
-            'visit_metrics': {
-                'unique_clients': unique_clients,
-                'visits_per_client': completed / unique_clients if unique_clients else 0.0,
-                'opz_qty': float(opz_by_year.get(year, 0.0)),
-                'opz_pct': (
-                    100.0 * float(opz_by_year.get(year, 0.0)) / completed
-                    if completed
-                    else 0.0
-                ),
-            },
-        }
-        year_row = _year_row_from_summary(
+        year_row = _year_row(
             year,
-            period_start,
-            period_end,
-            summary,
-            is_partial_year=bool(period['is_partial_year']),
-            is_opening_year=bool(period['is_opening_year']),
-            is_latest_year=bool(period['is_latest_year']),
+            period,
+            fact_rows['annual'].get(year, {}),
+            float(opz_by_year.get(year, 0.0)),
         )
         technical_missing = _year_over_year_missing_sources(
             state_by_key,
@@ -1518,16 +1400,9 @@ async def _year_over_year_payload(
             year_row['opz_qty'] = None
             year_row['opz_pct'] = None
         year_rows.append(year_row)
-        daily = [
-            {
-                'date': date(year, month, 1).isoformat(),
-                **values,
-            }
-            for month, values in fact_rows['monthly'].get(year, {}).items()
-        ]
         monthly_by_year[year] = _monthly_yoy_rows(
             year,
-            daily,
+            fact_rows['monthly'].get(year, {}),
             period_start,
             period_end,
             state_by_key,
@@ -1539,20 +1414,6 @@ async def _year_over_year_payload(
         )
 
     year_rows = _with_year_changes(year_rows)
-    latest_index = next(
-        (
-            index
-            for index, row in enumerate(year_rows)
-            if int(row['year']) == activity_end.year
-        ),
-        None,
-    )
-    latest = year_rows[latest_index] if latest_index is not None else {}
-    previous = (
-        year_rows[latest_index - 1]
-        if latest_index is not None and latest_index > 0
-        else {}
-    )
     months = [f'{month:02d}' for month in range(1, 13)]
     monthly_rows = [
         row
@@ -1758,16 +1619,6 @@ async def _year_over_year_payload(
             monthly_rows,
         ),
     ]
-    base['raw'] = {
-        'years': year_rows,
-        'months': monthly_rows,
-        'latest_year': latest.get('year'),
-        'previous_year': previous.get('year'),
-        'activity_start': activity_start.isoformat(),
-        'activity_end': activity_end.isoformat(),
-        'months_in_scope': months,
-        'service_detail_excluded': True,
-    }
     return base
 
 
@@ -1797,11 +1648,6 @@ async def _payment_methods_payload(
             'title': 'Нет данных',
             'text': 'За выбранный период у филиала нет данных: он не входил в отчётность за эти даты.',
         })
-        base['raw'] = {
-            'yandex_pay_applied': breakdown['yandex_pay_applied'],
-            'countable_months': breakdown['countable_months'],
-            'branches': [],
-        }
         return base
 
     def total_of(key: str) -> float | None:
@@ -1987,11 +1833,6 @@ async def _payment_methods_payload(
                 'Проверьте введённую сумму или способ проведения оплат Яндекс Пэй в YClients.'
             ),
         })
-    base['raw'] = {
-        'yandex_pay_applied': breakdown['yandex_pay_applied'],
-        'countable_months': breakdown['countable_months'],
-        'branches': branches,
-    }
     return base
 
 
@@ -2073,11 +1914,6 @@ async def _staff_rows(
                     case((Appointment.attendance == COMPLETED_ATTENDANCE, Appointment.id))
                 )
             ).label('completed'),
-            func.count(
-                func.distinct(
-                    case((Appointment.attendance != COMPLETED_ATTENDANCE, Appointment.id))
-                )
-            ).label('not_completed'),
             func.count(func.distinct(Appointment.client_id)).label('clients'),
         )
         .outerjoin(Staff, Staff.id == Appointment.staff_id)
@@ -2133,7 +1969,6 @@ async def _staff_rows(
             'company_title': row.company_title,
             'appointments': int(row.appointments or 0),
             'completed': completed,
-            'not_completed': int(row.not_completed or 0),
             'clients': int(row.clients or 0),
             'revenue': 0.0,
             'avg_check': 0.0,
@@ -2145,7 +1980,6 @@ async def _staff_rows(
             'company_title': row.company_title,
             'appointments': 0,
             'completed': 0,
-            'not_completed': 0,
             'clients': 0,
             'revenue': 0.0,
             'avg_check': 0.0,
@@ -2411,7 +2245,6 @@ async def _client_recency_payload(
             row_key='segment',
         )
     ]
-    base['raw'] = {'segments': rows, 'summary_metrics': visits}
     return base
 
 
@@ -2479,6 +2312,7 @@ async def _leaderboard_payload_impl(
             force_allowed=allowed_company_ids is not None,
             include_extra_service_revenue=True,
             include_all_staff_in_leaderboards=True,
+            include_staff_leaderboards=True,
             factual_at=factual_at,
         )
     except INFRASTRUCTURE_ERRORS as error:
@@ -2665,7 +2499,6 @@ async def _leaderboard_payload_impl(
             hide_when_empty=True,
         ),
     ]
-    base['raw'] = {}
     return base
 
 
