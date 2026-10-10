@@ -574,7 +574,8 @@ def test_vercel_configs_define_security_headers():
 
 def test_local_and_test_import_allow_local_defaults():
     # The full non-production allowlist (config.NON_PRODUCTION_ENV_NAMES): local dev, pytest,
-    # a shared dev deploy, CI, and the legacy standalone demo stack (.env.demo.example).
+    # a shared dev deploy, CI, and the retired standalone demo stack (its compose file and
+    # env example are gone; the name stays allowed so an old .env keeps booting locally).
     for app_env in ('local', 'test', 'dev', 'ci', 'demo'):
         result = _run_import_api({
             'APP_ENV': app_env,
