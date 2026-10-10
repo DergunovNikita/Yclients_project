@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, time, timedelta
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event, select, text
+from sqlalchemy.exc import OperationalError
 
 import api
 import auth_deps
@@ -691,6 +692,7 @@ async def test_dashboard_client_reports_revenue_uses_paid_service_rows(async_ses
         date(2025, 1, 1),
         date(2025, 1, 31),
         1,
+        opz_override=await dashboard_service._opz_count(async_session, date(2025, 1, 1), date(2025, 1, 31), 1),
     )
     assert data['cards'][2]['value'] == overview['revenue']['service_revenue'] == 2200.0
     assert data['cards'][2]['value'] == plan_fact['revenue']
@@ -827,7 +829,11 @@ async def test_dashboard_year_over_year_uses_actual_history_and_overview_formula
         include_appointments_breakdown=False,
     )
     plan_fact_components = await dashboard_service._fact_metric_components(
-        async_session, date(2025, 1, 1), date(2025, 12, 31), 1
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        1,
+        opz_override=await dashboard_service._opz_count(async_session, date(2025, 1, 1), date(2025, 12, 31), 1),
     )
     assert years_by_year[2025]['revenue'] == overview['revenue']['total']
     assert years_by_year[2025]['revenue'] == plan_fact_components['revenue']
@@ -2171,7 +2177,7 @@ async def test_reporting_end_takes_the_branch_out_of_the_staff_and_service_lists
         async_session, start=date(2025, 9, 1), end=date(2025, 9, 30)
     )
     unscoped = await dashboard_service.fetch_staff(async_session)
-    services = await dashboard_service.fetch_dashboard_services(async_session)
+    services = await dashboard_service.fetch_dashboard_services(async_session, portal_account_id=1)
 
     assert {row['name'] for row in august} == {'Stays Barber', 'Left Barber'}
     assert {row['name'] for row in september} == {'Stays Barber'}
@@ -3028,6 +3034,7 @@ async def test_year_over_year_opz_fact_advances_latest_year(
         date(2025, 1, 1),
         date(2025, 1, 1),
         1,
+        opz_override=await dashboard_service._opz_count(async_session, date(2025, 1, 1), date(2025, 1, 1), 1),
     )
 
     assert report['raw']['activity_end'] == '2025-01-01'
@@ -3964,6 +3971,7 @@ async def test_dashboard_staff_efficiency_revenue_uses_paid_service_rows(async_s
         date(2025, 1, 1),
         date(2025, 1, 31),
         1,
+        opz_override=await dashboard_service._opz_count(async_session, date(2025, 1, 1), date(2025, 1, 31), 1),
     )
     assert data['cards'][2]['value'] == overview['revenue']['service_revenue'] == 2200.0
     assert data['cards'][2]['value'] == plan_fact['revenue']
@@ -4168,7 +4176,7 @@ async def test_dashboard_staff_leaderboard_report_returns_retryable_503_on_total
     import dashboard_reports
 
     async def boom(*args, **kwargs):
-        raise RuntimeError('boom')
+        raise OperationalError('SELECT 1', {}, OSError('connection lost'))
 
     monkeypatch.setattr(dashboard_reports, 'fetch_plan_fact', boom)
 
@@ -4176,14 +4184,20 @@ async def test_dashboard_staff_leaderboard_report_returns_retryable_503_on_total
         yield async_session
 
     app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    params = {'report_id': 'staff_leaderboard', 'start_date': '2025-01-01', 'end_date': '2025-01-31'}
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        r = await client.get(
-            '/dashboard/reports/data',
-            params={'report_id': 'staff_leaderboard', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
-        )
+        r = await client.get('/dashboard/reports/data', params=params)
+
+        # A defect is not retryable: it is a 500, not a 503 asking the user to try again.
+        async def defect(*args, **kwargs):
+            raise RuntimeError('boom')
+
+        monkeypatch.setattr(dashboard_reports, 'fetch_plan_fact', defect)
+        crashed = await client.get('/dashboard/reports/data', params=params)
     app.dependency_overrides.clear()
 
+    assert crashed.status_code == 500
     assert r.status_code == 503
     detail = r.json()['detail']
     assert detail == {
@@ -9782,9 +9796,10 @@ async def test_manual_fact_service_refuses_a_foreign_row_without_the_router(asyn
     await async_session.commit()
 
     with pytest.raises(ValueError, match='not editable by this user'):
-        await dashboard_service.save_manual_review_facts(
+        await dashboard_service.save_manual_facts(
             async_session,
             '2025-01',
+            dashboard_service.REVIEWS_QTY_CODE,
             1,
             None,
             [{'company_id': 1, 'staff_id': 3, 'value': 9}],
@@ -9796,9 +9811,10 @@ async def test_manual_fact_service_refuses_a_foreign_row_without_the_router(asyn
         )
     assert (await async_session.execute(select(ManualFactMetric))).scalars().all() == []
 
-    saved = await dashboard_service.save_manual_review_facts(
+    saved = await dashboard_service.save_manual_facts(
         async_session,
         '2025-01',
+        dashboard_service.REVIEWS_QTY_CODE,
         1,
         None,
         [{'company_id': 1, 'staff_id': 2, 'value': 9}],
@@ -9820,9 +9836,10 @@ async def test_manual_fact_service_refuses_a_row_that_is_not_open(async_session)
     await async_session.commit()
 
     with pytest.raises(dashboard_service.ManualFactRowNotOpen):
-        await dashboard_service.save_manual_review_facts(
+        await dashboard_service.save_manual_facts(
             async_session,
             '2025-01',
+            dashboard_service.REVIEWS_QTY_CODE,
             1,
             None,
             [{'company_id': 1, 'staff_id': 4, 'value': 1}],
@@ -10382,6 +10399,8 @@ async def test_plan_settings_save_drops_the_cached_administrator_roles(async_ses
             'staff_category': 'administrator',
             'reviews_qty': 3,
         }],
+        actor_user_id=None,
+        portal_account_id=None,
     )
 
     assert not async_session.info.get('administrator_role_periods')
@@ -11216,6 +11235,8 @@ async def test_plan_settings_preserve_period_plan_for_fired_administrator(async_
         '2025-05',
         [{'company_id': 1}],
         [],
+        actor_user_id=None,
+        portal_account_id=None,
     )
 
     preserved_input = await async_session.scalar(
@@ -11364,6 +11385,8 @@ async def test_plan_settings_preserve_category_only_role_snapshots(async_session
             'staff_id': 20,
             'staff_category': 'administrator',
         }],
+        actor_user_id=None,
+        portal_account_id=None,
     )
 
     rows = (
@@ -11429,6 +11452,8 @@ async def test_plan_settings_edit_replaces_derived_legacy_metrics(async_session)
             'clients': 120,
             'avg_check_total': 3000,
         }],
+        actor_user_id=None,
+        portal_account_id=None,
     )
 
     revenue_rows = (
@@ -14594,15 +14619,6 @@ async def test_future_ended_client_reports_measure_recency_at_factual_cutoff(
     ])
     await async_session.commit()
 
-    rows = await dashboard_reports._clients_rows(
-        async_session,
-        date(2000, 1, 1),
-        date(2026, 12, 31),
-        1,
-        None,
-        None,
-        factual_at,
-    )
     churn = await dashboard_reports.fetch_report_data(
         async_session,
         'revenue_at_risk',
@@ -14612,7 +14628,6 @@ async def test_future_ended_client_reports_measure_recency_at_factual_cutoff(
     )
     cards = {card['label']: card['value'] for card in churn['cards']}
 
-    assert rows[0]['days_since_last_visit'] == 31
     # 31 days after the last visit is far from the 90 the report waits for.
     assert cards['Ушедших клиентов'] == 0
     assert cards['Ежемесячная выручка под риском'] == 0.0

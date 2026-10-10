@@ -1,5 +1,5 @@
 requests>=2.31.0
-urllib3>=2.0.0  # Retry(retry_after_max=...) caps honored 429 Retry-After; param added in urllib3 2.x
+urllib3>=2.7.0  # Retry(retry_after_max=...) caps honored 429 Retry-After; missing in 2.2.2, present in 2.7.0 (oldest checked)
 sqlalchemy>=2.0.0,<2.1
 alembic>=1.14.0
 psycopg2-binary>=2.9.0
@@ -9,12 +9,8 @@ fastapi>=0.104.0
 uvicorn>=0.24.0
 pydantic>=2.7.0
 python-dotenv>=1.0.0
-pytest>=8.3.0
-pytest-asyncio>=0.25.0
 httpx>=0.28.0
-aiosqlite>=0.21.0
 bcrypt>=4.0.0
 PyJWT>=2.8.0
 email-validator>=2.0.0
 cryptography>=42.0.0
-ruff>=0.6.0

@@ -35,7 +35,6 @@ async def can_reassign_branch_from_tenant(
     db: AsyncSession,
     source_portal_account_id: int,
     target_portal_account_id: int,
-    company_id: int | None = None,  # kept for call-site compatibility
 ) -> bool:
     if source_portal_account_id == target_portal_account_id:
         return True
@@ -72,12 +71,7 @@ async def reassign_branch_from_admin_only_tenant(
 ) -> bool:
     if branch.portal_account_id == target_portal_account_id:
         return True
-    if not await can_reassign_branch_from_tenant(
-        db,
-        branch.portal_account_id,
-        target_portal_account_id,
-        branch.company_id,
-    ):
+    if not await can_reassign_branch_from_tenant(db, branch.portal_account_id, target_portal_account_id):
         return False
     await _detach_source_credential_company_links(
         db, branch.portal_account_id, branch.company_id

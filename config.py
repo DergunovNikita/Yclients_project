@@ -2,6 +2,7 @@
 Конфигурационный файл с настройками.
 Значения берутся из переменных окружения (.env файл) с fallback-значениями.
 """
+import logging
 import os
 from datetime import date
 from urllib.parse import urlsplit
@@ -18,6 +19,8 @@ NON_PRODUCTION_ENV_NAMES = {'local', 'test', 'dev', 'ci', 'demo'}
 APP_ENV = os.getenv('APP_ENV', '').strip().lower()
 IS_PRODUCTION = APP_ENV not in NON_PRODUCTION_ENV_NAMES
 LOG_LEVEL = (os.getenv('LOG_LEVEL', 'INFO').strip() or 'INFO').upper()
+if LOG_LEVEL not in logging.getLevelNamesMapping():
+    raise RuntimeError(f'LOG_LEVEL must be one of: {", ".join(logging.getLevelNamesMapping())}')
 PLACEHOLDER_SECRET_VALUES = {
     'change_me_local_jwt_secret',
     'change_me_sync_api_token',
@@ -82,6 +85,17 @@ def _is_placeholder(value: str | None) -> bool:
     )
 
 
+def _is_public_https_url(value: str | None) -> bool:
+    if _is_blank(value):
+        return False
+    parsed = urlsplit(value.strip())
+    host = (parsed.hostname or '').lower()
+    is_loopback = (
+        host in {'localhost', '::1', '0.0.0.0'} or host.endswith('.localhost') or host.startswith('127.')
+    )
+    return parsed.scheme == 'https' and bool(host) and not is_loopback
+
+
 def _cors_origins_list(value: str | None) -> list[str]:
     return [origin.strip() for origin in (value or '').split(',') if origin.strip()]
 
@@ -123,7 +137,7 @@ YCLIENTS_RETRY_AFTER_MAX = _get_float('YCLIENTS_RETRY_AFTER_MAX', 60.0)
 # Настройки PostgreSQL
 # ============================================================================
 DB_HOST = os.getenv('DB_HOST', 'localhost')
-DB_PORT = int(os.getenv('DB_PORT', '5432'))
+DB_PORT = _get_int('DB_PORT', 5432)
 DB_NAME = os.getenv('DB_NAME', 'yclients_db')
 DB_USER = os.getenv('DB_USER', 'postgres')
 DB_PASSWORD = os.getenv('DB_PASSWORD', '')
@@ -261,6 +275,7 @@ def collect_production_config_errors(
     smtp_from: str | None = SMTP_FROM,
     dashboard_cors_origins: str | None = DASHBOARD_CORS_ORIGINS,
     dashboard_cors_origin_regex: str | None = DASHBOARD_CORS_ORIGIN_REGEX,
+    app_public_url: str | None = APP_PUBLIC_URL,
 ) -> list[str]:
     """Return production-only startup configuration errors.
 
@@ -297,6 +312,10 @@ def collect_production_config_errors(
         errors.append('AUTH_CONSOLE_EMAIL must be false')
     if not auth_console_email and any(_is_placeholder(value) for value in (smtp_host, smtp_user, smtp_password, smtp_from)):
         errors.append('SMTP_HOST, SMTP_USER, SMTP_PASSWORD and SMTP_FROM must be configured')
+    if not auth_console_email and not _is_public_https_url(app_public_url):
+        # Verification and reset links are built from it; a loopback or plain-http base sends
+        # every e-mail with a dead or downgradable link.
+        errors.append('APP_PUBLIC_URL must be a public https URL when e-mail is sent through SMTP')
     if not _is_blank(dashboard_cors_origin_regex):
         errors.append('DASHBOARD_CORS_ORIGIN_REGEX must be empty in production')
     if any(not _is_exact_cors_origin(origin) for origin in _cors_origins_list(dashboard_cors_origins)):

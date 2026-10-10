@@ -1,31 +1,23 @@
-"""Create or update a local platform_admin portal user."""
+"""Create or update a platform_admin portal user (also the production bootstrap run by the auto-deploy script)."""
 from __future__ import annotations
 
 import argparse
 from datetime import datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from auth_service import hash_password, normalize_email
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from database import init_database
-from models import PortalUser, PortalUserBranch
+from models import PortalUser
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Create local platform_admin portal user')
+    parser = argparse.ArgumentParser(description='Create or update a platform_admin portal user')
     parser.add_argument('--email', required=True)
     parser.add_argument('--password', required=True)
     parser.add_argument('--full-name', default='Local Super Admin')
-    parser.add_argument('--assign-all-branches', action='store_true', help='Assign all companies as branches')
     return parser.parse_args()
-
-
-def _set_user_branches(db, user_id: int, company_ids: list[int]) -> None:
-    db.execute(delete(PortalUserBranch).where(PortalUserBranch.user_id == user_id))
-    for company_id in sorted(set(company_ids)):
-        db.add(PortalUserBranch(user_id=user_id, company_id=company_id))
-    db.commit()
 
 
 def main() -> int:
@@ -63,11 +55,6 @@ def main() -> int:
             db.commit()
             print(f'Updated platform_admin user id={user.id} email={email}')
 
-        if args.assign_all_branches:
-            _set_user_branches(db, user.id, [])
-            print('Ignored branch assignment for platform_admin')
-
-        print('Login at http://127.0.0.1:5173/login.html')
         print(f'Email: {email}')
         return 0
     finally:

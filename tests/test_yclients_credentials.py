@@ -250,3 +250,13 @@ def test_only_the_read_path_loads_credentials_async():
         'reaches the credential bookkeeping commit. Confirm it is a read path. Callers now: '
         f'{sorted(record_stats_callers)}'
     )
+
+
+def test_fernet_objects_are_cached_per_key(monkeypatch):
+    from yclients_credentials import _fernet
+
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'first-key')
+    first = _fernet()
+    assert _fernet() is first
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'second-key')
+    assert _fernet() is not first

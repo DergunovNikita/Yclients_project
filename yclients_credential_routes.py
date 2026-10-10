@@ -7,6 +7,7 @@ so every URL stays under both `/auth/...` and `/dashboard/auth/...` (see api.py)
 
 from __future__ import annotations
 
+import asyncio
 from typing import NoReturn
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
@@ -68,7 +69,7 @@ class YClientsCredentialUpdateRequest(BaseModel):
     company_ids: list[int] | None = None
 
 
-def _credentials_config_error(exc: CredentialsConfigError) -> HTTPException:
+def _credentials_config_error() -> HTTPException:
     return HTTPException(status_code=500, detail=CREDENTIAL_STORAGE_FAILED_DETAIL)
 
 
@@ -198,13 +199,18 @@ async def _validate_credential_companies(
         raise HTTPException(status_code=403, detail=f'Companies outside tenant: {missing}')
 
 
-def _test_source_credentials(source_type: str | None, partner_token: str, login: str, password: str) -> dict:
-    adapter = authenticated_adapter_from_payload(
+def _authenticated_adapter(source_type: str | None, partner_token: str, login: str, password: str):
+    """Blocking YClients login; call through `asyncio.to_thread`."""
+    return authenticated_adapter_from_payload(
         source_type,
         partner_token=partner_token,
         login=login,
         password=password,
     )
+
+
+def _test_source_credentials(source_type: str | None, partner_token: str, login: str, password: str) -> dict:
+    adapter = _authenticated_adapter(source_type, partner_token, login, password)
     return {
         'success': True,
         'source_type': adapter.source_type,
@@ -215,19 +221,11 @@ def _test_source_credentials(source_type: str | None, partner_token: str, login:
 async def _sync_credential_companies_from_yclients(
     db: AsyncSession,
     portal_account_id: int,
-    partner_token: str,
-    login: str,
-    password: str,
-    source_type: str = SOURCE_YCLIENTS,
+    adapter,
 ) -> list[int]:
-    adapter = authenticated_adapter_from_payload(
-        source_type,
-        partner_token=partner_token,
-        login=login,
-        password=password,
-    )
-    company_ids = sorted(item.company_id for item in adapter.list_branches())
-    materialized_company_ids = await adapter.materialize_branches(db, portal_account_id, company_ids)
+    branches = await asyncio.to_thread(adapter.list_branches)
+    company_ids = sorted(item.company_id for item in branches)
+    materialized_company_ids = await adapter.materialize_branches(db, portal_account_id, company_ids, branches)
     return sorted(set(materialized_company_ids))
 
 
@@ -276,20 +274,15 @@ async def admin_create_yclients_credentials(
             raise HTTPException(status_code=400, detail='portal_account_id does not match X-Portal-Account-Id')
     portal_account_id = await _validated_credential_account_id(db, actor, x_portal_account_id or body.portal_account_id)
     try:
-        _test_source_credentials(source_type, body.partner_token, body.login, body.password)
+        adapter = await asyncio.to_thread(
+            _authenticated_adapter, source_type, body.partner_token, body.login, body.password
+        )
     except Exception as exc:
         await _raise_credential_create_failure(db, actor, portal_account_id, exc)
     company_ids = list(body.company_ids)
     if not company_ids:
         try:
-            company_ids = await _sync_credential_companies_from_yclients(
-                db,
-                portal_account_id,
-                body.partner_token,
-                body.login,
-                body.password,
-                source_type,
-            )
+            company_ids = await _sync_credential_companies_from_yclients(db, portal_account_id, adapter)
         except Exception as exc:
             await _raise_credential_create_failure(db, actor, portal_account_id, exc)
     await _validate_credential_companies(db, portal_account_id, company_ids)
@@ -311,7 +304,7 @@ async def admin_create_yclients_credentials(
             error_type=exc.__class__.__name__,
         )
         await db.commit()
-        raise _credentials_config_error(exc) from exc
+        raise _credentials_config_error() from exc
 
     db.add(credential)
     await db.flush()
@@ -373,7 +366,7 @@ async def admin_update_yclients_credentials(
             error_type=exc.__class__.__name__,
         )
         await db.commit()
-        raise _credentials_config_error(exc) from exc
+        raise _credentials_config_error() from exc
 
     if body.company_ids is not None:
         await _validate_credential_companies(db, credential.portal_account_id, body.company_ids)
@@ -462,7 +455,9 @@ async def admin_test_saved_yclients_credentials(
         await db.commit()
         raise HTTPException(status_code=500, detail=CREDENTIAL_DECRYPT_FAILED_DETAIL) from exc
     try:
-        result = _test_source_credentials(SOURCE_YCLIENTS, value.partner_token, value.login, value.password)
+        result = await asyncio.to_thread(
+            _test_source_credentials, SOURCE_YCLIENTS, value.partner_token, value.login, value.password
+        )
     except HTTPException as exc:
         await mark_credential_failure_async(db, credential.id, CREDENTIAL_TEST_FAILED_DETAIL)
         await _audit_credential_action_failure(
@@ -563,7 +558,7 @@ async def admin_test_yclients_credentials_payload(
         await db.commit()
         raise HTTPException(status_code=400, detail=CREDENTIAL_PAYLOAD_INVALID_DETAIL)
     try:
-        result = _test_source_credentials(source_type, partner_token, login, password)
+        result = await asyncio.to_thread(_test_source_credentials, source_type, partner_token, login, password)
     except HTTPException:
         await _audit_credential_action_failure(
             db,

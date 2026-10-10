@@ -18,7 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import exists, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -45,6 +45,7 @@ from auth_hierarchy import USER_MANAGER_ROLES
 from auth_routes import router as auth_router
 from auth_scope import (
     AccessContext,
+    can_view_branch_payments,
     can_view_financials,
     effective_staff_id,
     require_financial_access,
@@ -87,7 +88,6 @@ from dashboard_service import (
 )
 from sync_jobs import SyncJobService
 from sync_orchestrator import get_sync_status
-from sync_parsing import parse_date, parse_datetime_end, parse_datetime_start
 from sync_security import validate_sync_token
 
 init_async_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
@@ -336,10 +336,19 @@ def require_client_pii_access(request: Request) -> tuple[AccessContext, int]:
     return ctx, int(portal_account_id)
 
 
-def require_request_financial_access(request: Request) -> None:
+def require_request_branch_payments(request: Request) -> None:
+    """Gate for endpoints that return branch-wide payments or totals.
+
+    Revenue visibility alone is not enough: `admin`/`barber` stay clamped to their own staff row
+    and a branch-wide payment list would reveal what that clamp hides. The predicate is the one
+    the report catalog and the Yandex Pay editor use.
+    """
     ctx = request_access(request)
-    if ctx is not None:
-        require_financial_access(ctx)
+    if ctx is None:
+        return
+    require_financial_access(ctx)
+    if not can_view_branch_payments(ctx):
+        raise HTTPException(status_code=403, detail='Branch payment data is not allowed for this role')
 
 
 def can_request_view_financials(request: Request) -> bool:
@@ -604,8 +613,7 @@ async def api_clients(
 ):
     limit, offset = pagination
     ctx, portal_account_id = require_client_pii_access(request)
-    stmt = select(Client)
-    stmt = apply_company_scope(stmt, Client.company_id, company_id, ctx)
+    stmt = scope_model_stmt(select(Client), Client, ctx, company_id=company_id)
     if min_visits is not None:
         stmt = stmt.where(Client.visits_count >= min_visits)
     stmt = stmt.order_by(Client.id.asc())
@@ -742,22 +750,20 @@ async def api_appointments(
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
     client_id: Optional[int] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
     ctx = request_access(request)
-    stmt = select(Appointment)
-    stmt = apply_company_scope(stmt, Appointment.company_id, company_id, ctx)
-    stmt = apply_staff_scope(stmt, Appointment.staff_id, staff_id, ctx)
+    stmt = scope_model_stmt(select(Appointment), Appointment, ctx, company_id=company_id, staff_id=staff_id)
     if client_id is not None:
         stmt = stmt.where(Appointment.client_id == client_id)
-    if date_from:
-        stmt = stmt.where(Appointment.date >= parse_date(date_from))
-    if date_to:
-        stmt = stmt.where(Appointment.date <= parse_date(date_to))
+    if date_from is not None:
+        stmt = stmt.where(Appointment.date >= date_from)
+    if date_to is not None:
+        stmt = stmt.where(Appointment.date <= date_to)
     stmt = stmt.order_by(Appointment.id.asc())
     total, items = await fetch_page(db, stmt, limit, offset)
     data = serialize_rows(items, lambda item: {
@@ -783,10 +789,9 @@ async def api_transactions(
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
-    require_request_financial_access(request)
+    require_request_branch_payments(request)
     limit, offset = pagination
-    stmt = select(Transaction)
-    stmt = apply_company_scope(stmt, Transaction.company_id, company_id, request_access(request))
+    stmt = scope_model_stmt(select(Transaction), Transaction, request_access(request), company_id=company_id)
     if appointment_id is not None:
         stmt = stmt.where(Transaction.appointment_id == appointment_id)
     stmt = stmt.order_by(Transaction.id.asc())
@@ -808,19 +813,20 @@ async def api_transactions(
 async def api_financial_transactions(
     request: Request,
     company_id: Optional[int] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
-    require_request_financial_access(request)
+    require_request_branch_payments(request)
     limit, offset = pagination
-    stmt = select(FinancialTransaction)
-    stmt = apply_company_scope(stmt, FinancialTransaction.company_id, company_id, request_access(request))
-    if date_from:
-        stmt = stmt.where(FinancialTransaction.date >= parse_datetime_start(date_from))
-    if date_to:
-        stmt = stmt.where(FinancialTransaction.date <= parse_datetime_end(date_to))
+    stmt = scope_model_stmt(
+        select(FinancialTransaction), FinancialTransaction, request_access(request), company_id=company_id
+    )
+    if date_from is not None:
+        stmt = stmt.where(FinancialTransaction.date >= datetime.combine(date_from, time.min))
+    if date_to is not None:
+        stmt = stmt.where(FinancialTransaction.date <= datetime.combine(date_to, time.max))
     stmt = stmt.order_by(FinancialTransaction.id.asc())
     total, items = await fetch_page(db, stmt, limit, offset)
     data = serialize_rows(items, lambda item: {
@@ -850,10 +856,9 @@ async def api_goods_transactions(
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
-    require_request_financial_access(request)
+    require_request_branch_payments(request)
     limit, offset = pagination
-    stmt = select(GoodTransaction)
-    stmt = apply_company_scope(stmt, GoodTransaction.company_id, company_id, request_access(request))
+    stmt = scope_model_stmt(select(GoodTransaction), GoodTransaction, request_access(request), company_id=company_id)
     stmt = stmt.order_by(GoodTransaction.id.asc())
     total, items = await fetch_page(db, stmt, limit, offset)
     data = serialize_rows(items, lambda item: {
@@ -882,22 +887,20 @@ async def api_comments(
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
     min_rating: Optional[float] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
     ctx = request_access(request)
-    stmt = select(Comment)
-    stmt = apply_company_scope(stmt, Comment.company_id, company_id, ctx)
-    stmt = apply_staff_scope(stmt, Comment.master_id, staff_id, ctx)
+    stmt = scope_model_stmt(select(Comment), Comment, ctx, company_id=company_id, staff_id=staff_id)
     if min_rating is not None:
         stmt = stmt.where(Comment.rating >= min_rating)
-    if date_from:
-        stmt = stmt.where(Comment.date >= parse_datetime_start(date_from))
-    if date_to:
-        stmt = stmt.where(Comment.date <= parse_datetime_end(date_to))
+    if date_from is not None:
+        stmt = stmt.where(Comment.date >= datetime.combine(date_from, time.min))
+    if date_to is not None:
+        stmt = stmt.where(Comment.date <= datetime.combine(date_to, time.max))
     stmt = stmt.order_by(Comment.id.asc())
     total, items = await fetch_page(db, stmt, limit, offset)
     data = serialize_rows(items, lambda item: {
@@ -920,20 +923,18 @@ async def api_staff_schedules(
     request: Request,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
     pagination: tuple[int, int] = Depends(page_params),
 ):
     limit, offset = pagination
     ctx = request_access(request)
-    stmt = select(StaffSchedule)
-    stmt = apply_company_scope(stmt, StaffSchedule.company_id, company_id, ctx)
-    stmt = apply_staff_scope(stmt, StaffSchedule.staff_id, staff_id, ctx)
-    if date_from:
-        stmt = stmt.where(StaffSchedule.date >= parse_date(date_from))
-    if date_to:
-        stmt = stmt.where(StaffSchedule.date <= parse_date(date_to))
+    stmt = scope_model_stmt(select(StaffSchedule), StaffSchedule, ctx, company_id=company_id, staff_id=staff_id)
+    if date_from is not None:
+        stmt = stmt.where(StaffSchedule.date >= date_from)
+    if date_to is not None:
+        stmt = stmt.where(StaffSchedule.date <= date_to)
     stmt = stmt.order_by(StaffSchedule.id.asc())
     total, items = await fetch_page(db, stmt, limit, offset)
     data = serialize_rows(items, lambda item: {
@@ -949,24 +950,18 @@ async def api_staff_schedules(
 
 @app.get("/stats")
 async def api_stats(request: Request, db: AsyncSession = Depends(get_async_db)):
-    require_request_financial_access(request)
+    require_request_branch_payments(request)
     ctx = request_access(request)
     allowed = None if ctx is None or ctx.full_access else (ctx.company_ids or [])
     revenue_result = await db.execute(
-        apply_company_scope(
-            select(func.sum(Transaction.cost * Transaction.amount)),
-            Transaction.company_id,
-            None,
-            ctx,
-        )
+        scope_model_stmt(select(func.sum(Transaction.cost * Transaction.amount)), Transaction, ctx)
     )
     revenue = revenue_result.scalar_one_or_none() or 0
 
     fin_result = await db.execute(
-        apply_company_scope(
+        scope_model_stmt(
             select(func.sum(FinancialTransaction.amount)).where(FinancialTransaction.amount > 0),
-            FinancialTransaction.company_id,
-            None,
+            FinancialTransaction,
             ctx,
         )
     )
@@ -986,27 +981,13 @@ async def api_stats(request: Request, db: AsyncSession = Depends(get_async_db)):
                 )
             r = await db.execute(stmt)
             return r.scalar_one()
-        stmt = select(func.count()).select_from(model)
-        company_column = getattr(model, 'company_id', None)
-        if company_column is None and model is Company:
-            company_column = Company.id
-        if company_column is not None:
-            # Route through apply_company_scope like every other model here, instead of a
-            # hand-rolled `.in_(allowed)` that would compile `IN ()` and silently return 0 for
-            # a zero-branch principal. Currently masked by the revenue/fin_income/attended
-            # queries above raising first, but that ordering is incidental — this must not
-            # depend on it.
-            stmt = apply_company_scope(stmt, company_column, None, ctx)
-        r = await db.execute(stmt)
+        # The shared scoping refuses a zero-branch principal instead of compiling `IN ()` and
+        # silently returning 0 — and must not depend on the queries above raising first.
+        r = await db.execute(scope_model_stmt(select(func.count()).select_from(model), model, ctx))
         return r.scalar_one()
 
     attended_result = await db.execute(
-        apply_company_scope(
-            select(func.count()).where(Appointment.attendance == 1),
-            Appointment.company_id,
-            None,
-            ctx,
-        )
+        scope_model_stmt(select(func.count()).where(Appointment.attendance == 1), Appointment, ctx)
     )
     appointments_total = await count_of(Appointment)
 
@@ -1043,10 +1024,10 @@ async def api_stats(request: Request, db: AsyncSession = Depends(get_async_db)):
 
 class SyncTriggerRequest(BaseModel):
     mode: Literal['incremental', 'refresh', 'full'] = 'incremental'
-    initiator: str = 'dashboard'
+    initiator: str = Field('dashboard', max_length=64)
     portal_account_id: int | None = None
     credential_id: int | None = None
-    company_ids: list[int] = []
+    company_ids: list[int] = Field(default_factory=list, max_length=200)
     global_sync: bool = False
 
 
@@ -1207,20 +1188,25 @@ MONEY_EXPORT_COLUMNS: dict[type, frozenset[str]] = {
 }
 
 
-def csv_export_stmt(model, ctx: AccessContext | None):
-    """Scope the export query, outside the streaming body.
+def scope_model_stmt(
+    stmt,
+    model,
+    ctx: AccessContext | None,
+    *,
+    company_id: int | None = None,
+    staff_id: int | None = None,
+):
+    """Narrow a query over `model` to what the principal may read: branches, reporting window, own staff row.
 
-    The staff clamp can refuse — a fired employee keeps their portal login, and
-    `effective_staff_id` answers 403 rather than opening the branch. Resolved inside the
-    generator that refusal would land after `http.response.start`, and the caller would get a
-    200 with a lone header row and a dropped connection instead of a status code.
+    Every surface that lists the raw tables (JSON listings, `/stats`, CSV export) goes through
+    here, so they answer the same question the dashboard does and cannot drift apart. `stmt` may
+    select anything from `model`, an aggregate included.
     """
-    stmt = select(model)
     company_column = getattr(model, 'company_id', None)
     if company_column is not None:
-        stmt = apply_company_scope(stmt, company_column, None, ctx)
+        stmt = apply_company_scope(stmt, company_column, company_id, ctx)
     elif model is Company:
-        stmt = apply_company_scope(stmt, Company.id, None, ctx)
+        stmt = apply_company_scope(stmt, Company.id, company_id, ctx)
     elif ctx is not None and not ctx.full_access:
         stmt = stmt.where(False)
     if company_column is not None and model not in EXPORT_WINDOW_EXEMPT_MODELS:
@@ -1236,8 +1222,33 @@ def csv_export_stmt(model, ctx: AccessContext | None):
             stmt = stmt.where(branch_window_overlap_clause(company_column, today, today))
     staff_column = STAFF_SCOPED_EXPORT_COLUMNS.get(model)
     if staff_column is not None:
-        stmt = apply_staff_scope(stmt, staff_column, None, ctx)
+        stmt = apply_staff_scope(stmt, staff_column, staff_id, ctx)
+    return stmt
+
+
+def csv_export_stmt(model, ctx: AccessContext | None):
+    """Scope the export query, outside the streaming body.
+
+    The staff clamp can refuse — a fired employee keeps their portal login, and
+    `effective_staff_id` answers 403 rather than opening the branch. Resolved inside the
+    generator that refusal would land after `http.response.start`, and the caller would get a
+    200 with a lone header row and a dropped connection instead of a status code.
+    """
+    stmt = scope_model_stmt(select(model), model, ctx)
     return stmt.order_by(*model.__table__.primary_key.columns)
+
+
+CSV_FORMULA_PREFIXES = ('=', '+', '-', '@', '\t', '\r')
+
+
+def neutralize_formula(value: Any) -> Any:
+    """Stop a spreadsheet from running customer-written text as a formula.
+
+    Only strings are touched, so negative numbers stay numbers.
+    """
+    if isinstance(value, str) and value.startswith(CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
 
 
 async def async_stream_csv_rows(db: AsyncSession, model, stmt, blank_columns: frozenset[str] = frozenset()):
@@ -1249,10 +1260,11 @@ async def async_stream_csv_rows(db: AsyncSession, model, stmt, blank_columns: fr
     buffer.seek(0)
     buffer.truncate(0)
 
-    result = await db.stream(stmt)
+    # Without yield_per the ORM drains the whole cursor into memory before the first row is yielded.
+    result = await db.stream(stmt.execution_options(yield_per=1000))
     async for row in result.scalars():
         writer.writerow([
-            None if column in blank_columns else serialize_value(getattr(row, column))
+            None if column in blank_columns else neutralize_formula(serialize_value(getattr(row, column)))
             for column in columns
         ])
         yield buffer.getvalue()
@@ -1270,7 +1282,7 @@ async def export_csv(table_name: str, request: Request, db: AsyncSession = Depen
         )
     ctx = request_access(request)
     if model in FINANCIAL_EXPORT_MODELS:
-        require_request_financial_access(request)
+        require_request_branch_payments(request)
     show_financials = can_request_view_financials(request)
     blank_columns = frozenset() if show_financials else MONEY_EXPORT_COLUMNS.get(model, frozenset())
     if model is Client:

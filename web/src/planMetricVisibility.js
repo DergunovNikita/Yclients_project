@@ -11,11 +11,6 @@ export function normalizeHiddenPlanMetricCodes(metrics = [], hiddenCodes = []) {
   return normalized;
 }
 
-export function visiblePlanMetrics(metrics = [], hiddenCodes = []) {
-  const hidden = normalizeHiddenPlanMetricCodes(metrics, hiddenCodes);
-  return metrics.filter((metric) => !hidden.has(metric?.code));
-}
-
 export function moneyPlanMetricCodes(metrics = []) {
   return new Set(
     metrics

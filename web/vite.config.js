@@ -50,6 +50,7 @@ export default defineConfig(({ mode }) => {
         },
         '/auth': apiProxy,
         '/dashboard': apiProxy,
+        '/onboarding': apiProxy,
       },
     },
   };

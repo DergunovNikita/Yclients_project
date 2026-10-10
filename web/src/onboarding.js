@@ -1,12 +1,8 @@
 import './auth.css';
 import './onboarding.css';
-import { authFetch, hasSessionHint, loadCurrentUser } from './auth.js';
+import { authFetch, loadCurrentUser, requireAuthRedirect } from './auth.js';
 import { escapeHtml } from './html.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
-
-if (!hasSessionHint()) {
-  window.location.href = '/login.html';
-}
 
 document.documentElement.lang = getLocale();
 applyTranslations();
@@ -107,7 +103,9 @@ async function refreshState() {
     if (data.credentials && data.credentials.length && !credentialId) {
       credentialId = data.credentials[0].id;
     }
-    showStep(data.step || 'done');
+    const step = data.step || 'done';
+    // The branch list only comes from the credentials POST; after a reload there is nothing to pick from.
+    showStep(step === 'pending_branches' && !availableCompanies.length ? 'pending_credentials' : step);
   } catch (error) {
     els.loading.textContent = `${t('common.errorPrefix')}: ${error.message}`;
   }
@@ -171,4 +169,4 @@ els.branchesForm.addEventListener('submit', async (event) => {
   }
 });
 
-refreshState();
+if (requireAuthRedirect()) refreshState();

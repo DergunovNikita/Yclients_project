@@ -108,6 +108,9 @@ WIPE_TABLES = [
 ]
 
 
+LOCAL_DB_HOSTS = {'localhost', '127.0.0.1', '::1'}
+
+
 def maybe_wipe_data(db) -> None:
     table_names = ", ".join(quote_identifier(db.bind.dialect, table_name) for table_name in WIPE_TABLES)
     wipe_sql = f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE;"
@@ -575,6 +578,12 @@ def seed_activity(
 def main() -> int:
     args = parse_args()
     rng = random.Random(args.seed)
+
+    # TRUNCATE ... CASCADE also empties tenant configuration, plans and manual facts, so the
+    # same local-only rule as scripts/local-db-refresh.sh applies before anything connects.
+    if args.wipe and DB_HOST not in LOCAL_DB_HOSTS:
+        print(f'Refusing --wipe: DB_HOST={DB_HOST} is not a local address.')
+        return 1
 
     database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
     if not database.test_connection():

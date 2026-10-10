@@ -3,6 +3,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 from config import collect_production_config_errors
 
 
@@ -61,6 +63,7 @@ def test_production_config_policy_accepts_safe_values():
         smtp_from='noreply@example.com',
         dashboard_cors_origins='https://dashboard.example.com,https://admin.example.com',
         dashboard_cors_origin_regex='',
+        app_public_url='https://portal.example.com',
     ) == []
 
 
@@ -82,6 +85,7 @@ def test_production_config_policy_requires_smtp_without_console_fallback():
         smtp_from='',
         dashboard_cors_origins='https://dashboard.example.com',
         dashboard_cors_origin_regex='',
+        app_public_url='https://portal.example.com',
     )
 
     assert errors == ['SMTP_HOST, SMTP_USER, SMTP_PASSWORD and SMTP_FROM must be configured']
@@ -184,6 +188,31 @@ def test_production_config_policy_rejects_placeholder_api_key_when_login_disable
     assert 'AUTH_REQUIRE_LOGIN must be true unless API_KEY is set' not in errors
 
 
+@pytest.mark.parametrize('url', [None, '', 'http://127.0.0.1:5173', 'https://localhost', 'http://portal.example.com'])
+def test_production_config_policy_requires_public_https_app_url_for_smtp(url):
+    errors = collect_production_config_errors(
+        api_key='',
+        auth_require_login=True,
+        auth_public_registration_enabled=False,
+        auth_jwt_secret='a-long-production-jwt-secret-32-plus',
+        sync_api_token='sync-token-32-plus-non-default-value',
+        db_password='db-password-32-plus-non-default',
+        portal_credentials_encryption_key='credential-key-32-plus-non-default',
+        auth_cookie_secure=True,
+        auth_cookie_samesite='lax',
+        auth_console_email=False,
+        smtp_host='smtp.example.com',
+        smtp_user='mailer@example.com',
+        smtp_password='smtp-password-32-plus-non-default',
+        smtp_from='noreply@example.com',
+        dashboard_cors_origins='https://dashboard.example.com',
+        dashboard_cors_origin_regex='',
+        app_public_url=url,
+    )
+
+    assert errors == ['APP_PUBLIC_URL must be a public https URL when e-mail is sent through SMTP']
+
+
 def _run_import_api(env_overrides: dict[str, str]) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.update({
@@ -205,6 +234,7 @@ def _run_import_api(env_overrides: dict[str, str]) -> subprocess.CompletedProces
         'SMTP_FROM': 'noreply@example.com',
         'DASHBOARD_CORS_ORIGINS': 'https://dashboard.example.com',
         'DASHBOARD_CORS_ORIGIN_REGEX': '',
+        'APP_PUBLIC_URL': 'https://portal.example.com',
     })
     env.update(env_overrides)
     return subprocess.run(
@@ -276,6 +306,7 @@ def _safe_production_config_env() -> dict[str, str]:
         'SMTP_FROM': 'noreply@example.com',
         'DASHBOARD_CORS_ORIGINS': 'https://dashboard.example.com',
         'DASHBOARD_CORS_ORIGIN_REGEX': '',
+        'APP_PUBLIC_URL': 'https://portal.example.com',
     }
 
 
@@ -293,6 +324,28 @@ def _run_production_code(code: str, env_overrides: dict[str, str] | None = None)
         capture_output=True,
         check=False,
     )
+
+
+def test_invalid_log_level_is_refused_at_import():
+    result = _run_import_config({'APP_ENV': 'local', 'LOG_LEVEL': 'LOUD'})
+
+    assert result.returncode != 0
+    assert 'LOG_LEVEL must be one of' in result.stderr
+
+
+def test_garbage_db_port_falls_back_like_every_other_integer():
+    env = {'APP_ENV': 'local', 'DB_PORT': 'five'}
+    result = subprocess.run(
+        [sys.executable, '-c', 'import config; print(config.DB_PORT)'],
+        cwd=os.getcwd(),
+        env={**os.environ, 'PYTHONPATH': os.getcwd(), **env},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == '5432'
 
 
 def test_env_example_is_importable_as_local_config():
@@ -363,6 +416,7 @@ def test_production_http_docs_routes_are_closed_but_health_is_open():
         'SMTP_FROM': 'noreply@example.com',
         'DASHBOARD_CORS_ORIGINS': 'https://dashboard.example.com',
         'DASHBOARD_CORS_ORIGIN_REGEX': '',
+        'APP_PUBLIC_URL': 'https://portal.example.com',
     })
     http_result = subprocess.run(
         [

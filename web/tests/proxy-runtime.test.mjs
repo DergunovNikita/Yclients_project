@@ -233,6 +233,7 @@ test('proxyToVm forwards only allowlisted request headers', async () => {
       cookie: 'portal_access=a',
       'content-type': 'application/json',
       'x-api-key': 'api-key',
+      'user-agent': 'Mozilla/5.0 (Macintosh) Safari/605.1.15',
       'x-csrf-token': 'csrf-token',
       'x-forwarded-for': '203.0.113.10',
       'x-portal-account-id': 'portal-1',
@@ -243,11 +244,73 @@ test('proxyToVm forwards only allowlisted request headers', async () => {
       accept: 'application/json',
       cookie: 'portal_access=a',
       'content-type': 'application/json',
+      'user-agent': 'Mozilla/5.0 (Macintosh) Safari/605.1.15',
       'x-csrf-token': 'csrf-token',
       'x-portal-account-id': 'portal-1',
     });
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test('proxyToVm answers a failing upstream body with the structured 503 and keeps the abort timer until then', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const events = [];
+  globalThis.setTimeout = (fn, ms) => {
+    events.push('timer-set');
+    return originalSetTimeout(fn, ms);
+  };
+  globalThis.clearTimeout = (handle) => {
+    events.push('timer-cleared');
+    return originalClearTimeout(handle);
+  };
+  globalThis.fetch = async () => ({
+    status: 200,
+    headers: upstreamHeaders([]),
+    async arrayBuffer() {
+      events.push('body-read');
+      throw new TypeError('terminated');
+    },
+  });
+
+  try {
+    for (const proxy of [webProxy, rootProxy]) {
+      events.length = 0;
+      const res = new ResponseRecorder();
+      await proxy.proxyToVm(requestStub(), res, new URL('https://vm.example.test/dashboard/auth/me'));
+
+      assert.equal(res.statusCode, 503);
+      assert.equal(JSON.parse(res.body).error, 'upstream_unavailable');
+      assert.deepEqual(events, ['timer-set', 'body-read', 'timer-cleared']);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
+
+test('handlers answer a build failure with a fixed 500 that does not echo the error', async () => {
+  const originalOrigin = process.env.VM_API_ORIGIN;
+  const originalConsoleError = console.error;
+  delete process.env.VM_API_ORIGIN;
+  console.error = () => {};
+
+  try {
+    for (const handler of [rootProxyHandler, webProxyHandler]) {
+      const res = new ResponseRecorder();
+      await handler(requestStub('GET', {}, '/api/health'), res);
+
+      assert.equal(res.statusCode, 500);
+      assert.equal(res.body, '{"error":"Internal error"}');
+    }
+  } finally {
+    console.error = originalConsoleError;
+    if (originalOrigin !== undefined) {
+      process.env.VM_API_ORIGIN = originalOrigin;
+    }
   }
 });
 
@@ -663,7 +726,16 @@ test('both vercel.json files agree, and the auth proxy outlasts a YClients crede
   assert.ok(root.functions['api/auth-proxy.js'].maxDuration >= 60);
   // The proxy aborts its own upstream call at PROXY_TIMEOUT_MS (160 s) and must still have time to
   // answer; a shorter function limit turns every slow call into a bare Vercel timeout.
-  for (const fn of ['api/auth-proxy.js', 'api/dashboard/**/*.js']) {
+  // The direct credential functions (api/auth/admin/yclients-credentials/**) run the same slow
+  // YClients login check, and the catch-all serves whatever has no function of its own.
+  for (const fn of ['api/auth-proxy.js', 'api/auth/**/*.js', 'api/dashboard/**/*.js', 'api/[...path].js']) {
     assert.ok(root.functions[fn].maxDuration > 160, `${fn} maxDuration must exceed the 160 s proxy timeout`);
+  }
+});
+
+test('the dev server proxies every backend scope the SPA calls', async () => {
+  const config = await readFile(new URL('../vite.config.js', import.meta.url), 'utf8');
+  for (const scope of ['/api', '/auth', '/dashboard', '/onboarding']) {
+    assert.ok(config.includes(`'${scope}'`), `vite.config.js has no dev proxy for ${scope}`);
   }
 });

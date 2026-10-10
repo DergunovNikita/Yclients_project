@@ -10,7 +10,7 @@
  * sent, not a second implementation of the rule. Both bounds are inclusive ISO days, which
  * compare correctly as plain strings.
  */
-export function branchInPeriod(branch, start, end) {
+function branchInPeriod(branch, start, end) {
   if (!start || !end) return true;
   const opened = branch?.reporting_start_date;
   const left = branch?.reporting_end_date;

@@ -30,7 +30,9 @@ class TelegramNotifier:
             )
             response.raise_for_status()
             return True
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            # Class name only: the exception text carries the request URL, which holds the bot token.
+            print(f'! Telegram notification failed: {exc.__class__.__name__}')
             return False
 
 

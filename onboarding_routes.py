@@ -7,6 +7,7 @@ Two logical steps:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -140,7 +141,9 @@ async def onboarding_credentials(
 ):
     _require_owner(user)
 
-    adapter = authenticated_adapter_from_payload(
+    # requests-based client with retries: keep the blocking HTTP off the event loop.
+    adapter = await asyncio.to_thread(
+        authenticated_adapter_from_payload,
         body.source_type,
         partner_token=body.partner_token,
         login=body.login,
@@ -148,7 +151,7 @@ async def onboarding_credentials(
     )
     source_type = adapter.source_type
 
-    available = [item.as_payload() for item in adapter.list_branches()]
+    available = [item.as_payload() for item in await asyncio.to_thread(adapter.list_branches)]
     if not available:
         raise HTTPException(status_code=400, detail='Data source returned no companies for these credentials')
 
@@ -181,7 +184,6 @@ async def onboarding_credentials(
                     db,
                     existing.portal_account_id,
                     user.portal_account_id or -1,
-                    company.id,
                 )
             ):
                 conflicting.append(item['company_id'])
@@ -253,7 +255,7 @@ async def onboarding_branches(
         raise HTTPException(status_code=400, detail='Pick at least one branch')
 
     adapter = adapter_from_credential(source_type, credential)
-    if not adapter.authenticate():
+    if not await asyncio.to_thread(adapter.authenticate):
         await mark_credential_failure_async(db, credential.id, 'YClients re-authentication failed')
         await db.commit()
         raise HTTPException(status_code=400, detail='Data source re-authentication failed')

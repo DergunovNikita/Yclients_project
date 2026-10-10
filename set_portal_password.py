@@ -1,8 +1,9 @@
 """Set a permanent reusable password for an existing portal user.
 
 Unlike `create_portal_admin.py`, this script does not create users or modify
-roles — it only replaces the password hash and stamps `password_changed_at`
-so the account is treated as having a permanent reusable password.
+roles — it only replaces the password hash, stamps `password_changed_at` so the
+account is treated as having a permanent reusable password, and signs the user out
+everywhere (a rotated password must not leave old sessions alive).
 """
 from __future__ import annotations
 
@@ -10,12 +11,13 @@ import argparse
 import getpass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
-from auth_service import PORTAL_PASSWORD_MIN_LENGTH, hash_password, normalize_email
+from auth_service import PASSWORD_MAX_BYTES, PORTAL_PASSWORD_MIN_LENGTH, hash_password, normalize_email
+from auth_sessions import bump_user_token_version
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from database import init_database
-from models import PortalUser
+from models import PortalRefreshToken, PortalUser
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +34,9 @@ def main() -> int:
     if len(password) < PORTAL_PASSWORD_MIN_LENGTH:
         print(f'Password must be at least {PORTAL_PASSWORD_MIN_LENGTH} characters')
         return 2
+    if len(password.encode('utf-8')) > PASSWORD_MAX_BYTES:
+        print(f'Password must not exceed {PASSWORD_MAX_BYTES} bytes in UTF-8')
+        return 2
 
     database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
     if not database.test_connection():
@@ -46,6 +51,8 @@ def main() -> int:
 
         user.password_hash = hash_password(password)
         user.password_changed_at = datetime.utcnow()
+        bump_user_token_version(user)
+        db.execute(delete(PortalRefreshToken).where(PortalRefreshToken.user_id == user.id))
         db.commit()
         print(f'Password updated for user id={user.id} email={email}')
         return 0

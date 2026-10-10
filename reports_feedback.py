@@ -10,11 +10,12 @@ from sqlalchemy.orm import aliased
 
 from dashboard_service import _company_scope_clause, day_window, reporting_window_clause
 from models import Comment, Company, Staff
-from report_payload import DECIMAL_FORMAT, NUMBER_FORMAT, PERCENT_FORMAT, ReportRequest, card, chart, table
+from report_payload import DECIMAL_FORMAT, NO_MASTER, NUMBER_FORMAT, PERCENT_FORMAT, ReportRequest, card, chart, table
 
 MAX_RATING = 5
 LOW_RATING = 3
-NO_MASTER = 'Без мастера'
+# The list has no pagination, and a long period over every branch would otherwise ship every low review.
+NEGATIVE_REVIEW_LIMIT = 200
 
 
 def _review_conditions(req: ReportRequest) -> list[Any]:
@@ -90,7 +91,10 @@ async def build_nps_dashboard(req: ReportRequest) -> dict[str, Any]:
         .outerjoin(Company, Company.id == Comment.company_id)
         .where(*conditions, Comment.rating <= LOW_RATING)
         .order_by(Comment.date.desc(), Comment.id.desc())
+        .limit(NEGATIVE_REVIEW_LIMIT + 1)
     )
+    fetched = (await req.db.execute(negative_stmt)).all()
+    negative_truncated = len(fetched) > NEGATIVE_REVIEW_LIMIT
     negative_rows = [
         {
             'id': row.id,
@@ -100,7 +104,7 @@ async def build_nps_dashboard(req: ReportRequest) -> dict[str, Any]:
             'rating': float(row.rating),
             'comment': row.text,
         }
-        for row in (await req.db.execute(negative_stmt)).all()
+        for row in fetched[:NEGATIVE_REVIEW_LIMIT]
     ]
 
     base['cards'] = [
@@ -131,6 +135,12 @@ async def build_nps_dashboard(req: ReportRequest) -> dict[str, Any]:
             negative_rows,
         )
     ]
+    if negative_truncated:
+        base['notes'].append({
+            'kind': 'info',
+            'title': 'Список ограничен',
+            'text': f'Показаны последние {NEGATIVE_REVIEW_LIMIT} отзывов с низкой оценкой; сузьте период, чтобы увидеть остальные.',
+        })
     if req.staff_id is not None:
         base['notes'].append({
             'kind': 'info',

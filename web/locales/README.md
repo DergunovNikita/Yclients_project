@@ -7,7 +7,7 @@ Runtime internationalization for the Vite frontend. Russian (`ru`) is the
 
 - `ru.json`, `en.json`, `it.json` — translation dictionaries (nested JSON).
 - `../src/i18n.js` — ES module: `t`, `applyTranslations`, `getLocale`/`setLocale`,
-  `mountLanguageSwitcher`, and `Intl` helpers (`formatMoney`, `formatDate`, `formatNumber`).
+  `mountLanguageSwitcher`, and `intlLocale()` (the BCP 47 tag for `Intl` formatters).
 
 The active locale is persisted in `localStorage` under `app_locale`.
 
@@ -41,7 +41,7 @@ remains the source of truth for the translation-key set.
 
 1. Add the key to `ru.json` first, then mirror it into `en.json` and `it.json`.
 2. Reference it via `data-i18n` / `data-i18n-attr` in markup, or `t('key')` in JS.
-3. Missing keys fall back to `ru`, then to the literal key string.
+3. Missing keys fall back to Italian (`DEFAULT_LOCALE` in `i18n.js`), then to the literal key string.
 
 ## Wired pages
 

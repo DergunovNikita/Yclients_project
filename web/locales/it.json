@@ -93,7 +93,6 @@
     "cancel": "Annulla",
     "close": "Chiudi",
     "loading": "Caricamento…",
-    "dash": "—",
     "errorPrefix": "Errore",
     "reloadDataAgain": "Per favore, aggiorna di nuovo i dati.",
     "loadingShort": "Caricamento",
@@ -400,7 +399,6 @@
     "scaleMoney": "importi",
     "scaleCount": "quantità",
     "scalePercent": "percentuali",
-    "topRevenue": "Top 5 per ricavi",
     "goodsKpiCompletion": "Completamento KPI prodotti",
     "completionTooltip": "Completamento: {value}",
     "diagnosticBarbers": "visite dei barbieri: {count}",
@@ -701,7 +699,10 @@
       "partial": "Parziale"
     },
     "sources": {
-      "yclientsComments": "recensioni YClients",
+      "appointmentsDetail": "dettaglio degli appuntamenti",
+      "financialTransactionsDetail": "dettaglio dei pagamenti",
+      "goodsTransactionsDetail": "dettaglio delle operazioni sui prodotti",
+      "staffSchedules": "orari del personale",
       "personalAccountTopups": "ricariche dei conti personali"
     },
     "missingSources": "Mancano",
@@ -738,7 +739,6 @@
   },
   "demo": {
     "viewDemo": "Guarda la demo",
-    "banner": "Modalità demo · dati fittizi",
-    "readOnly": "Modalità demo: sola lettura"
+    "banner": "Modalità demo · dati fittizi"
   }
 }

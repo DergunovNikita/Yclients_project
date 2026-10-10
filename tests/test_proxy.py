@@ -27,6 +27,7 @@ def test_root_proxy_forwards_real_client_ip_headers():
         const forwarded = forwardedHeaders({
           headers: {
             cookie: 'session=ok',
+            'user-agent': 'Mozilla/5.0 Safari',
             'x-forwarded-for': '203.0.113.10',
             'x-real-ip': '203.0.113.11',
           },
@@ -34,6 +35,7 @@ def test_root_proxy_forwards_real_client_ip_headers():
         });
 
         assert.equal(forwarded.cookie, 'session=ok');
+        assert.equal(forwarded['user-agent'], 'Mozilla/5.0 Safari');
         assert.equal(forwarded['x-forwarded-for'], '198.51.100.42');
         assert.equal(forwarded['x-real-ip'], '198.51.100.42');
         assert.notEqual(forwarded['x-forwarded-for'], '203.0.113.10');

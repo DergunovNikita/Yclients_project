@@ -16,6 +16,7 @@ const REQUEST_HEADER_ALLOWLIST = new Set([
   'accept',
   'content-type',
   'cookie',
+  'user-agent',
   'x-csrf-token',
   'x-portal-account-id',
 ]);
@@ -254,6 +255,7 @@ export async function proxyToVm(req, res, target) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
   let upstream;
+  let body;
   try {
     upstream = await fetch(target, {
       method,
@@ -262,6 +264,10 @@ export async function proxyToVm(req, res, target) {
       redirect: 'manual',
       signal: controller.signal,
     });
+    // The abort timer must keep running until the body is in: a stalled upstream body would
+    // otherwise hold the function until maxDuration, and a reset mid-body would escape as an
+    // unhandled rejection instead of the structured 503 the frontend knows how to show.
+    body = Buffer.from(await upstream.arrayBuffer());
   } catch (error) {
     res.statusCode = 503;
     res.setHeader('Content-Type', 'application/json');
@@ -287,7 +293,6 @@ export async function proxyToVm(req, res, target) {
     res.setHeader('set-cookie', setCookies);
   }
 
-  const body = Buffer.from(await upstream.arrayBuffer());
   res.end(body);
 }
 

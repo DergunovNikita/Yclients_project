@@ -1,5 +1,6 @@
 """Tests for sync_worker.py's own orchestration loop (job claiming, engine lifecycle)."""
 import types
+from contextlib import contextmanager
 
 import sync_worker
 
@@ -28,6 +29,9 @@ class _FakeJobs:
 
     def claim_next_job(self, db):
         return None  # nothing queued -> every tick is an idle tick
+
+    def has_running_job(self, db):
+        return False
 
     def reap_stale_jobs(self, db, max_running_minutes=None):
         return 0
@@ -258,3 +262,102 @@ def test_auto_enqueue_still_runs_when_a_retention_sweep_fails(monkeypatch):
         pass
 
     assert enqueued['n'] == 3
+
+
+class _ProbeControl:
+    """Control double: whether a run is 'running' and whether the lock is free are set per test."""
+
+    def __init__(self, running_run, lock_free):
+        self.running_run = running_run
+        self.lock_free = lock_free
+        self.probed = 0
+        self.cleaned = 0
+
+    def get_running_run(self, db):
+        return object() if self.running_run else None
+
+    @contextmanager
+    def probe_idle_lock(self, engine):
+        self.probed += 1
+        yield self.lock_free
+
+    def cleanup_stale_runs(self, db):
+        self.cleaned += 1
+        return 1
+
+
+class _ProbeJobs:
+    def __init__(self, running_job=False):
+        self.running_job = running_job
+        self.reaped = 0
+
+    def has_running_job(self, db):
+        return self.running_job
+
+    def reap_stale_jobs(self, db, max_running_minutes=None):
+        self.reaped += 1
+        return 1
+
+
+def _reap(control, jobs):
+    sync_worker.reap_orphans_if_no_sync_running(types.SimpleNamespace(engine=object()), object(), control, jobs)
+
+
+def test_orphans_are_closed_when_the_lock_is_free():
+    control, jobs = _ProbeControl(running_run=True, lock_free=True), _ProbeJobs(running_job=True)
+
+    _reap(control, jobs)
+
+    assert (control.cleaned, jobs.reaped) == (1, 1)
+
+
+def test_nothing_is_closed_while_a_sync_holds_the_lock():
+    """A held lock means the 'running' run and job belong to a live sync, however old they are."""
+    control, jobs = _ProbeControl(running_run=True, lock_free=False), _ProbeJobs(running_job=True)
+
+    _reap(control, jobs)
+
+    assert control.probed == 1
+    assert (control.cleaned, jobs.reaped) == (0, 0)
+
+
+def test_the_lock_is_not_probed_when_nothing_is_running():
+    """An idle tick must not take the lock needlessly: a CLI sync starting then would bounce."""
+    control, jobs = _ProbeControl(running_run=False, lock_free=True), _ProbeJobs(running_job=False)
+
+    _reap(control, jobs)
+
+    assert control.probed == 0
+
+
+def test_a_running_job_alone_is_enough_to_probe():
+    control, jobs = _ProbeControl(running_run=False, lock_free=True), _ProbeJobs(running_job=True)
+
+    _reap(control, jobs)
+
+    assert (control.cleaned, jobs.reaped) == (1, 1)
+
+
+def test_process_next_job_hands_its_database_to_run_sync_job(monkeypatch):
+    """The worker's engine serves the sync's lock and run tracking; no second engine per job."""
+    database = _FakeDatabase()
+    seen = {}
+
+    class ClaimingJobs(_FakeJobs):
+        def claim_next_job(self, db):
+            return types.SimpleNamespace(
+                id=1, mode='incremental', initiator='w', portal_account_id=7, credential_id=None, company_ids=[]
+            )
+
+        def finish_job(self, db, job, result):
+            seen['finished'] = result
+
+    def fake_run_sync_job(**kwargs):
+        seen['database'] = kwargs['database']
+        return {'status': 'success'}
+
+    monkeypatch.setattr(sync_worker, 'SyncJobService', ClaimingJobs)
+    monkeypatch.setattr(sync_worker, 'run_sync_job', fake_run_sync_job)
+
+    assert sync_worker.process_next_job(database) is True
+    assert seen['database'] is database

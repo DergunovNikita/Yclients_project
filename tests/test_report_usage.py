@@ -19,6 +19,7 @@ import report_usage
 from api import app
 from auth_scope import AccessContext
 from models import Company, Group, ReportUsageEvent, Staff, SyncState
+from report_payload import ReportInputError
 from sync_control import SyncControlService
 
 PARAMS = {'start_date': '2026-03-01', 'end_date': '2026-03-31'}
@@ -163,16 +164,19 @@ async def test_failures_are_recorded_with_their_status(async_session, usage_app,
 
         return fetch
 
-    monkeypatch.setattr(dashboard_routes, 'fetch_report_data', failing(ValueError('bad window')))
+    monkeypatch.setattr(dashboard_routes, 'fetch_report_data', failing(ReportInputError('bad window')))
     bad = await _data()
     monkeypatch.setattr(dashboard_routes, 'fetch_report_data', failing(dashboard_reports.ReportCalculationError('x')))
     unavailable = await _data()
     monkeypatch.setattr(dashboard_routes, 'fetch_report_data', failing(RuntimeError('boom')))
     crashed = await _get(raise_app_exceptions=False, report_id=REPORT, **PARAMS)
+    # A bare ValueError is a defect inside a builder, not a refused input: it must not pose as a 400.
+    monkeypatch.setattr(dashboard_routes, 'fetch_report_data', failing(ValueError('int() of a broken row')))
+    defect = await _get(raise_app_exceptions=False, report_id=REPORT, **PARAMS)
 
-    assert (bad.status_code, unavailable.status_code, crashed.status_code) == (400, 503, 500)
+    assert (bad.status_code, unavailable.status_code, crashed.status_code, defect.status_code) == (400, 503, 500, 500)
     rows = await _events(async_session)
-    assert [row.status_code for row in rows] == [400, 503, 500]
+    assert [row.status_code for row in rows] == [400, 503, 500, 500]
     assert all(row.source_status is None for row in rows)
 
 
@@ -404,6 +408,20 @@ async def test_tracking_since_note_warns_when_the_period_starts_earlier(async_se
     assert [n['kind'] for n in data['notes']] == ['info', 'warning']
     # A period that starts at the first record still has a «not opened for 60 days» list reaching before it.
     assert [n['kind'] for n in later['notes']] == ['info', 'warning']
+
+
+@pytest.mark.asyncio
+async def test_tracking_since_ignores_platform_admin_events(async_session, usage_app):
+    async_session.add_all([
+        _event(role='platform_admin', usage_day=date(2026, 1, 5)),
+        _event(usage_day=date(2026, 3, 10)),
+    ])
+    await async_session.commit()
+
+    data, _, _ = await _usage_report()
+
+    # Support clicks say nothing about when the tenant's own usage started being counted.
+    assert data['raw']['tracking_since'] == '2026-03-10'
 
 
 @pytest.mark.asyncio

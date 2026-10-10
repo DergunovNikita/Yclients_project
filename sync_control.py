@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -42,12 +43,32 @@ class SyncControlService:
             # it ever does, instead of a discarded return value hiding it again.
             print(f'⚠ pg_advisory_unlock({self._lock_id}) returned false — lock was not held on this connection')
 
-    def cleanup_stale_runs(self, db) -> None:
-        for run in db.query(SyncRun).filter(SyncRun.status == 'running').all():
+    @contextmanager
+    def probe_idle_lock(self, engine):
+        """Yield True while holding the sync lock, i.e. when no sync is running anywhere.
+
+        A run that holds the lock is alive; one that does not is orphaned. Only code that got
+        True here may abandon 'running' rows. The lock gets its own AUTOCOMMIT connection for
+        the same reason run_sync_job's does (it is session-level), and is held only for the body.
+        """
+        with engine.connect().execution_options(isolation_level='AUTOCOMMIT') as lock_conn:
+            if not self.acquire_lock(lock_conn):
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                self.release_lock(lock_conn)
+
+    def cleanup_stale_runs(self, db) -> int:
+        """Mark every 'running' run abandoned. Call only while holding the sync lock."""
+        stale = db.query(SyncRun).filter(SyncRun.status == 'running').all()
+        for run in stale:
             run.status = 'abandoned'
             run.finished_at = datetime.now()
-            run.message = 'Run marked as abandoned before a new lock-acquired start'
+            run.message = 'Run marked as abandoned: its process no longer holds the sync lock'
         db.commit()
+        return len(stale)
 
     def purge_old_runs(
         self,

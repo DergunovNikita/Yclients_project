@@ -6,6 +6,7 @@ import pytest
 
 import dashboard_reports
 import dashboard_service
+import reports_feedback
 from models import (
     Appointment,
     Client,
@@ -410,6 +411,24 @@ async def test_reviews_negative_table_is_newest_first_with_a_tiebreaker(async_se
     assert [row['id'] for row in negative['rows']] == [6, 4, 3]
     assert negative['rows'][0]['staff_name'] == 'Без мастера'
     assert 'company_title' in [column['key'] for column in negative['columns']]
+
+
+@pytest.mark.asyncio
+async def test_reviews_negative_table_is_capped_to_the_newest_with_a_note(async_session, monkeypatch):
+    await _seed_reviews(async_session)
+    monkeypatch.setattr(reports_feedback, 'NEGATIVE_REVIEW_LIMIT', 2)
+
+    report = await _report(async_session, 'nps_dashboard')
+
+    assert [row['id'] for row in _table(report, 'negative_reviews')['rows']] == [6, 4]
+    assert any(note['title'] == 'Список ограничен' for note in report['notes'])
+    # The cards still describe every review of the period, not the shown part.
+    assert _cards(report)['Отзывов'] == 5
+
+    monkeypatch.setattr(reports_feedback, 'NEGATIVE_REVIEW_LIMIT', 3)
+    report = await _report(async_session, 'nps_dashboard')
+    assert len(_table(report, 'negative_reviews')['rows']) == 3
+    assert not any(note['title'] == 'Список ограничен' for note in report['notes'])
 
 
 @pytest.mark.asyncio

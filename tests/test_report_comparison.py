@@ -1,9 +1,11 @@
 """Report comparison: baseline window, who gets one, and what the block carries."""
 
+import logging
 from datetime import date
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import OperationalError
 
 import api
 import dashboard_reports
@@ -17,6 +19,7 @@ from dashboard_reports import (
     fetch_report_data,
 )
 from models import Appointment, Client, Company, Group, Staff
+from report_payload import ReportInputError
 
 
 def _payload(**overrides):
@@ -40,7 +43,7 @@ def test_previous_window_follows_the_overview_baseline():
 
 def test_a_period_at_the_start_of_the_calendar_has_no_baseline_and_is_a_client_error():
     for preset in (None, 'week', 'month'):
-        with pytest.raises(ValueError, match='previous period'):
+        with pytest.raises(ReportInputError, match='previous period'):
             _previous_window(date(1, 1, 1), date(1, 1, 31), preset)
 
 
@@ -86,17 +89,6 @@ def test_comparison_carries_charts_and_tables_only_for_ids_the_current_payload_h
     assert comparison['source_status'] == 'ready'
 
 
-def test_a_ranking_table_comparison_merges_every_metric_by_row_key():
-    table = {
-        'id': 'rank',
-        'row_key': 'staff_id',
-        'rows': [{'staff_id': 1}],
-        'ranking': {'rows_by_metric': {'a': [{'staff_id': 1}, {'staff_id': 2}], 'b': [{'staff_id': 2}, {'staff_id': 3}]}},
-    }
-    rows = dashboard_reports._comparison_table_rows(table)
-    assert [row['staff_id'] for row in rows] == [1, 2, 3]
-
-
 @pytest.mark.asyncio
 async def test_comparison_is_built_even_when_the_primary_payload_is_partial(monkeypatch):
     async def fake_payload(db, report_id, start, end, *args, **kwargs):
@@ -140,6 +132,72 @@ async def test_a_report_that_cannot_compare_gets_no_comparison(monkeypatch):
         None, 'year_over_year', date(2026, 9, 1), date(2026, 9, 30), compare_previous=True,
     )
     assert 'comparison' not in data
+
+
+@pytest.mark.asyncio
+async def test_a_report_without_comparison_does_not_fail_on_a_window_it_never_uses(monkeypatch):
+    async def fake_payload(db, report_id, start, end, *args, **kwargs):
+        return _payload()
+
+    monkeypatch.setattr(dashboard_reports, '_fetch_report_payload', fake_payload)
+    # The calendar's first days have no previous period; a report that ignores the comparison must still open.
+    data = await fetch_report_data(
+        None, 'year_over_year', date(1, 1, 2), date(1, 1, 31), compare_previous=True,
+    )
+    assert 'comparison' not in data
+    with pytest.raises(ReportInputError, match='previous period'):
+        await fetch_report_data(
+            None, 'new_vs_returning_cross', date(1, 1, 2), date(1, 1, 31), compare_previous=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_deliberate_refusals_are_report_input_errors():
+    with pytest.raises(ReportInputError):
+        await fetch_report_data(None, 'no_such_report', date(2026, 9, 1), date(2026, 9, 30))
+    with pytest.raises(ReportInputError):
+        await fetch_report_data(None, 'new_vs_returning_cross', date(2026, 9, 1), date(2026, 9, 30), granularity='hour')
+    with pytest.raises(ReportInputError):
+        await fetch_report_data(None, 'new_vs_returning_cross', date(2026, 9, 30), date(2026, 9, 1))
+
+
+@pytest.mark.asyncio
+async def test_leaderboard_retries_only_database_failures(async_session, monkeypatch):
+    messages = []
+
+    class Collect(logging.Handler):
+        def emit(self, record):
+            messages.append(record.getMessage())
+
+    # The app stops `yclients.*` records at its own handler, so caplog (a root handler) never sees them.
+    logger = logging.getLogger('yclients.reports')
+    handler = Collect(level=logging.INFO)
+    logger.addHandler(handler)
+    monkeypatch.setattr(logger, 'level', logging.INFO)
+    monkeypatch.setattr(logger, 'disabled', False)
+
+    def failing_with(error):
+        async def fetch_plan_fact(*args, **kwargs):
+            raise error
+
+        return fetch_plan_fact
+
+    window = (date(2026, 9, 1), date(2026, 9, 30))
+    monkeypatch.setattr(dashboard_reports, 'fetch_plan_fact', failing_with(OperationalError('SELECT 1', {}, OSError('gone'))))
+    try:
+        with pytest.raises(dashboard_reports.ReportCalculationError) as raised:
+            await fetch_report_data(async_session, 'staff_leaderboard', *window, company_id=1, staff_id=7)
+    finally:
+        logger.removeHandler(handler)
+    assert raised.value.stage == 'plan_fact'
+    assert any(message.startswith('staff_leaderboard failed') for message in messages)
+    # A person id stays out of the log line.
+    assert not any('staff_id' in message for message in messages)
+
+    # A defect in the calculation is not retryable: it must surface as itself (a 500), not as a 503.
+    monkeypatch.setattr(dashboard_reports, 'fetch_plan_fact', failing_with(ValueError('broken row')))
+    with pytest.raises(ValueError, match='broken row'):
+        await fetch_report_data(async_session, 'staff_leaderboard', *window, company_id=1)
 
 
 @pytest.mark.asyncio

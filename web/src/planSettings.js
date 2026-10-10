@@ -31,7 +31,8 @@ function valuesFor(fields, scope, row, readValue) {
   return Object.fromEntries(fields.map((field) => [field, readValue(scope, row, field)]));
 }
 
-export function buildPlanSettingsPayload(data, month, readValue) {
+// The month is the one the rows were loaded for, never the picker: it moves before the rows do.
+export function buildPlanSettingsPayload(data, readValue) {
   const branches = (data?.branches || []).map((row) => ({
     company_id: Number(row.company_id),
     ...valuesFor(BRANCH_PLAN_SETTING_FIELDS, 'branch', row, readValue),
@@ -42,5 +43,5 @@ export function buildPlanSettingsPayload(data, month, readValue) {
     staff_category: row.staff_category,
     ...valuesFor(STAFF_PLAN_SETTING_FIELDS, 'staff', row, readValue),
   }));
-  return { month, branches, staff };
+  return { month: data?.month, branches, staff };
 }

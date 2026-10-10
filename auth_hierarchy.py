@@ -53,11 +53,7 @@ def branches_overlap(actor_branch_ids: list[int], target_branch_ids: list[int]) 
     return bool(set(actor_branch_ids) & set(target_branch_ids))
 
 
-def _branch_scope_ok(actor_role: str, actor_branch_ids: list[int], target_branch_ids: list[int]) -> bool:
-    if actor_role == PLATFORM_ADMIN_ROLE:
-        return True
-    if actor_role == TENANT_OWNER_ROLE:
-        return True
+def _branch_scope_ok(actor_branch_ids: list[int], target_branch_ids: list[int]) -> bool:
     if not actor_branch_ids or not target_branch_ids:
         return False
     return set(target_branch_ids).issubset(set(actor_branch_ids))
@@ -82,7 +78,7 @@ def can_list_user(
         if not target_branch_ids:
             return False
         return branches_overlap(actor_branch_ids, target_branch_ids)
-    return _branch_scope_ok(actor_role, actor_branch_ids, target_branch_ids)
+    return _branch_scope_ok(actor_branch_ids, target_branch_ids)
 
 
 def can_manage_user(
@@ -91,9 +87,16 @@ def can_manage_user(
     target_role: str,
     target_branch_ids: list[int],
 ) -> bool:
+    """Listing is wider than managing: a same-rank peer is listed on any branch overlap, but may be
+    changed only when every branch of the peer is also the actor's (otherwise a peer's extra
+    branches could be taken over through an e-mail change)."""
     if actor_role not in USER_ADMIN_ROLES:
         return False
-    return can_list_user(actor_role, actor_branch_ids, target_role, target_branch_ids)
+    if not can_list_user(actor_role, actor_branch_ids, target_role, target_branch_ids):
+        return False
+    if actor_role in (PLATFORM_ADMIN_ROLE, TENANT_OWNER_ROLE):
+        return True
+    return _branch_scope_ok(actor_branch_ids, target_branch_ids)
 
 
 def assert_can_assign_role(actor_role: str, target_role: str) -> None:

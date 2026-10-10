@@ -16,9 +16,12 @@ export const STATUS_LABELS = {
   partial: t('reports.status.partial'),
 };
 
-export const SOURCE_LABELS = {
+const SOURCE_LABELS = {
   yclients: 'YClients',
-  yclients_comments: t('reports.sources.yclientsComments'),
+  appointments_detail: t('reports.sources.appointmentsDetail'),
+  financial_transactions_detail: t('reports.sources.financialTransactionsDetail'),
+  goods_transactions_detail: t('reports.sources.goodsTransactionsDetail'),
+  staff_schedules: t('reports.sources.staffSchedules'),
   personal_account_topups: t('reports.sources.personalAccountTopups'),
 };
 

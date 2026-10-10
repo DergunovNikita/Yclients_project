@@ -1134,3 +1134,164 @@ def test_purge_old_jobs_if_due_throttles_to_once_per_interval():
         assert ran_again == 1
         assert session.get(SyncJob, 2) is None
         assert session.get(SyncJob, 3) is not None
+
+
+def test_cleanup_stale_runs_abandons_only_running_rows_and_counts_them():
+    with _sqlite_session([SyncRun.__table__]) as session:
+        session.add_all([
+            SyncRun(mode='full', trigger_type='manual', status='running', initiator='x', started_at=datetime(2026, 1, 1)),
+            SyncRun(mode='full', trigger_type='manual', status='success', initiator='x', started_at=datetime(2026, 1, 2)),
+        ])
+        session.commit()
+
+        abandoned = SyncControlService().cleanup_stale_runs(session)
+
+        assert abandoned == 1
+        statuses = sorted(run.status for run in session.query(SyncRun).all())
+        assert statuses == ['abandoned', 'success']
+
+
+def test_probe_idle_lock_releases_only_a_lock_it_took():
+    class Conn:
+        closed = False
+
+        def execution_options(self, **_kwargs):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.closed = True
+
+    class Engine:
+        def __init__(self):
+            self.conn = Conn()
+
+        def connect(self):
+            return self.conn
+
+    calls = []
+
+    def probe(lock_free):
+        service = SyncControlService()
+        service.acquire_lock = lambda db: lock_free
+        service.release_lock = lambda db: calls.append('release')
+        engine = Engine()
+        with service.probe_idle_lock(engine) as acquired:
+            calls.append(('inside', acquired))
+        assert engine.conn.closed
+
+    probe(True)
+    probe(False)
+
+    assert calls == [('inside', True), 'release', ('inside', False)]
+
+
+def test_probe_idle_lock_releases_when_the_body_raises():
+    class Conn:
+        def execution_options(self, **_kwargs):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class Engine:
+        def connect(self):
+            return Conn()
+
+    released = []
+    service = SyncControlService()
+    service.acquire_lock = lambda db: True
+    service.release_lock = lambda db: released.append(True)
+
+    with pytest.raises(RuntimeError):
+        with service.probe_idle_lock(Engine()):
+            raise RuntimeError('boom')
+
+    assert released == [True]
+
+
+def test_has_running_job_sees_only_running_status():
+    with _auto_sync_session() as session:
+        jobs = SyncJobService()
+        assert jobs.has_running_job(session) is False
+        session.add(SyncJob(
+            mode='full', initiator='x', status='queued', portal_account_id=7, company_ids=[], progress_pct=0,
+            current_stage='queued', step_results=[], cancel_requested=False, requested_at=datetime(2026, 1, 1),
+        ))
+        session.commit()
+        assert jobs.has_running_job(session) is False
+        session.query(SyncJob).update({'status': 'running'})
+        session.commit()
+        assert jobs.has_running_job(session) is True
+
+
+def test_get_sync_status_reuses_one_engine(monkeypatch):
+    import sync_orchestrator
+
+    built = []
+
+    class FakeSession:
+        def close(self):
+            pass
+
+    class FakeDatabase:
+        def get_db(self):
+            return FakeSession()
+
+    def fake_init(*_args, **_kwargs):
+        built.append(1)
+        return FakeDatabase()
+
+    monkeypatch.setattr(sync_orchestrator, '_status_database', None)
+    monkeypatch.setattr(sync_orchestrator, 'init_database', fake_init)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'get_status_payload', lambda self, db: {'running': False})
+
+    assert sync_orchestrator.get_sync_status() == {'running': False}
+    assert sync_orchestrator.get_sync_status() == {'running': False}
+    assert len(built) == 1
+
+
+def test_run_sync_job_uses_the_database_it_is_given(monkeypatch):
+    """With a supplied engine run_sync_job must not build another one."""
+    import sync_orchestrator
+
+    class Conn:
+        closed = False
+
+        def execution_options(self, **_kwargs):
+            return self
+
+        def close(self):
+            self.closed = True
+
+    class Engine:
+        def connect(self):
+            return Conn()
+
+    class Session:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    class Database:
+        engine = Engine()
+
+        def get_db(self):
+            return Session()
+
+    def must_not_build(*_args, **_kwargs):
+        raise AssertionError('run_sync_job built its own engine')
+
+    monkeypatch.setattr(sync_orchestrator, 'init_database', must_not_build)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'acquire_lock', lambda self, db: False)
+    monkeypatch.setattr(sync_orchestrator.SyncControlService, 'get_status_payload', lambda self, db: {})
+
+    result = sync_orchestrator.run_sync_job('incremental', 'queued', database=Database())
+
+    assert result['status'] == 'already_running'

@@ -1,5 +1,5 @@
 /** Alias → canonical id, built from the catalog's `aliases` (the backend stays the one source of truth). */
-export function buildAliasMap(reports = []) {
+function buildAliasMap(reports = []) {
   const aliases = new Map();
   reports.forEach((report) => {
     (report.aliases || []).forEach((alias) => aliases.set(alias, report.id));

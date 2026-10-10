@@ -1,13 +1,21 @@
+.env*
+!.env.example
 .DS_Store
-.env
 Silver Stratum Plan Reader.json
 secrets/*.json
 .git
+.github
 .venv
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
+.ruff_cache/
 logs/
 nginx/ssl/
-metabase-data/
+# Not needed at runtime: the SPA ships through Vercel, the tests and docs are for development.
+web/
+api/
+tests/
+docs/

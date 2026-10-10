@@ -112,8 +112,6 @@ async def provision_staff_account(
 
     await set_user_branches(db, user.id, company_ids or [staff.company_id])
     staff.portal_user_id = user.id
-    if staff.fired:
-        staff.fired = 0
     await _ensure_portal_user_id_sequence(db)
 
     return ProvisionedAccount(

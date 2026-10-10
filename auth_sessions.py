@@ -23,6 +23,7 @@ from config import (
     AUTH_REFRESH_TOKEN_EXPIRE_DAYS,
 )
 from models import PortalRefreshToken, PortalUser
+from sync_security import secure_equals
 
 ACCESS_COOKIE_NAME = 'portal_access'
 REFRESH_COOKIE_NAME = 'portal_refresh'
@@ -36,7 +37,6 @@ class IssuedSession:
     access_token: str
     refresh_token: str
     csrf_token: str
-    refresh_record: PortalRefreshToken
 
 
 # ---------- token hashing helpers ----------
@@ -126,7 +126,6 @@ async def issue_session(
         access_token=access_token,
         refresh_token=raw_refresh,
         csrf_token=csrf_token,
-        refresh_record=refresh,
     )
 
 
@@ -178,7 +177,6 @@ async def rotate_session(
         access_token=access_token_fn(user, refresh.id),
         refresh_token=raw_rotated_refresh,
         csrf_token=csrf_token,
-        refresh_record=refresh,
     )
     return user, issued
 
@@ -357,7 +355,7 @@ def enforce_csrf(request: Request, *, allow_bearer_skip: bool = True) -> None:
 
     cookie_token = request.cookies.get(AUTH_CSRF_COOKIE_NAME)
     header_token = request.headers.get(AUTH_CSRF_HEADER_NAME)
-    if not cookie_token or not header_token or not secrets.compare_digest(cookie_token, header_token):
+    if not cookie_token or not header_token or not secure_equals(cookie_token, header_token):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail='CSRF token missing or invalid',

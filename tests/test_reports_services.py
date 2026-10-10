@@ -303,6 +303,25 @@ async def test_combos_table_is_capped_and_says_so(async_session):
 
 
 @pytest.mark.asyncio
+async def test_combos_comparison_run_is_not_capped(async_session):
+    async_session.add_all([Group(id=1, title='G'), Company(id=1, title='Salon', group_id=1)])
+    await async_session.flush()
+    async_session.add(_visit(1, None))
+    await async_session.flush()
+    for index in range(12):
+        async_session.add(_line(index + 1, 1, 100 + index, f'Service {index:02}'))
+    await async_session.commit()
+
+    comparison = await dashboard_reports._fetch_report_payload(
+        async_session, 'service_combos', *WINDOW, 1, None, 'day', None, NOW, None, for_comparison=True
+    )
+
+    # 12 services make 66 pairs; the cap of 50 would leave the lower-ranked ones without a row to compare.
+    assert len(_table(comparison, 'combos')['rows']) == 66
+    assert not any(note['title'] == 'Показаны самые частые пары' for note in comparison['notes'])
+
+
+@pytest.mark.asyncio
 async def test_combos_report_is_counts_only(seeded):
     assert dashboard_reports.report_requires_financials('service_combos') is False
     assert dashboard_reports.REPORT_REGISTRY['service_combos'].requires_financials is False

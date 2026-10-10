@@ -23,6 +23,7 @@ from models import Appointment, Company, Staff
 from report_payload import (
     DECIMAL_FORMAT,
     MONEY_FORMAT,
+    NO_MASTER,
     NUMBER_FORMAT,
     PERCENT_FORMAT,
     ReportRequest,
@@ -35,7 +36,6 @@ from report_payload import (
 
 NO_SHOW_ATTENDANCE = -1
 ONLINE_CREATED_USER_ID = 0
-UNNAMED_STAFF = 'Без мастера'
 STAFF_CHART_ROWS = 12
 TEXT_FORMAT = 'text'
 WEEKDAY_SHORT = ('Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс')
@@ -125,7 +125,7 @@ async def _staff_records(req: ReportRequest) -> list[dict[str, Any]]:
         named = row.staff_id is not None
         rows.append({
             'staff_id': row.staff_id,
-            'staff_name': (row.staff_name or f'Сотрудник {row.staff_id}') if named else UNNAMED_STAFF,
+            'staff_name': (row.staff_name or f'Сотрудник {row.staff_id}') if named else NO_MASTER,
             'company_title': row.company_title if named else None,
             'records': records,
             'completed': int(row.completed or 0),
@@ -487,7 +487,7 @@ async def build_staff_efficiency(req: ReportRequest) -> dict[str, Any]:
     titles = await _staff_branch_titles(req)
     for row in rows:
         if row['staff_id'] is None:
-            row['staff_name'] = UNNAMED_STAFF
+            row['staff_name'] = NO_MASTER
             row['company_title'] = None
         else:
             row['company_title'] = titles.get(int(row['staff_id']), row['company_title'])

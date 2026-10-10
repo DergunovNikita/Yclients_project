@@ -113,12 +113,18 @@ class SyncJobService:
         db.refresh(job)
         return job
 
+    def has_running_job(self, db) -> bool:
+        return db.query(SyncJob.id).filter(SyncJob.status == 'running').first() is not None
+
     def reap_stale_jobs(self, db, *, max_running_minutes: int, now: datetime | None = None) -> int:
         """Fail 'running' jobs left orphaned by a worker that died mid-sync.
 
         Such a job stays 'running' forever: it blocks auto-enqueue for its tenant and shows a
         phantom run in the dashboard. Only jobs whose start is older than max_running_minutes are
         reaped, so a job actively processed by a live worker is never touched.
+
+        Call only while holding the sync lock (SyncControlService.probe_idle_lock): a long first
+        `full` legitimately runs for hours, and while the lock is held its job is alive.
         """
         if max_running_minutes <= 0:
             return 0
@@ -246,30 +252,6 @@ class SyncJobService:
 
     def get_latest_job(self, db, portal_account_id: int | None = None) -> Optional[SyncJob]:
         return self._scoped_query(db.query(SyncJob), portal_account_id).order_by(SyncJob.id.desc()).first()
-
-    def get_recent_events(self, db, job_id: int | None, limit: int = 10) -> list[dict[str, Any]]:
-        if job_id is None:
-            return []
-        events = (
-            db.query(SyncJobEvent)
-            .filter(SyncJobEvent.job_id == job_id)
-            .order_by(SyncJobEvent.id.desc())
-            .limit(limit)
-            .all()
-        )
-        return [self.serialize_event(event) for event in reversed(events)]
-
-    def get_status_payload(self, db, portal_account_id: int | None = None) -> dict[str, Any]:
-        current = self.get_active_job(db, portal_account_id)
-        latest = self.get_latest_job(db, portal_account_id)
-        base_query = self._scoped_query(db.query(SyncJob), portal_account_id)
-        return {
-            'queued_jobs': base_query.filter(SyncJob.status == 'queued').count(),
-            'running_jobs': self._scoped_query(db.query(SyncJob), portal_account_id).filter(SyncJob.status == 'running').count(),
-            'current_job': self.serialize(current),
-            'last_job': self.serialize(latest),
-            'events': self.get_recent_events(db, current.id if current else (latest.id if latest else None)),
-        }
 
     @staticmethod
     def serialize(job: Optional[SyncJob]) -> Optional[dict[str, Any]]:

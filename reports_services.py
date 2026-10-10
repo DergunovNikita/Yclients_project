@@ -15,9 +15,18 @@ from dashboard_service import (
     fetch_top_services,
 )
 from models import Appointment, ServiceCatalog, Transaction
-from report_payload import MONEY_FORMAT, NUMBER_FORMAT, PERCENT_FORMAT, ReportRequest, card, chart, table, top_rows
+from report_payload import (
+    MONEY_FORMAT,
+    NO_MASTER,
+    NUMBER_FORMAT,
+    PERCENT_FORMAT,
+    ReportRequest,
+    card,
+    chart,
+    table,
+    top_rows,
+)
 
-NO_STAFF_LABEL = 'Без мастера'
 CHART_ROWS = 12
 # Pairs of ~200 services are tens of thousands of rows; a table nobody can read helps nobody.
 COMBO_TABLE_LIMIT = 50
@@ -154,7 +163,7 @@ async def build_service_staff_profit(req: ReportRequest) -> dict[str, Any]:
             # Staff are told apart by id, never by name: two people can share one.
             'key': f'{staff_id}|{title}',
             'staff_id': staff_id,
-            'staff_name': row['staff_name'] or NO_STAFF_LABEL,
+            'staff_name': row['staff_name'] or NO_MASTER,
             'company_title': row['company_title'],
             'title': title,
             'sold': sold,
@@ -251,26 +260,27 @@ async def build_service_combos(req: ReportRequest) -> dict[str, Any]:
     ).one()
     first, second = visit_services.alias('first'), visit_services.alias('second')
     visits_count = func.count()
-    pair_rows = (
-        await req.db.execute(
-            select(
-                func.min(first.c.title).label('first_title'),
-                func.min(first.c.service_id).label('first_id'),
-                func.min(second.c.title).label('second_title'),
-                func.min(second.c.service_id).label('second_id'),
-                visits_count.label('visits'),
-            )
-            .select_from(
-                first.join(
-                    second,
-                    and_(first.c.visit == second.c.visit, first.c.service_key < second.c.service_key),
-                )
-            )
-            .group_by(first.c.service_key, second.c.service_key)
-            .order_by(visits_count.desc(), first.c.service_key, second.c.service_key)
-            .limit(COMBO_TABLE_LIMIT + 1)
+    pairs_stmt = (
+        select(
+            func.min(first.c.title).label('first_title'),
+            func.min(first.c.service_id).label('first_id'),
+            func.min(second.c.title).label('second_title'),
+            func.min(second.c.service_id).label('second_id'),
+            visits_count.label('visits'),
         )
-    ).all()
+        .select_from(
+            first.join(
+                second,
+                and_(first.c.visit == second.c.visit, first.c.service_key < second.c.service_key),
+            )
+        )
+        .group_by(first.c.service_key, second.c.service_key)
+        .order_by(visits_count.desc(), first.c.service_key, second.c.service_key)
+    )
+    # The comparison run looks the current top pairs up by name, so a pair ranked lower there still needs its row.
+    if not req.for_comparison:
+        pairs_stmt = pairs_stmt.limit(COMBO_TABLE_LIMIT + 1)
+    pair_rows = (await req.db.execute(pairs_stmt)).all()
     visits = int(totals.visits or 0)
     multi_visits = int(totals.multi_visits or 0)
     rows = [
@@ -280,7 +290,7 @@ async def build_service_combos(req: ReportRequest) -> dict[str, Any]:
             'visits': int(row.visits),
             'share': _ratio(int(row.visits), multi_visits, 100),
         }
-        for row in pair_rows[:COMBO_TABLE_LIMIT]
+        for row in (pair_rows if req.for_comparison else pair_rows[:COMBO_TABLE_LIMIT])
     ]
     req.base['notes'].append({
         'kind': 'formula',
@@ -290,7 +300,7 @@ async def build_service_combos(req: ReportRequest) -> dict[str, Any]:
             'сколько бы раз ни повторялась услуга. Доля — от визитов с двумя и более услугами.'
         ),
     })
-    if len(pair_rows) > COMBO_TABLE_LIMIT:
+    if len(pair_rows) > COMBO_TABLE_LIMIT and not req.for_comparison:
         req.base['notes'].append({
             'kind': 'info',
             'title': 'Показаны самые частые пары',

@@ -427,26 +427,14 @@ async def _appointment_company_ids(
 
 
 async def _fetch_appointments_breakdown(
-    db_or_company_ids: AsyncSession | list[int],
-    company_ids_or_start: list[int] | date,
-    start_or_end: date,
-    end_or_staff_id: date | Optional[int],
+    db: AsyncSession,
+    company_ids: list[int],
+    start: date,
+    end: date,
     staff_id: Optional[int] = None,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    if isinstance(db_or_company_ids, list):
-        db = None
-        company_ids = db_or_company_ids
-        start = company_ids_or_start
-        end = start_or_end
-        staff_id = end_or_staff_id
-    else:
-        db = db_or_company_ids
-        company_ids = company_ids_or_start
-        start = start_or_end
-        end = end_or_staff_id
-
-    if db is not None and factual_at is not None and end >= factual_at.date():
+    if factual_at is not None and end >= factual_branch_date(factual_at):
         return await _local_appointments_breakdown(
             db,
             company_ids,
@@ -462,25 +450,17 @@ async def _fetch_appointments_breakdown(
     # and administrator records — so switching per period would put two periods of the same
     # scope on different definitions and let a subset report more records than its
     # superset. The choice is therefore made per scope, not per period.
-    if db is not None and await fetch_reporting_windows(db, company_ids):
+    if await fetch_reporting_windows(db, company_ids):
         return await _local_appointments_breakdown(
             db, company_ids, start, end, staff_id, factual_at
         )
 
     try:
-        if db is None:
-            counts = await yclients_analytics.fetch_record_stats(company_ids, start, end, staff_id)
-        else:
-            try:
-                counts = await yclients_analytics.fetch_record_stats(company_ids, start, end, staff_id, db=db)
-            except TypeError:
-                counts = await yclients_analytics.fetch_record_stats(company_ids, start, end, staff_id)
+        counts = await yclients_analytics.fetch_record_stats(company_ids, start, end, staff_id, db=db)
     except yclients_analytics.YClientsAnalyticsError:
-        if db is not None:
-            return await _local_appointments_breakdown(
-                db, company_ids, start, end, staff_id, factual_at
-            )
-        return _unavailable_appointments_breakdown()
+        return await _local_appointments_breakdown(
+            db, company_ids, start, end, staff_id, factual_at
+        )
     return _ready_appointments_breakdown(counts)
 
 
@@ -736,7 +716,7 @@ def _company_scope_clause(column, company_id: Optional[int], allowed_company_ids
     if company_id is not None:
         return column == company_id
     if allowed_company_ids is not None:
-        return column.in_(allowed_company_ids) if allowed_company_ids else column.in_([])
+        return column.in_(allowed_company_ids)
     return None
 
 
@@ -1291,13 +1271,7 @@ def _service_revenue_union(
             select(FinancialTransaction.amount.label('amount'), *extra_columns)
             .select_from(FinancialTransaction)
             .join(Appointment, join_condition)
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
+            .outerjoin(AccountCatalog, _financial_account_join())
             .where(
                 _service_paid_filters(
                     dr.start,
@@ -1368,23 +1342,20 @@ async def _average_check_block(
         )
     ).one()
 
-    goods_filters = [
-        GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
-        GoodTransaction.document_id.is_not(None),
-        *day_window(GoodTransaction.date, dr.start, dr.end),
-        _business_staff_id_condition(GoodTransaction.master_id),
-        reporting_window_clause(GoodTransaction.company_id, GoodTransaction.date),
-    ]
-    scope = _company_scope_clause(GoodTransaction.company_id, company_id, company_ids)
-    if scope is not None:
-        goods_filters.append(scope)
-    if staff_id is not None and created_user_id is None:
-        goods_filters.append(GoodTransaction.master_id == staff_id)
-    if factual_at is not None:
-        goods_filters.append(GoodTransaction.date <= factual_at)
+    goods_filters = _goods_revenue_filters(
+        dr.start,
+        dr.end,
+        company_id,
+        staff_id if created_user_id is None else None,
+        company_ids,
+        factual_at,
+    )
     goods_checks = int(
         await db.scalar(
-            select(func.count(func.distinct(GoodTransaction.document_id))).where(*goods_filters)
+            select(func.count(func.distinct(GoodTransaction.document_id))).where(
+                goods_filters,
+                GoodTransaction.document_id.is_not(None),
+            )
         )
         or 0
     )
@@ -1454,13 +1425,7 @@ async def _average_check_block(
                 ).label('unclassified_operations'),
             )
             .select_from(FinancialTransaction)
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
+            .outerjoin(AccountCatalog, _financial_account_join())
             .where(*direct_payment_filters)
         )
     ).one()
@@ -1596,13 +1561,7 @@ async def fetch_revenue_by_account_type(
             ).label('amount'),
         )
         .select_from(FinancialTransaction)
-        .outerjoin(
-            AccountCatalog,
-            and_(
-                AccountCatalog.company_id == FinancialTransaction.company_id,
-                AccountCatalog.account_id == FinancialTransaction.account_id,
-            ),
-        )
+        .outerjoin(AccountCatalog, _financial_account_join())
         .where(*_direct_payment_filters(dr, None, company_ids, factual_at))
         .group_by(FinancialTransaction.company_id, AccountCatalog.type, *month_exprs)
     )
@@ -1879,6 +1838,13 @@ def _transaction_service_label_join():
     )
 
 
+def _financial_account_join():
+    return and_(
+        AccountCatalog.company_id == FinancialTransaction.company_id,
+        AccountCatalog.account_id == FinancialTransaction.account_id,
+    )
+
+
 def _financial_service_label_join():
     return and_(
         ServiceLabel.service_id == FinancialTransaction.sold_item_id,
@@ -2104,13 +2070,7 @@ async def _revenue_block(
             .select_from(FinancialTransaction)
             .join(Appointment, join_condition)
             .outerjoin(ServiceLabel, _financial_service_label_join())
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
+            .outerjoin(AccountCatalog, _financial_account_join())
             .where(
                 _service_paid_filters(
                     dr.start,
@@ -2690,7 +2650,6 @@ async def fetch_year_over_year_facts(
 
     payment_year = extract('year', FinancialTransaction.date)
     payment_month = extract('month', FinancialTransaction.date)
-    payment_day_expr = func.date(FinancialTransaction.date)
     service_filters = [
         _service_paid_filters(
             start,
@@ -2717,13 +2676,7 @@ async def fetch_year_over_year_facts(
             .select_from(FinancialTransaction)
             .join(Appointment, join_condition)
             .outerjoin(ServiceLabel, _financial_service_label_join())
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
+            .outerjoin(AccountCatalog, _financial_account_join())
             .where(*service_filters)
         )
     )
@@ -2759,21 +2712,9 @@ async def fetch_year_over_year_facts(
     else:
         direct_component = or_(direct_component, _personal_account_condition())
     direct_filters = [
-        FinancialTransaction.amount > 0,
-        payment_day_expr >= start,
-        payment_day_expr <= end,
-        _physical_account_condition(),
-        _business_financial_master_condition(factual_at),
+        *_direct_payment_filters(DateRange(start, end), company_id, allowed_company_ids, factual_at),
         direct_component,
-        reporting_window_clause(FinancialTransaction.company_id, payment_day_expr),
     ]
-    direct_scope = _company_scope_clause(
-        FinancialTransaction.company_id, company_id, allowed_company_ids
-    )
-    if direct_scope is not None:
-        direct_filters.append(direct_scope)
-    if factual_at is not None:
-        direct_filters.append(FinancialTransaction.date <= factual_at)
     goods_amount = case(
         (FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE, FinancialTransaction.amount),
         else_=0.0,
@@ -2791,13 +2732,7 @@ async def fetch_year_over_year_facts(
                 func.coalesce(func.sum(topup_amount), 0.0).label('topup_revenue'),
             )
             .select_from(FinancialTransaction)
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
+            .outerjoin(AccountCatalog, _financial_account_join())
             .where(*direct_filters)
             .group_by(payment_year, payment_month)
         )
@@ -2826,14 +2761,13 @@ async def fetch_year_over_year_facts(
     )
     dependency_filters = [
         FinancialTransaction.amount > 0,
-        payment_day_expr >= start,
-        payment_day_expr <= end,
+        *day_window(FinancialTransaction.date, start, end),
         _physical_account_condition(),
         dependency_component,
         # Both anchors, matching _service_paid_filters. Without the visit anchor a
         # payment this report already excludes would still widen the appointment
         # coverage this year demands, blanking the branch's opening year.
-        reporting_window_clause(FinancialTransaction.company_id, payment_day_expr),
+        reporting_window_clause(FinancialTransaction.company_id, FinancialTransaction.date),
         reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
     dependency_scope = _company_scope_clause(
@@ -2867,13 +2801,7 @@ async def fetch_year_over_year_facts(
             )
             .select_from(FinancialTransaction)
             .join(Appointment, join_condition)
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
+            .outerjoin(AccountCatalog, _financial_account_join())
             .where(*dependency_filters)
         )
     )
@@ -3010,33 +2938,14 @@ async def fetch_revenue_daily(
 
     if include_financials:
         payment_day = func.date(FinancialTransaction.date)
-        svc_branches = _financial_appointment_branches_union(
-            lambda join_condition: (
-                select(
-                    payment_day.label('d'),
-                    FinancialTransaction.amount.label('amount'),
-                )
-                .select_from(FinancialTransaction)
-                .join(Appointment, join_condition)
-                .outerjoin(
-                    AccountCatalog,
-                    and_(
-                        AccountCatalog.company_id == FinancialTransaction.company_id,
-                        AccountCatalog.account_id == FinancialTransaction.account_id,
-                    ),
-                )
-                .where(
-                    _service_paid_filters(
-                        start,
-                        end,
-                        company_id,
-                        staff_id,
-                        allowed_company_ids=allowed_company_ids,
-                        factual_at=factual_at,
-                    ),
-                    _physical_account_condition(),
-                )
-            )
+        svc_branches = _service_revenue_union(
+            DateRange(start, end),
+            company_id,
+            staff_id,
+            None,
+            allowed_company_ids,
+            factual_at,
+            extra_columns=(payment_day.label('d'),),
         )
         svc_stmt = (
             select(
@@ -3051,13 +2960,7 @@ async def fetch_revenue_daily(
                 func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
             )
             .select_from(FinancialTransaction)
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
+            .outerjoin(AccountCatalog, _financial_account_join())
             .where(
                 _goods_paid_filters(
                     start,
@@ -3077,13 +2980,7 @@ async def fetch_revenue_daily(
                 func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
             )
             .select_from(FinancialTransaction)
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
+            .outerjoin(AccountCatalog, _financial_account_join())
             .where(_topup_revenue_filters(start, end, company_id, staff_id, allowed_company_ids, factual_at))
             .group_by(payment_day)
         )
@@ -3098,6 +2995,8 @@ async def fetch_revenue_daily(
     appt_rows = (await db.execute(appt_stmt)).all()
     opz_by_date: dict[date, int] = {}
     if include_opz:
+        # One query for the whole scope: _opz_events would otherwise look the zone up per branch.
+        await _company_timezone_names(db, effective_company_ids)
         for item_company_id in effective_company_ids:
             events = await _opz_events(
                 db, start, end, item_company_id, factual_at=factual_at
@@ -3187,12 +3086,10 @@ async def _service_catalog_row(
 async def fetch_service_kpi_groups(
     db: AsyncSession,
     *,
-    portal_account_id: int | None = None,
+    portal_account_id: int,
     include_inactive: bool = True,
 ) -> list[dict[str, Any]]:
-    stmt = select(ServiceKpiGroup)
-    if portal_account_id is not None:
-        stmt = stmt.where(ServiceKpiGroup.portal_account_id == portal_account_id)
+    stmt = select(ServiceKpiGroup).where(ServiceKpiGroup.portal_account_id == portal_account_id)
     if not include_inactive:
         stmt = stmt.where(ServiceKpiGroup.is_active.is_(True))
     stmt = stmt.order_by(
@@ -3213,7 +3110,7 @@ async def fetch_dashboard_services(
     is_extra: bool | None = None,
     kpi_group_id: int | None = None,
     allowed_company_ids: list[int] | None = None,
-    portal_account_id: int | None = None,
+    portal_account_id: int,
 ) -> dict[str, Any]:
     label_join = and_(
         ServiceLabel.company_id == ServiceCatalog.company_id,
@@ -3336,7 +3233,7 @@ async def save_service_label(
     *,
     is_extra: bool,
     allowed_company_ids: list[int] | None = None,
-    portal_account_id: int | None = None,
+    portal_account_id: int,
 ) -> dict[str, Any]:
     catalog = await _editable_service_catalog(
         db,
@@ -3344,7 +3241,7 @@ async def save_service_label(
         service_id,
         allowed_company_ids=allowed_company_ids,
     )
-    await _apply_service_label(db, catalog, is_extra=is_extra, now=datetime.utcnow())
+    await _apply_service_label(db, catalog, is_extra=is_extra, now=factual_now())
     await db.commit()
     return await fetch_dashboard_services(
         db,
@@ -3431,19 +3328,29 @@ async def create_service_kpi_group(
     clean_title = str(title or '').strip()
     if not clean_title:
         raise ValueError('title is required')
-    now = datetime.utcnow()
-    group = ServiceKpiGroup(
-        portal_account_id=portal_account_id,
-        code=await _unique_service_group_code(db, code or clean_title, portal_account_id=portal_account_id),
-        title=clean_title,
-        description=str(description or '').strip() or None,
-        sort_order=int(sort_order or 0),
-        is_active=bool(is_active),
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(group)
-    await db.commit()
+    now = factual_now()
+    # The code is picked by a read, so a concurrent create of the same title can take it first and
+    # the unique index refuses ours; the second pass reads that row and moves on to the next suffix.
+    for attempt in range(2):
+        group = ServiceKpiGroup(
+            portal_account_id=portal_account_id,
+            code=await _unique_service_group_code(db, code or clean_title, portal_account_id=portal_account_id),
+            title=clean_title,
+            description=str(description or '').strip() or None,
+            sort_order=int(sort_order or 0),
+            is_active=bool(is_active),
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(group)
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            if attempt:
+                raise
+            continue
+        break
     await db.refresh(group)
     return _service_kpi_group_payload(group)
 
@@ -3452,7 +3359,7 @@ async def update_service_kpi_group(
     db: AsyncSession,
     group_id: int,
     *,
-    portal_account_id: int | None = None,
+    portal_account_id: int,
     title: str | None = None,
     code: str | None = None,
     description: str | None = None,
@@ -3471,7 +3378,7 @@ async def update_service_kpi_group(
         }.items()
         if value is not None
     }
-    await _apply_service_kpi_group_change(db, group, fields=fields, now=datetime.utcnow())
+    await _apply_service_kpi_group_change(db, group, fields=fields, now=factual_now())
     await db.commit()
     await db.refresh(group)
     return _service_kpi_group_payload(group)
@@ -3481,10 +3388,10 @@ async def _editable_service_kpi_group(
     db: AsyncSession,
     group_id: int,
     *,
-    portal_account_id: int | None,
+    portal_account_id: int,
 ) -> ServiceKpiGroup:
     group = await db.get(ServiceKpiGroup, group_id)
-    if group is None or (portal_account_id is not None and group.portal_account_id != portal_account_id):
+    if group is None or group.portal_account_id != portal_account_id:
         raise ValueError('unknown KPI group')
     return group
 
@@ -3522,7 +3429,7 @@ async def archive_service_kpi_group(
     db: AsyncSession,
     group_id: int,
     *,
-    portal_account_id: int | None = None,
+    portal_account_id: int,
 ) -> dict[str, Any]:
     return await update_service_kpi_group(
         db,
@@ -3539,7 +3446,7 @@ async def save_service_kpi_assignment(
     *,
     group_id: int | None,
     allowed_company_ids: list[int] | None = None,
-    portal_account_id: int | None = None,
+    portal_account_id: int,
 ) -> dict[str, Any]:
     catalog = await _editable_service_catalog(
         db,
@@ -3549,7 +3456,7 @@ async def save_service_kpi_assignment(
     )
     if group_id is not None:
         await _active_service_kpi_group(db, group_id, portal_account_id=portal_account_id)
-    await _apply_service_kpi_assignment(db, catalog, group_id=group_id, now=datetime.utcnow())
+    await _apply_service_kpi_assignment(db, catalog, group_id=group_id, now=factual_now())
     await db.commit()
     return await fetch_dashboard_services(
         db,
@@ -3564,14 +3471,10 @@ async def _active_service_kpi_group(
     db: AsyncSession,
     group_id: int,
     *,
-    portal_account_id: int | None,
+    portal_account_id: int,
 ) -> ServiceKpiGroup:
     group = await db.get(ServiceKpiGroup, group_id)
-    if (
-        group is None
-        or not group.is_active
-        or (portal_account_id is not None and group.portal_account_id != portal_account_id)
-    ):
+    if group is None or not group.is_active or group.portal_account_id != portal_account_id:
         raise ValueError('unknown active KPI group')
     return group
 
@@ -3670,7 +3573,7 @@ async def save_service_management(
             if not final_active:
                 raise ValueError('unknown active KPI group')
 
-        now = datetime.now(UTC).replace(tzinfo=None)
+        now = factual_now()
         for group_id, fields in group_fields.items():
             await _apply_service_kpi_group_change(db, groups[group_id], fields=fields, now=now)
 
@@ -3843,13 +3746,7 @@ async def fetch_top_services(
                 ),
             )
             .outerjoin(ServiceCatalog, _financial_service_catalog_join())
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
+            .outerjoin(AccountCatalog, _financial_account_join())
             .where(
                 _service_paid_filters(
                     start,
@@ -3981,13 +3878,7 @@ async def fetch_paid_goods_rows(
             Staff.name.label('staff_name'),
         )
         .select_from(FinancialTransaction)
-        .outerjoin(
-            AccountCatalog,
-            and_(
-                AccountCatalog.company_id == FinancialTransaction.company_id,
-                AccountCatalog.account_id == FinancialTransaction.account_id,
-            ),
-        )
+        .outerjoin(AccountCatalog, _financial_account_join())
         .outerjoin(
             GoodTransaction,
             financial_goods_transaction_match_condition(),
@@ -4117,13 +4008,7 @@ async def fetch_extra_services(
             )
             .join(ServiceLabel, _financial_service_label_join())
             .outerjoin(ServiceCatalog, _financial_service_catalog_join())
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
+            .outerjoin(AccountCatalog, _financial_account_join())
             .where(
                 _service_paid_filters(
                     start,
@@ -4241,13 +4126,7 @@ async def _extra_service_revenue_by_staff(
             .select_from(FinancialTransaction)
             .join(Appointment, join_condition)
             .join(ServiceLabel, _financial_service_label_join())
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
+            .outerjoin(AccountCatalog, _financial_account_join())
             .where(
                 _service_paid_filters(
                     start,
@@ -4271,12 +4150,14 @@ async def _extra_service_revenue_by_staff(
         .group_by(branches.c.staff_id)
     )
     try:
-        rows = (await db.execute(stmt)).all()
+        # A savepoint keeps the rollback local: the session is the request's, and a plain
+        # rollback would expire its ORM objects and drop whatever the caller had pending.
+        async with db.begin_nested():
+            rows = (await db.execute(stmt)).all()
     except SQLAlchemyError as error:
         # The other ranking variants are still usable, but a missing aggregate must
         # not be represented as a real zero.
         logger.warning('extra-service revenue aggregation failed: %s', error)
-        await db.rollback()
         return None
     return {int(row.staff_id): float(row.revenue or 0.0) for row in rows}
 
@@ -4621,6 +4502,7 @@ async def _opz_count_scope(
 ) -> float:
     if company_ids is None:
         company_ids = await _appointment_company_ids(db, company_id, staff_id)
+    await _company_timezone_names(db, company_ids)
     total = 0.0
     for item_company_id in company_ids:
         total += await _opz_count(
@@ -5066,24 +4948,6 @@ async def _administrator_role_periods_by_company(
     return result
 
 
-async def _staff_role_periods(
-    db: AsyncSession,
-    start: date,
-    end: date,
-    company_id: int,
-    staff_id: int,
-    current_position: Optional[str],
-) -> tuple[list[tuple[date, date]], list[tuple[date, date]]]:
-    periods = await _staff_role_periods_by_staff(
-        db,
-        start,
-        end,
-        company_id,
-        {int(staff_id): current_position},
-    )
-    return periods[int(staff_id)]
-
-
 async def _staff_role_periods_by_staff(
     db: AsyncSession,
     start: date,
@@ -5291,14 +5155,15 @@ async def _administrator_service_scope(
         return result
 
     company_id = int(staff.company_id)
-    admin_periods, master_periods = await _staff_role_periods(
-        db,
-        start,
-        end,
-        company_id,
-        int(staff_id),
-        staff.position,
-    )
+    admin_periods, master_periods = (
+        await _staff_role_periods_by_staff(
+            db,
+            start,
+            end,
+            company_id,
+            {int(staff_id): staff.position},
+        )
+    )[int(staff_id)]
     if not admin_periods:
         result = AdministratorServiceScope(is_administrator=False)
         cache[key] = result
@@ -5449,7 +5314,26 @@ async def _staff_schedule_coverage_info(
     company_id: int,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
+    """Schedule/timestamp coverage of one branch and period, memoised for the request.
+
+    Plan/fact asks the same (period, branch) from the role segment and again from the
+    diagnostic; callers only read the dict, and nothing in a request writes the sync state.
+    """
     factual_at = factual_at or factual_now()
+    cache: dict[tuple, dict[str, Any]] = db.info.setdefault('staff_schedule_coverage', {})
+    key = (start, end, company_id, factual_at)
+    if key not in cache:
+        cache[key] = await _load_staff_schedule_coverage(db, start, end, company_id, factual_at)
+    return cache[key]
+
+
+async def _load_staff_schedule_coverage(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+    factual_at: datetime,
+) -> dict[str, Any]:
     reporting_start, reporting_end, state = (
         await db.execute(
             select(Company.reporting_start_date, Company.reporting_end_date, SyncSourceState)
@@ -5814,15 +5698,11 @@ async def _admin_opz_by_created_appointments(
     staff_ids: list[int],
     user_id_by_staff: dict[int, Optional[int]],
     barber_staff_ids: list[int] | None = None,
-    opz_events: list[OpzEvent] | None = None,
-    factual_at: Optional[datetime] = None,
+    *,
+    opz_events: list[OpzEvent],
 ) -> dict[int, int]:
     if not staff_ids:
         return {}
-    if opz_events is None:
-        opz_events = await _opz_events(
-            db, start, end, company_id, factual_at=factual_at
-        )
     if barber_staff_ids:
         allowed_barbers = {int(staff_id) for staff_id in barber_staff_ids}
         opz_events = [
@@ -5900,36 +5780,25 @@ async def _fact_metric_components(
     start: date,
     end: date,
     company_id: int,
-    staff_id: Optional[int] = None,
-    created_user_id: Optional[int] = None,
-    clients_override: Optional[float] = None,
-    opz_override: Optional[float] = None,
+    *,
+    opz_override: float,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, float]:
+    """Branch-level plan/fact components; the caller counts OPZ events once per branch and passes the count."""
     factual_at = factual_at or factual_now()
     average_check = await _average_check_block(
         db,
         DateRange(start, end),
         company_id,
-        staff_id,
-        created_user_id=created_user_id,
         factual_at=factual_at,
     )
-    opz_staff_id = None if created_user_id is not None else staff_id
     goods_metrics = await _goods_sales_metrics(
-        db, start, end, company_id, staff_id, factual_at
+        db, start, end, company_id, factual_at=factual_at
     )
-    clients_count = float(clients_override) if clients_override is not None else float(
+    clients_count = float(
         await db.scalar(
             select(func.count(func.distinct(Appointment.id))).where(
-                _appt_revenue_filters(
-                    start,
-                    end,
-                    company_id,
-                    staff_id,
-                    created_user_id=created_user_id,
-                    factual_at=factual_at,
-                )
+                _appt_revenue_filters(start, end, company_id, factual_at=factual_at)
             )
         )
         or 0
@@ -5938,20 +5807,11 @@ async def _fact_metric_components(
         'revenue': float(average_check['numerator'] or 0),
         'clients': clients_count,
         'avg_check_denominator': float(average_check['denominator'] or 0),
-        'opz_qty': (
-            float(opz_override)
-            if opz_override is not None
-            else await _opz_count(
-                db, start, end, company_id,
-                staff_id=opz_staff_id,
-                created_user_id=created_user_id,
-                factual_at=factual_at,
-            )
-        ),
+        'opz_qty': float(opz_override),
     }
     values.update(
         await _service_group_counts(
-            db, start, end, company_id, staff_id, factual_at
+            db, start, end, company_id, None, factual_at
         )
     )
     values.update(goods_metrics)
@@ -6005,13 +5865,7 @@ async def _staff_fact_components_by_branch(
             )
             .select_from(FinancialTransaction)
             .join(Appointment, join_condition)
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
+            .outerjoin(AccountCatalog, _financial_account_join())
             .where(
                 _service_paid_filters(
                     start, end, company_id, factual_at=factual_at
@@ -6054,13 +5908,7 @@ async def _staff_fact_components_by_branch(
                 ).label('topup_revenue'),
             )
             .select_from(FinancialTransaction)
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
+            .outerjoin(AccountCatalog, _financial_account_join())
             .where(
                 FinancialTransaction.amount > 0,
                 *day_window(FinancialTransaction.date, start, end),
@@ -6278,20 +6126,24 @@ async def _plan_metric_components_by_staff(
         field: getattr(branch_setting, field, None)
         for field in BRANCH_SETTING_FIELDS
     }
-    for row in input_rows:
-        staff_id = int(row.staff_id)
-        out.setdefault(staff_id, {}).update(
-            _staff_metric_values_from_input(
-                {
-                    'staff_category': row.staff_category,
-                    **{
-                        field: getattr(row, field, None)
-                        for field in STAFF_INPUT_FIELDS
+    # The PlanMetric query above is cut by the window; input-derived values must follow it,
+    # or a month the tenant does not own would keep its staff plans against a trimmed fact.
+    window = (await fetch_reporting_windows(db, [company_id])).get(company_id)
+    if window is None or window.covers(end):
+        for row in input_rows:
+            staff_id = int(row.staff_id)
+            out.setdefault(staff_id, {}).update(
+                _staff_metric_values_from_input(
+                    {
+                        'staff_category': row.staff_category,
+                        **{
+                            field: getattr(row, field, None)
+                            for field in STAFF_INPUT_FIELDS
+                        },
                     },
-                },
-                branch_values,
+                    branch_values,
+                )
             )
-        )
     categories: dict[int, str] = {
         int(row.staff_id): row.staff_category
         for row in input_rows
@@ -6323,7 +6175,7 @@ def _countable_manual_months(
     plan meets an unfinished month. A past week would otherwise import a whole month of
     top-ups into seven days; early in a month, month-to-date is genuinely a few days long.
     """
-    today = (factual_at or factual_now()).date()
+    today = factual_branch_date(factual_at)
     countable: set[date] = set()
     for month_start, month_end in _month_slices(
         date(start.year, start.month, 1),
@@ -6742,10 +6594,6 @@ def _mark_metric_cells_unavailable(cells: list[dict[str, Any]], codes: set[str])
         })
 
 
-def _has_plan_values(plan_values: dict[str, float]) -> bool:
-    return bool(plan_values)
-
-
 def _has_fact_values(fact_values: dict[str, float]) -> bool:
     return any(float(value or 0.0) != 0.0 for value in fact_values.values())
 
@@ -6764,7 +6612,7 @@ def _is_visible_staff_row(
     distributes across, so an empty period must not drop them from the table.
     """
     return is_visible_staff_plan(plan_values) and (
-        _has_plan_values(plan_values)
+        bool(plan_values)
         or _has_fact_values(fact_values)
         or category == 'administrator'
     )
@@ -6802,10 +6650,6 @@ def _metric_plan_value(group: dict[str, Any], code: str) -> float | None:
             value = cell.get('plan')
             return None if value is None else float(value or 0.0)
     return None
-
-
-def _extra_service_qty(group: dict[str, Any]) -> float:
-    return _metric_fact_value(group, 'extra_services_qty')
 
 
 def _staff_leaderboards_payload(
@@ -6861,7 +6705,7 @@ def _staff_leaderboards_payload(
         *,
         include_revenue: bool,
     ) -> list[dict[str, Any]]:
-        total = sum(_extra_service_qty(group) for group in source)
+        total = sum(_metric_fact_value(group, 'extra_services_qty') for group in source)
         rows = []
         for group in source:
             qty = _metric_fact_optional(group, 'extra_services_qty')
@@ -7002,7 +6846,6 @@ def _goods_kpi_execution_payload(groups: list[dict[str, Any]]) -> list[dict[str,
     out = []
     for code in GOODS_KPI_CODES:
         metric = metric_by_code[code]
-        fmt = metric['format']
         plan_values = [
             plan
             for plan in (_metric_plan_value(group, code) for group in groups)
@@ -7010,25 +6853,12 @@ def _goods_kpi_execution_payload(groups: list[dict[str, Any]]) -> list[dict[str,
         ]
         plan_raw = sum(plan_values) if plan_values else None
         fact_raw = sum(_metric_fact_value(group, code) for group in groups)
-        plan = _round_metric_value(plan_raw, fmt)
-        fact = _round_metric_value(fact_raw, fmt)
-        if plan is None:
-            completion_pct = None
-        elif plan == 0:
-            completion_pct = 100.0 if (fact or 0) >= 0 else None
-        else:
-            completion_pct = 100.0 * (fact or 0.0) / plan
+        cell = _metric_cells({code: plan_raw}, {code: fact_raw}, (metric,))[0]
         out.append({
             'code': code,
             'label': metric['label'],
-            'format': fmt,
-            'plan': plan,
-            'fact': fact,
-            'remaining': None if plan is None else _round_metric_value(
-                (plan or 0.0) - (fact or 0.0), fmt
-            ),
-            'completion_pct': _round_metric_value(completion_pct, 'percent'),
-            'status': _completion_status(completion_pct),
+            'format': metric['format'],
+            **{key: value for key, value in cell.items() if key != 'code'},
         })
     return out
 
@@ -7366,15 +7196,6 @@ def _segment_staff_by_category(
     return admin_staff_ids, barber_staff_ids
 
 
-def _opz_events_in_window(
-    opz_events: list[OpzEvent],
-    window_start: date,
-    window_end: date,
-) -> list[OpzEvent]:
-    """OPZ events anchored inside one role segment's date window."""
-    return [event for event in opz_events if window_start <= event.event_date <= window_end]
-
-
 async def _admin_opz_by_staff_for_period(
     db: AsyncSession,
     start: date,
@@ -7410,7 +7231,7 @@ async def _admin_opz_by_staff_for_period(
         admin_staff_ids, barber_staff_ids = _segment_staff_by_category(staff_ids, segment_categories)
         if not admin_staff_ids:
             continue
-        segment_events = _opz_events_in_window(opz_events, segment_start, segment_end)
+        segment_events = [event for event in opz_events if segment_start <= event.event_date <= segment_end]
         counts = await _admin_opz_by_created_appointments(
             db,
             segment_start,
@@ -7420,7 +7241,6 @@ async def _admin_opz_by_staff_for_period(
             user_id_by_staff,
             barber_staff_ids or None,
             opz_events=segment_events,
-            factual_at=factual_at,
         )
         for sid, value in counts.items():
             totals[sid] = totals.get(sid, 0.0) + float(value)
@@ -7492,7 +7312,7 @@ async def _staff_plan_groups_for_branch(
             barber_staff_ids or None,
             factual_at=factual_at,
         )
-        segment_opz_events = _opz_events_in_window(opz_events, segment_start, segment_end)
+        segment_opz_events = [event for event in opz_events if segment_start <= event.event_date <= segment_end]
         admin_opz_by_staff = await _admin_opz_by_created_appointments(
             db,
             segment_start,
@@ -7502,7 +7322,6 @@ async def _staff_plan_groups_for_branch(
             user_id_by_staff,
             barber_staff_ids or None,
             opz_events=segment_opz_events,
-            factual_at=factual_at,
         )
         admin_extra_metrics_by_staff = (
             await _admin_extra_service_metrics(
@@ -7610,8 +7429,9 @@ async def fetch_staff(
     include_staff_ids: Optional[list[int]] = None,
     start: Optional[date] = None,
     end: Optional[date] = None,
+    staff_id: Optional[int] = None,
 ) -> list[dict[str, Any]]:
-    """Staff of the branches in scope, optionally narrowed to one reporting period.
+    """Staff of the branches in scope, optionally narrowed to one reporting period or one employee.
 
     The employee filter sits next to the branch filter and has to agree with it: a period
     the branch cannot report on must not offer its people either. Without a period the
@@ -7647,6 +7467,8 @@ async def fetch_staff(
         stmt = stmt.where(Company.id.in_(allowed))
     if company_id is not None:
         stmt = stmt.where(Company.id == company_id)
+    if staff_id is not None:
+        stmt = stmt.where(Staff.id == staff_id)
     if start is not None and end is not None:
         stmt = stmt.where(branch_window_overlap_clause(Staff.company_id, start, end))
 
@@ -8102,6 +7924,15 @@ def _normalize_plan_settings_payload(
     return period_start, period_end, normalized_branches, normalized_staff
 
 
+PLAN_SETTINGS_CONFLICT_DETAIL = 'Plan was changed by someone else; reload and try again'
+# First key of the two-int advisory lock form, a key space of its own next to the sync's single bigint lock.
+PLAN_SETTINGS_LOCK_NAMESPACE = 7301
+
+
+class PlanSettingsConflict(Exception):
+    """A concurrent save of the same month wrote rows this one was about to insert."""
+
+
 async def save_plan_settings(
     db: AsyncSession,
     month: str,
@@ -8110,6 +7941,9 @@ async def save_plan_settings(
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
     replace_existing_plan: bool = False,
+    *,
+    actor_user_id: Optional[int],
+    portal_account_id: Optional[int],
 ) -> dict[str, Any]:
     period_start, period_end, normalized_branches, normalized_staff = _normalize_plan_settings_payload(month, branches, staff)
     # Staff categories come from the plan, so anything cached from before this write is stale.
@@ -8135,6 +7969,13 @@ async def save_plan_settings(
     missing_company_ids = sorted(set(branch_ids) - existing_company_ids)
     if missing_company_ids:
         raise ValueError(f'company does not exist: {missing_company_ids[0]}')
+
+    # Saving is delete-all + insert, so two saves of one month must queue up: the second would
+    # otherwise delete nothing and collide with the first one's rows on the unique indexes.
+    # Taken before the snapshot is read, so the second save plans on what the first one wrote.
+    if db.get_bind().dialect.name == 'postgresql':
+        month_key = period_start.year * 12 + period_start.month
+        await db.execute(select(func.pg_advisory_xact_lock(PLAN_SETTINGS_LOCK_NAMESPACE, month_key)))
 
     saved_branch_settings, saved_staff_inputs = await _plan_settings_snapshot(
         db,
@@ -8401,6 +8242,26 @@ async def save_plan_settings(
             )
         )
 
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        raise PlanSettingsConflict(PLAN_SETTINGS_CONFLICT_DETAIL) from None
+
+    await log_portal_audit(
+        db,
+        actor_user_id=actor_user_id,
+        portal_account_id=portal_account_id,
+        action='plan_settings.updated',
+        target_type='plan_settings',
+        target_id=_month_value(period_start),
+        metadata={
+            'company_ids': branch_ids,
+            'edited_company_ids': sorted(edited_branch_ids),
+            'edited_staff': [[company, staff_id] for company, staff_id in sorted(edited_staff_keys)],
+            'replaced_existing_plan': replace_existing_plan,
+        },
+    )
     await db.commit()
     return await fetch_plan_settings(
         db,
@@ -8623,7 +8484,7 @@ async def fetch_manual_review_facts(
     *,
     portal_account_id: Optional[int],
 ) -> dict[str, Any]:
-    payload = await _fetch_manual_facts(
+    return await _fetch_manual_facts(
         db,
         month,
         REVIEWS_QTY_CODE,
@@ -8634,7 +8495,6 @@ async def fetch_manual_review_facts(
         allowed_staff_keys=allowed_staff_keys,
         portal_account_id=portal_account_id,
     )
-    return payload
 
 
 async def _admin_opz_current_values(
@@ -8918,6 +8778,14 @@ async def _write_manual_facts(
     if not changed_items:
         return
 
+    # Same upper cut as the editor's own listing (`branches_not_yet_left`): months after a branch
+    # left the tenant are not ours to enter, and a value written there could never be shown again.
+    windows = await fetch_reporting_windows(db, sorted({company for company, _ in changed_items}))
+    for company, staff in sorted(changed_items):
+        window = windows.get(company)
+        if window is not None and window.end is not None and window.end < month_start:
+            raise ManualFactRowNotOpen(f'company {company} left the tenant before {month_start:%Y-%m}, staff {staff}')
+
     # Rewritten as delete + insert, not update: a legacy month may still be split over several
     # rows, and the new value replaces them all. Each deleted row is guarded by the exact value
     # read above, so a concurrent save that slipped in after the read leaves the count short.
@@ -8982,9 +8850,10 @@ async def _write_manual_facts(
     await db.commit()
 
 
-async def save_manual_review_facts(
+async def save_manual_facts(
     db: AsyncSession,
     month: str,
+    metric_code: str,
     company_id: Optional[int],
     staff_id: Optional[int],
     items: list[dict[str, Any]],
@@ -8995,10 +8864,11 @@ async def save_manual_review_facts(
     actor_user_id: Optional[int],
     portal_account_id: Optional[int],
 ) -> dict[str, Any]:
+    """Save one metric's editor rows and return the editor as the next GET would show it."""
     await _write_manual_facts(
         db,
         month,
-        REVIEWS_QTY_CODE,
+        metric_code,
         company_id,
         staff_id,
         items,
@@ -9008,45 +8878,8 @@ async def save_manual_review_facts(
         actor_user_id=actor_user_id,
         portal_account_id=portal_account_id,
     )
-    return await fetch_manual_review_facts(
-        db,
-        month,
-        int(company_id) if company_id is not None else None,
-        int(staff_id) if staff_id is not None else None,
-        allowed_company_ids=allowed_company_ids,
-        force_allowed=force_allowed,
-        allowed_staff_keys=allowed_staff_keys,
-        portal_account_id=portal_account_id,
-    )
-
-
-async def save_manual_opz_facts(
-    db: AsyncSession,
-    month: str,
-    company_id: Optional[int],
-    staff_id: Optional[int],
-    items: list[dict[str, Any]],
-    allowed_company_ids: Optional[list[int]] = None,
-    force_allowed: bool = False,
-    allowed_staff_keys: Optional[frozenset[tuple[int, int]]] = None,
-    *,
-    actor_user_id: Optional[int],
-    portal_account_id: Optional[int],
-) -> dict[str, Any]:
-    await _write_manual_facts(
-        db,
-        month,
-        OPZ_QTY_CODE,
-        company_id,
-        staff_id,
-        items,
-        allowed_company_ids=allowed_company_ids,
-        force_allowed=force_allowed,
-        allowed_staff_keys=allowed_staff_keys,
-        actor_user_id=actor_user_id,
-        portal_account_id=portal_account_id,
-    )
-    return await fetch_manual_opz_facts(
+    fetch_editor = fetch_manual_opz_facts if metric_code == OPZ_QTY_CODE else fetch_manual_review_facts
+    return await fetch_editor(
         db,
         month,
         int(company_id) if company_id is not None else None,
@@ -9083,8 +8916,9 @@ async def fetch_plan_fact(
             allowed_company_ids=allowed_company_ids,
             force_allowed=force_allowed,
             include_staff_ids=[staff_id],
+            staff_id=staff_id,
         )
-        selected_staff = next((staff for staff in staff_rows if staff['id'] == staff_id), None)
+        selected_staff = staff_rows[0] if staff_rows else None
         if selected_staff is not None:
             if company_id is None:
                 company_id = int(selected_staff['company_id'])
@@ -9219,6 +9053,7 @@ async def fetch_plan_fact(
     facts_by_company: dict[int, dict[str, float]] = {}
     opz_events_by_company: dict[int, list[OpzEvent]] = {}
     staff_groups_by_company: dict[int, list[dict[str, Any]]] = {}
+    await _company_timezone_names(db, company_ids)
     for branch_id in company_ids:
         opz_events_by_company[branch_id] = await _opz_events(
             db, start, end, branch_id, factual_at=factual_at
@@ -9249,7 +9084,7 @@ async def fetch_plan_fact(
         _countable_manual_months(start, end, factual_at),
     )
     for branch_id in company_ids:
-        facts_by_company.setdefault(branch_id, {})[REVIEWS_QTY_CODE] = review_facts_by_company.get(branch_id, 0.0)
+        facts_by_company[branch_id][REVIEWS_QTY_CODE] = review_facts_by_company.get(branch_id, 0.0)
         _apply_manual_opz(facts_by_company[branch_id], manual_opz_by_company.get(branch_id, 0.0))
         staff_groups_by_company[branch_id] = await _staff_plan_groups_for_branch(
             db,
@@ -9269,7 +9104,7 @@ async def fetch_plan_fact(
         )
 
     groups: list[dict[str, Any]] = []
-    if company_id is None and company_ids:
+    if company_ids:
         network_plan = _sum_metric_components([plans_by_company.get(branch_id, {}) for branch_id in company_ids])
         # The network row is the sum of the branch rows, including the two average-check
         # components: the numerator is a sum of payment amounts, and the denominator counts

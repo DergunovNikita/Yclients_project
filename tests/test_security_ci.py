@@ -29,6 +29,18 @@ def test_security_workflow_declares_expected_tools_and_modes():
     assert 'GITLEAKS_CONFIG: .gitleaks.toml' in deploy_workflow
 
 
+def test_deploy_workflow_gates_on_lint_and_frontend_checks():
+    workflow = (ROOT / '.github/workflows/deploy-vm.yml').read_text()
+    deploy_job = workflow.split('  deploy-vm:', 1)[1]
+
+    assert 'ruff check .' in workflow
+    assert 'requirements-dev.txt' in workflow
+    for command in ('npm ci', 'npm run test:auth', 'npm run test:dashboard', 'npm run build', 'npm run scan:auth-build'):
+        assert command in workflow
+    # A broken frontend/proxy (e.g. a 13th Vercel function) must stop the deploy, not just turn a check red.
+    assert '- frontend' in deploy_job.split('steps:', 1)[0]
+
+
 def test_local_security_script_documents_same_gate():
     script = (ROOT / 'scripts/security-check.sh').read_text()
     readme = (ROOT / 'README.md').read_text()

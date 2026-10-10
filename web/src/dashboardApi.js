@@ -22,11 +22,12 @@ export { serviceManagementNavigationAllowed } from './dashboardRequestState.js';
 export { runServiceManagementMutation } from './dashboardRequestState.js';
 export { settleServiceManagementLoad } from './dashboardRequestState.js';
 
-export const REQUEST_TIMEOUT_MS = 190000;
-export const SLOW_REQUEST_MS = 12000;
+const REQUEST_TIMEOUT_MS = 190000;
+const SLOW_REQUEST_MS = 12000;
 
 const apiBase = import.meta.env?.VITE_API_BASE || '';
-const apiKey = import.meta.env?.VITE_API_KEY || '';
+// Dev only: a VITE_ variable is inlined into the bundle for every visitor, and this key is full-access.
+export const apiKey = import.meta.env?.DEV ? (import.meta.env.VITE_API_KEY || '') : '';
 
 function apiUrl(path, params = {}) {
   const query = new URLSearchParams();
@@ -56,7 +57,7 @@ function requestHeaders(method, extra = {}) {
   return authHeaders(headers);
 }
 
-export function apiErrorForResponse(response, payload = {}) {
+function apiErrorForResponse(response, payload = {}) {
   return responseError(response, payload, userDataLoadErrorMessage());
 }
 

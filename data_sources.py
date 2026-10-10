@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable
@@ -55,6 +56,7 @@ class DataSourceAdapter(ABC):
         db: AsyncSession,
         portal_account_id: int,
         company_ids: list[int],
+        available: list[DataSourceBranch] | None = None,
     ) -> list[int]:
         raise NotImplementedError
 
@@ -130,8 +132,16 @@ class YClientsDataSourceAdapter(DataSourceAdapter):
         db: AsyncSession,
         portal_account_id: int,
         company_ids: list[int],
+        available: list[DataSourceBranch] | None = None,
     ) -> list[int]:
-        available = {item.company_id: item for item in self.list_branches()}
+        """Link the picked companies to the tenant.
+
+        `available` is the already fetched branch list; without it the listing is requested here,
+        off the event loop (the DB session is never touched from that thread).
+        """
+        if available is None:
+            available = await asyncio.to_thread(self.list_branches)
+        available = {item.company_id: item for item in available}
         unknown = [cid for cid in company_ids if cid not in available]
         if unknown:
             raise HTTPException(status_code=400, detail=f'Companies not available for credential: {unknown}')

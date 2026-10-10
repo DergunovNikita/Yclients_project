@@ -2700,22 +2700,17 @@ def execute_sync(
             print(f"  Тенант {tenant_label}")
             print(f"{'=' * 60}")
 
+            auth_error: str | None = None
             try:
                 company_api = _build_api_for_credential(credential)
             except Exception as exc:
-                mark_credential_failure_sync(db, credential.id, exc.__class__.__name__)
-                emit_progress(
-                    'credentials_auth',
-                    'failed',
-                    10,
-                    f'Credential auth failed: {credential.title}',
-                    credential=credential,
-                    payload={'error': str(exc)[:1000]},
-                )
-                raise
+                # One tenant's bad auth reply must not stop the tenants after it in this run.
+                company_api = None
+                auth_error = exc.__class__.__name__
+                print(f"! Ошибка авторизации учётных данных «{credential.title}»: {auth_error}")
             if company_api is None:
                 print(f"! Не удалось авторизовать учётные данные «{credential.title}» — пропуск тенанта")
-                mark_credential_failure_sync(db, credential.id, 'YClients authentication failed')
+                mark_credential_failure_sync(db, credential.id, auth_error or 'YClients authentication failed')
                 step_results.append({
                     'name': f"Credentials auth [{tenant_label}]",
                     'key': 'credentials_auth',
@@ -2728,6 +2723,7 @@ def execute_sync(
                     10,
                     f'Credential auth failed: {credential.title}',
                     credential=credential,
+                    payload={'error': auth_error} if auth_error else None,
                 )
                 continue
             mark_credential_success_sync(db, credential.id)

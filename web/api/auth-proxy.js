@@ -41,9 +41,11 @@ export default async function handler(req, res) {
   try {
     result = buildTargetUrl(req);
   } catch (error) {
+    // The message can name a missing env var; it goes to the function log, not to the caller.
+    console.error('proxy target build failed:', error);
     res.statusCode = 500;
     res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ error: error.message }));
+    res.end(JSON.stringify({ error: 'Internal error' }));
     return;
   }
   if (!result.ok) {

@@ -24,7 +24,7 @@ export function formatDecimal(value) {
   return Number(value || 0).toLocaleString(intlLocale(), { maximumFractionDigits: 2 });
 }
 
-export function formatPercent(value) {
+function formatPercent(value) {
   if (value === null || value === undefined || value === '') return '—';
   return `${Number(value || 0).toLocaleString(intlLocale(), { maximumFractionDigits: 1 })}%`;
 }

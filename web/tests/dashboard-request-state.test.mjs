@@ -189,7 +189,7 @@ test('service management sends only changed fields in one batch', () => {
 });
 
 test('service management controls reflect dirty and loading state', () => {
-  assert.deepEqual(serviceManagementControls({ loading: false, hasData: true, hasSavedData: true, dirty: false }), {
+  assert.deepEqual(serviceManagementControls({ loading: false, hasData: true, dirty: false }), {
     filtersDisabled: false,
     editorDisabled: false,
     refreshDisabled: false,
@@ -197,7 +197,7 @@ test('service management controls reflect dirty and loading state', () => {
     resetDisabled: true,
     addGroupDisabled: false,
   });
-  assert.deepEqual(serviceManagementControls({ loading: false, hasData: true, hasSavedData: true, dirty: true }), {
+  assert.deepEqual(serviceManagementControls({ loading: false, hasData: true, dirty: true }), {
     filtersDisabled: true,
     editorDisabled: false,
     refreshDisabled: true,
@@ -205,7 +205,7 @@ test('service management controls reflect dirty and loading state', () => {
     resetDisabled: false,
     addGroupDisabled: true,
   });
-  assert.deepEqual(serviceManagementControls({ loading: true, hasData: true, hasSavedData: true, dirty: true }), {
+  assert.deepEqual(serviceManagementControls({ loading: true, hasData: true, dirty: true }), {
     filtersDisabled: true,
     editorDisabled: true,
     refreshDisabled: true,

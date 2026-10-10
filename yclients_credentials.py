@@ -8,6 +8,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from typing import Iterable
 
 from cryptography.fernet import Fernet
@@ -43,6 +44,7 @@ class YClientsCredentialValue:
     portal_account_id: int | None = None
 
 
+@lru_cache(maxsize=4)
 def _fernet_from_key(raw_key: str) -> Fernet:
     if not raw_key:
         raise CredentialsConfigError('PORTAL_CREDENTIALS_ENCRYPTION_KEY is not configured')
@@ -177,18 +179,6 @@ def load_active_credentials_sync(
             _record_decrypt_failure(credential, exc)
     db.commit()
     return values
-
-
-async def load_credential_company_map_async(db: AsyncSession) -> dict[int, int]:
-    rows = (
-        await db.execute(
-            select(
-                YClientsCredentialCompany.company_id,
-                YClientsCredentialCompany.credential_id,
-            )
-        )
-    ).all()
-    return {int(company_id): int(credential_id) for company_id, credential_id in rows}
 
 
 async def load_credentials_for_companies_async(

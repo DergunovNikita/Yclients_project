@@ -6,14 +6,23 @@ const LOCALE_KEY = 'app_locale';
 const DEFAULT_LOCALE = 'it';
 const messages = { ru, en, it };
 export const LOCALES = Object.keys(messages);
-export const LOCALE_CHANGE_EVENT = 'app:localechange';
+let cachedLocale = null;
 
 function lookup(dict, key) {
   return key.split('.').reduce((node, part) => (node == null ? undefined : node[part]), dict);
 }
 
-export function getLocale() {
-  const stored = localStorage.getItem(LOCALE_KEY);
+// Browsers with site data blocked throw on any localStorage access; the locale must still resolve.
+function readStoredLocale() {
+  try {
+    return localStorage.getItem(LOCALE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function resolveLocale() {
+  const stored = readStoredLocale();
   if (LOCALES.includes(stored)) return stored;
   const candidates = typeof navigator === 'undefined'
     ? []
@@ -21,6 +30,12 @@ export function getLocale() {
       .filter(Boolean)
       .map((value) => String(value).toLowerCase().split('-')[0]);
   return candidates.find((locale) => LOCALES.includes(locale)) || DEFAULT_LOCALE;
+}
+
+// t() runs thousands of times per render; resolve once and let setLocale invalidate.
+export function getLocale() {
+  if (cachedLocale === null) cachedLocale = resolveLocale();
+  return cachedLocale;
 }
 
 /**
@@ -52,15 +67,16 @@ export function applyTranslations(root = document) {
   });
 }
 
-export function setLocale(locale) {
+function setLocale(locale) {
   if (!LOCALES.includes(locale)) return getLocale();
-  const previous = getLocale();
-  localStorage.setItem(LOCALE_KEY, locale);
+  try {
+    localStorage.setItem(LOCALE_KEY, locale);
+  } catch {
+    /* the choice then lasts until the page reloads */
+  }
+  cachedLocale = locale;
   document.documentElement.lang = locale;
   applyTranslations();
-  if (previous !== locale) {
-    window.dispatchEvent(new CustomEvent(LOCALE_CHANGE_EVENT, { detail: { locale } }));
-  }
   return locale;
 }
 
@@ -68,18 +84,6 @@ const INTL_LOCALE = { ru: 'ru-RU', en: 'en-US', it: 'it-IT' };
 
 export function intlLocale() {
   return INTL_LOCALE[getLocale()] || INTL_LOCALE[DEFAULT_LOCALE];
-}
-
-export function formatMoney(amount, currency = 'RUB') {
-  return new Intl.NumberFormat(intlLocale(), { style: 'currency', currency }).format(amount);
-}
-
-export function formatDate(date) {
-  return new Intl.DateTimeFormat(intlLocale()).format(date instanceof Date ? date : new Date(date));
-}
-
-export function formatNumber(n) {
-  return new Intl.NumberFormat(intlLocale()).format(n);
 }
 
 export function userDataLoadErrorMessage() {

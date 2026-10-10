@@ -29,18 +29,17 @@ function renderCards(cards = []) {
 }
 
 function renderNotes(notes = [], missingSources = []) {
-  const sourceText = missingSources.length
-    ? `<div class="reports-note__sources">${t('reports.missingSources')}: ${missingSources.map(sourceLabel).map(escapeHtml).join(', ')}</div>`
+  const notesHtml = notes.map((note) => `
+    <div class="reports-note reports-note--${escapeHtml(note.kind || 'info')}">
+      <strong>${escapeHtml(note.title || t('reports.note'))}</strong>
+      <span>${escapeHtml(note.text || '')}</span>
+    </div>
+  `).join('');
+  // One line for the whole report: a partial report may carry no notes, or several.
+  const sourcesHtml = missingSources.length
+    ? `<div class="reports-note reports-note--missing"><span>${t('reports.missingSources')}: ${missingSources.map(sourceLabel).map(escapeHtml).join(', ')}</span></div>`
     : '';
-  return `
-    ${notes.map((note) => `
-      <div class="reports-note reports-note--${escapeHtml(note.kind || 'info')}">
-        <strong>${escapeHtml(note.title || t('reports.note'))}</strong>
-        <span>${escapeHtml(note.text || '')}</span>
-        ${sourceText}
-      </div>
-    `).join('')}
-  `;
+  return notesHtml + sourcesHtml;
 }
 
 function renderCalculationScope(scope) {

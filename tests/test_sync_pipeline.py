@@ -676,6 +676,44 @@ def test_execute_sync_reuses_caller_supplied_database(monkeypatch):
         assert result['success'] is True
 
 
+def test_one_credentials_auth_exception_does_not_stop_the_other_tenants(monkeypatch):
+    """A tenant whose auth raises (e.g. a non-JSON reply) is recorded as a failed step and skipped."""
+    with sqlite_session_with_system([Group.__table__, Company.__table__, SyncState.__table__]) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.commit()
+
+        credentials = [
+            YClientsCredentialValue(
+                id=cid, title=f'Tenant {cid}', partner_token='p', login='l', password='x',
+                company_ids=(1,), portal_account_id=7,
+            )
+            for cid in (11, 12)
+        ]
+        patch_execute_sync_dependencies(monkeypatch, db, credentials[0])
+        monkeypatch.setattr(sync_pipeline, 'load_active_credentials_sync', lambda *_a, **_k: credentials)
+        failures = []
+        built = []
+
+        def build(credential):
+            built.append(credential.id)
+            if credential.id == 11:
+                raise ValueError('not json')
+            return FakeSyncAPI()
+
+        monkeypatch.setattr(sync_pipeline, '_build_api_for_credential', build)
+        monkeypatch.setattr(
+            sync_pipeline, 'mark_credential_failure_sync', lambda _db, cid, reason: failures.append((cid, reason))
+        )
+
+        result = execute_sync(mode='incremental', end_date=date(2026, 6, 30), portal_account_id=7)
+
+        assert built == [11, 12]
+        assert failures == [(11, 'ValueError')]
+        failed = [step for step in result['step_results'] if step['key'] == 'credentials_auth']
+        assert len(failed) == 1 and failed[0]['success'] is False
+
+
 def test_execute_sync_does_not_certify_incomplete_historical_coverage(monkeypatch):
     with sqlite_session_with_system([Group.__table__, Company.__table__, SyncState.__table__]) as db:
         db.add(Group(id=1, title='G1'))

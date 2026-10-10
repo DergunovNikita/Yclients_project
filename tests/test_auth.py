@@ -1,6 +1,7 @@
 """Portal auth and branch access control tests."""
 
 import json
+import logging
 from datetime import datetime, timedelta
 
 import pytest
@@ -2019,10 +2020,10 @@ async def test_create_yclients_credential_failures_are_sanitized_and_audited(
         def fail_credential_test(*_args, **_kwargs):
             raise failure
 
-        monkeypatch.setattr(yclients_credential_routes, '_test_source_credentials', fail_credential_test)
+        monkeypatch.setattr(yclients_credential_routes, '_authenticated_adapter', fail_credential_test)
         company_ids = [1]
     else:
-        monkeypatch.setattr(yclients_credential_routes, '_test_source_credentials', lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(yclients_credential_routes, '_authenticated_adapter', lambda *_args, **_kwargs: None)
 
         async def fail_company_discovery(*_args, **_kwargs):
             raise failure
@@ -3028,9 +3029,11 @@ async def test_distribute_credentials_reports_invite_failures_after_rollback(aut
     data = response.json()['data']
     assert data['sent_count'] == 0
     assert data['sent'] == []
+    # The exception text (SMTP host, DB internals) stays server-side.
     assert data['errors'] == [
-        {'user_id': 12, 'email': 'rollback.invite@example.com', 'reason': 'smtp unavailable'}
+        {'user_id': 12, 'email': 'rollback.invite@example.com', 'reason': 'Email delivery failed'}
     ]
+    assert 'smtp unavailable' not in response.text
 
 
 @pytest.mark.asyncio
@@ -3877,3 +3880,469 @@ async def test_resend_verification_only_emails_pending_unverified_accounts(auth_
     # resend cooldown, the verified account has nothing to verify, and the unknown email
     # does not exist.
     assert sent == ['pending@example.com']
+
+
+# ---------- password length: bcrypt only reads 72 bytes ----------
+
+LONG_PASSWORD = 'Пароль' * 7  # 42 characters, 84 bytes: inside max_length, over the bcrypt limit
+
+
+class _Api:
+    """Context manager: the app wired to the test session, one client."""
+
+    def __init__(self, auth_db):
+        self.auth_db = auth_db
+
+    async def __aenter__(self):
+        async def override_db():
+            yield self.auth_db
+
+        app.dependency_overrides[api.get_async_db] = override_db
+        self.client = AsyncClient(transport=ASGITransport(app=app), base_url='http://test')
+        return await self.client.__aenter__()
+
+    async def __aexit__(self, *exc):
+        await self.client.__aexit__(*exc)
+        app.dependency_overrides.clear()
+
+
+def _bearer(user_id, role):
+    return {'Authorization': f'Bearer {create_access_token(user_id, role)}'}
+
+
+def test_verify_password_never_raises_on_long_input_or_a_broken_hash():
+    from auth_service import verify_password
+
+    stored = hash_password('Admin12345!')
+    assert verify_password('Admin12345!', stored) is True
+    assert verify_password('a' * 100, stored) is False
+    assert verify_password(LONG_PASSWORD, stored) is False
+    assert verify_password('Admin12345!', 'not-a-bcrypt-hash') is False
+
+
+@pytest.mark.asyncio
+async def test_login_with_over_long_password_is_401_for_known_and_unknown_email(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    async with _Api(auth_db) as client:
+        known = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': LONG_PASSWORD})
+        unknown = await client.post('/auth/login', json={'email': 'nobody@example.com', 'password': LONG_PASSWORD})
+        huge = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'x' * 129})
+
+    assert known.status_code == unknown.status_code == 401
+    assert known.json() == unknown.json()
+    assert huge.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_login_checks_a_dummy_hash_when_the_email_is_unknown(auth_db, monkeypatch):
+    from auth_service import DUMMY_PASSWORD_HASH
+
+    seen = []
+
+    def record(password, password_hash):
+        seen.append(password_hash)
+        return False
+
+    monkeypatch.setattr(auth_routes, 'verify_password', record)
+    async with _Api(auth_db) as client:
+        await client.post('/auth/login', json={'email': 'nobody@example.com', 'password': 'Whatever123!'})
+        await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Whatever123!'})
+
+    assert seen[0] == DUMMY_PASSWORD_HASH
+    assert seen[1] != DUMMY_PASSWORD_HASH
+
+
+@pytest.mark.asyncio
+async def test_every_password_entry_point_rejects_over_long_passwords_with_422(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setattr(auth_routes, 'AUTH_PUBLIC_REGISTRATION_ENABLED', True)
+    reset_token = await create_email_token(auth_db, 1, TOKEN_PURPOSE_RESET)
+    async with _Api(auth_db) as client:
+        register = await client.post(
+            '/auth/register', json={'email': 'long@example.com', 'password': LONG_PASSWORD}
+        )
+        reset = await client.post('/auth/reset-password', json={'token': reset_token, 'password': LONG_PASSWORD})
+        change = await client.post(
+            '/auth/change-password',
+            headers=_bearer(1, 'owner'),
+            json={'current_password': 'Admin12345!', 'new_password': LONG_PASSWORD},
+        )
+        create = await client.post(
+            '/auth/admin/users',
+            headers=_bearer(1, 'owner'),
+            json={'email': 'created@example.com', 'password': LONG_PASSWORD, 'role': 'manager', 'company_ids': [1]},
+        )
+        # The longest ASCII password bcrypt can take in full is still accepted.
+        ok = await client.post(
+            '/auth/admin/users',
+            headers=_bearer(1, 'owner'),
+            json={'email': 'fits@example.com', 'password': 'a' * 72, 'role': 'manager', 'company_ids': [1]},
+        )
+
+    for response in (register, reset, change, create):
+        assert response.status_code == 422
+        assert 'bytes' in response.text
+    assert ok.status_code == 200
+    # The rejected reset did not spend the token.
+    assert await auth_db.scalar(
+        select(PortalEmailToken.used_at).where(PortalEmailToken.user_id == 1)
+    ) is None
+
+
+# ---------- AUTH-6/21: logging of failures ----------
+
+@pytest.mark.asyncio
+async def test_failed_login_and_rate_limit_are_logged_without_the_email(auth_db, monkeypatch, caplog):
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_MAX_REQUESTS', 1)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_IP_MAX_REQUESTS', 50)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_WINDOW_SECONDS', 60.0)
+    auth_routes._auth_rate_limit_hits.clear()
+    # The `yclients` logger does not propagate to root (see api.py), so attach the capture handler directly.
+    auth_logger = logging.getLogger('yclients.auth')
+    auth_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level('WARNING', logger='yclients.auth'):
+            async with _Api(auth_db) as client:
+                first = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Wrong12345!'})
+                second = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Wrong12345!'})
+    finally:
+        auth_logger.removeHandler(caplog.handler)
+        auth_routes._auth_rate_limit_hits.clear()
+
+    assert (first.status_code, second.status_code) == (401, 429)
+    messages = [record.getMessage() for record in caplog.records if record.name == 'yclients.auth']
+    assert messages == ['login failed user_id=1', 'auth rate limit hit route=/auth/login bucket=email_ip']
+    assert all('admin@example.com' not in message and 'Wrong12345!' not in message for message in messages)
+
+
+# ---------- AUTH-9: comparisons that cannot raise ----------
+
+def test_secure_equals_accepts_non_ascii_and_missing_input():
+    from sync_security import secure_equals, validate_sync_token
+
+    assert secure_equals('secret', 'secret') is True
+    assert secure_equals('secrét', 'secret') is False
+    assert secure_equals(None, 'secret') is False
+    assert secure_equals('секрет', 'секрет') is True
+    with pytest.raises(HTTPException) as exc_info:
+        validate_sync_token('é', 'configured')
+    assert exc_info.value.status_code == 401
+
+
+def test_csrf_check_answers_403_for_non_ascii_tokens():
+    class _Req:
+        method = 'POST'
+        cookies = {ACCESS_COOKIE_NAME: 'x', AUTH_CSRF_COOKIE_NAME: 'é'}
+        headers = {'x-csrf-token': 'abc'}
+
+    with pytest.raises(HTTPException) as exc_info:
+        auth_sessions.enforce_csrf(_Req())
+    assert exc_info.value.status_code == 403
+
+
+# ---------- AUTH-2: peers are managed only inside the actor's own branches ----------
+
+def test_can_manage_peer_only_when_every_peer_branch_is_the_actors():
+    from auth_hierarchy import can_list_user, can_manage_user
+
+    # Overlap alone still lists the peer ...
+    assert can_list_user('branch_admin', [1, 2], 'branch_admin', [2, 3]) is True
+    # ... but a peer with a branch the actor does not hold cannot be changed or deleted.
+    assert can_manage_user('branch_admin', [1, 2], 'branch_admin', [2, 3]) is False
+    assert can_manage_user('branch_admin', [1, 2], 'branch_admin', [2]) is True
+    assert can_manage_user('branch_admin', [1, 2], 'manager', [3]) is False
+    assert can_manage_user('branch_admin', [1, 2], 'manager', [1]) is True
+    assert can_manage_user('owner', [1], 'owner', [2]) is True
+    assert can_manage_user('platform_admin', [], 'platform_admin', []) is True
+    assert can_manage_user('manager', [1], 'manager', [1]) is False
+
+
+@pytest.mark.asyncio
+async def test_branch_admin_cannot_take_over_a_peer_with_extra_branches(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(
+        PortalUser(
+            id=30,
+            portal_account_id=1,
+            email='peer@example.com',
+            password_hash=hash_password('Peer12345!'),
+            full_name='Peer',
+            role='branch_admin',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add_all([PortalUserBranch(user_id=30, company_id=1), PortalUserBranch(user_id=30, company_id=2)])
+    await auth_db.commit()
+    headers = _bearer(3, 'branch_admin')  # holds branch 1 only
+
+    async with _Api(auth_db) as client:
+        listed = await client.get('/auth/admin/users', headers=headers)
+        patched = await client.patch('/auth/admin/users/30', headers=headers, json={'email': 'attacker@example.com'})
+        deleted = await client.delete('/auth/admin/users/30', headers=headers)
+
+    peer_row = next(item for item in listed.json()['data'] if item['id'] == 30)
+    assert peer_row['manageable'] is False
+    assert patched.status_code == 403
+    assert deleted.status_code == 403
+    assert await auth_db.scalar(select(PortalUser.email).where(PortalUser.id == 30)) == 'peer@example.com'
+
+
+# ---------- AUTH-12: branches handed to a user stay inside that user's tenant ----------
+
+@pytest_asyncio.fixture
+async def two_tenants(auth_db):
+    auth_db.add(Company(id=3, title='Other tenant branch', group_id=1))
+    auth_db.add(PortalAccount(id=2, label='Tenant B', created_at=datetime.utcnow()))
+    auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
+    auth_db.add(
+        PortalUser(
+            id=53,
+            portal_account_id=None,
+            email='platform.tenancy@example.com',
+            password_hash=hash_password('Platform12345!'),
+            full_name='Platform Admin',
+            role='platform_admin',
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+    )
+    auth_db.add(Staff(id=9300, name='Floater', position='master', company_id=1, fired=0, bookable=True))
+    await auth_db.commit()
+    return auth_db
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_cannot_attach_another_tenants_branch_to_a_user(two_tenants, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    headers = _bearer(53, 'platform_admin')
+    async with _Api(two_tenants) as client:
+        foreign = await client.patch('/auth/admin/users/2', headers=headers, json={'company_ids': [3]})
+        mixed = await client.patch('/auth/admin/users/2', headers=headers, json={'company_ids': [1, 3]})
+        own = await client.patch('/auth/admin/users/2', headers=headers, json={'company_ids': [2]})
+
+    assert foreign.status_code == 403
+    assert mixed.status_code == 403
+    assert own.status_code == 200
+    rows = (await two_tenants.execute(select(PortalUserBranch.company_id).where(PortalUserBranch.user_id == 2))).scalars()
+    assert sorted(rows) == [2]
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_cannot_move_a_staff_row_to_another_tenant(two_tenants, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    headers = {**_bearer(53, 'platform_admin'), 'X-Portal-Account-Id': '1'}
+    async with _Api(two_tenants) as client:
+        foreign = await client.patch(
+            '/auth/admin/staff/9300', headers=headers, json={'full_name': 'Floater', 'company_id': 3}
+        )
+        own = await client.patch(
+            '/auth/admin/staff/9300', headers=headers, json={'full_name': 'Floater', 'company_id': 2}
+        )
+
+    assert foreign.status_code == 403
+    assert own.status_code == 200
+    assert await two_tenants.scalar(select(Staff.company_id).where(Staff.id == 9300)) == 2
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_attach_a_branch_outside_the_tenant_on_update(two_tenants, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    async with _Api(two_tenants) as client:
+        response = await client.patch('/auth/admin/users/2', headers=_bearer(1, 'owner'), json={'company_ids': [3]})
+
+    assert response.status_code == 403
+
+
+# ---------- AUTH-20: bounds ----------
+
+@pytest.mark.asyncio
+async def test_admin_update_rejects_oversized_inputs_with_422(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    async with _Api(auth_db) as client:
+        long_name = await client.patch('/auth/admin/users/2', headers=_bearer(1, 'owner'), json={'full_name': 'x' * 256})
+        many_ids = await client.patch(
+            '/auth/admin/users/2', headers=_bearer(1, 'owner'), json={'company_ids': list(range(1, 202))}
+        )
+
+    assert long_name.status_code == 422
+    assert many_ids.status_code == 422
+
+
+# ---------- AUTH-5: e-mail tokens are single-use and only the newest one lives ----------
+
+@pytest.mark.asyncio
+async def test_email_token_is_single_use(auth_db):
+    from auth_service import consume_email_token
+
+    raw = await create_email_token(auth_db, 1, TOKEN_PURPOSE_RESET)
+    first = await consume_email_token(auth_db, raw, TOKEN_PURPOSE_RESET)
+    second = await consume_email_token(auth_db, raw, TOKEN_PURPOSE_RESET)
+
+    assert first is not None and first.id == 1
+    assert second is None
+
+
+@pytest.mark.asyncio
+async def test_email_token_purpose_expiry_and_inactive_user_are_refused(auth_db):
+    from auth_service import consume_email_token
+
+    raw = await create_email_token(auth_db, 1, TOKEN_PURPOSE_RESET)
+    assert await consume_email_token(auth_db, raw, 'verify') is None
+
+    await auth_db.execute(
+        PortalEmailToken.__table__.update().where(PortalEmailToken.user_id == 1).values(expires_at=datetime.utcnow())
+    )
+    await auth_db.commit()
+    assert await consume_email_token(auth_db, raw, TOKEN_PURPOSE_RESET) is None
+
+    fresh = await create_email_token(auth_db, 2, TOKEN_PURPOSE_RESET)
+    manager = await auth_db.get(PortalUser, 2)
+    manager.is_active = False
+    await auth_db.commit()
+    assert await consume_email_token(auth_db, fresh, TOKEN_PURPOSE_RESET) is None
+    # A refused consume leaves the token untouched.
+    assert await auth_db.scalar(select(PortalEmailToken.used_at).where(PortalEmailToken.user_id == 2)) is None
+
+
+@pytest.mark.asyncio
+async def test_issuing_a_new_token_invalidates_older_ones_of_the_same_purpose(auth_db):
+    from auth_service import consume_email_token
+
+    old_reset = await create_email_token(auth_db, 1, TOKEN_PURPOSE_RESET)
+    verify = await create_email_token(auth_db, 1, 'verify')
+    other_user = await create_email_token(auth_db, 2, TOKEN_PURPOSE_RESET)
+    new_reset = await create_email_token(auth_db, 1, TOKEN_PURPOSE_RESET)
+
+    assert await consume_email_token(auth_db, old_reset, TOKEN_PURPOSE_RESET) is None
+    assert await consume_email_token(auth_db, new_reset, TOKEN_PURPOSE_RESET) is not None
+    assert await consume_email_token(auth_db, verify, 'verify') is not None
+    assert await consume_email_token(auth_db, other_user, TOKEN_PURPOSE_RESET) is not None
+
+
+@pytest.mark.asyncio
+async def test_successful_reset_invalidates_the_other_reset_tokens(auth_db, monkeypatch):
+    from auth_service import _token_hash
+
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    raw = await create_email_token(auth_db, 1, TOKEN_PURPOSE_RESET)
+    # A second live token can only come from another path than create_email_token.
+    auth_db.add(
+        PortalEmailToken(
+            user_id=1,
+            token_hash=_token_hash('stray-reset-token-1234'),
+            purpose=TOKEN_PURPOSE_RESET,
+            expires_at=datetime.utcnow() + timedelta(hours=1),
+            created_at=datetime.utcnow(),
+        )
+    )
+    await auth_db.commit()
+    async with _Api(auth_db) as client:
+        reset = await client.post('/auth/reset-password', json={'token': raw, 'password': 'Changed12345!'})
+        replay = await client.post('/auth/reset-password', json={'token': raw, 'password': 'Another12345!'})
+        stray = await client.post(
+            '/auth/reset-password', json={'token': 'stray-reset-token-1234', 'password': 'Another12345!'}
+        )
+
+    assert reset.status_code == 200
+    assert replay.status_code == 400
+    assert stray.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_change_password_invalidates_outstanding_reset_tokens(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    raw = await create_email_token(auth_db, 1, TOKEN_PURPOSE_RESET)
+    async with _Api(auth_db) as client:
+        changed = await client.post(
+            '/auth/change-password',
+            headers=_bearer(1, 'owner'),
+            json={'current_password': 'Admin12345!', 'new_password': 'Changed12345!'},
+        )
+        reset = await client.post('/auth/reset-password', json={'token': raw, 'password': 'Another12345!'})
+
+    assert changed.status_code == 200
+    assert reset.status_code == 400
+
+
+# ---------- AUTH-4: SMTP leaves the event loop ----------
+
+@pytest.mark.asyncio
+async def test_email_is_sent_off_the_event_loop_thread(auth_db, monkeypatch):
+    import threading
+
+    import auth_service
+
+    sent_from = []
+    monkeypatch.setattr(auth_service, 'send_auth_email', lambda *args: sent_from.append(threading.get_ident()))
+    user = await auth_db.get(PortalUser, 1)
+    await auth_service.send_password_reset_email(auth_db, user)
+    await auth_service.send_account_invite_email(auth_db, user)
+
+    assert len(sent_from) == 2
+    assert threading.get_ident() not in sent_from
+
+
+# ---------- AUTH-19: the password CLI signs the user out everywhere ----------
+
+def test_set_portal_password_script_revokes_sessions(monkeypatch):
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    import set_portal_password
+
+    # One shared connection, so the attached `system` schema survives between sessions.
+    engine = create_engine('sqlite:///:memory:', poolclass=StaticPool, connect_args={'check_same_thread': False})
+    with engine.begin() as conn:
+        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
+        PortalUser.__table__.create(conn)
+        PortalRefreshToken.__table__.create(conn)
+    factory = sessionmaker(engine, expire_on_commit=False)
+    with factory() as session:
+        session.add(
+            PortalUser(
+                id=1,
+                portal_account_id=None,
+                email='cli@example.com',
+                password_hash=hash_password('OldPassword123!'),
+                role='platform_admin',
+                is_active=True,
+                token_version=4,
+                created_at=datetime.utcnow(),
+            )
+        )
+        session.add(
+            PortalRefreshToken(
+                user_id=1,
+                token_hash='h' * 64,
+                expires_at=datetime.utcnow() + timedelta(days=1),
+                created_at=datetime.utcnow(),
+            )
+        )
+        session.commit()
+
+    class _Database:
+        def test_connection(self):
+            return True
+
+        def get_db(self):
+            return factory()
+
+    monkeypatch.setattr(set_portal_password, 'init_database', lambda *args: _Database())
+    monkeypatch.setattr('sys.argv', ['set_portal_password', '--email', 'CLI@example.com', '--password', 'NewPassword123!'])
+    assert set_portal_password.main() == 0
+
+    with factory() as session:
+        user = session.get(PortalUser, 1)
+        assert user.token_version == 5
+        assert user.password_changed_at is not None
+        assert session.scalar(select(func.count()).select_from(PortalRefreshToken)) == 0
+    from auth_service import verify_password
+
+    assert verify_password('NewPassword123!', user.password_hash)
+
+    monkeypatch.setattr('sys.argv', ['set_portal_password', '--email', 'cli@example.com', '--password', LONG_PASSWORD])
+    assert set_portal_password.main() == 2

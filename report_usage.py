@@ -266,7 +266,7 @@ async def fetch_report_usage(
     }
     people = (await db.execute(select(func.count(distinct(event.user_id))).where(in_period))).scalar_one()
     tracking_since = (
-        await db.execute(select(func.min(event.usage_day)).where(event.portal_account_id == portal_account_id))
+        await db.execute(select(func.min(event.usage_day)).where(tenant))
     ).scalar_one()
 
     catalog = _catalog()

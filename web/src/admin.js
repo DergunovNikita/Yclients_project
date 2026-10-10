@@ -12,6 +12,7 @@ import {
 import { buildCsv } from './adminSecurity.js';
 import { escapeHtml } from './html.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
+import { formatBranchDateTime } from './timestamps.js';
 
 document.documentElement.lang = getLocale();
 applyTranslations();
@@ -731,7 +732,7 @@ function renderInitialPasswordsTable() {
         <td>${escapeHtml(row.full_name || '—')}</td>
         <td>${roleBadge(row.role)}</td>
         <td>${escapeHtml(branchTitles(row.company_ids))}</td>
-        <td>${escapeHtml(formatDate(row.password_reset_sent_at) || '—')}</td>
+        <td>${escapeHtml(formatBranchDateTime(row.password_reset_sent_at) || '—')}</td>
         <td class="admin-table__cell-actions">
           <button type="button" class="btn btn--ghost btn--small" data-resend-invite="${escapeHtml(row.user_id)}">${t('admin.resendInvite')}</button>
         </td>
@@ -1268,7 +1269,7 @@ yclientsCredentialsBody?.addEventListener('click', async (event) => {
       testBtn.disabled = false;
     }
   }
-  if (deleteBtn) {
+  if (deleteBtn && confirm(t('settings.credDeleteConfirm'))) {
     hideYclientsCredentialsError();
     deleteBtn.disabled = true;
     try {

@@ -4,7 +4,7 @@ Database helpers for PostgreSQL connectivity and migrations.
 Sync engine (psycopg2) is used by ETL pipeline / worker.
 Async engine (asyncpg) is used by FastAPI endpoints.
 """
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from alembic import command
@@ -63,13 +63,6 @@ class Database:
         )
         self.SessionLocal = sessionmaker(bind=self.engine)
 
-    def get_session(self) -> Generator[Session, None, None]:
-        db = self.SessionLocal()
-        try:
-            yield db
-        finally:
-            db.close()
-
     def get_db(self) -> Session:
         return self.SessionLocal()
 
@@ -84,21 +77,11 @@ class Database:
             return False
 
 
-# --- Sync singleton (ETL / worker) ---
-
-db_instance: Database | None = None
-
+# --- Sync engine (ETL / worker) ---
 
 def init_database(host: str, port: int, name: str, user: str, password: str = '') -> Database:
-    global db_instance
-    db_instance = Database(host, port, name, user, password)
-    return db_instance
-
-
-def get_db() -> Generator[Session, None, None]:
-    if db_instance is None:
-        raise RuntimeError("Database not initialized. Call init_database() first.")
-    yield from db_instance.get_session()
+    """Build a new sync Database. Each call creates an engine and pool, so long-lived callers hold on to one."""
+    return Database(host, port, name, user, password)
 
 
 # --- Async singleton (FastAPI) ---
@@ -117,10 +100,11 @@ def init_async_database(host: str, port: int, name: str, user: str, password: st
     # Pool sized against Postgres max_connections=100, shared with the sync worker and any
     # ad hoc psql/migration session (uvicorn runs this API as a single process with no
     # --workers, so this engine's pool is the whole app's ceiling, not a per-process slice):
-    #   - sync worker: one long-lived engine at rest (Database sets no pool_size/max_overflow,
-    #     so it gets SQLAlchemy's default 5 + 10 overflow = 15) plus, while a job is actively
-    #     running, one more engine opened by sync_orchestrator.run_sync_job for the advisory
-    #     lock and run tracking (another 15 ceiling) -> ~30 worst case.
+    #   - sync worker: one long-lived engine (Database sets no pool_size/max_overflow, so it gets
+    #     SQLAlchemy's default 5 + 10 overflow = 15) shared with run_sync_job for the advisory lock
+    #     and run tracking, plus one more engine while a CLI/systemd sync runs (another 15
+    #     ceiling) -> ~30 worst case. The API's status lookup keeps one lazily-built sync engine
+    #     too, but it only ever runs three tiny queries, so it holds a connection or two.
     #   - ad hoc access: alembic migrations, one-off scripts, a human psql session -> budget 10.
     #   - remainder for this engine: 100 - 30 - 10 = 60. Split as pool_size=15 (always-open
     #     baseline) + max_overflow=15 (burst room for concurrent heavy dashboard reports) = 30,

@@ -1,4 +1,5 @@
 from datetime import datetime
+import threading
 import traceback
 
 from config import (
@@ -11,7 +12,7 @@ from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
 )
-from database import init_database
+from database import Database, init_database
 from sync_control import SyncControlService
 from sync_jobs import SyncJobService
 from sync_logging import build_log_path, stream_run_output
@@ -28,17 +29,25 @@ def run_sync_job(
     portal_account_id: int | None = None,
     credential_id: int | None = None,
     company_ids: list[int] | None = None,
+    database: Database | None = None,
 ) -> dict:
+    """Run one sync under the global advisory lock.
+
+    Args:
+        database: long-lived engine to reuse (the worker passes its own); without one a fresh
+            engine is built for this call.
+    """
     normalized_mode = (mode or 'incremental').strip().lower()
     normalized_trigger = (trigger_type or 'manual').strip().lower()
-    database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
+    if database is None:
+        database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
     control_db = database.get_db()
     # pg_advisory_lock is session-level: it belongs to one physical connection, not to a
     # transaction. An ORM Session hands its connection back to the pool on every commit(),
     # and this function commits many times (create_run, set_state, every progress_callback)
     # while the pipeline session works on the same pool — so the lock and the unlock landed
     # on different connections, pg_advisory_unlock() returned false, and the lock stayed
-    # held on an abandoned pooled connection that init_database's module-level global keeps
+    # held on an abandoned pooled connection that the worker's long-lived engine keeps
     # alive forever. Every later run then reported 'already_running'. Reproduced against
     # real PostgreSQL; the lock therefore gets a connection of its own that nothing else
     # can check out.
@@ -64,8 +73,8 @@ def run_sync_job(
             # get_status_payload() issues three queries; if any of them raises, lock_conn and
             # control_db must still be closed here. acquire_lock() returned False, so this
             # connection never held the lock -- but both connections were already checked out
-            # of the pool, and init_database's module-level global keeps the engine (and its
-            # pool) alive, so a long-running worker leaks one connection per failed attempt
+            # of the pool, and the worker's long-lived engine (and its
+            # pool) stays alive, so a long-running worker leaks one connection per failed attempt
             # until the pool is exhausted.
             lock_conn.close()
             control_db.close()
@@ -234,9 +243,21 @@ def run_sync_job(
     return result
 
 
+_status_database: Database | None = None
+_status_database_lock = threading.Lock()
+
+
+def _get_status_database() -> Database:
+    """One engine for all status lookups: they arrive on every dashboard load, from worker threads."""
+    global _status_database
+    with _status_database_lock:
+        if _status_database is None:
+            _status_database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
+        return _status_database
+
+
 def get_sync_status() -> dict:
-    database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
-    db = database.get_db()
+    db = _get_status_database().get_db()
     try:
         return SyncControlService().get_status_payload(db)
     finally:

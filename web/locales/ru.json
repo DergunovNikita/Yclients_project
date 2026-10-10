@@ -93,7 +93,6 @@
     "cancel": "Отмена",
     "close": "Закрыть",
     "loading": "Загружаем…",
-    "dash": "—",
     "errorPrefix": "Ошибка",
     "reloadDataAgain": "Пожалуйста, обновите данные ещё раз.",
     "loadingShort": "Загрузка",
@@ -400,7 +399,6 @@
     "scaleMoney": "деньги",
     "scaleCount": "количество",
     "scalePercent": "проценты",
-    "topRevenue": "Топ-5 по выручке",
     "goodsKpiCompletion": "Выполнение товарных KPI",
     "completionTooltip": "Выполнение: {value}",
     "diagnosticBarbers": "визиты барберов: {count}",
@@ -701,7 +699,10 @@
       "partial": "Частично"
     },
     "sources": {
-      "yclientsComments": "отзывы YClients",
+      "appointmentsDetail": "детализация записей",
+      "financialTransactionsDetail": "детализация платежей",
+      "goodsTransactionsDetail": "детализация товарных операций",
+      "staffSchedules": "графики сотрудников",
       "personalAccountTopups": "пополнения личных счетов"
     },
     "missingSources": "Не хватает",
@@ -738,7 +739,6 @@
   },
   "demo": {
     "viewDemo": "Смотреть демо",
-    "banner": "Демо-режим · данные вымышленные",
-    "readOnly": "Демо-режим: только просмотр"
+    "banner": "Демо-режим · данные вымышленные"
   }
 }

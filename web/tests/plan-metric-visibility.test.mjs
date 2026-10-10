@@ -7,7 +7,6 @@ import {
   moneyPlanMetricCodes,
   normalizeHiddenPlanMetricCodes,
   setPlanMetricHidden,
-  visiblePlanMetrics,
 } from '../src/planMetricVisibility.js';
 
 const metrics = [
@@ -15,6 +14,9 @@ const metrics = [
   { code: 'avg_check_total', label: 'Average check', format: 'money' },
   { code: 'clients', label: 'Clients', format: 'number' },
 ];
+
+// The page filters through filterPlanFactForDisplay; this is the plain "what is left" view of a hidden set.
+const visiblePlanMetrics = (all, hidden) => all.filter((metric) => !hidden.has(metric.code));
 
 test('plan metric visibility exposes only server-provided metrics', () => {
   const normalized = normalizeHiddenPlanMetricCodes(metrics, ['revenue', 'forbidden_metric']);

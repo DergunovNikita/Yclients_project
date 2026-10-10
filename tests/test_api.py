@@ -16,6 +16,7 @@ from models import (
     Appointment,
     Comment,
     Company,
+    FinancialTransaction,
     Good,
     GoodCatalog,
     GoodTransaction,
@@ -23,6 +24,7 @@ from models import (
     PortalAccount,
     PortalAuditEvent,
     PortalBranch,
+    PortalMetricVisibility,
     PortalUser,
     PortalUserBranch,
     Service,
@@ -1410,3 +1412,257 @@ async def test_csv_export_respects_the_branch_reporting_window(async_session):
     assert 'Stays Barber' in staff.text
     # `companies` documents the cut instead of being subject to it.
     assert 'Left' in companies.text
+
+
+def _revenue_override(role: str) -> PortalMetricVisibility:
+    return PortalMetricVisibility(
+        portal_account_id=1, role=role, visible_codes=['revenue'], updated_at=datetime.utcnow()
+    )
+
+
+def _portal_user(user_id: int, role: str, branches: list[int], email: str | None = None) -> list:
+    return [
+        PortalUser(
+            id=user_id,
+            portal_account_id=1,
+            email=email or f'user{user_id}@example.com',
+            password_hash=hash_password('Password123!'),
+            full_name=f'User {user_id}',
+            role=role,
+            is_active=True,
+            email_verified_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        ),
+        *[PortalUserBranch(user_id=user_id, company_id=company_id) for company_id in branches],
+    ]
+
+
+async def _get_as(async_session, monkeypatch, user_id: int, role: str, paths: list[tuple[str, dict]]):
+    import auth_deps
+
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+
+    async def override_db():
+        yield async_session
+
+    headers = {'Authorization': f'Bearer {create_access_token(user_id, role)}'}
+    app.dependency_overrides[api.get_async_db] = override_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            return [await client.get(path, params=params, headers=headers) for path, params in paths]
+    finally:
+        app.dependency_overrides.clear()
+        monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
+
+
+@pytest.mark.asyncio
+async def test_json_listings_and_stats_respect_the_branch_reporting_window(async_session, monkeypatch):
+    """The JSON listings and /stats are the same raw tables the CSV export cuts by the window.
+
+    Branch 2 left the tenant on 31.08: its later facts must vanish from every surface while its
+    earlier history stays, and /stats must count and sum exactly what the listings return.
+    """
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Stays', group_id=1),
+        Company(id=2, title='Left', group_id=1, reporting_end_date=date(2026, 8, 31)),
+        PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()),
+        PortalBranch(portal_account_id=1, company_id=1),
+        PortalBranch(portal_account_id=1, company_id=2),
+        *_portal_user(200, 'branch_admin', [1, 2]),
+        Staff(id=1, name='Stays Barber', company_id=1),
+        Staff(id=2, name='Left Barber', company_id=2),
+        Client(id=1, name='Stays Client', company_id=1),
+        Client(id=2, name='Left Client', company_id=2),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2026, 9, 5)),
+        Appointment(id=2, company_id=2, staff_id=2, date=date(2026, 9, 5)),
+        Appointment(id=3, company_id=2, staff_id=2, date=date(2026, 8, 20)),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Transaction(id=1, appointment_id=1, company_id=1, service_id=10, cost=100.0, amount=1),
+        Transaction(id=2, appointment_id=2, company_id=2, service_id=20, cost=200.0, amount=1),
+        Transaction(id=3, appointment_id=3, company_id=2, service_id=30, cost=300.0, amount=1),
+        # The last day of the window carries a time of day: it must still be inside.
+        FinancialTransaction(id=1, company_id=1, date=datetime(2026, 9, 5, 12), amount=10.0),
+        FinancialTransaction(id=2, company_id=2, date=datetime(2026, 8, 31, 14, 30), amount=20.0),
+        FinancialTransaction(id=3, company_id=2, date=datetime(2026, 9, 1, 9), amount=40.0),
+        GoodTransaction(id=1, company_id=2, type_id=1, amount=1.0, cost=5.0, date=datetime(2026, 8, 31, 18)),
+        GoodTransaction(id=2, company_id=2, type_id=1, amount=1.0, cost=5.0, date=datetime(2026, 9, 2)),
+        Comment(id=1, company_id=2, master_id=2, text='before', date=datetime(2026, 8, 31, 20)),
+        Comment(id=2, company_id=2, master_id=2, text='after', date=datetime(2026, 9, 3)),
+        StaffSchedule(id=1, company_id=2, staff_id=2, date=date(2026, 8, 31)),
+        StaffSchedule(id=2, company_id=2, staff_id=2, date=date(2026, 9, 1)),
+    ])
+    await async_session.commit()
+
+    (appointments, transactions, financial, goods, comments, schedules, clients, stats) = await _get_as(
+        async_session, monkeypatch, 200, 'branch_admin',
+        [
+            ('/appointments', {}), ('/transactions', {}), ('/financial_transactions', {}),
+            ('/goods_transactions', {}), ('/comments', {}), ('/staff_schedules', {}),
+            ('/clients', {}), ('/stats', {}),
+        ],
+    )
+
+    def ids(response):
+        assert response.status_code == 200, response.text
+        return {row['id'] for row in response.json()['data']}
+
+    assert ids(appointments) == {1, 3}
+    assert ids(transactions) == {1, 3}
+    assert ids(financial) == {1, 2}
+    assert ids(goods) == {1}
+    assert ids(comments) == {1}
+    assert ids(schedules) == {1}
+    # A reference row has no day: it goes by "is the branch ours today", and the departed one is not.
+    assert ids(clients) == {1}
+    payload = stats.json()
+    assert payload['appointments'] == 2
+    assert payload['transactions'] == 2
+    assert payload['financial_transactions'] == 2
+    assert payload['goods_transactions'] == 1
+    assert payload['comments'] == 1
+    assert payload['staff_schedule_slots'] == 1
+    assert payload['clients'] == 1
+    assert payload['total_revenue'] == 400.0
+    assert payload['financial_income'] == 30.0
+
+
+@pytest.mark.asyncio
+async def test_money_endpoints_need_branch_payment_access(async_session, monkeypatch):
+    """Opening `revenue` for admin/barber must not open branch-wide payment lists or totals.
+
+    They are clamped to their own staff row everywhere else; a manager with the same switch on is
+    a branch-level role and keeps the access.
+    """
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Branch', group_id=1),
+        PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()),
+        PortalBranch(portal_account_id=1, company_id=1),
+        *_portal_user(210, 'barber', [1]),
+        *_portal_user(211, 'admin', [1]),
+        *_portal_user(212, 'manager', [1]),
+        Staff(id=10, name='Barber', company_id=1, portal_user_id=210),
+        Staff(id=11, name='Admin', company_id=1, portal_user_id=211),
+        _revenue_override('barber'),
+        _revenue_override('admin'),
+        _revenue_override('manager'),
+        FinancialTransaction(id=1, company_id=1, date=datetime(2026, 9, 5), amount=10.0),
+    ])
+    await async_session.commit()
+    paths = [
+        ('/transactions', {}), ('/financial_transactions', {}), ('/goods_transactions', {}), ('/stats', {}),
+        ('/export/csv/transactions', {}), ('/export/csv/financial_transactions', {}),
+        ('/export/csv/goods_transactions', {}), ('/export/csv/appointments', {}),
+    ]
+
+    for user_id, role in ((210, 'barber'), (211, 'admin')):
+        responses = await _get_as(async_session, monkeypatch, user_id, role, paths)
+        assert [r.status_code for r in responses] == [403] * 7 + [200], role
+    manager = await _get_as(async_session, monkeypatch, 212, 'manager', paths)
+    assert [r.status_code for r in manager] == [200] * 8
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('path', ['/appointments', '/financial_transactions', '/comments', '/staff_schedules'])
+@pytest.mark.parametrize('param', ['date_from', 'date_to'])
+async def test_listing_rejects_a_malformed_date_with_422(async_session, path, param):
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            garbage = await client.get(path, params={param: 'garbage'})
+            valid = await client.get(path, params={param: '2026-09-05'})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert garbage.status_code == 422
+    assert valid.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_listing_date_bounds_include_the_whole_last_day(async_session):
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Branch', group_id=1),
+        FinancialTransaction(id=1, company_id=1, date=datetime(2026, 9, 4, 23, 59), amount=1.0),
+        FinancialTransaction(id=2, company_id=1, date=datetime(2026, 9, 5, 23, 59), amount=2.0),
+        FinancialTransaction(id=3, company_id=1, date=datetime(2026, 9, 6, 0, 0), amount=3.0),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            response = await client.get(
+                '/financial_transactions', params={'date_from': '2026-09-05', 'date_to': '2026-09-05'}
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert [row['id'] for row in response.json()['data']] == [2]
+
+
+@pytest.mark.asyncio
+async def test_csv_export_neutralises_spreadsheet_formulas(async_session):
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Branch', group_id=1),
+        Comment(id=1, company_id=1, text='=HYPERLINK("http://evil","x")', user_name='+cmd', rating=-5.0),
+        Comment(id=2, company_id=1, text='@SUM(A1)', user_name='-1+1', date=datetime(2026, 9, 5)),
+        Comment(id=3, company_id=1, text='\tTabbed', user_name='plain'),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            response = await client.get('/export/csv/comments')
+    finally:
+        app.dependency_overrides.clear()
+
+    rows = {row['id']: row for row in csv.DictReader(io.StringIO(response.text))}
+    assert rows['1']['text'] == '\'=HYPERLINK("http://evil","x")'
+    assert rows['1']['user_name'] == "'+cmd"
+    assert rows['2']['text'] == "'@SUM(A1)"
+    assert rows['2']['user_name'] == "'-1+1"
+    assert rows['3']['text'] == "'\tTabbed"
+    assert rows['3']['user_name'] == 'plain'
+    # A negative number is a number, not text that starts with "-".
+    assert rows['1']['rating'] == '-5.0'
+
+
+@pytest.mark.asyncio
+async def test_sync_trigger_bounds_free_text_and_lists(async_session, monkeypatch):
+    async def override_db():
+        yield async_session
+
+    monkeypatch.setattr(api, 'SYNC_API_TOKEN', 'test-sync-token')
+    app.dependency_overrides[api.get_async_db] = override_db
+    headers = {'X-Sync-Token': 'test-sync-token'}
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            long_initiator = await client.post(
+                '/sync/trigger', json={'initiator': 'x' * 65, 'global_sync': True}, headers=headers
+            )
+            long_list = await client.post(
+                '/sync/trigger', json={'company_ids': list(range(201)), 'global_sync': True}, headers=headers
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert long_initiator.status_code == 422
+    assert long_list.status_code == 422

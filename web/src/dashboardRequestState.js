@@ -8,7 +8,7 @@ export function apiStatusForHttpStatus(status) {
   return 'error';
 }
 
-export function payloadErrorMessage(payload, fallback) {
+function payloadErrorMessage(payload, fallback) {
   const detail = payload?.detail;
   if (typeof detail === 'string') return detail;
   if (detail && typeof detail === 'object' && typeof detail.message === 'string') return detail.message;
@@ -287,13 +287,13 @@ export function serviceManagementChanges(current = {}, saved = {}) {
   return { row_changes: rowChanges, group_changes: groupChanges };
 }
 
-export function serviceManagementControls({ loading, hasData, hasSavedData, dirty }) {
+export function serviceManagementControls({ loading, hasData, dirty }) {
   return {
     filtersDisabled: Boolean(loading || dirty),
     editorDisabled: Boolean(loading),
     refreshDisabled: Boolean(loading || dirty),
     saveDisabled: Boolean(loading || !hasData || !dirty),
-    resetDisabled: Boolean(loading || !hasSavedData || !dirty),
+    resetDisabled: Boolean(loading || !hasData || !dirty),
     addGroupDisabled: Boolean(loading || !hasData || dirty),
   };
 }

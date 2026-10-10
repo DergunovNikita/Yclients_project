@@ -10,6 +10,7 @@ import {
 
 test('plan settings payload preserves the editable field contract', () => {
   const data = {
+    month: '2026-08',
     branches: [{ company_id: '7' }],
     staff: [
       { company_id: '7', staff_id: '11', staff_category: 'barber' },
@@ -30,7 +31,7 @@ test('plan settings payload preserves the editable field contract', () => {
     values.get(`${scope}:${scope === 'branch' ? row.company_id : row.staff_id}:${field}`) ?? null
   );
 
-  const payload = buildPlanSettingsPayload(data, '2026-08', readValue);
+  const payload = buildPlanSettingsPayload(data, readValue);
 
   assert.deepEqual(Object.keys(payload.branches[0]), ['company_id', ...BRANCH_PLAN_SETTING_FIELDS]);
   assert.deepEqual(
@@ -74,6 +75,12 @@ test('plan settings payload preserves the editable field contract', () => {
       },
     ],
   });
+});
+
+test('the payload is addressed to the month the rows were loaded for', () => {
+  // The picker already shows the next month while the table still holds the old one.
+  const payload = buildPlanSettingsPayload({ month: '2026-08', branches: [], staff: [] }, () => null);
+  assert.equal(payload.month, '2026-08');
 });
 
 test('schedule attribution diagnostics share the coverage renderer', () => {

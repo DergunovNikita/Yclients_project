@@ -20,5 +20,4 @@ case ":$PATH:" in
 esac
 
 export VIRTUAL_ENV="$ROOT_DIR/.venv"
-export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:--p no:capture}"
 echo "Using local tools from $LOCAL_BIN"

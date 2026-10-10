@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import secrets
 import smtplib
@@ -10,7 +11,7 @@ from email.message import EmailMessage
 
 import bcrypt
 import jwt
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import (
@@ -34,10 +35,23 @@ TOKEN_PURPOSE_VERIFY = 'verify'
 TOKEN_PURPOSE_RESET = 'reset'
 TOKEN_TTL_HOURS = {'verify': 48, 'reset': 2}
 PORTAL_PASSWORD_MIN_LENGTH = 8
+# bcrypt 5 raises on longer input and older versions truncate silently; neither is acceptable.
+PASSWORD_MAX_BYTES = 72
+
+
+def check_password_bytes(password: str) -> str:
+    """Pydantic validator: reject passwords bcrypt cannot hash in full (Cyrillic is 2 bytes a character)."""
+    if len(password.encode('utf-8')) > PASSWORD_MAX_BYTES:
+        raise ValueError(f'Password must not exceed {PASSWORD_MAX_BYTES} bytes in UTF-8 (about 36 Cyrillic characters)')
+    return password
 
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+
+# Checked when the e-mail is unknown so a miss costs the same bcrypt round as a hit.
+DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(16))
 
 
 def generate_bootstrap_password(length: int = 24) -> str:
@@ -47,7 +61,13 @@ def generate_bootstrap_password(length: int = 24) -> str:
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+    raw = password.encode('utf-8')
+    if len(raw) > PASSWORD_MAX_BYTES:
+        return False
+    try:
+        return bcrypt.checkpw(raw, password_hash.encode('utf-8'))
+    except ValueError:  # malformed stored hash
+        return False
 
 
 def create_access_token(
@@ -86,16 +106,32 @@ def _token_hash(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
 
 
+async def invalidate_email_tokens(db: AsyncSession, user_id: int, purpose: str, *, now: datetime | None = None) -> None:
+    """Mark every unused token of one purpose as used, so only the newest mail link stays valid."""
+    await db.execute(
+        update(PortalEmailToken)
+        .where(
+            PortalEmailToken.user_id == user_id,
+            PortalEmailToken.purpose == purpose,
+            PortalEmailToken.used_at.is_(None),
+        )
+        .values(used_at=now or datetime.utcnow())
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def create_email_token(db: AsyncSession, user_id: int, purpose: str, *, commit: bool = True) -> str:
     raw = secrets.token_urlsafe(32)
     ttl = TOKEN_TTL_HOURS[purpose]
+    now = datetime.utcnow()
+    await invalidate_email_tokens(db, user_id, purpose, now=now)
     db.add(
         PortalEmailToken(
             user_id=user_id,
             token_hash=_token_hash(raw),
             purpose=purpose,
-            expires_at=datetime.utcnow() + timedelta(hours=ttl),
-            created_at=datetime.utcnow(),
+            expires_at=now + timedelta(hours=ttl),
+            created_at=now,
         )
     )
     if commit:
@@ -104,23 +140,27 @@ async def create_email_token(db: AsyncSession, user_id: int, purpose: str, *, co
 
 
 async def consume_email_token(db: AsyncSession, raw_token: str, purpose: str) -> PortalUser | None:
-    token_hash = _token_hash(raw_token)
-    row = (
+    """Spend a token exactly once; the conditional UPDATE is what makes concurrent replays lose."""
+    now = datetime.utcnow()
+    user_id = (
         await db.execute(
-            select(PortalEmailToken).where(
-                PortalEmailToken.token_hash == token_hash,
+            update(PortalEmailToken)
+            .where(
+                PortalEmailToken.token_hash == _token_hash(raw_token),
                 PortalEmailToken.purpose == purpose,
+                PortalEmailToken.used_at.is_(None),
+                PortalEmailToken.expires_at > now,
+                PortalEmailToken.user_id.in_(select(PortalUser.id).where(PortalUser.is_active.is_(True))),
             )
+            .values(used_at=now)
+            .returning(PortalEmailToken.user_id)
+            .execution_options(synchronize_session=False)
         )
     ).scalar_one_or_none()
-    if row is None or row.used_at is not None or row.expires_at < datetime.utcnow():
+    if user_id is None:
         return None
 
-    user = (await db.execute(select(PortalUser).where(PortalUser.id == row.user_id))).scalar_one_or_none()
-    if user is None:
-        return None
-
-    row.used_at = datetime.utcnow()
+    user = (await db.execute(select(PortalUser).where(PortalUser.id == user_id))).scalar_one()
     await db.commit()
     return user
 
@@ -225,7 +265,8 @@ async def send_verification_email(db: AsyncSession, user: PortalUser) -> None:
     link = _email_link('/verify-email.html', token)
     name = (user.full_name or user.email).strip()
     try:
-        send_auth_email(
+        await asyncio.to_thread(
+            send_auth_email,
             user.email,
             'Подтверждение регистрации — YClients Portal',
             (
@@ -247,7 +288,8 @@ async def send_password_reset_email(db: AsyncSession, user: PortalUser) -> None:
     link = _email_link('/reset-password.html', token)
     name = (user.full_name or user.email).strip()
     try:
-        send_auth_email(
+        await asyncio.to_thread(
+            send_auth_email,
             user.email,
             'Сброс пароля — YClients Portal',
             (
@@ -269,7 +311,8 @@ async def send_account_invite_email(db: AsyncSession, user: PortalUser) -> None:
     link = _email_link('/reset-password.html', token)
     name = (user.full_name or user.email).strip()
     try:
-        send_auth_email(
+        await asyncio.to_thread(
+            send_auth_email,
             user.email,
             'Доступ к YClients Portal',
             (

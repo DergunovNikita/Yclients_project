@@ -3,7 +3,7 @@
 Running ``alembic upgrade head`` from scratch is unusable in this project: the
 ``0001`` baseline builds the public tables from the *current* models, so later
 add-column migrations (``source_type``, ``is_demo``, …) collide with columns that
-already exist. For a fresh database (e.g. the isolated demo instance) create the
+already exist. For a fresh database (migrate.py hands it over; the test suites use it) create the
 full current schema from metadata and stamp head, so future migrations still
 apply incrementally.
 

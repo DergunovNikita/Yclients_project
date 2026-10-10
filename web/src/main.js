@@ -42,6 +42,7 @@ import {
   runServiceManagementMutation,
   settleServiceManagementLoad,
   staffRefreshAllowsDataLoad,
+  apiKey,
 } from './dashboardApi.js';
 
 import { escapeHtml } from './html.js';
@@ -86,7 +87,7 @@ import {
   yandexPayTotal,
 } from './yandexPayInput.js';
 import { buildManualFactItems, manualFactRowKey, manualFactSaveScope } from './manualFactInput.js';
-import { BRANCH_TIME_ZONE, parseServerInstant } from './timestamps.js';
+import { BRANCH_TIME_ZONE, formatBranchDateTime, parseServerInstant } from './timestamps.js';
 import { initReports } from './reports/index.js';
 import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
 import {
@@ -116,7 +117,6 @@ Chart.register(
 document.documentElement.lang = getLocale();
 applyTranslations();
 
-const apiKey = import.meta.env?.VITE_API_KEY || '';
 const DEMO_AUTOLOGIN = import.meta.env.VITE_DEMO_AUTOLOGIN;
 let currentUser = null;
 
@@ -299,6 +299,7 @@ let planSettingsSavedSnapshot = '';
 let planSettingsDirty = false;
 let planSettingsLoadedMonth = '';
 let planSettingsSaving = false;
+let planSettingsLoading = false;
 let reviewFactSavedSnapshot = '';
 let reviewFactSavedData = null;
 let reviewFactDirty = false;
@@ -435,7 +436,8 @@ function updateFloatingEditorSave() {
   document.body.classList.toggle('floating-editor-save-visible', state.visible);
   if (!state.visible) return;
   els.floatingEditorSaveStatus.textContent = t('dash.unsavedChanges');
-  els.floatingEditorSaveButton.disabled = state.saving;
+  // Rows of one month with the picker already on another: saving then would write the wrong month.
+  els.floatingEditorSaveButton.disabled = state.saving || (activeView === 'planSettings' && planSettingsLoading);
   els.floatingEditorSaveButton.textContent = state.saving ? t('common.saving') : t('dash.saveChanges');
 }
 
@@ -612,22 +614,7 @@ function formatInputNumber(value) {
   if (value === null || value === undefined || value === '') return '';
   const number = Number(value);
   if (Number.isNaN(number)) return '';
-  return Number.isInteger(number) ? String(number) : String(number);
-}
-
-function formatMoscowDateTime(value) {
-  if (!value) return null;
-  const date = parseServerInstant(value);
-  if (date === null) return value;
-  return new Intl.DateTimeFormat('ru-RU', {
-    timeZone: BRANCH_TIME_ZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).format(date);
+  return String(number);
 }
 
 function setApiState(text, kind = 'warn') {
@@ -808,6 +795,13 @@ function highlightOverviewPreset(preset) {
   els.overviewPresetButtons.forEach((button) => {
     button.classList.toggle('active', button.dataset.overviewPreset === preset);
   });
+}
+
+function refilterForPeriod(filter) {
+  renderBranchOptions(filter);
+  // The employee list is scoped by the same window, so it is stale the moment the
+  // period moves: a branch that left takes its people out of the filter with it.
+  if (filter.staff) loadStaff(filter, { force: true });
 }
 
 function setOverviewPreset(preset) {
@@ -1657,7 +1651,7 @@ function renderPlanTable(groups, metrics) {
                         const cellsByCode = Object.fromEntries((group.metrics || []).map((cell) => [cell.code, cell]));
                         const cell = cellsByCode[metric.code] || {};
                         const format = field === 'completion_pct' ? 'percent' : metric.format;
-                        const statusClass = field === 'completion_pct' ? ` metric-status ${cell.status || 'no-plan'}` : '';
+                        const statusClass = field === 'completion_pct' ? ` metric-status ${escapeHtml(cell.status || 'no-plan')}` : '';
                         return `<td class="number${statusClass}" data-metric="${escapeHtml(metric.code)}">${escapeHtml(formatMetricValue(cell[field], format))}</td>`;
                       })
                       .join('')}
@@ -1829,7 +1823,7 @@ function renderPlanInsights(planFact) {
     const visibleMetrics = selectedStaffPlan.metrics.filter(
       (metric) => (metric.plan !== null && metric.plan !== undefined) || chartValue(metric.fact) !== 0,
     );
-    const title = t('dash.planVsFactTitle', { name: escapeHtml(selectedStaffPlan.title || t('dash.staffFallbackLower')) });
+    const title = t('dash.planVsFactTitle', { name: selectedStaffPlan.title || t('dash.staffFallbackLower') });
     const meta = escapeHtml(selectedStaffPlan.category_label || '');
     PLAN_SCOPE_ORDER.forEach((scope) => {
       const scopeMetrics = visibleMetrics.filter(
@@ -1840,7 +1834,7 @@ function renderPlanInsights(planFact) {
           (metric) => (metric.format || 'number') === scale.format,
         );
         if (!groupMetrics.length) return;
-        const heading = `${title} · ${planScopeLabel(scope)} · ${t(scale.labelKey)}`;
+        const heading = escapeHtml(`${title} · ${planScopeLabel(scope)} · ${t(scale.labelKey)}`);
         if (scale.perMetric) {
           const cells = groupMetrics
             .map((metric, index) => {
@@ -2017,7 +2011,6 @@ function renderPlanFact(planFact) {
   const diagnosticsHtml = renderPlanDiagnostics(planFact?.diagnostics || []);
   if (!groups.length && !planFact?.parent_group) {
     renderPlanInsights(null);
-    if (els.planInsights) els.planInsights.innerHTML = '';
     els.planFactTable.innerHTML = `${diagnosticsHtml}<div class="empty">${t('dash.noPlanForPeriod')}</div>`;
     els.planMeta.textContent = '';
     return;
@@ -2156,7 +2149,7 @@ function renderPlanSettingsStaff(rows) {
 function setPlanSettingsDirty(isDirty) {
   planSettingsDirty = isDirty;
   els.planSettingsDirty.classList.toggle('visible', isDirty);
-  els.planSettingsSave.disabled = planSettingsSaving || !planSettingsData;
+  els.planSettingsSave.disabled = planSettingsSaving || planSettingsLoading || !planSettingsData;
   els.planSettingsReset.disabled = planSettingsSaving || !isDirty || !planSettingsSavedData;
   updateFloatingEditorSave();
 }
@@ -2193,7 +2186,7 @@ function collectPlanSettingsPayload() {
       : `[data-staff-id="${row.staff_id}"]`;
     return planSettingsInputValue(`input[data-plan-${scope}]${idSelector}[data-field="${field}"]`);
   };
-  return buildPlanSettingsPayload(planSettingsData, els.planSettingsMonth.value, readValue);
+  return buildPlanSettingsPayload(planSettingsData, readValue);
 }
 
 function updatePlanSettingsDirtyFromForm() {
@@ -2208,7 +2201,7 @@ function renderPlanSettings(data, { updateSnapshot = true, dirty = false } = {})
   renderPlanSettingsBranches(data.branches || []);
   renderPlanSettingsStaff(data.staff || []);
   els.planSettingsSaved.textContent = data.last_saved_at
-    ? t('dash.lastSaveAt', { value: formatMoscowDateTime(data.last_saved_at) })
+    ? t('dash.lastSaveAt', { value: formatBranchDateTime(data.last_saved_at) ?? data.last_saved_at })
     : t('dash.lastSaveNone');
 
   if (updateSnapshot) {
@@ -2225,12 +2218,14 @@ function confirmDiscardServiceManagement() {
 }
 
 function setPlanSettingsLoading(isLoading) {
+  planSettingsLoading = isLoading;
   els.planSettingsLoad.disabled = isLoading;
   els.planSettingsCopy.disabled = isLoading;
   els.planSettingsSave.disabled = isLoading || !planSettingsData;
   els.planSettingsReset.disabled = isLoading || !planSettingsDirty || !planSettingsSavedData;
   els.planSettingsLoad.textContent = isLoading ? t('common.loadingShort') : t('dash.load');
   els.planSettingsSave.textContent = isLoading ? t('common.saving') : t('dash.save');
+  updateFloatingEditorSave();
 }
 
 async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom = null, dirty = false } = {}) {
@@ -2265,7 +2260,7 @@ async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom 
 }
 
 async function savePlanSettings() {
-  if (planSettingsSaving || !planSettingsData) return;
+  if (planSettingsSaving || planSettingsLoading || !planSettingsData) return;
   planSettingsSaving = true;
   updateFloatingEditorSave();
   clearError();
@@ -2402,7 +2397,7 @@ function renderServiceCatalog(rows) {
                   ${serviceGroupOptionsHtml(row.kpi_group_id)}
                 </select>
               </td>
-              <td>${escapeHtml(formatMoscowDateTime(latestServiceManagementTimestamp(
+              <td>${escapeHtml(formatBranchDateTime(latestServiceManagementTimestamp(
                 row.updated_at,
                 row.label_updated_at,
                 row.kpi_assignment_updated_at,
@@ -2532,7 +2527,6 @@ function updateServiceManagementControls() {
   const controls = serviceManagementControls({
     loading: serviceManagementLoading,
     hasData: Boolean(serviceManagementSavedData),
-    hasSavedData: Boolean(serviceManagementSavedData),
     dirty: serviceManagementDirty,
   });
   els.serviceFilterLoad.disabled = controls.refreshDisabled;
@@ -3492,7 +3486,7 @@ async function loadSyncStatus() {
     const lastSuccessfulAt = sync.last_successful_sync_at
       || (lastRun?.status === 'success' ? lastRun.finished_at : null);
     els.syncState.textContent = lastSuccessfulAt
-      ? t('dash.syncUpdatedAt', { value: formatMoscowDateTime(lastSuccessfulAt) })
+      ? t('dash.syncUpdatedAt', { value: formatBranchDateTime(lastSuccessfulAt) ?? lastSuccessfulAt })
       : t('dash.syncNoSuccessfulUpdates');
   } catch (error) {
     if (isSupersededRequest(error) || !request.isCurrent()) return;
@@ -3534,6 +3528,8 @@ function setActiveView(view) {
   Object.entries(viewRequestScopes).forEach(([requestView, scope]) => {
     if (requestView !== 'branches' && requestView !== 'syncStatus' && requestView !== view) scope.abort();
   });
+  // An aborted load never reaches its own finally, which would leave Save disabled for good.
+  if (view !== 'planSettings' && planSettingsLoading && !planSettingsSaving) setPlanSettingsLoading(false);
   if (previousView === 'reports' && view !== 'reports') reportsController?.clear();
   activeView = view;
   els.overviewView.classList.toggle('active', view === 'overview');
@@ -3894,6 +3890,8 @@ filterEls.overview.staff.addEventListener('change', () => loadDashboard());
 els.overviewPresetButtons.forEach((button) => {
   button.addEventListener('click', () => {
     setOverviewPreset(button.dataset.overviewPreset || 'month');
+    // Assigning the dates fires no change event, so the selectors would keep the old window's lists.
+    refilterForPeriod(filterEls.overview);
     loadDashboard();
   });
 });
@@ -4048,12 +4046,7 @@ els.planSettingsLoad.addEventListener('click', () => reloadPlanSettingsMonth());
 Object.values(filterEls).forEach((filter) => {
   [filter.month, filter.start, filter.end]
     .filter(Boolean)
-    .forEach((input) => input.addEventListener('change', () => {
-      renderBranchOptions(filter);
-      // The employee list is scoped by the same window, so it is stale the moment the
-      // period moves: a branch that left takes its people out of the filter with it.
-      if (filter.staff) loadStaff(filter, { force: true });
-    }));
+    .forEach((input) => input.addEventListener('change', () => refilterForPeriod(filter)));
 });
 
 els.planSettingsMonth.addEventListener('change', () => reloadPlanSettingsMonth());

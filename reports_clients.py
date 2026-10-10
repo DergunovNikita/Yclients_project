@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy import and_, case, extract, func, select
 
-from dashboard_reports import MAX_PERIOD_BUCKETS, _client_pareto_rows, _clients_rows
+from dashboard_reports import _client_pareto_rows, _clients_rows
 from dashboard_service import (
     COMPLETED_ATTENDANCE,
     DateRange,
@@ -26,9 +26,12 @@ from dashboard_service import (
 from models import Appointment, Company, FinancialTransaction, Staff
 from payment_methods import month_label, short_month_label
 from report_payload import (
+    MAX_PERIOD_BUCKETS,
     MONEY_FORMAT,
+    NO_MASTER,
     NUMBER_FORMAT,
     PERCENT_FORMAT,
+    ReportInputError,
     ReportRequest,
     card,
     chart,
@@ -39,11 +42,10 @@ CHURN_DAYS = 90
 # Revenue at risk reads the client's payments over the year before they left.
 REVENUE_LOOKBACK_DAYS = 365
 RETENTION_HORIZONS = (1, 3, 6, 12)
-NO_MASTER = 'Без мастера'
 
 
 def _month_starts(start: date, end: date) -> Iterator[date]:
-    """First days of every calendar month touched by [start, end]; ValueError past `MAX_PERIOD_BUCKETS` months."""
+    """First days of every calendar month touched by [start, end]; ReportInputError past `MAX_PERIOD_BUCKETS` months."""
     day = start.replace(day=1)
     for _ in range(MAX_PERIOD_BUCKETS):
         if day > end:
@@ -51,7 +53,7 @@ def _month_starts(start: date, end: date) -> Iterator[date]:
         yield day
         day = shift_months_back(day, -1)
     if day <= end:
-        raise ValueError('period is too long: choose a shorter one')
+        raise ReportInputError('period is too long: choose a shorter one')
 
 
 def _month_key(day: date) -> str:
@@ -132,8 +134,7 @@ def _frequency_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 async def build_top_clients_pareto(req: ReportRequest) -> dict[str, Any]:
     rows = await _clients_rows(
-        req.db, req.start, req.end, req.company_id, req.staff_id, req.allowed_company_ids, req.factual_at,
-        include_lifetime_visits=True,
+        req.db, req.start, req.end, req.company_id, req.staff_id, req.allowed_company_ids, req.factual_at
     )
     identified = [row for row in rows if row['client_id'] is not None]
     anonymous = [row for row in rows if row['client_id'] is None]

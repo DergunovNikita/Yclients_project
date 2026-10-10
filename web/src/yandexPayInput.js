@@ -2,6 +2,8 @@
 // plus the day the amount is "data through" (the last day of the month it covers).
 // Pure functions only — the page owns the DOM, this owns what a typed string means.
 
+import { storedValue } from './manualFactInput.js';
+
 export const YANDEX_PAY_MAX = 1e9;
 const MAX_DECIMALS = 2;
 
@@ -32,10 +34,6 @@ export function yandexPayDraftKey(raw) {
   const parsed = parseYandexPayInput(raw);
   if (parsed.error) return `!${String(raw ?? '').trim()}`;
   return parsed.value === null ? '' : String(parsed.value);
-}
-
-function storedValue(row) {
-  return row.value === null || row.value === undefined ? null : Number(row.value);
 }
 
 function storedDataThrough(row) {

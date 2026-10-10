@@ -16,6 +16,18 @@ MONEY_FORMAT = 'money'
 NUMBER_FORMAT = 'number'
 PERCENT_FORMAT = 'percent'
 DECIMAL_FORMAT = 'decimal'
+# Label of the row that collects records without a staff member.
+NO_MASTER = 'Без мастера'
+
+# Daily history since 2018 is ~3,200 periods; this leaves room for decades of weeks and months.
+MAX_PERIOD_BUCKETS = 6000
+
+
+class ReportInputError(ValueError):
+    """A request the report refuses on purpose (bad period, granularity, comparison window); the route answers 400.
+
+    Any other exception raised while building a report is a defect and must surface as a 500.
+    """
 
 
 @dataclass(frozen=True)

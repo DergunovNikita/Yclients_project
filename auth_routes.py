@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from datetime import datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import AfterValidator, BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,14 +27,17 @@ from auth_hierarchy import (
 )
 from auth_scope import AccessContext, can_view_branch_payments, manual_fact_staff_keys
 from auth_service import (
+    DUMMY_PASSWORD_HASH,
     PORTAL_PASSWORD_MIN_LENGTH,
     TOKEN_PURPOSE_RESET,
     TOKEN_PURPOSE_VERIFY,
+    check_password_bytes,
     consume_email_token,
     create_access_token,
     email_cooldown_active,
     generate_bootstrap_password,
     hash_password,
+    invalidate_email_tokens,
     load_portal_account_branch_ids,
     load_user_access_branch_ids,
     normalize_email,
@@ -77,6 +82,8 @@ from config import (
     AUTH_RATE_LIMIT_WINDOW_SECONDS,
 )
 
+logger = logging.getLogger('yclients.auth')
+
 router = APIRouter()
 # YClients credential admin (create/list/update/delete/test) lives in its own router; mounted
 # here so it rides along under both `/auth` and `/dashboard/auth` (see api.py) with no change
@@ -91,15 +98,25 @@ AUTH_RATE_LIMIT_ROUTES = {
 }
 
 
+# bcrypt looks only at the first 72 bytes, so the limit is in bytes (not characters).
+NewPassword = Annotated[
+    str,
+    Field(min_length=PORTAL_PASSWORD_MIN_LENGTH, max_length=128),
+    AfterValidator(check_password_bytes),
+]
+CompanyIds = Annotated[list[int], Field(max_length=200)]
+
+
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=PORTAL_PASSWORD_MIN_LENGTH, max_length=128)
+    password: NewPassword
     full_name: str | None = Field(default=None, max_length=255)
 
 
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3, max_length=255)
-    password: str
+    # Over-long input is a plain 401 in verify_password; only the body size is capped here.
+    password: str = Field(max_length=128)
 
 
 class TokenRequest(BaseModel):
@@ -108,7 +125,7 @@ class TokenRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     token: str = Field(min_length=10, max_length=256)
-    password: str = Field(min_length=PORTAL_PASSWORD_MIN_LENGTH, max_length=128)
+    password: NewPassword
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -116,8 +133,8 @@ class ForgotPasswordRequest(BaseModel):
 
 
 class ChangePasswordRequest(BaseModel):
-    current_password: str
-    new_password: str = Field(min_length=PORTAL_PASSWORD_MIN_LENGTH, max_length=128)
+    current_password: str = Field(max_length=128)
+    new_password: NewPassword
 
 
 class ResendVerificationRequest(BaseModel):
@@ -127,8 +144,8 @@ class ResendVerificationRequest(BaseModel):
 class AdminStaffCreateAccountRequest(BaseModel):
     email: EmailStr | None = None
     role: str | None = None
-    password: str | None = Field(default=None, min_length=PORTAL_PASSWORD_MIN_LENGTH, max_length=128)
-    company_ids: list[int] | None = None
+    password: NewPassword | None = None
+    company_ids: CompanyIds | None = None
 
 
 class DistributeCredentialsRequest(BaseModel):
@@ -139,17 +156,17 @@ class AdminUserUpdateRequest(BaseModel):
     email: EmailStr | None = None
     role: str | None = None
     is_active: bool | None = None
-    full_name: str | None = None
-    company_ids: list[int] | None = None
+    full_name: str | None = Field(default=None, max_length=255)
+    company_ids: CompanyIds | None = None
 
 
 class AdminUserCreateRequest(BaseModel):
     email: EmailStr
-    password: str | None = Field(default=None, min_length=PORTAL_PASSWORD_MIN_LENGTH, max_length=128)
+    password: NewPassword | None = None
     full_name: str | None = Field(default=None, max_length=255)
     role: str
     portal_account_id: int | None = None
-    company_ids: list[int] = Field(default_factory=list)
+    company_ids: CompanyIds = Field(default_factory=list)
 
 
 class AdminStaffUpdateRequest(BaseModel):
@@ -305,7 +322,11 @@ async def login(
     email = normalize_email(body.email)
     enforce_auth_rate_limit(request, AUTH_RATE_LIMIT_ROUTES['login'], email)
     user = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
-    if user is None or not await asyncio.to_thread(verify_password, body.password, user.password_hash):
+    password_matches = await asyncio.to_thread(
+        verify_password, body.password, user.password_hash if user is not None else DUMMY_PASSWORD_HASH
+    )
+    if user is None or not password_matches:
+        logger.warning('login failed user_id=%s', user.id if user is not None else None)
         raise HTTPException(status_code=401, detail='Invalid email or password')
     if not user_can_login(user):
         raise HTTPException(status_code=403, detail='Account disabled')
@@ -349,6 +370,7 @@ def _check_rate_limit_bucket(
     recent = _auth_rate_limit_hits.get(key, [])
     if len(recent) >= max_requests:
         retry_after = max(1, int(window_seconds - (now - recent[0])))
+        logger.warning('auth rate limit hit route=%s bucket=%s', key[1], key[0])
         raise HTTPException(
             status_code=429,
             detail='Too many authentication attempts, try again shortly',
@@ -384,6 +406,7 @@ def _demo_login_allowed(ip: str | None) -> bool:
     recent = [ts for ts in _demo_login_hits.get(key, ()) if now - ts < _DEMO_LOGIN_WINDOW_SECONDS]
     if len(recent) >= _DEMO_LOGIN_MAX_PER_WINDOW:
         _demo_login_hits[key] = recent
+        logger.warning('auth rate limit hit route=demo-login bucket=ip')
         return False
     recent.append(now)
     _demo_login_hits[key] = recent
@@ -616,6 +639,7 @@ async def reset_password(
     user.password_changed_at = datetime.utcnow()
     bump_user_token_version(user)
     await revoke_user_sessions(db, user.id)
+    await invalidate_email_tokens(db, user.id, TOKEN_PURPOSE_RESET)
     await db.commit()
     return {'success': True, 'message': 'Пароль обновлён. Теперь можно войти в кабинет.'}
 
@@ -635,6 +659,7 @@ async def change_password(
     user.password_changed_at = datetime.utcnow()
     bump_user_token_version(user)
     await revoke_user_sessions(db, user.id)
+    await invalidate_email_tokens(db, user.id, TOKEN_PURPOSE_RESET)
     await db.commit()
     return {'success': True, 'message': 'Пароль успешно изменён. Войдите снова.'}
 
@@ -697,15 +722,20 @@ async def _tenant_scoped_users(
     return (await db.execute(stmt)).scalars().all()
 
 
-async def _validate_company_ids_in_scope(
+async def _validate_company_ids_in_tenant(
     db: AsyncSession,
-    actor: PortalUser,
+    portal_account_id: int | None,
     company_ids: list[int],
 ) -> None:
+    """Branches given to a user or staff row must belong to that tenant, whoever the actor is.
+
+    Checking against the actor's own scope is not enough: a platform_admin has none, and a
+    branch handed across tenants would open the other tenant's data to the user.
+    """
     await _validate_company_ids_exist(db, company_ids)
-    if actor.role == 'platform_admin':
+    if not company_ids:
         return
-    tenant_company_ids = set(await load_portal_account_branch_ids(db, actor.portal_account_id))
+    tenant_company_ids = set(await load_portal_account_branch_ids(db, portal_account_id))
     invalid = sorted(set(company_ids) - tenant_company_ids)
     if invalid:
         raise HTTPException(status_code=403, detail=f'Companies outside tenant: {invalid}')
@@ -836,7 +866,6 @@ async def admin_create_user(
     actor_branch_ids = await _actor_branch_ids(db, actor)
     assert_can_assign_role(actor.role, body.role)
     validate_company_ids_for_role(actor.role, actor_branch_ids, body.role, body.company_ids)
-    await _validate_company_ids_in_scope(db, actor, body.company_ids)
 
     portal_account_id = actor.portal_account_id
     if actor.role == 'platform_admin':
@@ -864,11 +893,7 @@ async def admin_create_user(
         else:
             raise HTTPException(status_code=400, detail='portal_account_id is required for tenant users')
 
-    if body.company_ids and portal_account_id is not None:
-        tenant_company_ids = set(await load_portal_account_branch_ids(db, portal_account_id))
-        invalid = sorted(set(body.company_ids) - tenant_company_ids)
-        if invalid:
-            raise HTTPException(status_code=403, detail=f'Companies outside tenant: {invalid}')
+    await _validate_company_ids_in_tenant(db, portal_account_id, body.company_ids)
 
     email = normalize_email(body.email)
     existing = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
@@ -962,7 +987,7 @@ async def admin_update_user(
         user.portal_account_id = None
         await set_user_branches(db, user.id, [])
     elif body.company_ids is not None:
-        await _validate_company_ids_in_scope(db, actor, body.company_ids)
+        await _validate_company_ids_in_tenant(db, user.portal_account_id, body.company_ids)
         await set_user_branches(db, user.id, body.company_ids)
 
     branch_ids = await load_user_access_branch_ids(db, user)
@@ -1032,7 +1057,9 @@ async def admin_update_staff(
     if body.company_id != staff.company_id:
         assert_can_manage_staff(actor.role, actor_branch_ids, body.company_id)
 
-    await _validate_company_ids_exist(db, [body.company_id])
+    await _validate_company_ids_in_tenant(
+        db, await _active_admin_portal_account_id(db, actor, x_portal_account_id), [body.company_id]
+    )
 
     staff.name = body.full_name.strip()
     staff.company_id = body.company_id
@@ -1105,11 +1132,9 @@ async def admin_create_staff_account(
     assert_can_assign_role(actor.role, role)
     company_ids = body.company_ids if body.company_ids is not None else [staff.company_id]
     validate_company_ids_for_role(actor.role, actor_branch_ids, role, company_ids)
-    if actor.role == 'platform_admin':
-        invalid = sorted(set(company_ids) - set(actor_branch_ids))
-        if invalid:
-            raise HTTPException(status_code=403, detail=f'Branches not allowed: {invalid}')
-    await _validate_company_ids_in_scope(db, actor, company_ids)
+    await _validate_company_ids_in_tenant(
+        db, await _active_admin_portal_account_id(db, actor, x_portal_account_id), company_ids
+    )
 
     try:
         account = await provision_staff_account(
@@ -1215,7 +1240,9 @@ async def admin_distribute_credentials(
         try:
             await send_account_invite_email(db, user)
         except Exception as exc:
-            errors.append({'user_id': user_id, 'email': user_email, 'reason': str(exc)})
+            # The raw message can carry the SMTP host or DB internals; it must not reach the browser.
+            logger.warning('invite email failed user_id=%s error=%s', user_object_id, type(exc).__name__)
+            errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Email delivery failed'})
             continue
 
         sent.append({'user_id': user_object_id, 'email': user_email})

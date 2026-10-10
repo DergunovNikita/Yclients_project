@@ -33,12 +33,10 @@ export function appendOptionContent(item, labelText, multiple) {
 }
 
 class CustomSelect {
-  constructor(selectEl, { placeholder = t('common.select'), searchable = true, searchPlaceholder = t('common.search') } = {}) {
+  constructor(selectEl, { placeholder = t('common.select') } = {}) {
     this.select = selectEl;
     this.multiple = selectEl.multiple;
     this.placeholder = placeholder;
-    this.searchable = searchable;
-    this.searchPlaceholder = searchPlaceholder;
     this.open = false;
     this.searchQuery = '';
 
@@ -71,9 +69,9 @@ class CustomSelect {
     this.searchInput = document.createElement('input');
     this.searchInput.type = 'search';
     this.searchInput.className = 'custom-select__search';
-    this.searchInput.placeholder = this.searchPlaceholder;
+    this.searchInput.placeholder = t('common.search');
     this.searchInput.autocomplete = 'off';
-    this.searchInput.setAttribute('aria-label', this.searchPlaceholder);
+    this.searchInput.setAttribute('aria-label', t('common.search'));
     this.searchWrap.appendChild(this.searchInput);
 
     this.list = document.createElement('ul');
@@ -153,7 +151,7 @@ class CustomSelect {
     document.addEventListener('click', this.onOutsideClick);
     document.addEventListener('keydown', this.onKeydown);
 
-    if (this.searchable && this.select.options.length > 0) {
+    if (this.select.options.length > 0) {
       requestAnimationFrame(() => this.searchInput.focus());
     }
   }
@@ -175,7 +173,7 @@ class CustomSelect {
   }
 
   updateSearchVisibility() {
-    const showSearch = this.searchable && this.select.options.length > 0;
+    const showSearch = this.select.options.length > 0;
     this.searchWrap.hidden = !showSearch;
     this.root.classList.toggle('custom-select--searchable', showSearch);
   }

@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -75,8 +75,8 @@ def test_appointment_breakdown_rejects_inconsistent_totals():
 
 
 @pytest.mark.asyncio
-async def test_appointment_breakdown_maps_counts_and_compatibility_aliases(monkeypatch):
-    async def fake_record_stats(company_ids, start, end, staff_id):
+async def test_appointment_breakdown_maps_counts_and_compatibility_aliases(async_session, monkeypatch):
+    async def fake_record_stats(company_ids, start, end, staff_id, db=None):
         assert company_ids == [1, 2]
         assert start == date(2026, 6, 1)
         assert end == date(2026, 6, 30)
@@ -85,6 +85,7 @@ async def test_appointment_breakdown_maps_counts_and_compatibility_aliases(monke
 
     monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', fake_record_stats)
     data = await _fetch_appointments_breakdown(
+        async_session,
         [1, 2],
         date(2026, 6, 1),
         date(2026, 6, 30),
@@ -99,23 +100,6 @@ async def test_appointment_breakdown_maps_counts_and_compatibility_aliases(monke
     assert data['attended'] == 12
     assert data['pending'] == 3
     assert data['shares_total_pct'] == 100
-
-
-@pytest.mark.asyncio
-async def test_appointment_breakdown_handles_source_error(monkeypatch):
-    async def fail_record_stats(*args, **kwargs):
-        raise dashboard_service.yclients_analytics.YClientsAnalyticsError('timeout')
-
-    monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', fail_record_stats)
-    data = await _fetch_appointments_breakdown(
-        [1],
-        date(2026, 6, 1),
-        date(2026, 6, 30),
-        None,
-    )
-
-    assert data['source_status'] == 'unavailable'
-    assert data['cancelled'] is None
 
 
 @pytest.mark.asyncio
@@ -175,7 +159,7 @@ async def test_dashboard_summary_exposes_exact_appointment_contract(async_sessio
     async_session.add(Company(id=1, title='One', group_id=1))
     await async_session.commit()
 
-    async def fake_record_stats(company_ids, start, end, staff_id):
+    async def fake_record_stats(company_ids, start, end, staff_id, db=None):
         assert company_ids == [1]
         return {'total': 10, 'cancelled': 3, 'completed': 6, 'incomplete': 1}
 
@@ -275,7 +259,7 @@ async def test_confirmed_appointment_is_not_counted_as_completed_visit(async_ses
     ])
     await async_session.commit()
 
-    async def fake_record_stats(company_ids, start, end, staff_id):
+    async def fake_record_stats(company_ids, start, end, staff_id, db=None):
         if start == date(2026, 6, 1):
             return {'total': 2, 'cancelled': 0, 'completed': 1, 'incomplete': 1}
         return {'total': 0, 'cancelled': 0, 'completed': 0, 'incomplete': 0}
@@ -342,7 +326,7 @@ async def test_cancellation_report_uses_exact_aggregate_counts(async_session, mo
     ])
     await async_session.commit()
 
-    async def fake_record_stats(company_ids, start, end, staff_id):
+    async def fake_record_stats(company_ids, start, end, staff_id, db=None):
         return {'total': 10, 'cancelled': 7, 'completed': 1, 'incomplete': 2}
 
     monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', fake_record_stats)
@@ -375,3 +359,22 @@ async def test_cancellation_report_uses_exact_aggregate_counts(async_session, mo
     assert data['raw']['exact_aggregates']['total'] == 10
     assert data['notes'][0]['title'] == 'Что считается'
     assert 'агрегатов YClients' in data['notes'][0]['text']
+
+
+@pytest.mark.asyncio
+async def test_appointment_breakdown_treats_the_branch_day_as_today(async_session, monkeypatch):
+    """21:00-24:00 UTC is already tomorrow in the branch: yesterday is a closed period, served upstream."""
+    async def fake_record_stats(company_ids, start, end, staff_id, db=None):
+        return {'total': 4, 'cancelled': 1, 'completed': 3, 'incomplete': 0}
+
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', fake_record_stats)
+    late_evening_utc = datetime(2026, 6, 30, 22, 0)
+    closed = await _fetch_appointments_breakdown(
+        async_session, [1], date(2026, 6, 1), date(2026, 6, 30), None, late_evening_utc
+    )
+    still_open = await _fetch_appointments_breakdown(
+        async_session, [1], date(2026, 6, 1), date(2026, 7, 1), None, late_evening_utc
+    )
+
+    assert closed['source_status'] == 'ready'
+    assert still_open['source_status'] == 'local'

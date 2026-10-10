@@ -21,6 +21,7 @@ from config import API_KEY, AUTH_REQUIRE_LOGIN, IS_PRODUCTION
 from database import get_async_db
 from models import PortalMetricVisibility, PortalRefreshToken, PortalUser
 from plan_config import ALL_MONEY_CODES, CONFIGURABLE_MONEY_ROLES, default_money_codes_for_role
+from sync_security import secure_equals
 
 OPEN_PATH_PREFIXES = (
     '/health',
@@ -173,7 +174,7 @@ async def require_auth(
         return ctx
 
     if API_KEY:
-        if x_api_key == API_KEY:
+        if secure_equals(x_api_key, API_KEY):
             ctx = AccessContext.api_key()
             request.state.access = ctx
             return ctx

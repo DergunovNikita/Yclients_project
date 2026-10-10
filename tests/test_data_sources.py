@@ -149,3 +149,24 @@ def test_normalize_source_type_rejects_an_unsupported_source():
     # The default and the only supported value both resolve without raising.
     assert normalize_source_type(None) == SOURCE_YCLIENTS
     assert normalize_source_type(' YClients ') == SOURCE_YCLIENTS
+
+
+@pytest.mark.asyncio
+async def test_materialize_branches_reuses_a_prefetched_listing(async_session):
+    async_session.add(PortalAccount(id=1, label='Tenant A', created_at=datetime.utcnow()))
+    await async_session.flush()
+    listings = []
+
+    class CountingAPI(FakeYClientsAPI):
+        def get_groups(self):
+            listings.append(1)
+            return [{'id': 10, 'title': 'Network', 'companies': [{'id': 101, 'title': 'Branch A'}]}]
+
+    adapter = YClientsDataSourceAdapter('partner', 'login', 'password', api_factory=CountingAPI)
+    branches = adapter.list_branches()
+
+    await adapter.materialize_branches(async_session, 1, [101], branches)
+    assert len(listings) == 1
+
+    await adapter.materialize_branches(async_session, 1, [101])
+    assert len(listings) == 2

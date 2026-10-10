@@ -102,6 +102,27 @@ def enqueue_auto_sync_jobs_if_due(db, now: datetime | None = None) -> dict:
     return {'status': 'ok', 'enqueued': enqueued, 'skipped': skipped}
 
 
+def reap_orphans_if_no_sync_running(database: Database, db, control: SyncControlService, jobs: SyncJobService) -> None:
+    """Close 'running' runs and jobs whose process died, but only while no sync holds the lock.
+
+    A killed worker leaves its sync_runs row 'running' (which stops auto-enqueue for good) and its job
+    'running'. A live sync, including a multi-hour `full`, holds the advisory lock, so the lock being
+    free is what proves the rows are orphaned. The probe is skipped when there is nothing to close, so
+    an idle tick never contends with a CLI/systemd sync starting up.
+    """
+    if control.get_running_run(db) is None and not jobs.has_running_job(db):
+        return
+    with control.probe_idle_lock(database.engine) as no_sync_running:
+        if not no_sync_running:
+            return
+        abandoned = control.cleanup_stale_runs(db)
+        if abandoned:
+            print(f'✓ Abandoned {abandoned} orphaned running sync run(s)')
+        reaped = jobs.reap_stale_jobs(db, max_running_minutes=SYNC_STALE_JOB_MINUTES)
+        if reaped:
+            print(f'✓ Reaped {reaped} stale running job(s)')
+
+
 def process_next_job(database: Database | None = None) -> bool:
     """Claim and run one queued sync job.
 
@@ -127,6 +148,7 @@ def process_next_job(database: Database | None = None) -> bool:
             portal_account_id=job.portal_account_id,
             credential_id=job.credential_id,
             company_ids=job.company_ids or None,
+            database=database,
         )
         if result.get('status') == 'already_running':
             jobs.release_job_to_queue(db, job)
@@ -168,9 +190,8 @@ def main():
             db = database.get_db()
             try:
                 jobs = SyncJobService()
-                reaped = jobs.reap_stale_jobs(db, max_running_minutes=SYNC_STALE_JOB_MINUTES)
-                if reaped:
-                    print(f'✓ Reaped {reaped} stale running job(s)')
+                control = SyncControlService()
+                reap_orphans_if_no_sync_running(database, db, control, jobs)
                 auto_result = enqueue_auto_sync_jobs_if_due(db)
                 processed = auto_result.get('enqueued', 0) > 0
                 # Retention runs LAST and cannot escape this handler, both deliberately.
@@ -190,7 +211,6 @@ def main():
                 # claimed a job: a permanently backlogged worker simply never prunes. That
                 # is the right trade (draining the queue matters more than trimming logs),
                 # but it is why retention can look like it 'never ran'.
-                control = SyncControlService()
                 for sweep in (
                     control.purge_old_runs_if_due,
                     jobs.purge_old_jobs_if_due,

@@ -31,6 +31,7 @@ from models import (
     PortalUserBranch,
     Staff,
 )
+from report_payload import MAX_PERIOD_BUCKETS, ReportInputError
 
 FROZEN_NOW = datetime(2026, 9, 15, 12, 0)
 AUGUST = (date(2026, 8, 1), date(2026, 8, 31))
@@ -210,6 +211,17 @@ def _by_company(payload):
 
 
 # --- revenue reconciliation -------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_month_axis_is_bounded_like_every_other_time_axis():
+    # Refused before any query: ~120k months would build a 120k-label chart and a loop per branch.
+    with pytest.raises(ReportInputError, match='too long'):
+        await payment_methods.fetch_payment_breakdown(None, date(2, 1, 1), date(9998, 1, 1), [1], FROZEN_NOW)
+    # 6000 months (2000-01 .. 2499-12) is the last accepted axis, one more is refused.
+    assert MAX_PERIOD_BUCKETS == 6000
+    with pytest.raises(ReportInputError):
+        await payment_methods.fetch_payment_breakdown(None, date(2000, 1, 1), date(2500, 1, 1), [1], FROZEN_NOW)
 
 
 @pytest.mark.asyncio

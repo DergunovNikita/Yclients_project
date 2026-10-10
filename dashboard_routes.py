@@ -35,6 +35,8 @@ from dashboard_service import (
     ManualFactConflict,
     ManualFactRowNotOpen,
     OverviewPeriodPreset,
+    PLAN_SETTINGS_CONFLICT_DETAIL,
+    PlanSettingsConflict,
     fetch_branches,
     fetch_extra_services,
     fetch_manual_opz_facts,
@@ -51,8 +53,7 @@ from dashboard_service import (
     archive_service_kpi_group,
     save_service_kpi_assignment,
     save_plan_settings,
-    save_manual_opz_facts,
-    save_manual_review_facts,
+    save_manual_facts,
     fetch_staff,
     fetch_summary,
     fetch_top_services,
@@ -63,6 +64,7 @@ from dashboard_reports import (
     REPORT_GRANULARITIES,
     REPORT_USAGE_ID,
     ReportCalculationError,
+    ReportInputError,
     fetch_report_data,
     fetch_report_registry,
     report_requires_financials,
@@ -75,6 +77,8 @@ from plan_config import (
     AVERAGE_CHECK_REVENUE_FIELDS,
     CONFIGURABLE_MONEY_ROLES,
     MONEY_METRICS,
+    OPZ_QTY_CODE,
+    REVIEWS_QTY_CODE,
     default_money_codes_for_role,
     money_payload_keys,
 )
@@ -87,7 +91,6 @@ from payment_methods import (
 )
 from portal_audit import log_portal_audit
 from report_usage import fetch_report_usage, track_report_usage
-from sync_jobs import SyncJobService
 from sync_orchestrator import get_sync_status
 
 logger = logging.getLogger(__name__)
@@ -877,7 +880,7 @@ async def dashboard_report_data(
                 period_preset=period_preset,
                 compare_previous=compare_previous,
             )
-        except ValueError as exc:
+        except ReportInputError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ReportCalculationError as exc:
             raise HTTPException(
@@ -895,14 +898,17 @@ async def dashboard_report_data(
 
 
 @router.get('/widget/sync_status')
-async def dashboard_widget_sync_status(
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
-    portal_account_id = require_tenant_context(ctx, allow_full_access=True)
+async def dashboard_widget_sync_status(ctx: AccessContext = Depends(get_dashboard_access)):
+    require_tenant_context(ctx, allow_full_access=True)
     sync_payload = await asyncio.to_thread(get_sync_status)
-    queue = await SyncJobService().async_get_status_payload(db, portal_account_id=portal_account_id)
-    return {'success': True, 'data': {'sync': sync_payload, 'queue': queue}}
+    # The run is global, so tenants get only what the header line needs: no log path, run
+    # message (raw exception text), initiator or job queue. /sync/status keeps the full payload.
+    last_run = sync_payload.get('last_run')
+    return {'success': True, 'data': {'sync': {
+        'running': sync_payload['running'],
+        'last_successful_sync_at': sync_payload.get('last_successful_sync_at'),
+        'last_run': {'status': last_run['status'], 'finished_at': last_run['finished_at']} if last_run else None,
+    }}}
 
 
 @router.get('/widget/summary')
@@ -1099,7 +1105,12 @@ async def dashboard_plan_settings_save(
             allowed_company_ids=branch_ids,
             force_allowed=force_allowed,
             replace_existing_plan=payload.copy_from is not None,
+            actor_user_id=ctx.user_id,
+            portal_account_id=ctx.portal_account_id,
         )
+    except PlanSettingsConflict as exc:
+        logger.info('plan settings save refused, concurrent save: month=%s user=%s', payload.month, ctx.user_id)
+        raise HTTPException(status_code=409, detail=PLAN_SETTINGS_CONFLICT_DETAIL) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}
@@ -1143,16 +1154,16 @@ async def _manual_fact_get(
 async def _manual_fact_post(
     db: AsyncSession,
     ctx: AccessContext,
-    save_fn: Callable[..., Any],
+    metric_code: str,
     month: str,
     company_id: int | None,
     staff_id: int | None,
     items: list[Any],
 ) -> dict[str, Any]:
-    """Shared write path for the reviews / additional-OPZ editors — only `save_fn` differs.
+    """Shared write path for the reviews / additional-OPZ editors — only `metric_code` differs.
 
     Deliberately does not call `_validate_dashboard_scope`, unlike `_manual_fact_get` above:
-    `save_fn` rejects any row whose (company_id, staff_id) is not a currently open one via
+    `save_manual_facts` rejects any row whose (company_id, staff_id) is not a currently open one via
     `ManualFactRowNotOpen`, so an unknown company or staff id is already refused downstream.
     """
     staff_keys = _require_manual_fact_access(ctx)
@@ -1161,9 +1172,10 @@ async def _manual_fact_post(
     _assert_manual_fact_rows_allowed(staff_keys, items)
     branch_ids, force_allowed = user_branch_ids(ctx)
     try:
-        data = await save_fn(
+        data = await save_manual_facts(
             db,
             month,
+            metric_code,
             scope['company_id'],
             staff_id,
             [item.model_dump(exclude_unset=True) for item in items],
@@ -1204,7 +1216,7 @@ async def dashboard_plan_reviews_fact_save(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     return await _manual_fact_post(
-        db, ctx, save_manual_review_facts, payload.month, payload.company_id, payload.staff_id, payload.items
+        db, ctx, REVIEWS_QTY_CODE, payload.month, payload.company_id, payload.staff_id, payload.items
     )
 
 
@@ -1226,7 +1238,7 @@ async def dashboard_plan_opz_fact_save(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     return await _manual_fact_post(
-        db, ctx, save_manual_opz_facts, payload.month, payload.company_id, payload.staff_id, payload.items
+        db, ctx, OPZ_QTY_CODE, payload.month, payload.company_id, payload.staff_id, payload.items
     )
 
 

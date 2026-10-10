@@ -28,12 +28,21 @@ let sessionTransitionStarted = false;
 let peerRefreshVersion = 0;
 const peerRefreshWaiters = new Set();
 
+// Merely touching window.localStorage throws when the browser blocks site data, and this runs at import.
 function localStore() {
-  return typeof localStorage === 'undefined' ? null : localStorage;
+  try {
+    return typeof localStorage === 'undefined' ? null : localStorage;
+  } catch {
+    return null;
+  }
 }
 
 function tabStore() {
-  return typeof sessionStorage === 'undefined' ? null : sessionStorage;
+  try {
+    return typeof sessionStorage === 'undefined' ? null : sessionStorage;
+  } catch {
+    return null;
+  }
 }
 
 function normalizedPath(path) {
@@ -278,7 +287,7 @@ function clearLocalAuthState({ clearPortalAccount = true, clearEmail = false } =
 clearLocalAuthState({ clearPortalAccount: false });
 ensureSessionCoordination();
 
-export function resolveApiPath(path) {
+function resolveApiPath(path) {
   if (!apiBase) {
     return path;
   }
@@ -341,7 +350,7 @@ function isPublicAuthPath(path) {
     .some((prefix) => path.startsWith(prefix));
 }
 
-function normalizeHeaders(path, options = {}) {
+function normalizeHeaders(options = {}) {
   const headers = authHeaders(options.headers || {});
   if (!(options.body instanceof FormData) && !headers['Content-Type'] && !headers['content-type']) {
     headers['Content-Type'] = 'application/json';
@@ -448,7 +457,7 @@ async function refreshSession() {
     refreshInFlight = fetch(resolveApiPath('/auth/refresh'), {
       method: 'POST',
       credentials: 'include',
-      headers: normalizeHeaders('/auth/refresh', { method: 'POST' }),
+      headers: normalizeHeaders({ method: 'POST' }),
     }).finally(() => {
       refreshInFlight = null;
     });
@@ -608,7 +617,7 @@ async function doFetch(path, options = {}) {
   return fetch(resolveApiPath(path), {
     ...fetchOptions,
     credentials: 'include',
-    headers: normalizeHeaders(path, options),
+    headers: normalizeHeaders(options),
   });
 }
 
@@ -713,7 +722,7 @@ export async function logout(loginPath = '/login.html') {
     await fetch(resolveApiPath('/auth/logout'), {
       method: 'POST',
       credentials: 'include',
-      headers: normalizeHeaders('/auth/logout', { method: 'POST' }),
+      headers: normalizeHeaders({ method: 'POST' }),
     });
   } catch {
     /* local cleanup and redirect still happen */

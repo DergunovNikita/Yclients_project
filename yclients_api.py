@@ -13,6 +13,8 @@ class YClientsAPI:
     """Класс для работы с YClients API"""
 
     MAX_PER_PAGE = 200
+    # Ceiling for an undated listing (clients, goods): 400k rows, far above any branch.
+    MAX_PLAIN_PAGES = 2000
     # Budget for one dated window, scaled to the rows it actually yields — the work is
     # proportional to rows, not to days, so a per-day budget would collapse to a
     # constant margin on a busy branch. Measured cost is ~3 requests per page of
@@ -96,7 +98,11 @@ class YClientsAPI:
             return False
 
         if response.status_code in [200, 201]:
-            data = response.json()
+            try:
+                data = response.json()
+            except ValueError:
+                print("✗ Ошибка авторизации: ответ не в формате JSON")
+                return False
             if data.get('success'):
                 self.user_token = data.get('data', {}).get('user_token')
                 return True
@@ -155,9 +161,14 @@ class YClientsAPI:
         """
         all_items = []
         page = 1
+        # An undated listing that ignores `page` would re-serve the same rows forever; the dated
+        # path has its own budget (_spend_split_budget), so only this one tracks ids.
+        seen_ids = set() if self._split_seen is None else None
 
         while True:
             self._spend_split_budget(url)
+            if seen_ids is not None and page > self.MAX_PLAIN_PAGES:
+                raise RuntimeError(f"YClients endpoint {url} returned more than {self.MAX_PLAIN_PAGES} pages")
             params = {'page': page, 'count': self.MAX_PER_PAGE}
             if extra_params:
                 params.update(extra_params)
@@ -175,6 +186,13 @@ class YClientsAPI:
                 raise RuntimeError(f"YClients endpoint {url} page {page} returned non-list data")
             if not data:
                 break
+
+            if seen_ids is not None:
+                ids = [item.get('id') if isinstance(item, dict) else None for item in data]
+                if None not in ids:
+                    if seen_ids.issuperset(ids):
+                        raise RuntimeError(f"YClients endpoint {url} page {page} repeated rows already returned")
+                    seen_ids.update(ids)
 
             all_items.extend(data)
 
@@ -337,8 +355,8 @@ class YClientsAPI:
     def get_groups(self) -> Optional[List[Dict]]:
         if not self._ensure_auth():
             return None
-        result = self._get(f'{self.base_url}/groups')
-        return result.get('data', []) if result else None
+        url = f'{self.base_url}/groups'
+        return self._list_response_data(self._get(url), url)
 
     # ------------------------------------------------------------------
     # Категории услуг
@@ -347,8 +365,8 @@ class YClientsAPI:
     def get_service_categories(self, company_id: str) -> Optional[List[Dict]]:
         if not self._ensure_auth():
             return None
-        result = self._get(f'{self.base_url}/company/{company_id}/service_categories')
-        return result.get('data', []) if result else None
+        url = f'{self.base_url}/company/{company_id}/service_categories'
+        return self._list_response_data(self._get(url), url)
 
     # ------------------------------------------------------------------
     # Услуги
@@ -376,8 +394,8 @@ class YClientsAPI:
     def get_positions(self, company_id: str) -> Optional[List[Dict]]:
         if not self._ensure_auth():
             return None
-        result = self._get(f'{self.base_url}/company/{company_id}/staff/positions/')
-        return result.get('data', []) if result else None
+        url = f'{self.base_url}/company/{company_id}/staff/positions/'
+        return self._list_response_data(self._get(url), url)
 
     # ------------------------------------------------------------------
     # Сотрудники
@@ -386,8 +404,8 @@ class YClientsAPI:
     def get_staff(self, company_id: str) -> Optional[List[Dict]]:
         if not self._ensure_auth():
             return None
-        result = self._get(f'{self.base_url}/company/{company_id}/staff')
-        return result.get('data', []) if result else None
+        url = f'{self.base_url}/company/{company_id}/staff'
+        return self._list_response_data(self._get(url), url)
 
     # ------------------------------------------------------------------
     # Клиенты (с пагинацией)
@@ -406,8 +424,8 @@ class YClientsAPI:
     def get_accounts(self, company_id: str) -> Optional[List[Dict]]:
         if not self._ensure_auth():
             return None
-        result = self._get(f'{self.base_url}/accounts/{company_id}')
-        return result.get('data', []) if result else None
+        url = f'{self.base_url}/accounts/{company_id}'
+        return self._list_response_data(self._get(url), url)
 
     # ------------------------------------------------------------------
     # Склады
@@ -416,8 +434,8 @@ class YClientsAPI:
     def get_storages(self, company_id: str) -> Optional[List[Dict]]:
         if not self._ensure_auth():
             return None
-        result = self._get(f'{self.base_url}/storages/{company_id}')
-        return result.get('data', []) if result else None
+        url = f'{self.base_url}/storages/{company_id}'
+        return self._list_response_data(self._get(url), url)
 
     # ------------------------------------------------------------------
     # Категории товаров
@@ -426,8 +444,8 @@ class YClientsAPI:
     def get_good_categories(self, company_id: str) -> Optional[List[Dict]]:
         if not self._ensure_auth():
             return None
-        result = self._get(f'{self.base_url}/company/{company_id}/goods_categories/0')
-        return result.get('data', []) if result else None
+        url = f'{self.base_url}/company/{company_id}/goods_categories/0'
+        return self._list_response_data(self._get(url), url)
 
     # ------------------------------------------------------------------
     # Товары (с пагинацией)
@@ -559,31 +577,11 @@ class YClientsAPI:
 
     def get_analytics_record_source(self, company_id: str,
                                     date_from: str, date_to: str) -> Optional[List[Dict]]:
-        if not self._ensure_auth():
-            return None
-        result = self._get(
-            f'{self.base_url}/company/{company_id}/analytics/overall/charts/record_source/',
-            params={'date_from': date_from, 'date_to': date_to},
-        )
-        if result is None:
-            return None
-        if isinstance(result, list):
-            return result
-        return result.get('data', []) if isinstance(result, dict) else None
+        return self._get_analytics_chart(company_id, 'record_source', date_from, date_to)
 
     def get_analytics_record_status(self, company_id: str,
                                     date_from: str, date_to: str) -> Optional[List[Dict]]:
-        if not self._ensure_auth():
-            return None
-        result = self._get(
-            f'{self.base_url}/company/{company_id}/analytics/overall/charts/record_status/',
-            params={'date_from': date_from, 'date_to': date_to},
-        )
-        if result is None:
-            return None
-        if isinstance(result, list):
-            return result
-        return result.get('data', []) if isinstance(result, dict) else None
+        return self._get_analytics_chart(company_id, 'record_status', date_from, date_to)
 
     # ------------------------------------------------------------------
     # Z-Отчёт

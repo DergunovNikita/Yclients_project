@@ -25,7 +25,7 @@ if command -v ruff >/dev/null 2>&1; then
     fail "ruff reported issues"
   fi
 else
-  warn "ruff not installed — 'pip install -r requirements.txt' to enable"
+  warn "ruff not installed — 'pip install -r requirements-dev.txt' to enable"
 fi
 
 # 2) syntax check for staged .py files (falls back to changed files vs HEAD)

@@ -35,7 +35,9 @@ fi
 
 "$PYTHON_BIN" -m compileall "${py_files[@]}"
 
-"$PYTHON_BIN" -m pytest -p no:capture "$@"
+"$PYTHON_BIN" -m ruff check .
+
+"$PYTHON_BIN" -m pytest "$@"
 
 cd "$ROOT_DIR/web"
 "$NODE_BIN/npm" run test:auth

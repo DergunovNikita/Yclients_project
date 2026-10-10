@@ -16,8 +16,9 @@ from sqlalchemy import (
     String,
     Text,
     Time,
+    UniqueConstraint,
 )
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 SYSTEM_SCHEMA = 'system'
@@ -51,8 +52,6 @@ class Group(Base):
         Index('uq_groups_account_external', 'portal_account_id', 'external_id', unique=True),
     )
 
-    companies = relationship("Company", back_populates="group")
-
 
 class Company(Base):
     __tablename__ = 'companies'
@@ -83,12 +82,6 @@ class Company(Base):
             unique=True,
         ),
     )
-
-    group = relationship("Group", back_populates="companies")
-    services = relationship("Service", back_populates="company")
-    staff = relationship("Staff", back_populates="company")
-    clients = relationship("Client", back_populates="company")
-    appointments = relationship("Appointment", back_populates="company")
 
 
 class ServiceCategory(Base):
@@ -125,8 +118,6 @@ class Service(Base):
     duration = Column(Integer)
     category_title = Column(String, index=True)
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
-
-    company = relationship("Company", back_populates="services")
 
 
 class ServiceCatalog(Base):
@@ -174,6 +165,11 @@ class ServiceKpiGroup(Base):
     sort_order = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, nullable=False)
+
+    # Mirrors the constraint migration 0023 created; without it SQLite tests cannot see a duplicate code.
+    __table_args__ = (
+        UniqueConstraint('portal_account_id', 'code', name='uq_service_kpi_groups_account_code'),
+    )
 
 
 class ServiceKpiAssignment(Base):
@@ -241,8 +237,6 @@ class Staff(Base):
         Index('uq_staff_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
     )
 
-    company = relationship("Company", back_populates="staff")
-
 
 class Client(Base):
     __tablename__ = 'clients'
@@ -262,8 +256,6 @@ class Client(Base):
     __table_args__ = (
         Index('uq_clients_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
     )
-
-    company = relationship("Company", back_populates="clients")
 
 
 class Account(Base):
@@ -400,9 +392,6 @@ class Appointment(Base):
         Index('ix_appointments_company_create_date', 'company_id', 'create_date'),
     )
 
-    company = relationship("Company", back_populates="appointments")
-    transactions = relationship("Transaction", back_populates="appointment")
-
 
 class Transaction(Base):
     __tablename__ = 'transactions'
@@ -415,8 +404,6 @@ class Transaction(Base):
     first_cost = Column(Float)
     amount = Column(Integer, default=1)
     company_id = Column(Integer, index=True)
-
-    appointment = relationship("Appointment", back_populates="transactions")
 
 
 class FinancialTransaction(Base):

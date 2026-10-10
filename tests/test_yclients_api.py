@@ -437,3 +437,117 @@ def test_honest_workloads_stay_well_inside_the_split_budget(days, rows_per_day, 
     assert spent < allowance * 2 / 3, (
         f'{shape} {days}d x{rows_per_day}: {spent} запросов при лимите {allowance}'
     )
+
+
+class _Response:
+    def __init__(self, status_code=200, json_error=False, payload=None):
+        self.status_code = status_code
+        self.text = 'not json'
+        self._json_error = json_error
+        self._payload = payload
+
+    def json(self):
+        if self._json_error:
+            raise ValueError('no json')
+        return self._payload
+
+
+def test_authenticate_returns_false_on_a_non_json_reply():
+    api = YClientsAPI('token', 'login', 'password')
+    api.session.post = lambda *_a, **_k: _Response(200, json_error=True)
+
+    assert api.authenticate() is False
+    assert api.user_token is None
+
+
+@pytest.mark.parametrize(
+    ('method', 'args'),
+    [
+        ('get_groups', ()),
+        ('get_service_categories', ('1',)),
+        ('get_positions', ('1',)),
+        ('get_staff', ('1',)),
+        ('get_accounts', ('1',)),
+        ('get_storages', ('1',)),
+        ('get_good_categories', ('1',)),
+    ],
+)
+@pytest.mark.parametrize(
+    'bad_payload',
+    [{'success': False, 'data': []}, {'success': True}, {'success': True, 'data': {'id': 1}}],
+)
+def test_snapshot_getters_reject_malformed_answers(method, args, bad_payload):
+    """sync_staff fires every CRM row missing from the list, so a bad answer must read as 'no data'."""
+    api = YClientsAPI('token', 'login', 'password')
+    api.user_token = 'user'
+    api._get = lambda *_a, **_k: bad_payload
+
+    assert getattr(api, method)(*args) is None
+
+
+def test_snapshot_getter_returns_the_list_of_a_valid_answer():
+    api = YClientsAPI('token', 'login', 'password')
+    api.user_token = 'user'
+    api._get = lambda *_a, **_k: {'success': True, 'data': [{'id': 1}]}
+
+    assert api.get_staff('1') == [{'id': 1}]
+
+
+def test_analytics_record_charts_share_the_chart_helper():
+    api = YClientsAPI('token', 'login', 'password')
+    api.user_token = 'user'
+    urls = []
+
+    def fake_get(url, params=None):
+        urls.append(url)
+        return {'data': [{'x': 1}]}
+
+    api._get = fake_get
+
+    assert api.get_analytics_record_source('1', 'a', 'b') == [{'x': 1}]
+    assert api.get_analytics_record_status('1', 'a', 'b') == [{'x': 1}]
+    assert [u.rsplit('/charts/', 1)[1] for u in urls] == ['record_source/', 'record_status/']
+
+
+def test_undated_pagination_stops_when_a_page_repeats_known_rows():
+    """An endpoint that ignores `page` would otherwise re-read the same rows forever."""
+    api = YClientsAPI('token', 'login', 'password')
+    pages = []
+
+    def fake_get(_url, params):
+        pages.append(params['page'])
+        return {'success': True, 'data': [{'id': i} for i in range(api.MAX_PER_PAGE)]}
+
+    api._get = fake_get
+
+    with pytest.raises(RuntimeError, match='repeated rows'):
+        api._get_all_pages('https://api.example.test/clients/1')
+
+    assert pages == [1, 2]
+
+
+def test_undated_pagination_has_a_hard_page_cap(monkeypatch):
+    api = YClientsAPI('token', 'login', 'password')
+    monkeypatch.setattr(api, 'MAX_PLAIN_PAGES', 3)
+    counter = {'next': 0}
+
+    def fake_get(_url, params):
+        start = counter['next']
+        counter['next'] += api.MAX_PER_PAGE
+        return {'success': True, 'data': [{'id': start + i} for i in range(api.MAX_PER_PAGE)]}
+
+    api._get = fake_get
+
+    with pytest.raises(RuntimeError, match='more than 3 pages'):
+        api._get_all_pages('https://api.example.test/goods/1')
+
+
+def test_undated_pagination_still_reads_distinct_pages_to_the_end():
+    api = YClientsAPI('token', 'login', 'password')
+    pages = {
+        1: [{'id': i} for i in range(api.MAX_PER_PAGE)],
+        2: [{'id': 1000 + i} for i in range(5)],
+    }
+    api._get = lambda _url, params: {'success': True, 'data': pages[params['page']]}
+
+    assert len(api._get_all_pages('https://api.example.test/clients/1')) == api.MAX_PER_PAGE + 5

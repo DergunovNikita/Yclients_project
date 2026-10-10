@@ -7,6 +7,8 @@
 #   VM_TARGET=user@host
 #   VM_SSH_KEY=~/.ssh/<ключ>
 set -euo pipefail
+# Дамп содержит хэши паролей и зашифрованные креды: файлы только для владельца, и на VM, и здесь.
+umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PG_BIN="${PG_BIN:-/opt/homebrew/opt/postgresql@16/bin}"
@@ -46,12 +48,18 @@ dump="$DUMP_DIR/prod_$(date +%Y%m%d_%H%M).dump"
 # обрывались на середине. Поэтому дамп сначала кладётся файлом на VM, копируется
 # и сверяется по sha256 — молча битый дамп хуже, чем упавший скрипт.
 remote_dump="/tmp/yclients_refresh_$$.dump"
+# Любой сбой между снятием дампа и копированием (sha, scp) не должен оставлять копию базы на VM.
+cleanup_remote_dump() {
+  ssh -i "$VM_SSH_KEY" -o BatchMode=yes "$VM_TARGET" "rm -f $remote_dump" || true
+}
+trap cleanup_remote_dump EXIT
 echo "1/3 Снимаю дамп прода -> $dump"
 ssh -i "$VM_SSH_KEY" -o BatchMode=yes "$VM_TARGET" \
-  "docker exec $VM_PG_CONTAINER pg_dump -U postgres -Fc $DB_NAME > $remote_dump"
+  "umask 077; docker exec $VM_PG_CONTAINER pg_dump -U postgres -Fc $DB_NAME > $remote_dump"
 remote_sum="$(ssh -i "$VM_SSH_KEY" -o BatchMode=yes "$VM_TARGET" "sha256sum $remote_dump | cut -d' ' -f1")"
 scp -q -i "$VM_SSH_KEY" -o BatchMode=yes "$VM_TARGET:$remote_dump" "$dump"
-ssh -i "$VM_SSH_KEY" -o BatchMode=yes "$VM_TARGET" "rm -f $remote_dump"
+cleanup_remote_dump
+trap - EXIT
 
 local_sum="$(shasum -a 256 "$dump" | cut -d' ' -f1)"
 if [ "$remote_sum" != "$local_sum" ]; then

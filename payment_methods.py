@@ -35,6 +35,7 @@ from dashboard_service import (
 )
 from models import METHOD_YANDEX_PAY, ManualPaymentAmount
 from portal_audit import log_portal_audit
+from report_payload import MAX_PERIOD_BUCKETS, ReportInputError
 
 MAX_AMOUNT = Decimal('1000000000')
 CENT = Decimal('0.01')
@@ -497,6 +498,9 @@ async def fetch_payment_breakdown(
     reason is reported. `monthly` splits the same numbers by calendar month for the trend
     chart and decides per month and value, so one cut-off end does not blank the whole line.
     """
+    # Counted before the slices are built: the month axis is bounded like every other time axis of the reports.
+    if (end.year - start.year) * 12 + end.month - start.month + 1 > MAX_PERIOD_BUCKETS:
+        raise ReportInputError('period is too long: choose a shorter one')
     month_starts = [date(first.year, first.month, 1) for first, _ in _month_slices(start, end)]
     today = factual_branch_date(factual_at)
 

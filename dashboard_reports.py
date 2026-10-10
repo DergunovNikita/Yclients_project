@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import traceback
+import logging
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
@@ -15,6 +15,7 @@ from functools import lru_cache
 from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from plan_config import normalize_staff_category
@@ -59,9 +60,11 @@ from payment_methods import (
 )
 from report_payload import (
     DECIMAL_FORMAT,
+    MAX_PERIOD_BUCKETS,
     MONEY_FORMAT,
     NUMBER_FORMAT,
     PERCENT_FORMAT,
+    ReportInputError,
     ReportRequest,
     card as _card,
     chart as _chart,
@@ -80,8 +83,6 @@ from models import (
 )
 
 REPORT_GRANULARITIES = {'day', 'week', 'month'}
-# Daily history since 2018 is ~3,200 periods; this leaves room for decades of weeks and months.
-MAX_PERIOD_BUCKETS = 6000
 
 
 def _report_now() -> datetime:
@@ -96,6 +97,11 @@ YOY_ANNUAL_SOURCES = (
     'goods_transactions_detail',
 )
 YOY_MONTHLY_SOURCES = YOY_ANNUAL_SOURCES[:2]
+
+
+logger = logging.getLogger('yclients.reports')
+# What makes a leaderboard run worth retrying: the database (or its connection) failed, not the request or the code.
+INFRASTRUCTURE_ERRORS = (SQLAlchemyError, OSError)
 
 
 class ReportCalculationError(RuntimeError):
@@ -531,13 +537,13 @@ async def fetch_report_data(
     """
     canonical_id = resolve_report_id(report_id)
     if canonical_id is None:
-        raise ValueError(f'unknown report_id: {report_id}')
+        raise ReportInputError(f'unknown report_id: {report_id}')
     if granularity not in REPORT_GRANULARITIES:
-        raise ValueError('granularity must be one of day, week, month')
+        raise ReportInputError('granularity must be one of day, week, month')
     if start > end:
-        raise ValueError('start_date must be <= end_date')
+        raise ReportInputError('start_date must be <= end_date')
     if compare_start and compare_end and compare_start > compare_end:
-        raise ValueError('compare_start_date must be <= compare_end_date')
+        raise ReportInputError('compare_start_date must be <= compare_end_date')
 
     factual_at = _report_now()
     # An explicit comparison governs the whole page. Letting the preset drive the deltas
@@ -545,12 +551,14 @@ async def fetch_report_data(
     # ticked would put two different percentages for one metric on one screen — the
     # segments table and the comparison panel of `new_vs_returning_cross` sit together.
     explicit_window = bool(compare_start and compare_end)
+    compares = REPORT_REGISTRY[canonical_id].compare
     # The comparison window must come from the preset the page was opened with, before it is dropped below.
+    # A report without comparison ignores the request, so it must not fail on a window it will never use.
     cmp_start, cmp_end = (
         (compare_start, compare_end)
         if explicit_window
         else _previous_window(start, end, period_preset)
-        if compare_previous
+        if compare_previous and compares
         else (start, end)
     )
     if explicit_window or compare_staff_id is not None:
@@ -569,7 +577,7 @@ async def fetch_report_data(
     )
     if canonical_id != report_id:
         data['requested_report_id'] = report_id
-    if REPORT_REGISTRY[canonical_id].compare and (explicit_window or compare_previous or compare_staff_id is not None):
+    if compares and (explicit_window or compare_previous or compare_staff_id is not None):
         cmp_staff_id = compare_staff_id if compare_staff_id is not None else staff_id
         compare_data = await _fetch_report_payload(
             db,
@@ -593,7 +601,7 @@ def _previous_window(start: date, end: date, period_preset: str | None) -> tuple
     try:
         previous = DateRange(start=start, end=end).previous_period(period_preset)
     except (OverflowError, ValueError) as exc:  # a period at the very start of the calendar has no baseline
-        raise ValueError('the period has no previous period to compare with') from exc
+        raise ReportInputError('the period has no previous period to compare with') from exc
     return previous.start, previous.end
 
 
@@ -620,24 +628,11 @@ def _comparison_payload(data: dict[str, Any], compare_data: dict[str, Any], staf
             if item.get('id') in chart_ids
         ],
         'tables': [
-            {'id': item['id'], 'rows': _comparison_table_rows(item)}
+            {'id': item['id'], 'rows': item.get('rows', [])}
             for item in compare_data.get('tables', [])
             if item.get('id') in table_ids and item.get('row_key')
         ],
     }
-
-
-def _comparison_table_rows(table_payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Rows of a table; a ranking table is re-sorted client-side, so every metric's rows are merged by key."""
-    ranking = table_payload.get('ranking')
-    row_key = table_payload.get('row_key')
-    if not ranking or not row_key:
-        return table_payload.get('rows', [])
-    merged: dict[Any, dict[str, Any]] = {}
-    for rows in ranking.get('rows_by_metric', {}).values():
-        for row in rows:
-            merged.setdefault(row.get(row_key), row)
-    return list(merged.values())
 
 
 async def _fetch_report_payload(
@@ -805,14 +800,16 @@ def _period_key(value: date | datetime | None, granularity: str) -> str:
 def _period_starts(start: date, end: date, granularity: str) -> list[str]:
     """Every period start from the one holding `start` to the one holding `end`, so empty periods stay on the axis.
 
-    Raises ValueError past `MAX_PERIOD_BUCKETS`: the axis is zero-filled, so a window of centuries by day would
+    Raises ReportInputError past `MAX_PERIOD_BUCKETS`: the axis is zero-filled, so a window of centuries by day would
     otherwise allocate millions of rows for a request that has data on a few hundred of them.
     """
     current = date.fromisoformat(_period_key(start, granularity))
     keys = []
     while current <= end:
         if len(keys) >= MAX_PERIOD_BUCKETS:
-            raise ValueError(f'period is too long for granularity {granularity}: choose a coarser one or a shorter period')
+            raise ReportInputError(
+                f'period is too long for granularity {granularity}: choose a coarser one or a shorter period'
+            )
         keys.append(current.isoformat())
         try:
             if granularity == 'month':
@@ -2132,7 +2129,7 @@ async def _staff_rows(
         completed = int(row.completed or 0)
         rows_by_staff[row.staff_id] = {
             'staff_id': row.staff_id,
-            'staff_name': row.staff_name or f"staff {row.staff_id or '—'}",
+            'staff_name': row.staff_name or f"Сотрудник {row.staff_id or '—'}",
             'company_title': row.company_title,
             'appointments': int(row.appointments or 0),
             'completed': completed,
@@ -2144,7 +2141,7 @@ async def _staff_rows(
     for row in (await db.execute(rev_stmt)).all():
         item = rows_by_staff.setdefault(row.staff_id, {
             'staff_id': row.staff_id,
-            'staff_name': row.staff_name or f"staff {row.staff_id or '—'}",
+            'staff_name': row.staff_name or f"Сотрудник {row.staff_id or '—'}",
             'company_title': row.company_title,
             'appointments': 0,
             'completed': 0,
@@ -2179,13 +2176,11 @@ async def _clients_rows(
     staff_id: int | None,
     allowed_company_ids: list[int] | None,
     factual_at: datetime,
-    include_lifetime_visits: bool = False,
 ) -> list[dict[str, Any]]:
     visits_stmt = (
         select(
             Appointment.client_id.label('client_id'),
             func.count(func.distinct(Appointment.id)).label('visits'),
-            func.max(Appointment.date).label('last_visit'),
         )
         .where(and_(*_appointment_conditions(
             start,
@@ -2225,78 +2220,58 @@ async def _clients_rows(
         )
         .group_by(Appointment.client_id)
     )
-    # Visit-frequency buckets follow the client's whole history at the branch, so they
-    # need a count the period-scoped `visits` cannot give. Only the clients report reads
-    # it, so callers that ignore it do not pay for the extra query.
     clients: dict[int | None, dict[str, Any]] = {}
     for row in (await db.execute(visits_stmt)).all():
         client_id = int(row.client_id) if row.client_id is not None else None
         clients[client_id] = {
             'visits': int(row.visits or 0),
-            'last_visit': row.last_visit,
             'revenue': 0.0,
-            'lifetime_visits': 0 if include_lifetime_visits else None,
+            'lifetime_visits': 0,
         }
     for row in (await db.execute(revenue_stmt)).all():
         client_id = int(row.client_id) if row.client_id is not None else None
         client = clients.setdefault(
             client_id,
-            {
-                'visits': 0,
-                'last_visit': None,
-                'revenue': 0.0,
-                'lifetime_visits': 0 if include_lifetime_visits else None,
-            },
+            {'visits': 0, 'revenue': 0.0, 'lifetime_visits': 0},
         )
         client['revenue'] = float(row.revenue or 0)
     # Deliberately not bounded by the report's client ids: binding them would put tens of
     # thousands of parameters into one statement and trip asyncpg's 32767 ceiling on a
     # full-history report. The aggregate is grouped in Postgres and cheap. The staff
     # filter is dropped on purpose — it selects clients, it does not shorten their
-    # history — and a client who only ever paid keeps a lifetime count of 0.
-    if include_lifetime_visits:
-        lifetime_stmt = (
-            select(
-                Appointment.client_id.label('client_id'),
-                func.count(func.distinct(Appointment.id)).label('lifetime_visits'),
-            )
-            .where(and_(*_appointment_conditions(
-                None,
-                end,
-                company_id,
-                None,
-                attended_only=True,
-                allowed_company_ids=allowed_company_ids,
-                factual_at=factual_at,
-            )))
-            .group_by(Appointment.client_id)
+    # history — and a client who only ever paid keeps a lifetime count of 0. Visit-frequency
+    # buckets follow the whole history, which the period-scoped `visits` cannot give.
+    lifetime_stmt = (
+        select(
+            Appointment.client_id.label('client_id'),
+            func.count(func.distinct(Appointment.id)).label('lifetime_visits'),
         )
-        for row in (await db.execute(lifetime_stmt)).all():
-            client_id = int(row.client_id) if row.client_id is not None else None
-            client = clients.get(client_id)
-            if client is not None:
-                client['lifetime_visits'] = int(row.lifetime_visits or 0)
+        .where(and_(*_appointment_conditions(
+            None,
+            end,
+            company_id,
+            None,
+            attended_only=True,
+            allowed_company_ids=allowed_company_ids,
+            factual_at=factual_at,
+        )))
+        .group_by(Appointment.client_id)
+    )
+    for row in (await db.execute(lifetime_stmt)).all():
+        client_id = int(row.client_id) if row.client_id is not None else None
+        client = clients.get(client_id)
+        if client is not None:
+            client['lifetime_visits'] = int(row.lifetime_visits or 0)
 
-    rows = []
-    for client_id, client in clients.items():
-        revenue = float(client['revenue'])
-        visits = int(client['visits'])
-        last_visit = client['last_visit']
-        as_of_date = min(end, factual_at.date())
-        recency = (as_of_date - last_visit).days if last_visit else None
-        rows.append({
+    rows = [
+        {
             'client_id': client_id,
-            'visits': visits,
-            # None where it was not asked for, so a caller reading it without requesting
-            # it cannot silently bucket every client as "0 визитов"
-            'lifetime_visits': (
-                None if client['lifetime_visits'] is None else int(client['lifetime_visits'])
-            ),
-            'last_visit': last_visit.isoformat() if last_visit else None,
-            'days_since_last_visit': recency,
-            'revenue': revenue,
-            'avg_check': revenue / visits if visits else 0.0,
-        })
+            'visits': int(client['visits']),
+            'lifetime_visits': int(client['lifetime_visits']),
+            'revenue': float(client['revenue']),
+        }
+        for client_id, client in clients.items()
+    ]
     # client_id is a unique final tiebreaker (it can be None for the "no client" bucket,
     # which sorts last): without it, clients tied on revenue swap places whenever the
     # query plan changes.
@@ -2379,6 +2354,8 @@ async def _client_recency_payload(
         allowed_company_ids=allowed_company_ids,
         factual_at=factual_at,
         period_preset=period_preset,
+        # Only visit_metrics is read; the breakdown would add a YClients call whose result is dropped.
+        include_appointments_breakdown=False,
     )
     visits = summary.get('visit_metrics', {})
     rows = [
@@ -2460,27 +2437,23 @@ async def _leaderboard_payload(
             allowed_company_ids,
             factual_at,
         )
-    except Exception as error:  # noqa: BLE001 - mapped to a retryable report error by the route
-        traceback.print_exc()
+    except (ReportCalculationError, *INFRASTRUCTURE_ERRORS) as error:
+        # Only a failing database is retryable; anything else is a defect (500) or a refused input (400).
+        logger.exception(
+            'staff_leaderboard failed stage=%s start=%s end=%s company_id=%s',
+            getattr(error, 'stage', 'payload'), start.isoformat(), end.isoformat(), company_id,
+        )
         try:
             await db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
-        stage = getattr(error, 'stage', 'payload')
-        print(
-            'staff_leaderboard '
-            f'status=failed stage={stage} start={start.isoformat()} end={end.isoformat()} '
-            f'company_id={company_id} staff_id={staff_id}'
-        )
+        except Exception as rollback_error:  # noqa: BLE001 - the original failure is what the caller needs
+            logger.warning('staff_leaderboard rollback failed: %s', type(rollback_error).__name__)
         if isinstance(error, ReportCalculationError):
             raise
-        raise ReportCalculationError('staff leaderboard calculation failed', stage=stage) from error
+        raise ReportCalculationError('staff leaderboard calculation failed', stage='payload') from error
     finally:
-        duration_ms = round((time.perf_counter() - started_at) * 1000)
-        print(
-            'staff_leaderboard '
-            f'status=finished start={start.isoformat()} end={end.isoformat()} '
-            f'company_id={company_id} staff_id={staff_id} duration_ms={duration_ms}'
+        logger.info(
+            'staff_leaderboard finished start=%s end=%s company_id=%s duration_ms=%s',
+            start.isoformat(), end.isoformat(), company_id, round((time.perf_counter() - started_at) * 1000),
         )
 
 
@@ -2508,13 +2481,11 @@ async def _leaderboard_payload_impl(
             include_all_staff_in_leaderboards=True,
             factual_at=factual_at,
         )
-    except Exception as error:  # noqa: BLE001 - stage is added before route mapping
+    except INFRASTRUCTURE_ERRORS as error:
         raise ReportCalculationError('staff leaderboard plan/fact failed', stage='plan_fact') from error
-    print(
-        'staff_leaderboard '
-        f'status=ready stage=plan_fact start={start.isoformat()} end={end.isoformat()} '
-        f'company_id={company_id} staff_id={staff_id} '
-        f'duration_ms={round((time.perf_counter() - stage_started) * 1000)}'
+    logger.info(
+        'staff_leaderboard plan_fact ready start=%s end=%s company_id=%s duration_ms=%s',
+        start.isoformat(), end.isoformat(), company_id, round((time.perf_counter() - stage_started) * 1000),
     )
     boards = plan.get('staff_leaderboards', {})
     partial_reasons = set(boards.get('_partial_reasons') or [])
@@ -2542,7 +2513,7 @@ async def _leaderboard_payload_impl(
     extra_share_col = ('share_pct', 'Доля доп. услуг по метке, %', PERCENT_FORMAT)
     cosmo_share_col = ('share_pct', 'Доля продаж косметики, %', PERCENT_FORMAT)
 
-    revenue_barber = boards.get('revenue_barber', boards.get('revenue_top', []))
+    revenue_barber = boards.get('revenue_barber', [])
     revenue_admin = boards.get('revenue_admin', [])
     if any(
         boards.get(key)
@@ -2606,7 +2577,7 @@ async def _leaderboard_payload_impl(
             'extra_services',
             'Топ по допуслугам — мастера',
             [staff_col, branch_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), ('pct', 'Доп. услуги, %', PERCENT_FORMAT), extra_share_col],
-            boards.get('extra_services_barber_rankings', boards.get('extra_services_rankings', {})),
+            boards.get('extra_services_barber_rankings', {}),
             'pct',
             [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
             hide_when_empty=True,

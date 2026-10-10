@@ -93,7 +93,6 @@
     "cancel": "Cancel",
     "close": "Close",
     "loading": "Loading…",
-    "dash": "—",
     "errorPrefix": "Error",
     "reloadDataAgain": "Please refresh the data again.",
     "loadingShort": "Loading",
@@ -400,7 +399,6 @@
     "scaleMoney": "money",
     "scaleCount": "count",
     "scalePercent": "percent",
-    "topRevenue": "Top 5 by revenue",
     "goodsKpiCompletion": "Goods KPI completion",
     "completionTooltip": "Completion: {value}",
     "diagnosticBarbers": "barber visits: {count}",
@@ -701,7 +699,10 @@
       "partial": "Partial"
     },
     "sources": {
-      "yclientsComments": "YClients reviews",
+      "appointmentsDetail": "appointment details",
+      "financialTransactionsDetail": "payment details",
+      "goodsTransactionsDetail": "goods transaction details",
+      "staffSchedules": "staff schedules",
       "personalAccountTopups": "personal account top-ups"
     },
     "missingSources": "Missing",
@@ -738,7 +739,6 @@
   },
   "demo": {
     "viewDemo": "View demo",
-    "banner": "Demo mode · fictional data",
-    "readOnly": "Demo mode: view only"
+    "banner": "Demo mode · fictional data"
   }
 }

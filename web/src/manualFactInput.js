@@ -5,7 +5,7 @@ export function manualFactRowKey(companyId, staffId) {
   return `${companyId}:${staffId}`;
 }
 
-function storedValue(row) {
+export function storedValue(row) {
   return row.value === null || row.value === undefined ? null : Number(row.value);
 }
 
