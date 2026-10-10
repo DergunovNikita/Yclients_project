@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import date
 from typing import Any, Iterator
 
 import requests
@@ -30,8 +29,8 @@ import requests
 DEFAULT_BASE_URL = 'http://127.0.0.1:8020'
 TIMEOUT_SECONDS = 300
 
-# Anchored on a fixed day so a snapshot stays comparable across calendar days.
-TODAY = date(2026, 9, 7)
+# Fixed periods so a snapshot stays comparable across calendar days. Reports that measure from the real
+# "today" (revenue_at_risk) still move at midnight: capture before and after on the same day.
 PERIODS: tuple[tuple[str, str, str], ...] = (
     ('day', '2026-09-07', '2026-09-07'),
     ('week', '2026-09-01', '2026-09-07'),

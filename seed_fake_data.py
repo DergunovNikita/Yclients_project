@@ -228,7 +228,7 @@ def seed_companies(
             services.append(service)
             service_id = advance_pk(service_id, negative=negative_catalog_ids)
 
-        for p_idx, title in enumerate(shared_positions):
+        for title in shared_positions:
             db.add(
                 StaffPositionCatalog(
                     company_id=company.id,

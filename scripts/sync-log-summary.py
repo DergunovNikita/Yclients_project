@@ -21,7 +21,6 @@ from pathlib import Path
 LOG_DIR = Path(os.environ.get('SYNC_LOG_DIR', 'logs'))
 
 STEP_RE = re.compile(r'^\s*\[(OK|WARN|ERR|ERROR|FAIL)\]\s+(.*?)\s+(\d[\d.: ]*(?:мин|сек|s|m|ms)[\d\s мин сек]*)\s*$')
-SECTION_RE = re.compile(r'^── (?P<name>.+?) ──\s*$')
 BRANCH_RE = re.compile(r'^Филиал:\s+(?P<name>.+?)\s*$')
 ERROR_MARKERS = ('✗', 'Ошибк', 'Traceback', 'ERROR', 'ERR ', '[ERR]', '[FAIL]')
 DONE_MARKERS = ('Sync run finished', '✓ Успешно', 'done')

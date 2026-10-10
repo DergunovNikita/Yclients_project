@@ -217,6 +217,3 @@ def is_visible_staff_plan(plan_values: Mapping[str, Any]) -> bool:
         and (not plan_values or has_positive_plan_values(plan_values))
     )
 
-
-def is_non_working_staff_plan(plan_values: Mapping[str, Any]) -> bool:
-    return has_zero_clients_plan(plan_values) or not has_positive_plan_values(plan_values)

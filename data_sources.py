@@ -19,9 +19,6 @@ from yclients_credentials import decrypt_secret
 SOURCE_YCLIENTS = 'yclients'
 SUPPORTED_SOURCE_TYPES = (SOURCE_YCLIENTS,)
 
-# Sources authenticated with partner_token/login/password (credential onboarding).
-CREDENTIAL_SOURCE_TYPES = (SOURCE_YCLIENTS,)
-
 
 async def companies_claimed_elsewhere(
     db: AsyncSession,
