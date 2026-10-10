@@ -1,23 +1,17 @@
 """Migration 0053 adds the refresh-token reuse-detection columns and removes them again."""
-import importlib.util
-from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
+from helpers import load_migration
 from models import PortalRefreshToken
-
-MIGRATION = Path(__file__).resolve().parents[1] / 'alembic' / 'versions' / '0053_refresh_reuse_detection.py'
 
 
 @pytest.fixture
 def migration():
-    spec = importlib.util.spec_from_file_location('migration_0053', MIGRATION)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_migration('0053_refresh_reuse_detection.py', 'migration_0053')
 
 
 def _run(engine, fn):
@@ -44,7 +38,9 @@ def test_upgrade_adds_the_columns_and_index_and_downgrade_removes_them(migration
     assert {c['name'] for c in inspector.get_columns('portal_refresh_tokens', schema='system')} >= {
         'previous_token_hash', 'rotated_at',
     }
-    assert migration.INDEX_NAME in {ix['name'] for ix in inspector.get_indexes('portal_refresh_tokens', schema='system')}
+    assert migration.INDEX_NAME in {
+        ix['name'] for ix in inspector.get_indexes('portal_refresh_tokens', schema='system')
+    }
 
     _run(engine, migration.downgrade)
     inspector = sa.inspect(engine)

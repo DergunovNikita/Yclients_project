@@ -646,7 +646,11 @@ async def resend_verification(
     email = normalize_email(body.email)
     enforce_auth_rate_limit(request, AUTH_RATE_LIMIT_ROUTES['resend_verification'], email)
     user = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
-    if user is not None and user.email_verified_at is None and not email_cooldown_active(user.email_verification_sent_at):
+    if (
+        user is not None
+        and user.email_verified_at is None
+        and not email_cooldown_active(user.email_verification_sent_at)
+    ):
         background_tasks.add_task(_send_auth_email_after_response, user.id, send_verification_email)
     return {
         'success': True,

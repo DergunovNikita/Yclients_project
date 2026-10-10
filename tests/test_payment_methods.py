@@ -17,6 +17,7 @@ import report_common
 from api import app
 from auth_scope import AccessContext, can_view_branch_payments
 from auth_service import create_access_token, hash_password
+from conftest import new_session_row
 from models import (
     AccountCatalog,
     Appointment,
@@ -114,6 +115,7 @@ async def seeded(async_session):
         _user(5, 'barber', 'barber@example.com'),
         _user(6, 'owner', 'demo@example.com', is_demo=True),
         *[PortalUserBranch(user_id=user, company_id=company) for user in (2, 3, 4, 5) for company in (1, 2)],
+        *[new_session_row(user_id, session_id=user_id) for user_id in USER_IDS.values()],
         *[Staff(id=company, name=f'Staff {company}', position='Барбер', company_id=company) for company in (1, 2, 3)],
         Staff(id=14, name='Admin staff', position='Администратор', company_id=1, portal_user_id=4),
         Staff(id=15, name='Barber staff', position='Барбер', company_id=1, portal_user_id=5),
@@ -171,7 +173,9 @@ async def client(seeded):
 
 
 def _auth(role):
-    return {'Authorization': f'Bearer {create_access_token(USER_IDS[role], "owner" if role == "demo" else role)}'}
+    user_id = USER_IDS[role]
+    token = create_access_token(user_id, "owner" if role == "demo" else role, 0, user_id)
+    return {'Authorization': f'Bearer {token}'}
 
 
 async def _report(client, role='owner', start=AUGUST[0], end=AUGUST[1], **params):
@@ -282,9 +286,19 @@ async def test_report_matches_overview_per_branch_and_for_the_network(client, se
         include_appointments_breakdown=False,
         factual_at=FROZEN_NOW,
     )
-    assert payload['cards'][0] == {'label': 'Выручка', 'value': pytest.approx(network['revenue']['total']), 'format': 'money'}
+    assert payload['cards'][0] == {
+        'label': 'Выручка',
+        'value': pytest.approx(network['revenue']['total']),
+        'format': 'money',
+    }
     amounts = _table(payload, 'payment_amounts')
-    assert [column['key'] for column in amounts['columns']] == ['metric', 'total', 'company_1', 'company_2', 'company_3']
+    assert [column['key'] for column in amounts['columns']] == [
+        'metric',
+        'total',
+        'company_1',
+        'company_2',
+        'company_3',
+    ]
     revenue_row = amounts['rows'][0]
     assert revenue_row['total'] == pytest.approx(network['revenue']['total'])
     # Every form row adds up to the revenue row in every column.
@@ -513,7 +527,9 @@ async def test_opened_revenue_admits_a_manager_but_never_admin_or_barber(client,
 
 @pytest.mark.asyncio
 async def test_me_reports_the_same_predicate(client, seeded):
-    seeded.add(PortalMetricVisibility(portal_account_id=1, role='admin', visible_codes=['revenue'], updated_at=FROZEN_NOW))
+    seeded.add(
+        PortalMetricVisibility(portal_account_id=1, role='admin', visible_codes=['revenue'], updated_at=FROZEN_NOW)
+    )
     await seeded.commit()
     flags = {}
     for role in ('owner', 'branch_admin', 'manager', 'admin', 'barber'):
@@ -525,8 +541,12 @@ async def test_me_reports_the_same_predicate(client, seeded):
 
 @pytest.mark.asyncio
 async def test_branch_outside_the_scope_is_refused(client):
-    assert (await client.get(EDITOR, headers=_auth('branch_admin'), params={'month': '2026-08', 'company_id': 3})).status_code == 403
-    assert (await client.get(EDITOR, headers=_auth('owner'), params={'month': '2026-08', 'company_id': 9})).status_code == 403
+    assert (
+        await client.get(EDITOR, headers=_auth('branch_admin'), params={'month': '2026-08', 'company_id': 3})
+    ).status_code == 403
+    assert (
+        await client.get(EDITOR, headers=_auth('owner'), params={'month': '2026-08', 'company_id': 9})
+    ).status_code == 403
     assert (await _report(client, 'branch_admin', company_id=3)).status_code == 403
     post = await client.post(
         EDITOR, headers=_auth('branch_admin'), json={'month': '2026-08', 'items': [{'company_id': 3, 'value': 1}]}
@@ -713,7 +733,9 @@ async def test_stale_previous_value_conflicts_and_writes_nothing(client, seeded)
     )
     assert stale.status_code == 409
     assert stale.json()['detail'] == 'Value was changed by someone else; reload and try again'
-    assert [(row.company_id, float(row.amount)) for row in (await seeded.execute(select(ManualPaymentAmount))).scalars()] == [(1, 500.0)]
+    assert [
+        (row.company_id, float(row.amount)) for row in (await seeded.execute(select(ManualPaymentAmount))).scalars()
+    ] == [(1, 500.0)]
     assert await _audit_events(seeded) == []
 
     # Forgetting the lock value is stale too, whether the row exists...
@@ -819,7 +841,9 @@ async def test_an_untouched_empty_row_that_closed_since_loading_does_not_refuse_
         ],
     )
     assert saved.status_code == 200, saved.text
-    assert [(row.company_id, float(row.amount)) for row in (await seeded.execute(select(ManualPaymentAmount))).scalars()] == [(1, 5.0)]
+    assert [
+        (row.company_id, float(row.amount)) for row in (await seeded.execute(select(ManualPaymentAmount))).scalars()
+    ] == [(1, 5.0)]
     (event,) = await _audit_events(seeded)
     assert [row['company_id'] for row in event.metadata_json['rows']] == [1]
     # Nothing but the closed blank row: a no-op, not an error.
@@ -932,7 +956,9 @@ async def test_a_race_lost_on_a_later_row_undoes_the_rows_already_written(client
     ])
     assert response.status_code == 409
     monkeypatch.undo()
-    stored = {row.company_id: float(row.amount) for row in (await seeded.execute(select(ManualPaymentAmount))).scalars()}
+    stored = {
+        row.company_id: float(row.amount) for row in (await seeded.execute(select(ManualPaymentAmount))).scalars()
+    }
     assert stored == {1: 100.0, 2: 250.0}
     assert await _audit_events(seeded) == []
 
@@ -959,7 +985,9 @@ async def test_a_lost_insert_race_after_an_update_undoes_the_update(client, seed
     ])
     assert response.status_code == 409
     monkeypatch.undo()
-    stored = {row.company_id: float(row.amount) for row in (await seeded.execute(select(ManualPaymentAmount))).scalars()}
+    stored = {
+        row.company_id: float(row.amount) for row in (await seeded.execute(select(ManualPaymentAmount))).scalars()
+    }
     assert stored == {1: 100.0, 2: 300.0}
     assert await _audit_events(seeded) == []
 
@@ -1053,7 +1081,9 @@ async def test_a_float_sum_a_hair_under_yandex_pay_reads_as_zero_not_minus_zero(
     (alpha,) = (await _breakdown(seeded, company_id=1))['branches']
     assert alpha['cashless'] == 0.0 and math.copysign(1.0, alpha['cashless']) > 0
     assert not [note for note in payload['notes'] if note['title'] == 'Яндекс Пэй больше безналичных YClients']
-    cells = [row[column] for table in payload['tables'] for row in table['rows'] for column in row if column != 'metric']
+    cells = [
+        row[column] for table in payload['tables'] for row in table['rows'] for column in row if column != 'metric'
+    ]
     assert all(math.copysign(1.0, cell) > 0 for cell in cells if cell == 0)
 
 
@@ -1227,7 +1257,9 @@ async def test_a_month_where_yandex_pay_exceeds_cashless_is_named_even_if_the_pe
     (alpha,) = (await _breakdown(seeded, JULY_AUGUST[0], JULY_AUGUST[1], company_id=1))['branches']
     assert alpha['cashless'] > 0
     assert not [note for note in payload['notes'] if note['title'] == 'Яндекс Пэй больше безналичных YClients']
-    note = next(note for note in payload['notes'] if note['title'] == 'Яндекс Пэй больше безналичных YClients по месяцам')
+    note = next(
+        note for note in payload['notes'] if note['title'] == 'Яндекс Пэй больше безналичных YClients по месяцам'
+    )
     assert note['kind'] == 'warning' and 'июль 2026' in note['text'] and 'август' not in note['text']
     trend = payload['charts'][-1]
     cashless = next(dataset['data'] for dataset in trend['datasets'] if dataset['label'] == 'Безналичные')

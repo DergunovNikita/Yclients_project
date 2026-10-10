@@ -35,7 +35,13 @@ def test_deploy_workflow_gates_on_lint_and_frontend_checks():
 
     assert 'ruff check .' in workflow
     assert 'requirements-dev.txt' in workflow
-    for command in ('npm ci', 'npm run test:auth', 'npm run test:dashboard', 'npm run build', 'npm run scan:auth-build'):
+    for command in (
+        'npm ci',
+        'npm run test:auth',
+        'npm run test:dashboard',
+        'npm run build',
+        'npm run scan:auth-build',
+    ):
         assert command in workflow
     # A broken frontend/proxy (e.g. a 13th Vercel function) must stop the deploy, not just turn a check red.
     assert '- frontend' in deploy_job.split('steps:', 1)[0]

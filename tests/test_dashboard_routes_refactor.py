@@ -60,7 +60,9 @@ async def test_an_api_key_cannot_name_a_tenant_that_does_not_exist(client, async
 
 @pytest.mark.asyncio
 async def test_an_api_key_write_lands_on_the_tenant_it_names_not_on_the_lowest_id(client, async_session):
-    async_session.add_all([PortalAccount(id=1, label='first', created_at=NOW), PortalAccount(id=2, label='second', created_at=NOW)])
+    async_session.add_all(
+        [PortalAccount(id=1, label='first', created_at=NOW), PortalAccount(id=2, label='second', created_at=NOW)]
+    )
     await async_session.commit()
     body = {'role': 'manager', 'visible_codes': ['revenue']}
 

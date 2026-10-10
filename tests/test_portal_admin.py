@@ -18,7 +18,8 @@ import portal_account_provision
 import portal_staff_sync
 import yclients_credentials
 from api import app
-from auth_service import DUMMY_PASSWORD_HASH, create_access_token, hash_password, verify_password
+from auth_service import DUMMY_PASSWORD_HASH, hash_password, verify_password
+from conftest import issue_access_token
 from data_sources import YClientsDataSourceAdapter, companies_claimed_elsewhere
 from models import (
     Company,
@@ -58,7 +59,9 @@ async def tenant_db(async_session, monkeypatch):
     async_session.add(Group(id=1, title='G1'))
     async_session.add_all([Company(id=1, title='Branch 1', group_id=1), Company(id=2, title='Branch 2', group_id=1)])
     async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
-    async_session.add_all([PortalBranch(portal_account_id=1, company_id=1), PortalBranch(portal_account_id=1, company_id=2)])
+    async_session.add_all(
+        [PortalBranch(portal_account_id=1, company_id=1), PortalBranch(portal_account_id=1, company_id=2)]
+    )
     await async_session.flush()
     async_session.add(_user(1, 'owner', 'owner@example.com'))
     await async_session.commit()
@@ -134,7 +137,7 @@ async def test_a_get_of_the_user_list_writes_nothing_when_no_mirror_is_missing(t
         yield tenant_db
 
     app.dependency_overrides[api.get_async_db] = override_db
-    headers = {'Authorization': f'Bearer {create_access_token(1, "owner")}'}
+    headers = {'Authorization': f'Bearer {await issue_access_token(tenant_db, 1, "owner")}'}
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
             first = await client.get('/auth/admin/users', headers=headers)
@@ -156,7 +159,14 @@ async def test_branch_ids_for_a_list_of_users_match_the_per_user_loader(tenant_d
     tenant_db.add(PortalAccount(id=2, label='Other', created_at=datetime.utcnow()))
     tenant_db.add(Company(id=3, title='Branch 3', group_id=1))
     tenant_db.add(PortalBranch(portal_account_id=2, company_id=3))
-    tenant_db.add_all([_user(10, 'manager'), _user(11, 'barber'), _user(12, 'owner', tenant=2), _user(13, 'platform_admin', tenant=None)])
+    tenant_db.add_all(
+        [
+            _user(10, 'manager'),
+            _user(11, 'barber'),
+            _user(12, 'owner', tenant=2),
+            _user(13, 'platform_admin', tenant=None),
+        ]
+    )
     tenant_db.add_all([
         PortalUserBranch(user_id=10, company_id=2),
         PortalUserBranch(user_id=10, company_id=1),
@@ -286,7 +296,9 @@ async def test_a_chosen_password_is_still_hashed_for_a_single_account(tenant_db)
 async def test_bulk_provisioning_reports_each_failing_row_and_keeps_going(tenant_db, monkeypatch, auth_log):
     await _add_staff(tenant_db, 4)
     tenant_db.add(Staff(id=9050, name='Zed No Email', position='Барбер', company_id=1, fired=0))
-    tenant_db.add(Staff(id=9051, name='Zed Dup Email', email='worker9000@example.com', position='Барбер', company_id=1, fired=0))
+    tenant_db.add(
+        Staff(id=9051, name='Zed Dup Email', email='worker9000@example.com', position='Барбер', company_id=1, fired=0)
+    )
     await tenant_db.commit()
     real = portal_account_provision._provision
 
@@ -388,10 +400,12 @@ async def test_distribute_credentials_survives_a_database_error_outside_the_send
 
     app.dependency_overrides[api.get_async_db] = override_db
     try:
-        async with AsyncClient(transport=ASGITransport(app=app, raise_app_exceptions=False), base_url='http://test') as client:
+        async with AsyncClient(
+            transport=ASGITransport(app=app, raise_app_exceptions=False), base_url='http://test'
+        ) as client:
             response = await client.post(
                 '/auth/admin/distribute-credentials',
-                headers={'Authorization': f'Bearer {create_access_token(1, "owner")}'},
+                headers={'Authorization': f'Bearer {await issue_access_token(tenant_db, 1, "owner")}'},
                 json={'user_ids': [12, 13]},
             )
     finally:
@@ -420,7 +434,9 @@ class _FakeYClients:
 async def _tenant_with_claimed_location(session, *, with_users=True):
     session.add(PortalAccount(id=2, label='Other', created_at=datetime.utcnow()))
     await session.flush()
-    session.add(Company(id=77, portal_account_id=1, source_type='yclients', external_id=101, title='Claimed', group_id=1))
+    session.add(
+        Company(id=77, portal_account_id=1, source_type='yclients', external_id=101, title='Claimed', group_id=1)
+    )
     await session.flush()
     session.add(PortalBranch(portal_account_id=1, company_id=77))
     if with_users:
@@ -439,7 +455,12 @@ async def test_materialize_refuses_a_location_held_by_another_tenant(tenant_db):
     assert refused.value.status_code == 409
     assert refused.value.detail == 'Companies already linked to another tenant: [101]'
     assert await tenant_db.scalar(select(func.count()).select_from(Company).where(Company.portal_account_id == 2)) == 0
-    assert await tenant_db.scalar(select(func.count()).select_from(PortalBranch).where(PortalBranch.portal_account_id == 2)) == 0
+    assert (
+        await tenant_db.scalar(
+            select(func.count()).select_from(PortalBranch).where(PortalBranch.portal_account_id == 2)
+        )
+        == 0
+    )
 
 
 @pytest.mark.asyncio
@@ -475,7 +496,7 @@ async def test_admin_credential_create_without_company_ids_is_refused_for_a_clai
         async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
             response = await client.post(
                 '/auth/admin/yclients-credentials',
-                headers={'Authorization': f'Bearer {create_access_token(40, "owner")}'},
+                headers={'Authorization': f'Bearer {await issue_access_token(tenant_db, 40, "owner")}'},
                 json={'title': 'Mine', 'partner_token': 'p', 'login': 'l', 'password': 'pw'},
             )
     finally:
@@ -502,7 +523,7 @@ async def test_payload_test_rejects_unknown_fields_and_accepts_a_null_source_typ
     async def override_db():
         yield tenant_db
 
-    headers = {'Authorization': f'Bearer {create_access_token(1, "owner")}'}
+    headers = {'Authorization': f'Bearer {await issue_access_token(tenant_db, 1, "owner")}'}
     good = {'partner_token': 'p', 'login': 'l', 'password': 'pw'}
     app.dependency_overrides[api.get_async_db] = override_db
     try:
@@ -542,7 +563,7 @@ async def test_listing_credentials_writes_no_audit_row(tenant_db, monkeypatch):
             with count_statements(tenant_db) as statements:
                 response = await client.get(
                     '/auth/admin/yclients-credentials',
-                    headers={'Authorization': f'Bearer {create_access_token(1, "owner")}'},
+                    headers={'Authorization': f'Bearer {await issue_access_token(tenant_db, 1, "owner")}'},
                 )
     finally:
         app.dependency_overrides.clear()

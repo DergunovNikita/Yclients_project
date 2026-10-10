@@ -325,7 +325,9 @@ def collect_production_config_errors(
         errors.append('AUTH_COOKIE_SAMESITE must be one of: lax, strict, none')
     if auth_console_email and not auth_allow_console_email_in_production:
         errors.append('AUTH_CONSOLE_EMAIL must be false')
-    if not auth_console_email and any(_is_placeholder(value) for value in (smtp_host, smtp_user, smtp_password, smtp_from)):
+    if not auth_console_email and any(
+        _is_placeholder(value) for value in (smtp_host, smtp_user, smtp_password, smtp_from)
+    ):
         errors.append('SMTP_HOST, SMTP_USER, SMTP_PASSWORD and SMTP_FROM must be configured')
     if not auth_console_email and not _is_public_https_url(app_public_url):
         # Verification and reset links are built from it; a loopback or plain-http base sends

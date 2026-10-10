@@ -209,14 +209,20 @@ def test_backfill_refuses_a_credential_id_that_is_not_stored_and_active(monkeypa
 
 def test_backfill_uses_the_requested_stored_credential_for_every_branch(monkeypatch):
     _patch_main(monkeypatch, CompanySession(), credential_id=7)
-    monkeypatch.setattr(backfill_staff_schedules, 'load_active_credentials_sync', lambda _db: [_credential(3), _credential(7)])
+    monkeypatch.setattr(
+        backfill_staff_schedules, 'load_active_credentials_sync', lambda _db: [_credential(3), _credential(7)]
+    )
 
     def must_not_resolve_per_branch(*_args):
         raise AssertionError('a forced credential replaces the per-branch lookup')
 
     monkeypatch.setattr(backfill_staff_schedules, 'load_credentials_for_companies_sync', must_not_resolve_per_branch)
     built = []
-    monkeypatch.setattr(backfill_staff_schedules, '_build_api_for_credential', lambda credential: built.append(credential.id) or object())
+    monkeypatch.setattr(
+        backfill_staff_schedules,
+        '_build_api_for_credential',
+        lambda credential: built.append(credential.id) or object(),
+    )
     synced = []
     monkeypatch.setattr(
         backfill_staff_schedules, 'sync_staff_schedules',

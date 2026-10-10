@@ -200,7 +200,10 @@ async def test_services_reconcile_with_the_overview(seeded):
     overview = await dashboard_service.fetch_summary(
         seeded, *WINDOW, company_id=1, include_appointments_breakdown=False, factual_at=NOW
     )
-    for report_id, revenue_card in (('avg_check_by_service', 'Выручка услуг'), ('service_staff_profit', 'Выручка услуг')):
+    for report_id, revenue_card in (
+        ('avg_check_by_service', 'Выручка услуг'),
+        ('service_staff_profit', 'Выручка услуг'),
+    ):
         data = await _report(seeded, report_id)
         cards = _cards(data)
         assert cards[revenue_card] == overview['average_check']['service_revenue'] == 6000.0

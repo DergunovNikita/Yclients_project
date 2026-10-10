@@ -136,11 +136,16 @@ async def build_nps_dashboard(req: ReportRequest) -> dict[str, Any]:
         )
     ]
     if negative_truncated:
-        base['notes'].append({
-            'kind': 'info',
-            'title': 'Список ограничен',
-            'text': f'Показаны последние {NEGATIVE_REVIEW_LIMIT} отзывов с низкой оценкой; сузьте период, чтобы увидеть остальные.',
-        })
+        base['notes'].append(
+            {
+                'kind': 'info',
+                'title': 'Список ограничен',
+                'text': (
+                    f'Показаны последние {NEGATIVE_REVIEW_LIMIT} отзывов с низкой оценкой; '
+                    'сузьте период, чтобы увидеть остальные.'
+                ),
+            }
+        )
     if req.staff_id is not None:
         base['notes'].append({
             'kind': 'info',

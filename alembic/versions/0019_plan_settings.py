@@ -33,7 +33,9 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint('id'),
             schema='public',
         )
-        op.create_index('ix_plan_branch_settings_period_start', 'plan_branch_settings', ['period_start'], schema='public')
+        op.create_index(
+            'ix_plan_branch_settings_period_start', 'plan_branch_settings', ['period_start'], schema='public'
+        )
         op.create_index('ix_plan_branch_settings_period_end', 'plan_branch_settings', ['period_end'], schema='public')
         op.create_index('ix_plan_branch_settings_company_id', 'plan_branch_settings', ['company_id'], schema='public')
         op.create_index(

@@ -408,7 +408,11 @@ def update_credential_secrets(
         credential.is_active = bool(is_active)
     if partner_token is not None or login is not None:
         try:
-            partner_value = partner_token.strip() if partner_token is not None else decrypt_secret(credential.partner_token_encrypted)
+            partner_value = (
+                partner_token.strip()
+                if partner_token is not None
+                else decrypt_secret(credential.partner_token_encrypted)
+            )
             login_value = login.strip() if login is not None else decrypt_secret(credential.login_encrypted)
             credential.credential_fingerprint = credential_fingerprint(partner_value, login_value)
         except Exception:

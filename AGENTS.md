@@ -62,7 +62,7 @@ api/ / web/api/     — варианты same-origin Vercel proxy к backend API
 - **PEP8** строго, проверять через `ruff check .`
 - **Type hints** — где улучшает понимание, не ради формальности
 - **Pydantic** — для API request/response schemas
-- Максимальная длина строки — 120 символов
+- Максимальная длина строки — 120 символов; её проверяет `ruff check .` (`ruff.toml`: дефолтные правила + E501)
 
 ### Docstrings
 - Английский язык

@@ -10,7 +10,8 @@ from sqlalchemy import select
 
 import api
 from api import app
-from auth_service import create_access_token, hash_password
+from auth_service import hash_password
+from conftest import issue_access_token
 from models import (
     Client,
     Appointment,
@@ -129,7 +130,7 @@ async def test_legacy_api_filters_jwt_users_by_tenant_scope(async_session, monke
     async def override_db():
         yield async_session
 
-    token = create_access_token(100, 'manager')
+    token = await issue_access_token(async_session, 100, 'manager')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -188,7 +189,7 @@ async def test_groups_endpoint_scopes_jwt_users_to_accessible_branches(async_ses
     async def override_db():
         yield async_session
 
-    token = create_access_token(110, 'manager')
+    token = await issue_access_token(async_session, 110, 'manager')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -231,7 +232,7 @@ async def test_apply_company_scope_rejects_a_principal_with_no_branches(async_se
     async def override_db():
         yield async_session
 
-    token = create_access_token(140, 'manager')
+    token = await issue_access_token(async_session, 140, 'manager')
     headers = {'Authorization': f'Bearer {token}'}
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
@@ -286,7 +287,7 @@ async def test_stats_rejects_a_principal_with_no_branches(async_session, monkeyp
     async def override_db():
         yield async_session
 
-    token = create_access_token(141, 'branch_admin')
+    token = await issue_access_token(async_session, 141, 'branch_admin')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -337,7 +338,7 @@ async def test_raw_api_staff_scopes_linked_viewer_and_exports(async_session, mon
     async def override_db():
         yield async_session
 
-    token = create_access_token(120, 'barber')
+    token = await issue_access_token(async_session, 120, 'barber')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -404,7 +405,7 @@ async def test_raw_api_export_refuses_a_personal_role_with_no_staff_row(async_se
     async def override_db():
         yield async_session
 
-    token = create_access_token(130, 'barber')
+    token = await issue_access_token(async_session, 130, 'barber')
     headers = {'Authorization': f'Bearer {token}'}
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
@@ -470,13 +471,15 @@ async def test_catalog_money_fields_are_hidden_from_non_financial_roles(async_se
     async def override_db():
         yield async_session
 
-    token = create_access_token(130, 'manager')
+    token = await issue_access_token(async_session, 130, 'manager')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         services = await client.get('/services', headers={'Authorization': f'Bearer {token}'})
         goods = await client.get('/goods', headers={'Authorization': f'Bearer {token}'})
-        filtered = await client.get('/services', params={'min_price': 1000}, headers={'Authorization': f'Bearer {token}'})
+        filtered = await client.get(
+            '/services', params={'min_price': 1000}, headers={'Authorization': f'Bearer {token}'}
+        )
 
     app.dependency_overrides.clear()
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
@@ -539,8 +542,8 @@ async def test_csv_export_blanks_money_columns_for_non_financial_roles(async_ses
     async def override_db():
         yield async_session
 
-    manager_headers = {'Authorization': f'Bearer {create_access_token(151, "manager")}'}
-    owner_headers = {'Authorization': f'Bearer {create_access_token(152, "owner")}'}
+    manager_headers = {'Authorization': f'Bearer {await issue_access_token(async_session, 151, "manager")}'}
+    owner_headers = {'Authorization': f'Bearer {await issue_access_token(async_session, 152, "owner")}'}
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     cases = [
@@ -662,7 +665,7 @@ async def test_clients_endpoint_rejects_viewer_role(async_session):
     async def override_db():
         yield async_session
 
-    token = create_access_token(202, 'barber')
+    token = await issue_access_token(async_session, 202, 'barber')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -681,7 +684,7 @@ async def test_clients_endpoint_scopes_manager_and_logs_safe_audit(async_session
     async def override_db():
         yield async_session
 
-    token = create_access_token(201, 'manager')
+    token = await issue_access_token(async_session, 201, 'manager')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -728,7 +731,7 @@ async def test_platform_admin_clients_requires_selected_tenant(async_session):
     async def override_db():
         yield async_session
 
-    token = create_access_token(203, 'platform_admin')
+    token = await issue_access_token(async_session, 203, 'platform_admin')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -753,7 +756,7 @@ async def test_clients_csv_export_is_scoped_and_audited(async_session):
     async def override_db():
         yield async_session
 
-    token = create_access_token(201, 'manager')
+    token = await issue_access_token(async_session, 201, 'manager')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -798,7 +801,7 @@ async def test_company_scoped_csv_export_uses_jwt_branch_scope(async_session):
     async def override_db():
         yield async_session
 
-    token = create_access_token(201, 'manager')
+    token = await issue_access_token(async_session, 201, 'manager')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -822,7 +825,7 @@ async def test_clients_csv_export_rejects_non_user_or_viewer_access(async_sessio
 
     monkeypatch.setattr(api, 'API_KEY', 'legacy-api-key')
     monkeypatch.setattr(auth_deps, 'API_KEY', 'legacy-api-key')
-    viewer_token = create_access_token(202, 'barber')
+    viewer_token = await issue_access_token(async_session, 202, 'barber')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -874,7 +877,7 @@ async def test_stats_scopes_group_count_to_accessible_branches(async_session):
     async def override_db():
         yield async_session
 
-    token = create_access_token(161, 'branch_admin')
+    token = await issue_access_token(async_session, 161, 'branch_admin')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -924,7 +927,7 @@ async def test_groups_csv_matches_the_scoped_groups_listing(async_session):
     async def override_db():
         yield async_session
 
-    headers = {'Authorization': f'Bearer {create_access_token(162, "branch_admin")}'}
+    headers = {'Authorization': f'Bearer {await issue_access_token(async_session, 162, "branch_admin")}'}
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -1486,7 +1489,7 @@ async def _get_as(async_session, monkeypatch, user_id: int, role: str, paths: li
     async def override_db():
         yield async_session
 
-    headers = {'Authorization': f'Bearer {create_access_token(user_id, role)}'}
+    headers = {'Authorization': f'Bearer {await issue_access_token(async_session, user_id, role)}'}
     app.dependency_overrides[api.get_async_db] = override_db
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
@@ -1697,7 +1700,20 @@ def test_neutralize_formula_leaves_phone_like_text_alone(value):
 
 @pytest.mark.parametrize(
     'value',
-    ['=1+1', '@SUM(A1)', '+cmd|calc', '-1+1', '+7 999 abc', '-', '+', '\t12', '\r12', '=7999', "+7\n=1+1", '+7 (999)\t1'],
+    [
+        '=1+1',
+        '@SUM(A1)',
+        '+cmd|calc',
+        '-1+1',
+        '+7 999 abc',
+        '-',
+        '+',
+        '\t12',
+        '\r12',
+        '=7999',
+        "+7\n=1+1",
+        '+7 (999)\t1',
+    ],
 )
 def test_neutralize_formula_still_guards_everything_else(value):
     assert api.neutralize_formula(value) == "'" + value

@@ -51,7 +51,9 @@ def upgrade() -> None:
             schema='public',
         )
         op.create_index('ix_service_kpi_assignments_group_id', 'service_kpi_assignments', ['group_id'], schema='public')
-        op.create_index('ix_service_kpi_assignments_service_id', 'service_kpi_assignments', ['service_id'], schema='public')
+        op.create_index(
+            'ix_service_kpi_assignments_service_id', 'service_kpi_assignments', ['service_id'], schema='public'
+        )
 
 
 def downgrade() -> None:
@@ -61,7 +63,9 @@ def downgrade() -> None:
     if inspector.has_table('service_kpi_assignments', schema='public'):
         indexes = {index['name'] for index in inspector.get_indexes('service_kpi_assignments', schema='public')}
         if 'ix_service_kpi_assignments_service_id' in indexes:
-            op.drop_index('ix_service_kpi_assignments_service_id', table_name='service_kpi_assignments', schema='public')
+            op.drop_index(
+                'ix_service_kpi_assignments_service_id', table_name='service_kpi_assignments', schema='public'
+            )
         if 'ix_service_kpi_assignments_group_id' in indexes:
             op.drop_index('ix_service_kpi_assignments_group_id', table_name='service_kpi_assignments', schema='public')
         op.drop_table('service_kpi_assignments', schema='public')

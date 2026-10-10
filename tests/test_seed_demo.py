@@ -1,16 +1,13 @@
 from argparse import Namespace
-from contextlib import contextmanager
 from datetime import date, datetime
 
-from sqlalchemy import create_engine, func, select, text
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import func, select
 
 import scripts.seed_demo as seed_demo
+from helpers import sqlite_session_with_system as shared_sqlite_session_with_system
 from models import (
     AccountCatalog,
     Appointment,
-    Base,
     Client,
     Comment,
     Company,
@@ -67,24 +64,8 @@ class FakeServicesAPI:
         return self._services
 
 
-@contextmanager
 def sqlite_session_with_system():
-    engine = create_engine(
-        'sqlite+pysqlite:///:memory:',
-        future=True,
-        connect_args={'check_same_thread': False},
-        poolclass=StaticPool,
-    )
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(engine, tables=SEED_TABLES)
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
-        yield db
-    finally:
-        db.close()
-        engine.dispose()
+    return shared_sqlite_session_with_system(SEED_TABLES)
 
 
 def demo_args(**overrides):
@@ -175,7 +156,10 @@ def test_seed_demo_creates_embedded_tenant_without_touching_real_data():
         assert demo_company.portal_account_id == account.id
         assert demo_company.source_type == seed_demo.DEMO_SOURCE_TYPE
         assert demo_company.external_id == 1
-        assert db.scalar(select(func.count(ServiceCatalog.service_id)).where(ServiceCatalog.company_id == demo_company.id)) > 0
+        assert (
+            db.scalar(select(func.count(ServiceCatalog.service_id)).where(ServiceCatalog.company_id == demo_company.id))
+            > 0
+        )
 
         branch = db.execute(select(PortalBranch).where(PortalBranch.company_id == demo_company.id)).scalar_one()
         assert branch.portal_account_id == account.id
@@ -292,7 +276,10 @@ def test_seed_demo_child_primary_keys_do_not_scale_from_large_company_ids():
         assert db.scalar(select(func.max(Appointment.id)).where(Appointment.company_id == demo_company_id)) < 0
         assert db.scalar(select(func.max(Transaction.id)).where(Transaction.company_id == demo_company_id)) < 0
         assert db.scalar(select(func.max(StaffSchedule.id)).where(StaffSchedule.company_id == demo_company_id)) < 0
-        assert db.scalar(select(func.max(ServiceCatalog.service_id)).where(ServiceCatalog.company_id == demo_company_id)) < 0
+        assert (
+            db.scalar(select(func.max(ServiceCatalog.service_id)).where(ServiceCatalog.company_id == demo_company_id))
+            < 0
+        )
         assert (
             db.scalar(
                 select(func.count(FinancialTransaction.id))
@@ -385,7 +372,10 @@ def test_seed_demo_repairs_existing_demo_catalog_and_payment_links():
         seed_demo.repair_demo_data(db, company_ids)
         db.commit()
 
-        assert db.scalar(select(func.count(ServiceCatalog.service_id)).where(ServiceCatalog.company_id == demo_company_id)) > 0
+        assert (
+            db.scalar(select(func.count(ServiceCatalog.service_id)).where(ServiceCatalog.company_id == demo_company_id))
+            > 0
+        )
         assert (
             db.scalar(
                 select(func.count(FinancialTransaction.id))

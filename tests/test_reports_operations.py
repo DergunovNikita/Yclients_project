@@ -328,7 +328,11 @@ async def test_staff_efficiency_keeps_same_name_staff_apart_and_labels_unassigne
     assert set(by_id) == {1, 2, None}
     assert (by_id[1]['staff_name'], by_id[1]['company_title'], by_id[1]['completed']) == ('Anna', 'Alpha', 1)
     assert (by_id[2]['staff_name'], by_id[2]['company_title'], by_id[2]['completed']) == ('Anna', 'Beta', 2)
-    assert (by_id[None]['staff_name'], by_id[None]['company_title'], by_id[None]['completed']) == ('Без мастера', None, 2)
+    assert (by_id[None]['staff_name'], by_id[None]['company_title'], by_id[None]['completed']) == (
+        'Без мастера',
+        None,
+        2,
+    )
     assert cards(data)['Сотрудников в отчете'] == 2
     labels = chart(data, 'staff_completed')['labels']
     assert len(set(labels)) == len(labels)

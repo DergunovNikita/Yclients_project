@@ -361,7 +361,9 @@ class FinancialTransaction(Base):
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
 
     __table_args__ = (
-        Index('uq_financial_transactions_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
+        Index(
+            'uq_financial_transactions_company_source_external', 'company_id', 'source_type', 'external_id', unique=True
+        ),
         Index('ix_financial_transactions_company_date', 'company_id', 'date'),
     )
 
@@ -756,7 +758,9 @@ class PortalEmailToken(Base):
     __table_args__ = {'schema': SYSTEM_SCHEMA}
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_users.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(
+        Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_users.id', ondelete='CASCADE'), nullable=False, index=True
+    )
     token_hash = Column(String(64), nullable=False, unique=True)
     purpose = Column(String(16), nullable=False)
     expires_at = Column(DateTime, nullable=False)
@@ -871,7 +875,9 @@ class SyncJobEvent(Base):
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    job_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.sync_jobs.id', ondelete='CASCADE'), nullable=False, index=True)
+    job_id = Column(
+        Integer, ForeignKey(f'{SYSTEM_SCHEMA}.sync_jobs.id', ondelete='CASCADE'), nullable=False, index=True
+    )
     portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), index=True)
     credential_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.yclients_credentials.id'), index=True)
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)

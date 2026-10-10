@@ -8,28 +8,18 @@ it has to rename `staff.position` on the mirror rows too, or the label the porta
 matching the category the dashboard reads back.
 """
 
-import importlib.util
 from datetime import datetime
-from pathlib import Path
 from types import SimpleNamespace
 
 import sqlalchemy as sa
 from sqlalchemy import create_engine, select
 
+from helpers import load_migration
 from models import PortalMetricVisibility, PortalUser, Staff
 
 
-MIGRATION_PATH = (
-    Path(__file__).resolve().parents[1]
-    / 'alembic' / 'versions' / '0046_split_viewer_into_admin_barber.py'
-)
-
-
 def _load_migration():
-    spec = importlib.util.spec_from_file_location('migration_0046', MIGRATION_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_migration('0046_split_viewer_into_admin_barber.py', 'migration_0046')
 
 
 def _user(user_id, role):

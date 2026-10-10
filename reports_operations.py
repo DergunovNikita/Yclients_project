@@ -332,11 +332,16 @@ async def build_peak_load(req: ReportRequest) -> dict[str, Any]:
         ),
     })
     if unplaced[0]:
-        base['notes'].append({
-            'kind': 'warning',
-            'title': 'Визиты без времени',
-            'text': f'{unplaced[0]} визитов не имеют времени начала: они учтены в карточках, но не в таблице и графиках.',
-        })
+        base['notes'].append(
+            {
+                'kind': 'warning',
+                'title': 'Визиты без времени',
+                'text': (
+                    f'{unplaced[0]} визитов не имеют времени начала: '
+                    'они учтены в карточках, но не в таблице и графиках.'
+                ),
+            }
+        )
 
     hour_rows = []
     for hour in hours:
@@ -408,11 +413,16 @@ async def build_booking_channels(req: ReportRequest) -> dict[str, Any]:
         ),
     })
     if unknown:
-        base['notes'].append({
-            'kind': 'warning',
-            'title': 'Автор записи неизвестен',
-            'text': f'У {unknown} записей автор не указан: они входят в «Записей», но не в онлайн и не в администратора.',
-        })
+        base['notes'].append(
+            {
+                'kind': 'warning',
+                'title': 'Автор записи неизвестен',
+                'text': (
+                    f'У {unknown} записей автор не указан: '
+                    'они входят в «Записей», но не в онлайн и не в администратора.'
+                ),
+            }
+        )
     labels = [row['period'] for row in period_rows]
     datasets = [
         {'label': 'Онлайн', 'data': [row['online'] for row in period_rows], 'format': NUMBER_FORMAT},
@@ -445,7 +455,9 @@ async def build_booking_channels(req: ReportRequest) -> dict[str, Any]:
         period_rows,
         {'unknown'},
     )
-    base['tables'] = [table('periods', 'Записи по каналам и периодам', columns, period_rows, row_key='period', x_kind='time')]
+    base['tables'] = [
+        table('periods', 'Записи по каналам и периодам', columns, period_rows, row_key='period', x_kind='time')
+    ]
     return base
 
 

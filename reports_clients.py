@@ -498,7 +498,13 @@ async def build_retention_3_6_12(req: ReportRequest) -> dict[str, Any]:
             'Доля вернувшихся в течение 3 месяцев, по месяцу первого визита',
             'line',
             [short_month_label(item['cohort_month']) for item in cohort_rows],
-            [{'label': 'Вернулись за 3 мес', 'data': [item['pct_3'] for item in cohort_rows], 'format': PERCENT_FORMAT}],
+            [
+                {
+                    'label': 'Вернулись за 3 мес',
+                    'data': [item['pct_3'] for item in cohort_rows],
+                    'format': PERCENT_FORMAT,
+                }
+            ],
             x_kind='time',
         )
     ]

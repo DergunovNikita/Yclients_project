@@ -7568,7 +7568,9 @@ def _calculate_plan_settings_metrics(
         staff_rows_by_company.setdefault(company_id, []).append((category, values))
 
     branch_metrics = {
-        int(branch['company_id']): _branch_metric_values_from_staff(staff_rows_by_company.get(int(branch['company_id']), []))
+        int(branch['company_id']): _branch_metric_values_from_staff(
+            staff_rows_by_company.get(int(branch['company_id']), [])
+        )
         for branch in branches
     }
     return branch_metrics, staff_metrics
@@ -7725,7 +7727,9 @@ async def save_plan_settings(
     actor_user_id: Optional[int],
     portal_account_id: Optional[int],
 ) -> dict[str, Any]:
-    period_start, period_end, normalized_branches, normalized_staff = _normalize_plan_settings_payload(month, branches, staff)
+    period_start, period_end, normalized_branches, normalized_staff = _normalize_plan_settings_payload(
+        month, branches, staff
+    )
     # Staff categories come from the plan, so anything cached from before this write is stale.
     _drop_role_period_caches(db)
     branch_ids = sorted({int(row['company_id']) for row in normalized_branches})
@@ -7736,7 +7740,11 @@ async def save_plan_settings(
     if unlisted_staff_company_ids:
         raise ValueError(f'staff company is not included in branches: {unlisted_staff_company_ids[0]}')
 
-    allowed = (allowed_company_ids or []) if force_allowed else (allowed_company_ids if allowed_company_ids is not None else await branch_company_ids(db))
+    allowed = (
+        (allowed_company_ids or [])
+        if force_allowed
+        else (allowed_company_ids if allowed_company_ids is not None else await branch_company_ids(db))
+    )
     if allowed is not None:
         invalid = sorted(set(branch_ids) - set(allowed))
         if invalid:

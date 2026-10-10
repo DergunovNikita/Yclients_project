@@ -18,7 +18,8 @@ import reports_finance
 import reports_team
 import sync_pipeline
 from auth_scope import AccessContext
-from auth_service import create_access_token, hash_password
+from auth_service import hash_password
+from conftest import issue_access_token
 from dashboard_service import _staff_leaderboards_payload, fetch_plan_fact
 from report_helpers import get_summary, table_rows
 from api import app
@@ -243,7 +244,13 @@ async def test_dashboard_reports_catalog_hides_money_reports_but_keeps_overview_
     # The Overview links to this report, so a role without revenue has to be able to open it.
     assert 'new_vs_returning_cross' in visible
     assert 'peak_load' in visible
-    for money_report in ('financial_overview', 'payment_methods', 'year_over_year', 'goods_dynamics', 'revenue_at_risk'):
+    for money_report in (
+        'financial_overview',
+        'payment_methods',
+        'year_over_year',
+        'goods_dynamics',
+        'revenue_at_risk',
+    ):
         assert money_report not in visible
     assert visible == {
         report_id
@@ -707,35 +714,153 @@ async def test_dashboard_year_over_year_uses_actual_history_and_overview_formula
     async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
     async_session.add_all([Client(id=value, name=f'Client {value}', company_id=1) for value in range(1, 9)])
     await async_session.flush()
-    async_session.add_all([
-        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2023, 5, 10), attendance=1),
-        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2023, 6, 11), attendance=1),
-        Appointment(id=3, company_id=1, staff_id=1, client_id=3, date=date(2024, 1, 10), attendance=1),
-        Appointment(id=4, company_id=1, staff_id=1, client_id=4, date=date(2024, 12, 11), attendance=1),
-        Appointment(id=5, company_id=1, staff_id=1, client_id=5, date=date(2025, 1, 10), attendance=1),
-        Appointment(id=6, company_id=1, staff_id=1, client_id=6, date=date(2025, 8, 12), attendance=1),
-        # Future visits, including one later today, are not factual boundaries.
-        Appointment(id=7, company_id=1, staff_id=1, client_id=7, date=date(2027, 1, 10), attendance=0),
-        Appointment(id=8, company_id=1, staff_id=1, client_id=8, date=date(2026, 8, 1), datetime=datetime(2026, 8, 1, 18, 0), attendance=1),
-    ])
+    async_session.add_all(
+        [
+            Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2023, 5, 10), attendance=1),
+            Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2023, 6, 11), attendance=1),
+            Appointment(id=3, company_id=1, staff_id=1, client_id=3, date=date(2024, 1, 10), attendance=1),
+            Appointment(id=4, company_id=1, staff_id=1, client_id=4, date=date(2024, 12, 11), attendance=1),
+            Appointment(id=5, company_id=1, staff_id=1, client_id=5, date=date(2025, 1, 10), attendance=1),
+            Appointment(id=6, company_id=1, staff_id=1, client_id=6, date=date(2025, 8, 12), attendance=1),
+            # Future visits, including one later today, are not factual boundaries.
+            Appointment(id=7, company_id=1, staff_id=1, client_id=7, date=date(2027, 1, 10), attendance=0),
+            Appointment(
+                id=8,
+                company_id=1,
+                staff_id=1,
+                client_id=8,
+                date=date(2026, 8, 1),
+                datetime=datetime(2026, 8, 1, 18, 0),
+                attendance=1,
+            ),
+        ]
+    )
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2023, 5, 10, 12, 0), amount=1000.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2023, 6, 11, 12, 0), amount=1200.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=3, date=datetime(2023, 5, 15, 12, 0), amount=100.0, expense_title='Пополнение личного счета', sold_item_type='personal_account', master_id=1, company_id=1),
-        FinancialTransaction(id=4, date=datetime(2024, 1, 10, 12, 0), amount=1500.0, record_id=3, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=5, date=datetime(2024, 12, 11, 12, 0), amount=2000.0, record_id=4, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=6, date=datetime(2024, 2, 10, 12, 0), amount=400.0, sold_item_id=10, sold_item_type='goods_transaction', master_id=1, company_id=1),
-        FinancialTransaction(id=7, date=datetime(2025, 1, 10, 12, 0), amount=2500.0, record_id=5, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=8, date=datetime(2025, 8, 12, 12, 0), amount=3000.0, record_id=6, sold_item_type='service', master_id=1, company_id=1),
-        # A revenue fact after the last visit must advance actual latest_year.
-        FinancialTransaction(id=9, date=datetime(2026, 7, 20, 12, 0), amount=500.0, expense_title='Пополнение личного счета', sold_item_type='personal_account', master_id=1, company_id=1),
-        FinancialTransaction(id=10, date=datetime(2026, 8, 1, 10, 0), amount=200.0, expense_title='Пополнение личного счета', sold_item_type='personal_account', master_id=1, company_id=1),
-        FinancialTransaction(id=11, date=datetime(2026, 8, 1, 18, 0), amount=999.0, expense_title='Пополнение личного счета', sold_item_type='personal_account', master_id=1, company_id=1),
-        SyncSourceState(company_id=1, source='appointments_detail', period_start=date(2023, 1, 1), period_end=date(2026, 12, 31), synced_at=datetime(2026, 8, 1)),
-        SyncSourceState(company_id=1, source='financial_transactions_detail', period_start=date(2023, 1, 1), period_end=date(2026, 12, 31), synced_at=datetime(2026, 8, 1)),
-        SyncSourceState(company_id=1, source='goods_transactions_detail', period_start=date(2023, 1, 1), period_end=date(2026, 12, 31), synced_at=datetime(2026, 8, 1)),
-    ])
+    async_session.add_all(
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2023, 5, 10, 12, 0),
+                amount=1000.0,
+                record_id=1,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2023, 6, 11, 12, 0),
+                amount=1200.0,
+                record_id=2,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=3,
+                date=datetime(2023, 5, 15, 12, 0),
+                amount=100.0,
+                expense_title='Пополнение личного счета',
+                sold_item_type='personal_account',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=4,
+                date=datetime(2024, 1, 10, 12, 0),
+                amount=1500.0,
+                record_id=3,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=5,
+                date=datetime(2024, 12, 11, 12, 0),
+                amount=2000.0,
+                record_id=4,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=6,
+                date=datetime(2024, 2, 10, 12, 0),
+                amount=400.0,
+                sold_item_id=10,
+                sold_item_type='goods_transaction',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=7,
+                date=datetime(2025, 1, 10, 12, 0),
+                amount=2500.0,
+                record_id=5,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=8,
+                date=datetime(2025, 8, 12, 12, 0),
+                amount=3000.0,
+                record_id=6,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            # A revenue fact after the last visit must advance actual latest_year.
+            FinancialTransaction(
+                id=9,
+                date=datetime(2026, 7, 20, 12, 0),
+                amount=500.0,
+                expense_title='Пополнение личного счета',
+                sold_item_type='personal_account',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=10,
+                date=datetime(2026, 8, 1, 10, 0),
+                amount=200.0,
+                expense_title='Пополнение личного счета',
+                sold_item_type='personal_account',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=11,
+                date=datetime(2026, 8, 1, 18, 0),
+                amount=999.0,
+                expense_title='Пополнение личного счета',
+                sold_item_type='personal_account',
+                master_id=1,
+                company_id=1,
+            ),
+            SyncSourceState(
+                company_id=1,
+                source='appointments_detail',
+                period_start=date(2023, 1, 1),
+                period_end=date(2026, 12, 31),
+                synced_at=datetime(2026, 8, 1),
+            ),
+            SyncSourceState(
+                company_id=1,
+                source='financial_transactions_detail',
+                period_start=date(2023, 1, 1),
+                period_end=date(2026, 12, 31),
+                synced_at=datetime(2026, 8, 1),
+            ),
+            SyncSourceState(
+                company_id=1,
+                source='goods_transactions_detail',
+                period_start=date(2023, 1, 1),
+                period_end=date(2026, 12, 31),
+                synced_at=datetime(2026, 8, 1),
+            ),
+        ]
+    )
     await async_session.commit()
 
     async def override_db():
@@ -856,22 +981,76 @@ async def test_year_over_year_charts_render_values_after_full_historical_sync(
         Appointment(id=4, company_id=1, staff_id=1, client_id=4, date=date(2026, 2, 13), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2023, 5, 10, 12, 0), amount=1000.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2024, 6, 11, 12, 0), amount=2000.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=3, date=datetime(2025, 7, 12, 12, 0), amount=3000.0, record_id=3, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=4, date=datetime(2026, 2, 13, 12, 0), amount=4000.0, record_id=4, sold_item_type='service', master_id=1, company_id=1),
-    ])
+    async_session.add_all(
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2023, 5, 10, 12, 0),
+                amount=1000.0,
+                record_id=1,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2024, 6, 11, 12, 0),
+                amount=2000.0,
+                record_id=2,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=3,
+                date=datetime(2025, 7, 12, 12, 0),
+                amount=3000.0,
+                record_id=3,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=4,
+                date=datetime(2026, 2, 13, 12, 0),
+                amount=4000.0,
+                record_id=4,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+        ]
+    )
 
     # Exactly what execute_sync() persists after one forced full historical pass.
     sync_end = report_now.date()
     sync_start = sync_pipeline.historical_sync_start_date(sync_end)
     schedule_end = sync_end + timedelta(days=config.SCHEDULE_DAYS)
-    async_session.add_all([
-        SyncSourceState(company_id=1, source='appointments_detail', period_start=sync_start, period_end=schedule_end, synced_at=report_now),
-        SyncSourceState(company_id=1, source='financial_transactions_detail', period_start=sync_start, period_end=sync_end, synced_at=report_now),
-        SyncSourceState(company_id=1, source='goods_transactions_detail', period_start=sync_start, period_end=sync_end, synced_at=report_now),
-    ])
+    async_session.add_all(
+        [
+            SyncSourceState(
+                company_id=1,
+                source='appointments_detail',
+                period_start=sync_start,
+                period_end=schedule_end,
+                synced_at=report_now,
+            ),
+            SyncSourceState(
+                company_id=1,
+                source='financial_transactions_detail',
+                period_start=sync_start,
+                period_end=sync_end,
+                synced_at=report_now,
+            ),
+            SyncSourceState(
+                company_id=1,
+                source='goods_transactions_detail',
+                period_start=sync_start,
+                period_end=sync_end,
+                synced_at=report_now,
+            ),
+        ]
+    )
     await async_session.commit()
 
     async def override_db():
@@ -1097,13 +1276,29 @@ async def test_reporting_start_keeps_overview_and_year_over_year_in_agreement(
         Appointment(id=2, company_id=1, staff_id=1, date=date(2025, 6, 10), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2025, 4, 30, 12), amount=800.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 6, 10, 12), amount=700.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
-    ])
     async_session.add_all(
-        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 4, 30, 12),
+                amount=800.0,
+                record_id=1,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 6, 10, 12),
+                amount=700.0,
+                record_id=2,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+        ]
     )
+    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now))
     await async_session.commit()
 
     summary = await dashboard_service.fetch_summary(
@@ -1153,10 +1348,30 @@ async def test_reporting_start_keeps_topup_kpi_and_trend_chart_in_agreement(
         ),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2025, 4, 30, 12), amount=5000.0, account_id=7, master_id=1, sold_item_id=1, sold_item_type='account_replenishment', company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 6, 10, 12), amount=1000.0, account_id=7, master_id=1, sold_item_id=2, sold_item_type='account_replenishment', company_id=1),
-    ])
+    async_session.add_all(
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 4, 30, 12),
+                amount=5000.0,
+                account_id=7,
+                master_id=1,
+                sold_item_id=1,
+                sold_item_type='account_replenishment',
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 6, 10, 12),
+                amount=1000.0,
+                account_id=7,
+                master_id=1,
+                sold_item_id=2,
+                sold_item_type='account_replenishment',
+                company_id=1,
+            ),
+        ]
+    )
     await async_session.commit()
 
     summary = await dashboard_service.fetch_summary(
@@ -1204,14 +1419,38 @@ async def test_reporting_start_cuts_service_revenue_paid_across_the_boundary(
         Appointment(id=3, company_id=1, staff_id=1, date=date(2025, 7, 10), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2025, 5, 20, 12), amount=300.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 3, 15, 12), amount=500.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=3, date=datetime(2025, 7, 10, 12), amount=700.0, record_id=3, sold_item_type='service', master_id=1, company_id=1),
-    ])
     async_session.add_all(
-        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 5, 20, 12),
+                amount=300.0,
+                record_id=1,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 3, 15, 12),
+                amount=500.0,
+                record_id=2,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=3,
+                date=datetime(2025, 7, 10, 12),
+                amount=700.0,
+                record_id=3,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+        ]
     )
+    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now))
     await async_session.commit()
 
     summary = await dashboard_service.fetch_summary(
@@ -1343,16 +1582,60 @@ async def test_reporting_start_keeps_pre_opening_direct_revenue_out_of_years_and
         Appointment(id=2, company_id=2, staff_id=2, date=date(2025, 6, 10), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2024, 2, 1, 12), amount=100.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=3, date=datetime(2025, 6, 10, 12), amount=700.0, record_id=2, sold_item_type='service', master_id=2, company_id=2),
-        # The older branch keeps 2024 in the report, so these pre-opening direct payments
-        # of the newer branch fall inside a reported year and only the cutoff removes them.
-        FinancialTransaction(id=4, date=datetime(2025, 3, 1, 12), amount=900.0, account_id=7, master_id=2, sold_item_id=4, sold_item_type='account_replenishment', company_id=2),
-        FinancialTransaction(id=5, date=datetime(2025, 4, 1, 12), amount=600.0, master_id=2, sold_item_id=5, sold_item_type='goods_transaction', company_id=2),
-    ])
+    async_session.add_all(
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2024, 2, 1, 12),
+                amount=100.0,
+                record_id=1,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=3,
+                date=datetime(2025, 6, 10, 12),
+                amount=700.0,
+                record_id=2,
+                sold_item_type='service',
+                master_id=2,
+                company_id=2,
+            ),
+            # The older branch keeps 2024 in the report, so these pre-opening direct payments
+            # of the newer branch fall inside a reported year and only the cutoff removes them.
+            FinancialTransaction(
+                id=4,
+                date=datetime(2025, 3, 1, 12),
+                amount=900.0,
+                account_id=7,
+                master_id=2,
+                sold_item_id=4,
+                sold_item_type='account_replenishment',
+                company_id=2,
+            ),
+            FinancialTransaction(
+                id=5,
+                date=datetime(2025, 4, 1, 12),
+                amount=600.0,
+                master_id=2,
+                sold_item_id=5,
+                sold_item_type='goods_transaction',
+                company_id=2,
+            ),
+        ]
+    )
     async_session.add(
-        GoodTransaction(id=1, company_id=2, master_id=2, type_id=1, document_id=1, date=datetime(2025, 4, 1, 12), amount=3.0, cost=300.0)
+        GoodTransaction(
+            id=1,
+            company_id=2,
+            master_id=2,
+            type_id=1,
+            document_id=1,
+            date=datetime(2025, 4, 1, 12),
+            amount=3.0,
+            cost=300.0,
+        )
     )
     for company_id in (1, 2):
         async_session.add_all(
@@ -1401,10 +1684,28 @@ async def test_reporting_start_certifies_the_opening_year_of_a_branch_synced_fro
         Appointment(id=2, company_id=1, staff_id=1, date=date(2025, 6, 10), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2025, 7, 5, 12), amount=400.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 6, 10, 12), amount=700.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
-    ])
+    async_session.add_all(
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 7, 5, 12),
+                amount=400.0,
+                record_id=1,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 6, 10, 12),
+                amount=700.0,
+                record_id=2,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+        ]
+    )
     # Synced from the opening date only — never from the start of 2025.
     async_session.add_all(
         _yoy_source_states(1, date(2025, 5, 1), report_now.date(), report_now)
@@ -1463,10 +1764,28 @@ async def test_reporting_start_clamps_coverage_for_a_branch_opened_mid_year(
         Appointment(id=2, company_id=2, staff_id=2, date=date(2025, 7, 4), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2025, 2, 4, 12), amount=100.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 7, 4, 12), amount=300.0, record_id=2, sold_item_type='service', master_id=2, company_id=2),
-    ])
+    async_session.add_all(
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 2, 4, 12),
+                amount=100.0,
+                record_id=1,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 7, 4, 12),
+                amount=300.0,
+                record_id=2,
+                sold_item_type='service',
+                master_id=2,
+                company_id=2,
+            ),
+        ]
+    )
     async_session.add_all(_yoy_source_states(1, date(2025, 1, 1), report_now.date(), report_now))
     # Branch 2 synced from its opening, which is inside the reported year.
     async_session.add_all(_yoy_source_states(2, date(2025, 6, 1), report_now.date(), report_now))
@@ -1514,18 +1833,74 @@ async def test_reporting_start_trims_breakdown_cards_client_blocks_and_staff_fac
         Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2025, 6, 10), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2025, 4, 20, 12), amount=900.0, account_id=7, master_id=1, sold_item_id=1, sold_item_type='account_replenishment', company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 6, 10, 12), amount=300.0, account_id=7, master_id=1, sold_item_id=2, sold_item_type='account_replenishment', company_id=1),
-        FinancialTransaction(id=3, date=datetime(2025, 4, 20, 14), amount=800.0, master_id=1, sold_item_id=3, sold_item_type='goods_transaction', company_id=1),
-        FinancialTransaction(id=4, date=datetime(2025, 6, 10, 14), amount=200.0, master_id=1, sold_item_id=4, sold_item_type='goods_transaction', company_id=1),
-        Comment(id=1, company_id=1, master_id=1, date=datetime(2025, 4, 20, 13), rating=5.0, text='before'),
-        Comment(id=2, company_id=1, master_id=1, date=datetime(2025, 6, 10, 13), rating=4.0, text='after'),
-    ])
-    async_session.add_all([
-        GoodTransaction(id=1, company_id=1, master_id=1, type_id=1, document_id=1, date=datetime(2025, 4, 20, 15), amount=2.0, cost=200.0),
-        GoodTransaction(id=2, company_id=1, master_id=1, type_id=1, document_id=2, date=datetime(2025, 6, 10, 15), amount=1.0, cost=100.0),
-    ])
+    async_session.add_all(
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 4, 20, 12),
+                amount=900.0,
+                account_id=7,
+                master_id=1,
+                sold_item_id=1,
+                sold_item_type='account_replenishment',
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 6, 10, 12),
+                amount=300.0,
+                account_id=7,
+                master_id=1,
+                sold_item_id=2,
+                sold_item_type='account_replenishment',
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=3,
+                date=datetime(2025, 4, 20, 14),
+                amount=800.0,
+                master_id=1,
+                sold_item_id=3,
+                sold_item_type='goods_transaction',
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=4,
+                date=datetime(2025, 6, 10, 14),
+                amount=200.0,
+                master_id=1,
+                sold_item_id=4,
+                sold_item_type='goods_transaction',
+                company_id=1,
+            ),
+            Comment(id=1, company_id=1, master_id=1, date=datetime(2025, 4, 20, 13), rating=5.0, text='before'),
+            Comment(id=2, company_id=1, master_id=1, date=datetime(2025, 6, 10, 13), rating=4.0, text='after'),
+        ]
+    )
+    async_session.add_all(
+        [
+            GoodTransaction(
+                id=1,
+                company_id=1,
+                master_id=1,
+                type_id=1,
+                document_id=1,
+                date=datetime(2025, 4, 20, 15),
+                amount=2.0,
+                cost=200.0,
+            ),
+            GoodTransaction(
+                id=2,
+                company_id=1,
+                master_id=1,
+                type_id=1,
+                document_id=2,
+                date=datetime(2025, 6, 10, 15),
+                amount=1.0,
+                cost=100.0,
+            ),
+        ]
+    )
     await async_session.commit()
 
     # Upstream would happily return untrimmed counts; a period reaching behind the
@@ -1652,22 +2027,74 @@ async def test_reporting_start_excludes_pre_opening_goods_and_opz(
         Client(id=2, name='Counted', company_id=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        # An OPZ event needs the rebooking created on the visit day or the day after.
-        # Client 1's anchor visit sits before the cutoff, so the rebooking loses its
-        # anchor; client 2 is the control that proves the fixture can produce an event.
-        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 4, 30), attendance=1, create_date=datetime(2025, 4, 1, 10)),
-        Appointment(id=2, company_id=1, staff_id=1, client_id=1, date=date(2025, 7, 1), attendance=1, create_date=datetime(2025, 5, 1, 10)),
-        Appointment(id=3, company_id=1, staff_id=1, client_id=2, date=date(2025, 6, 10), attendance=1, create_date=datetime(2025, 6, 1, 10)),
-        Appointment(id=4, company_id=1, staff_id=1, client_id=2, date=date(2025, 8, 1), attendance=1, create_date=datetime(2025, 6, 11, 10)),
-    ])
-    async_session.add_all([
-        GoodTransaction(id=1, company_id=1, master_id=1, type_id=1, document_id=1, date=datetime(2025, 4, 20, 12), amount=3.0, cost=300.0),
-        GoodTransaction(id=2, company_id=1, master_id=1, type_id=1, document_id=2, date=datetime(2025, 6, 20, 12), amount=2.0, cost=200.0),
-    ])
     async_session.add_all(
-        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+        [
+            # An OPZ event needs the rebooking created on the visit day or the day after.
+            # Client 1's anchor visit sits before the cutoff, so the rebooking loses its
+            # anchor; client 2 is the control that proves the fixture can produce an event.
+            Appointment(
+                id=1,
+                company_id=1,
+                staff_id=1,
+                client_id=1,
+                date=date(2025, 4, 30),
+                attendance=1,
+                create_date=datetime(2025, 4, 1, 10),
+            ),
+            Appointment(
+                id=2,
+                company_id=1,
+                staff_id=1,
+                client_id=1,
+                date=date(2025, 7, 1),
+                attendance=1,
+                create_date=datetime(2025, 5, 1, 10),
+            ),
+            Appointment(
+                id=3,
+                company_id=1,
+                staff_id=1,
+                client_id=2,
+                date=date(2025, 6, 10),
+                attendance=1,
+                create_date=datetime(2025, 6, 1, 10),
+            ),
+            Appointment(
+                id=4,
+                company_id=1,
+                staff_id=1,
+                client_id=2,
+                date=date(2025, 8, 1),
+                attendance=1,
+                create_date=datetime(2025, 6, 11, 10),
+            ),
+        ]
     )
+    async_session.add_all(
+        [
+            GoodTransaction(
+                id=1,
+                company_id=1,
+                master_id=1,
+                type_id=1,
+                document_id=1,
+                date=datetime(2025, 4, 20, 12),
+                amount=3.0,
+                cost=300.0,
+            ),
+            GoodTransaction(
+                id=2,
+                company_id=1,
+                master_id=1,
+                type_id=1,
+                document_id=2,
+                date=datetime(2025, 6, 20, 12),
+                amount=2.0,
+                cost=200.0,
+            ),
+        ]
+    )
+    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now))
     await async_session.commit()
 
     goods_facts = await dashboard_service.fetch_year_over_year_facts(
@@ -1727,10 +2154,28 @@ async def test_reporting_start_does_not_blank_years_a_branch_predates(
         Appointment(id=2, company_id=2, staff_id=2, date=date(2025, 3, 4), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2024, 3, 4, 12), amount=100.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 3, 4, 12), amount=300.0, record_id=2, sold_item_type='service', master_id=2, company_id=2),
-    ])
+    async_session.add_all(
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2024, 3, 4, 12),
+                amount=100.0,
+                record_id=1,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 3, 4, 12),
+                amount=300.0,
+                record_id=2,
+                sold_item_type='service',
+                master_id=2,
+                company_id=2,
+            ),
+        ]
+    )
     async_session.add_all(_yoy_source_states(1, date(2024, 1, 1), report_now.date(), report_now))
     # Branch 2 opened in 2025 and is deliberately left with no sync state at all: a year
     # the branch did not exist for must not be read as missing coverage.
@@ -1775,14 +2220,38 @@ async def test_year_over_year_reporting_start_trims_pre_opening_history(
         Appointment(id=3, company_id=1, staff_id=1, date=date(2025, 6, 10), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2023, 3, 4, 12), amount=900.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 4, 30, 12), amount=800.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=3, date=datetime(2025, 6, 10, 12), amount=700.0, record_id=3, sold_item_type='service', master_id=1, company_id=1),
-    ])
     async_session.add_all(
-        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2023, 3, 4, 12),
+                amount=900.0,
+                record_id=1,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 4, 30, 12),
+                amount=800.0,
+                record_id=2,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=3,
+                date=datetime(2025, 6, 10, 12),
+                amount=700.0,
+                record_id=3,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+        ]
     )
+    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now))
     await async_session.commit()
 
     report = await dashboard_reports.fetch_report_data(
@@ -1831,11 +2300,37 @@ async def test_year_over_year_reporting_start_cuts_each_branch_separately(
         Appointment(id=3, company_id=2, staff_id=2, date=date(2025, 3, 4), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2024, 3, 4, 12), amount=100.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2024, 3, 4, 12), amount=500.0, record_id=2, sold_item_type='service', master_id=2, company_id=2),
-        FinancialTransaction(id=3, date=datetime(2025, 3, 4, 12), amount=300.0, record_id=3, sold_item_type='service', master_id=2, company_id=2),
-    ])
+    async_session.add_all(
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2024, 3, 4, 12),
+                amount=100.0,
+                record_id=1,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2024, 3, 4, 12),
+                amount=500.0,
+                record_id=2,
+                sold_item_type='service',
+                master_id=2,
+                company_id=2,
+            ),
+            FinancialTransaction(
+                id=3,
+                date=datetime(2025, 3, 4, 12),
+                amount=300.0,
+                record_id=3,
+                sold_item_type='service',
+                master_id=2,
+                company_id=2,
+            ),
+        ]
+    )
     for company_id in (1, 2):
         async_session.add_all(
             _yoy_source_states(company_id, date(2024, 1, 1), report_now.date(), report_now)
@@ -1933,13 +2428,29 @@ async def test_reporting_end_keeps_history_and_drops_facts_after_the_handover(
         Appointment(id=2, company_id=1, staff_id=1, date=date(2025, 9, 5), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2025, 6, 10, 12), amount=700.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 9, 5, 12), amount=900.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
-    ])
     async_session.add_all(
-        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 6, 10, 12),
+                amount=700.0,
+                record_id=1,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 9, 5, 12),
+                amount=900.0,
+                record_id=2,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+        ]
     )
+    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now))
     await async_session.commit()
 
     summary = await dashboard_service.fetch_summary(
@@ -2001,17 +2512,49 @@ async def test_reporting_end_cuts_service_revenue_paid_across_the_boundary(
         Appointment(id=4, company_id=1, staff_id=1, date=date(2025, 8, 31), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2025, 9, 20, 12), amount=300.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 8, 15, 12), amount=500.0, record_id=2, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=3, date=datetime(2025, 7, 10, 12), amount=700.0, record_id=3, sold_item_type='service', master_id=1, company_id=1),
-        # Payment columns are timestamps: an afternoon on the closing day is still inside
-        # a window whose bound is that same day.
-        FinancialTransaction(id=4, date=datetime(2025, 8, 31, 14, 30), amount=400.0, record_id=4, sold_item_type='service', master_id=1, company_id=1),
-    ])
     async_session.add_all(
-        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 9, 20, 12),
+                amount=300.0,
+                record_id=1,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 8, 15, 12),
+                amount=500.0,
+                record_id=2,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=3,
+                date=datetime(2025, 7, 10, 12),
+                amount=700.0,
+                record_id=3,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            # Payment columns are timestamps: an afternoon on the closing day is still inside
+            # a window whose bound is that same day.
+            FinancialTransaction(
+                id=4,
+                date=datetime(2025, 8, 31, 14, 30),
+                amount=400.0,
+                record_id=4,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+        ]
     )
+    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now))
     await async_session.commit()
 
     summary = await dashboard_service.fetch_summary(
@@ -2052,10 +2595,28 @@ async def test_reporting_end_cuts_each_branch_separately(async_session):
         Appointment(id=2, company_id=2, staff_id=2, date=date(2025, 9, 5), attendance=1),
     ])
     await async_session.flush()
-    async_session.add_all([
-        FinancialTransaction(id=1, date=datetime(2025, 9, 5, 12), amount=700.0, record_id=1, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 9, 5, 12), amount=900.0, record_id=2, sold_item_type='service', master_id=2, company_id=2),
-    ])
+    async_session.add_all(
+        [
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 9, 5, 12),
+                amount=700.0,
+                record_id=1,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 9, 5, 12),
+                amount=900.0,
+                record_id=2,
+                sold_item_type='service',
+                master_id=2,
+                company_id=2,
+            ),
+        ]
+    )
     await async_session.commit()
 
     network = await dashboard_service.fetch_summary(
@@ -2714,27 +3275,97 @@ async def test_dashboard_year_over_year_keeps_partial_multi_company_year(
         lambda: datetime(2026, 8, 1, 12),
     )
     async_session.add(Group(id=1, title='G1'))
-    async_session.add_all([
-        Company(id=1, title='Salon 1', group_id=1),
-        Company(id=2, title='Salon 2', group_id=1),
-        Company(id=3, title='Unsynced salon', group_id=1),
-        Staff(id=1, name='Master 1', position='Барбер', company_id=1),
-        Staff(id=2, name='Master 2', position='Барбер', company_id=2),
-        Appointment(id=1, company_id=1, staff_id=1, date=date(2023, 1, 1), attendance=1),
-        Appointment(id=2, company_id=2, staff_id=2, date=date(2023, 1, 1), attendance=1),
-        Appointment(id=3, company_id=1, staff_id=1, date=date(2024, 12, 31), attendance=1),
-        Appointment(id=4, company_id=2, staff_id=2, date=date(2024, 12, 31), attendance=1),
-        FinancialTransaction(id=1, company_id=1, master_id=1, record_id=1, sold_item_type='service', date=datetime(2023, 1, 1, 12), amount=100.0),
-        FinancialTransaction(id=2, company_id=2, master_id=2, record_id=2, sold_item_type='service', date=datetime(2023, 1, 1, 12), amount=200.0),
-        FinancialTransaction(id=3, company_id=1, master_id=1, record_id=3, sold_item_type='service', date=datetime(2024, 12, 31, 12), amount=300.0),
-        FinancialTransaction(id=4, company_id=2, master_id=2, record_id=4, sold_item_type='service', date=datetime(2024, 12, 31, 12), amount=400.0),
-        SyncSourceState(company_id=1, source='appointments_detail', period_start=date(2023, 1, 1), period_end=date(2024, 12, 31), synced_at=datetime(2025, 1, 1)),
-        SyncSourceState(company_id=1, source='financial_transactions_detail', period_start=date(2023, 1, 1), period_end=date(2024, 12, 31), synced_at=datetime(2025, 1, 1)),
-        SyncSourceState(company_id=2, source='appointments_detail', period_start=date(2023, 1, 1), period_end=date(2024, 12, 31), synced_at=datetime(2025, 1, 1)),
-        SyncSourceState(company_id=2, source='financial_transactions_detail', period_start=date(2023, 1, 1), period_end=date(2023, 12, 31), synced_at=datetime(2025, 1, 1)),
-        SyncSourceState(company_id=1, source='goods_transactions_detail', period_start=date(2023, 1, 1), period_end=date(2024, 12, 31), synced_at=datetime(2025, 1, 1)),
-        SyncSourceState(company_id=2, source='goods_transactions_detail', period_start=date(2023, 1, 1), period_end=date(2024, 12, 31), synced_at=datetime(2025, 1, 1)),
-    ])
+    async_session.add_all(
+        [
+            Company(id=1, title='Salon 1', group_id=1),
+            Company(id=2, title='Salon 2', group_id=1),
+            Company(id=3, title='Unsynced salon', group_id=1),
+            Staff(id=1, name='Master 1', position='Барбер', company_id=1),
+            Staff(id=2, name='Master 2', position='Барбер', company_id=2),
+            Appointment(id=1, company_id=1, staff_id=1, date=date(2023, 1, 1), attendance=1),
+            Appointment(id=2, company_id=2, staff_id=2, date=date(2023, 1, 1), attendance=1),
+            Appointment(id=3, company_id=1, staff_id=1, date=date(2024, 12, 31), attendance=1),
+            Appointment(id=4, company_id=2, staff_id=2, date=date(2024, 12, 31), attendance=1),
+            FinancialTransaction(
+                id=1,
+                company_id=1,
+                master_id=1,
+                record_id=1,
+                sold_item_type='service',
+                date=datetime(2023, 1, 1, 12),
+                amount=100.0,
+            ),
+            FinancialTransaction(
+                id=2,
+                company_id=2,
+                master_id=2,
+                record_id=2,
+                sold_item_type='service',
+                date=datetime(2023, 1, 1, 12),
+                amount=200.0,
+            ),
+            FinancialTransaction(
+                id=3,
+                company_id=1,
+                master_id=1,
+                record_id=3,
+                sold_item_type='service',
+                date=datetime(2024, 12, 31, 12),
+                amount=300.0,
+            ),
+            FinancialTransaction(
+                id=4,
+                company_id=2,
+                master_id=2,
+                record_id=4,
+                sold_item_type='service',
+                date=datetime(2024, 12, 31, 12),
+                amount=400.0,
+            ),
+            SyncSourceState(
+                company_id=1,
+                source='appointments_detail',
+                period_start=date(2023, 1, 1),
+                period_end=date(2024, 12, 31),
+                synced_at=datetime(2025, 1, 1),
+            ),
+            SyncSourceState(
+                company_id=1,
+                source='financial_transactions_detail',
+                period_start=date(2023, 1, 1),
+                period_end=date(2024, 12, 31),
+                synced_at=datetime(2025, 1, 1),
+            ),
+            SyncSourceState(
+                company_id=2,
+                source='appointments_detail',
+                period_start=date(2023, 1, 1),
+                period_end=date(2024, 12, 31),
+                synced_at=datetime(2025, 1, 1),
+            ),
+            SyncSourceState(
+                company_id=2,
+                source='financial_transactions_detail',
+                period_start=date(2023, 1, 1),
+                period_end=date(2023, 12, 31),
+                synced_at=datetime(2025, 1, 1),
+            ),
+            SyncSourceState(
+                company_id=1,
+                source='goods_transactions_detail',
+                period_start=date(2023, 1, 1),
+                period_end=date(2024, 12, 31),
+                synced_at=datetime(2025, 1, 1),
+            ),
+            SyncSourceState(
+                company_id=2,
+                source='goods_transactions_detail',
+                period_start=date(2023, 1, 1),
+                period_end=date(2024, 12, 31),
+                synced_at=datetime(2025, 1, 1),
+            ),
+        ]
+    )
     await async_session.commit()
 
     async def override_db():
@@ -2794,16 +3425,34 @@ async def test_year_over_year_query_count_does_not_grow_with_history_years(
         lambda: datetime(2026, 8, 1, 12, 0),
     )
     async_session.add(Group(id=1, title='G1'))
-    async_session.add_all([
-        Company(id=1, title='Salon 1', group_id=1),
-        Company(id=2, title='Salon 2', group_id=1),
-        Staff(id=1, name='Master 1', position='Барбер', company_id=1),
-        Staff(id=2, name='Master 2', position='Барбер', company_id=2),
-        Appointment(id=1, company_id=1, staff_id=1, date=date(2015, 1, 1), attendance=1),
-        Appointment(id=2, company_id=2, staff_id=2, date=date(2026, 7, 1), attendance=1),
-        FinancialTransaction(id=1, company_id=1, master_id=1, record_id=1, sold_item_type='service', date=datetime(2015, 1, 1, 12), amount=100.0),
-        FinancialTransaction(id=2, company_id=2, master_id=2, record_id=2, sold_item_type='service', date=datetime(2026, 7, 1, 12), amount=200.0),
-    ])
+    async_session.add_all(
+        [
+            Company(id=1, title='Salon 1', group_id=1),
+            Company(id=2, title='Salon 2', group_id=1),
+            Staff(id=1, name='Master 1', position='Барбер', company_id=1),
+            Staff(id=2, name='Master 2', position='Барбер', company_id=2),
+            Appointment(id=1, company_id=1, staff_id=1, date=date(2015, 1, 1), attendance=1),
+            Appointment(id=2, company_id=2, staff_id=2, date=date(2026, 7, 1), attendance=1),
+            FinancialTransaction(
+                id=1,
+                company_id=1,
+                master_id=1,
+                record_id=1,
+                sold_item_type='service',
+                date=datetime(2015, 1, 1, 12),
+                amount=100.0,
+            ),
+            FinancialTransaction(
+                id=2,
+                company_id=2,
+                master_id=2,
+                record_id=2,
+                sold_item_type='service',
+                date=datetime(2026, 7, 1, 12),
+                amount=200.0,
+            ),
+        ]
+    )
     for company_id in (1, 2):
         for source in (
             'appointments_detail',
@@ -4618,7 +5267,7 @@ async def test_platform_admin_dashboard_bundle_requires_selected_tenant(async_se
     async def override_db():
         yield async_session
 
-    token = create_access_token(900, 'platform_admin')
+    token = await issue_access_token(async_session, 900, 'platform_admin')
     headers = {'Authorization': f'Bearer {token}'}
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
@@ -4680,7 +5329,7 @@ async def test_dashboard_widgets_reject_foreign_staff_scope(async_session, monke
     async def override_db():
         yield async_session
 
-    token = create_access_token(910, 'owner')
+    token = await issue_access_token(async_session, 910, 'owner')
     headers = {'Authorization': f'Bearer {token}'}
     params = {
         'start_date': '2025-01-01',
@@ -4806,10 +5455,10 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     async def override_db():
         yield async_session
 
-    viewer_token = create_access_token(100, 'barber')
-    manager_token = create_access_token(101, 'manager')
-    owner_token = create_access_token(102, 'owner')
-    branch_admin_token = create_access_token(103, 'branch_admin')
+    viewer_token = await issue_access_token(async_session, 100, 'barber')
+    manager_token = await issue_access_token(async_session, 101, 'manager')
+    owner_token = await issue_access_token(async_session, 102, 'owner')
+    branch_admin_token = await issue_access_token(async_session, 103, 'branch_admin')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -4978,8 +5627,8 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
     async def override_db():
         yield async_session
 
-    owner_headers = {'Authorization': f'Bearer {create_access_token(200, "owner")}'}
-    manager_headers = {'Authorization': f'Bearer {create_access_token(201, "manager")}'}
+    owner_headers = {'Authorization': f'Bearer {await issue_access_token(async_session, 200, "owner")}'}
+    manager_headers = {'Authorization': f'Bearer {await issue_access_token(async_session, 201, "manager")}'}
     summary_params = {'start_date': '2025-01-01', 'end_date': '2025-01-31'}
 
     # Sentinel money values, one per leaderboard board shape, distinct from every qty/pct
@@ -5220,12 +5869,50 @@ async def test_dashboard_summary_revenue_and_change(async_session):
         ),
     ])
     await async_session.flush()
-    async_session.add_all([
-        Transaction(id=1, appointment_id=1, service_id=10, service_title='Cut', cost=1200.0, first_cost=1500.0, amount=1, company_id=1),
-        Transaction(id=2, appointment_id=2, service_id=10, service_title='Cut', cost=700.0, first_cost=900.0, amount=1, company_id=1),
-        FinancialTransaction(id=1, date=datetime(2025, 1, 10, 12, 0, 0), amount=1000.0, record_id=1, visit_id=1, sold_item_id=10, sold_item_type='service', company_id=1),
-        FinancialTransaction(id=2, date=datetime(2024, 12, 20, 12, 0, 0), amount=500.0, record_id=2, visit_id=2, sold_item_id=10, sold_item_type='service', company_id=1),
-    ])
+    async_session.add_all(
+        [
+            Transaction(
+                id=1,
+                appointment_id=1,
+                service_id=10,
+                service_title='Cut',
+                cost=1200.0,
+                first_cost=1500.0,
+                amount=1,
+                company_id=1,
+            ),
+            Transaction(
+                id=2,
+                appointment_id=2,
+                service_id=10,
+                service_title='Cut',
+                cost=700.0,
+                first_cost=900.0,
+                amount=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 1, 10, 12, 0, 0),
+                amount=1000.0,
+                record_id=1,
+                visit_id=1,
+                sold_item_id=10,
+                sold_item_type='service',
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2024, 12, 20, 12, 0, 0),
+                amount=500.0,
+                record_id=2,
+                visit_id=2,
+                sold_item_id=10,
+                sold_item_type='service',
+                company_id=1,
+            ),
+        ]
+    )
     await async_session.commit()
 
     async def override_db():
@@ -5300,34 +5987,122 @@ async def test_dashboard_summary_split_revenue_and_average_checks(async_session)
         ),
     ])
     await async_session.flush()
-    async_session.add_all([
-        Transaction(id=1, appointment_id=1, service_id=10, service_title='Стрижка', cost=1000.0, first_cost=1000.0, amount=1, company_id=1),
-        Transaction(id=2, appointment_id=1, service_id=11, service_title='Воск', cost=500.0, first_cost=500.0, amount=1, company_id=1),
-        Transaction(id=3, appointment_id=2, service_id=10, service_title='Стрижка', cost=1500.0, first_cost=1500.0, amount=1, company_id=1),
-        Transaction(id=4, appointment_id=1, service_id=11, service_title='Воск', cost=700.0, first_cost=700.0, amount=1, company_id=1),
-        FinancialTransaction(id=1, date=datetime(2025, 1, 10, 12, 0, 0), amount=1000.0, record_id=1, visit_id=1, sold_item_id=10, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 1, 10, 12, 0, 0), amount=500.0, record_id=1, visit_id=1, sold_item_id=11, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=3, date=datetime(2025, 1, 11, 12, 0, 0), amount=1500.0, record_id=2, visit_id=2, sold_item_id=10, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=4, date=datetime(2025, 1, 10, 12, 0, 0), amount=700.0, record_id=1, visit_id=1, sold_item_id=11, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=5, date=datetime(2025, 1, 11, 12, 0, 0), amount=600.0, record_id=2, visit_id=2, sold_item_id=1, sold_item_type='goods_transaction', master_id=1, company_id=1),
-        GoodTransaction(
-            id=1,
-            document_id=1,
-            type_id=1,
-            amount=1.0,
-            cost=600.0,
-            master_id=1,
-            company_id=1,
-            date=datetime(2025, 1, 11, 12, 0, 0),
-        ),
-        ServiceLabel(
-            service_id=11,
-            company_id=1,
-            is_extra=True,
-            source='google_sheet:services',
-            updated_at=datetime(2025, 1, 1, 0, 0, 0),
-        ),
-    ])
+    async_session.add_all(
+        [
+            Transaction(
+                id=1,
+                appointment_id=1,
+                service_id=10,
+                service_title='Стрижка',
+                cost=1000.0,
+                first_cost=1000.0,
+                amount=1,
+                company_id=1,
+            ),
+            Transaction(
+                id=2,
+                appointment_id=1,
+                service_id=11,
+                service_title='Воск',
+                cost=500.0,
+                first_cost=500.0,
+                amount=1,
+                company_id=1,
+            ),
+            Transaction(
+                id=3,
+                appointment_id=2,
+                service_id=10,
+                service_title='Стрижка',
+                cost=1500.0,
+                first_cost=1500.0,
+                amount=1,
+                company_id=1,
+            ),
+            Transaction(
+                id=4,
+                appointment_id=1,
+                service_id=11,
+                service_title='Воск',
+                cost=700.0,
+                first_cost=700.0,
+                amount=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 1, 10, 12, 0, 0),
+                amount=1000.0,
+                record_id=1,
+                visit_id=1,
+                sold_item_id=10,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 1, 10, 12, 0, 0),
+                amount=500.0,
+                record_id=1,
+                visit_id=1,
+                sold_item_id=11,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=3,
+                date=datetime(2025, 1, 11, 12, 0, 0),
+                amount=1500.0,
+                record_id=2,
+                visit_id=2,
+                sold_item_id=10,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=4,
+                date=datetime(2025, 1, 10, 12, 0, 0),
+                amount=700.0,
+                record_id=1,
+                visit_id=1,
+                sold_item_id=11,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=5,
+                date=datetime(2025, 1, 11, 12, 0, 0),
+                amount=600.0,
+                record_id=2,
+                visit_id=2,
+                sold_item_id=1,
+                sold_item_type='goods_transaction',
+                master_id=1,
+                company_id=1,
+            ),
+            GoodTransaction(
+                id=1,
+                document_id=1,
+                type_id=1,
+                amount=1.0,
+                cost=600.0,
+                master_id=1,
+                company_id=1,
+                date=datetime(2025, 1, 11, 12, 0, 0),
+            ),
+            ServiceLabel(
+                service_id=11,
+                company_id=1,
+                is_extra=True,
+                source='google_sheet:services',
+                updated_at=datetime(2025, 1, 1, 0, 0, 0),
+            ),
+        ]
+    )
     await async_session.commit()
 
     async def override_db():
@@ -6151,20 +6926,129 @@ async def test_dashboard_top_services_merges_same_service_name_across_branches(a
         ),
     ])
     await async_session.flush()
-    async_session.add_all([
-        Transaction(id=1, appointment_id=1, service_id=10, service_title='Black Mask', cost=100.0, first_cost=100.0, amount=1, company_id=1),
-        Transaction(id=2, appointment_id=2, service_id=20, service_title='Black Mask', cost=200.0, first_cost=200.0, amount=2, company_id=2),
-        Transaction(id=3, appointment_id=1, service_id=30, service_title='Комплексное мытьё головы', cost=50.0, first_cost=50.0, amount=1, company_id=1),
-        Transaction(id=4, appointment_id=2, service_id=40, service_title='Комплексное мытье головы', cost=75.0, first_cost=75.0, amount=1, company_id=2),
-        Transaction(id=5, appointment_id=1, service_id=50, service_title='Стрижка', cost=80.0, first_cost=80.0, amount=1, company_id=1),
-        FinancialTransaction(id=1, date=datetime(2025, 1, 10, 12, 0, 0), amount=100.0, record_id=1, visit_id=1, sold_item_id=10, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 1, 11, 12, 0, 0), amount=400.0, record_id=2, visit_id=2, sold_item_id=20, sold_item_type='service', master_id=2, company_id=2),
-        FinancialTransaction(id=3, date=datetime(2025, 1, 10, 12, 0, 0), amount=50.0, record_id=1, visit_id=1, sold_item_id=30, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=4, date=datetime(2025, 1, 11, 12, 0, 0), amount=75.0, record_id=2, visit_id=2, sold_item_id=40, sold_item_type='service', master_id=2, company_id=2),
-        FinancialTransaction(id=5, date=datetime(2025, 1, 10, 12, 0, 0), amount=80.0, record_id=1, visit_id=1, sold_item_id=50, sold_item_type='service', master_id=1, company_id=1),
-        ServiceLabel(service_id=10, company_id=1, is_extra=True, source='google_sheet:services', updated_at=datetime(2025, 1, 1, 0, 0, 0)),
-        ServiceLabel(service_id=20, company_id=2, is_extra=True, source='google_sheet:services', updated_at=datetime(2025, 1, 1, 0, 0, 0)),
-    ])
+    async_session.add_all(
+        [
+            Transaction(
+                id=1,
+                appointment_id=1,
+                service_id=10,
+                service_title='Black Mask',
+                cost=100.0,
+                first_cost=100.0,
+                amount=1,
+                company_id=1,
+            ),
+            Transaction(
+                id=2,
+                appointment_id=2,
+                service_id=20,
+                service_title='Black Mask',
+                cost=200.0,
+                first_cost=200.0,
+                amount=2,
+                company_id=2,
+            ),
+            Transaction(
+                id=3,
+                appointment_id=1,
+                service_id=30,
+                service_title='Комплексное мытьё головы',
+                cost=50.0,
+                first_cost=50.0,
+                amount=1,
+                company_id=1,
+            ),
+            Transaction(
+                id=4,
+                appointment_id=2,
+                service_id=40,
+                service_title='Комплексное мытье головы',
+                cost=75.0,
+                first_cost=75.0,
+                amount=1,
+                company_id=2,
+            ),
+            Transaction(
+                id=5,
+                appointment_id=1,
+                service_id=50,
+                service_title='Стрижка',
+                cost=80.0,
+                first_cost=80.0,
+                amount=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 1, 10, 12, 0, 0),
+                amount=100.0,
+                record_id=1,
+                visit_id=1,
+                sold_item_id=10,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 1, 11, 12, 0, 0),
+                amount=400.0,
+                record_id=2,
+                visit_id=2,
+                sold_item_id=20,
+                sold_item_type='service',
+                master_id=2,
+                company_id=2,
+            ),
+            FinancialTransaction(
+                id=3,
+                date=datetime(2025, 1, 10, 12, 0, 0),
+                amount=50.0,
+                record_id=1,
+                visit_id=1,
+                sold_item_id=30,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=4,
+                date=datetime(2025, 1, 11, 12, 0, 0),
+                amount=75.0,
+                record_id=2,
+                visit_id=2,
+                sold_item_id=40,
+                sold_item_type='service',
+                master_id=2,
+                company_id=2,
+            ),
+            FinancialTransaction(
+                id=5,
+                date=datetime(2025, 1, 10, 12, 0, 0),
+                amount=80.0,
+                record_id=1,
+                visit_id=1,
+                sold_item_id=50,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            ServiceLabel(
+                service_id=10,
+                company_id=1,
+                is_extra=True,
+                source='google_sheet:services',
+                updated_at=datetime(2025, 1, 1, 0, 0, 0),
+            ),
+            ServiceLabel(
+                service_id=20,
+                company_id=2,
+                is_extra=True,
+                source='google_sheet:services',
+                updated_at=datetime(2025, 1, 1, 0, 0, 0),
+            ),
+        ]
+    )
     await async_session.commit()
 
     async def override_db():
@@ -6315,13 +7199,59 @@ async def test_extra_service_labels_are_scoped_to_branch_in_calculations(async_s
         ),
     ])
     await async_session.flush()
-    async_session.add_all([
-        Transaction(id=1, appointment_id=1, service_id=10, service_title='Branch-only extra', cost=100.0, first_cost=100.0, amount=1, company_id=1),
-        Transaction(id=2, appointment_id=2, service_id=10, service_title='Branch-only extra', cost=200.0, first_cost=200.0, amount=1, company_id=2),
-        FinancialTransaction(id=1, date=datetime(2025, 1, 10, 12, 0, 0), amount=100.0, record_id=1, visit_id=1, sold_item_id=10, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 1, 11, 12, 0, 0), amount=200.0, record_id=2, visit_id=2, sold_item_id=10, sold_item_type='service', master_id=2, company_id=2),
-        ServiceLabel(service_id=10, company_id=1, is_extra=True, source='google_sheet:services', updated_at=datetime(2025, 1, 1, 0, 0, 0)),
-    ])
+    async_session.add_all(
+        [
+            Transaction(
+                id=1,
+                appointment_id=1,
+                service_id=10,
+                service_title='Branch-only extra',
+                cost=100.0,
+                first_cost=100.0,
+                amount=1,
+                company_id=1,
+            ),
+            Transaction(
+                id=2,
+                appointment_id=2,
+                service_id=10,
+                service_title='Branch-only extra',
+                cost=200.0,
+                first_cost=200.0,
+                amount=1,
+                company_id=2,
+            ),
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 1, 10, 12, 0, 0),
+                amount=100.0,
+                record_id=1,
+                visit_id=1,
+                sold_item_id=10,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 1, 11, 12, 0, 0),
+                amount=200.0,
+                record_id=2,
+                visit_id=2,
+                sold_item_id=10,
+                sold_item_type='service',
+                master_id=2,
+                company_id=2,
+            ),
+            ServiceLabel(
+                service_id=10,
+                company_id=1,
+                is_extra=True,
+                source='google_sheet:services',
+                updated_at=datetime(2025, 1, 1, 0, 0, 0),
+            ),
+        ]
+    )
     await async_session.commit()
 
     async def override_db():
@@ -6427,7 +7357,7 @@ async def test_dashboard_branch_scope_applies_to_plan_settings_write(async_sessi
     async def override_db():
         yield async_session
 
-    token = create_access_token(700, 'owner')
+    token = await issue_access_token(async_session, 700, 'owner')
     headers = {'Authorization': f'Bearer {token}'}
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
@@ -6664,34 +7594,94 @@ async def test_dashboard_bundle_filters_by_staff(async_session):
         ),
     ])
     await async_session.flush()
-    async_session.add_all([
-        Transaction(id=1, appointment_id=1, service_id=10, service_title='Cut 1', cost=1000.0, first_cost=1000.0, amount=1, company_id=1),
-        Transaction(id=2, appointment_id=2, service_id=20, service_title='Cut 2', cost=2000.0, first_cost=2000.0, amount=1, company_id=1),
-        FinancialTransaction(id=1, date=datetime(2025, 1, 10, 12, 0, 0), amount=1000.0, record_id=1, visit_id=1, sold_item_id=10, sold_item_type='service', master_id=1, company_id=1),
-        FinancialTransaction(id=2, date=datetime(2025, 1, 10, 14, 0, 0), amount=2000.0, record_id=2, visit_id=2, sold_item_id=20, sold_item_type='service', master_id=2, company_id=1),
-        FinancialTransaction(id=3, date=datetime(2025, 1, 10, 13, 0, 0), amount=300.0, record_id=1, visit_id=1, sold_item_id=1, sold_item_type='goods_transaction', master_id=None, company_id=1),
-        FinancialTransaction(id=4, date=datetime(2025, 1, 10, 15, 0, 0), amount=700.0, record_id=2, visit_id=2, sold_item_id=2, sold_item_type='goods_transaction', master_id=None, company_id=1),
-        GoodTransaction(
-            id=1,
-            document_id=1,
-            type_id=1,
-            amount=-1.0,
-            cost=300.0,
-            master_id=1,
-            company_id=1,
-            date=datetime(2025, 1, 10, 13, 0, 0),
-        ),
-        GoodTransaction(
-            id=2,
-            document_id=2,
-            type_id=1,
-            amount=-1.0,
-            cost=700.0,
-            master_id=2,
-            company_id=1,
-            date=datetime(2025, 1, 10, 15, 0, 0),
-        ),
-    ])
+    async_session.add_all(
+        [
+            Transaction(
+                id=1,
+                appointment_id=1,
+                service_id=10,
+                service_title='Cut 1',
+                cost=1000.0,
+                first_cost=1000.0,
+                amount=1,
+                company_id=1,
+            ),
+            Transaction(
+                id=2,
+                appointment_id=2,
+                service_id=20,
+                service_title='Cut 2',
+                cost=2000.0,
+                first_cost=2000.0,
+                amount=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=1,
+                date=datetime(2025, 1, 10, 12, 0, 0),
+                amount=1000.0,
+                record_id=1,
+                visit_id=1,
+                sold_item_id=10,
+                sold_item_type='service',
+                master_id=1,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=2,
+                date=datetime(2025, 1, 10, 14, 0, 0),
+                amount=2000.0,
+                record_id=2,
+                visit_id=2,
+                sold_item_id=20,
+                sold_item_type='service',
+                master_id=2,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=3,
+                date=datetime(2025, 1, 10, 13, 0, 0),
+                amount=300.0,
+                record_id=1,
+                visit_id=1,
+                sold_item_id=1,
+                sold_item_type='goods_transaction',
+                master_id=None,
+                company_id=1,
+            ),
+            FinancialTransaction(
+                id=4,
+                date=datetime(2025, 1, 10, 15, 0, 0),
+                amount=700.0,
+                record_id=2,
+                visit_id=2,
+                sold_item_id=2,
+                sold_item_type='goods_transaction',
+                master_id=None,
+                company_id=1,
+            ),
+            GoodTransaction(
+                id=1,
+                document_id=1,
+                type_id=1,
+                amount=-1.0,
+                cost=300.0,
+                master_id=1,
+                company_id=1,
+                date=datetime(2025, 1, 10, 13, 0, 0),
+            ),
+            GoodTransaction(
+                id=2,
+                document_id=2,
+                type_id=1,
+                amount=-1.0,
+                cost=700.0,
+                master_id=2,
+                company_id=1,
+                date=datetime(2025, 1, 10, 15, 0, 0),
+            ),
+        ]
+    )
     await async_session.commit()
 
     async def override_db():
@@ -7752,9 +8742,9 @@ async def test_manual_opz_facts_add_to_calculated_opz(async_session):
     assert save_response.status_code == 200
     assert editor_response.status_code == 200
     editor_data = editor_response.json()['data']
-    assert [(row['staff_id'], row['current_value'], row['value'], row['total_value']) for row in editor_data['rows']] == [
-        (2, 1.0, 3.0, 4.0)
-    ]
+    assert [
+        (row['staff_id'], row['current_value'], row['value'], row['total_value']) for row in editor_data['rows']
+    ] == [(2, 1.0, 3.0, 4.0)]
     assert editor_data['current_total'] == 1.0
     assert editor_data['manual_total'] == 3.0
     # `total_value` keeps the meaning it has for the reviews editor — the manual sum — and
@@ -13676,7 +14666,9 @@ async def test_dashboard_services_api_updates_extra_label_and_metrics(async_sess
             attendance=1,
         )
     )
-    async_session.add(Transaction(id=1, appointment_id=1, company_id=1, service_id=10, service_title='Black Mask', amount=2))
+    async_session.add(
+        Transaction(id=1, appointment_id=1, company_id=1, service_id=10, service_title='Black Mask', amount=2)
+    )
     async_session.add(
         FinancialTransaction(
             id=1,
@@ -13757,7 +14749,9 @@ async def test_dashboard_service_kpi_groups_and_single_assignment(async_session)
             attendance=1,
         )
     )
-    async_session.add(Transaction(id=1, appointment_id=1, company_id=1, service_id=10, service_title='Black Mask', amount=1))
+    async_session.add(
+        Transaction(id=1, appointment_id=1, company_id=1, service_id=10, service_title='Black Mask', amount=1)
+    )
     await async_session.commit()
 
     async def override_db():

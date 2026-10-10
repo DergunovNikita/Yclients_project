@@ -1,6 +1,4 @@
 """Migration 0054 drops the legacy catalog twins and write-only columns, and can put them back empty."""
-import importlib.util
-from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
@@ -8,16 +6,12 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
 import models
-
-MIGRATION = Path(__file__).resolve().parents[1] / 'alembic' / 'versions' / '0054_drop_legacy_catalogs.py'
+from helpers import load_migration
 
 
 @pytest.fixture
 def migration():
-    spec = importlib.util.spec_from_file_location('migration_0054', MIGRATION)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_migration('0054_drop_legacy_catalogs.py', 'migration_0054')
 
 
 def _run(engine, fn):

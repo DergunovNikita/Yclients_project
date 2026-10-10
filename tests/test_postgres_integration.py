@@ -69,7 +69,7 @@ def test_bootstrap_stamps_the_database_it_built(pg_session_factory):
     assert stamped == ScriptDirectory.from_config(cfg).get_current_head()
 
 
-def test_migration_creates_sync_jobs_and_typed_columns(pg_session_factory):
+def test_bootstrap_creates_sync_jobs_and_typed_columns(pg_session_factory):
     session = pg_session_factory()
     try:
         result = session.execute(text("""

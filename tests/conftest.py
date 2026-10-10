@@ -1,4 +1,6 @@
 import os
+import secrets
+from datetime import datetime, timedelta
 
 # Before anything imports config: APP_ENV now fails CLOSED, so any value outside
 # NON_PRODUCTION_ENV_NAMES — including unset — is treated as production and
@@ -140,3 +142,28 @@ async def async_session() -> AsyncGenerator[AsyncSession, None]:
     async with session_factory() as session:
         yield session
     await engine.dispose()
+
+
+def new_session_row(user_id: int, *, session_id: int | None = None) -> PortalRefreshToken:
+    """A live refresh-session row; access tokens are only valid while their session row is."""
+    now = datetime.utcnow()
+    return PortalRefreshToken(
+        id=session_id,
+        user_id=user_id,
+        token_hash=secrets.token_hex(32),
+        expires_at=now + timedelta(days=7),
+        last_used_at=now,
+        created_at=now,
+    )
+
+
+async def issue_access_token(db: AsyncSession, user_id: int, role: str, token_version: int = 0) -> str:
+    """Persist a real session for the user and return an access token bound to it, as login does."""
+    from auth_service import create_access_token
+
+    row = new_session_row(user_id)
+    db.add(row)
+    await db.flush()
+    session_id = row.id
+    await db.commit()
+    return create_access_token(user_id, role, token_version, session_id)

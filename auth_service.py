@@ -74,8 +74,8 @@ def verify_password(password: str, password_hash: str) -> bool:
 def create_access_token(
     user_id: int,
     role: str,
-    token_version: int = 0,
-    session_id: int | None = None,
+    token_version: int,
+    session_id: int,
 ) -> str:
     payload = {
         'sub': str(user_id),
@@ -83,9 +83,8 @@ def create_access_token(
         'tv': int(token_version or 0),
         'exp': datetime.utcnow() + timedelta(minutes=AUTH_JWT_EXPIRE_MINUTES),
         'iat': datetime.utcnow(),
+        'sid': int(session_id),
     }
-    if session_id is not None:
-        payload['sid'] = int(session_id)
     return jwt.encode(payload, AUTH_JWT_SECRET, algorithm='HS256')
 
 

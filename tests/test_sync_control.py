@@ -1,35 +1,13 @@
-from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 import sync_worker
-from models import Base, SyncJob, SyncJobEvent, SyncRun, SyncState, SyncStepRun, YClientsCredential
+from models import SyncJob, SyncJobEvent, SyncRun, SyncState, SyncStepRun, YClientsCredential
 from sync_control import SyncControlService
 from sync_jobs import SyncJobService
-
-
-@contextmanager
-def _sqlite_session(tables):
-    engine = create_engine(
-        'sqlite+pysqlite:///:memory:',
-        future=True,
-        connect_args={'check_same_thread': False},
-        poolclass=StaticPool,
-    )
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(engine, tables=tables)
-    session_local = sessionmaker(bind=engine)
-    session = session_local()
-    try:
-        yield session
-    finally:
-        session.close()
-        engine.dispose()
+from helpers import FakeConnection, FakeDatabase, FakeEngine, FakeSession
+from helpers import sqlite_session_with_system as _sqlite_session
 
 
 def test_set_state_serializes_datetime_to_isoformat():
@@ -398,16 +376,6 @@ def test_run_sync_job_locks_on_a_connection_no_pooled_session_can_take(monkeypat
     sessions = []
     lock_calls = {}
 
-    class FakeConnection:
-        def __init__(self):
-            self.closed = False
-
-        def execution_options(self, **_kwargs):
-            return self
-
-        def close(self):
-            self.closed = True
-
     class FakeSession:
         def __init__(self):
             self.committed = 0
@@ -483,26 +451,12 @@ def test_run_sync_job_releases_lock_when_create_run_raises(monkeypatch, tmp_path
 
     lock_calls = {}
 
-    class FakeConnection:
-        def __init__(self):
-            self.closed = False
-
-        def execution_options(self, **_kwargs):
-            return self
-
-        def close(self):
-            self.closed = True
-
     class FakeSession:
         def commit(self):
             pass
 
         def close(self):
             pass
-
-    class FakeEngine:
-        def connect(self):
-            return FakeConnection()
 
     class FakeDatabase:
         def __init__(self):
@@ -545,30 +499,6 @@ def test_run_sync_job_releases_lock_when_build_log_path_raises(monkeypatch, tmp_
 
     lock_calls = {}
 
-    class FakeConnection:
-        def __init__(self):
-            self.closed = False
-
-        def execution_options(self, **_kwargs):
-            return self
-
-        def close(self):
-            self.closed = True
-
-    class FakeSession:
-        def __init__(self):
-            self.closed = False
-
-        def commit(self):
-            pass
-
-        def close(self):
-            self.closed = True
-
-    class FakeEngine:
-        def connect(self):
-            return FakeConnection()
-
     class FakeDatabase:
         def __init__(self):
             self.engine = FakeEngine()
@@ -608,36 +538,6 @@ def test_run_sync_job_closes_connections_when_already_running_status_lookup_rais
     """
     import sync_orchestrator
 
-    class FakeConnection:
-        def __init__(self):
-            self.closed = False
-
-        def execution_options(self, **_kwargs):
-            return self
-
-        def close(self):
-            self.closed = True
-
-    class FakeSession:
-        def __init__(self):
-            self.closed = False
-
-        def close(self):
-            self.closed = True
-
-    class FakeEngine:
-        def connect(self):
-            return FakeConnection()
-
-    class FakeDatabase:
-        def __init__(self):
-            self.engine = FakeEngine()
-            self.control_db = FakeSession()
-            self.lock_conn = None
-
-        def get_db(self):
-            return self.control_db
-
     database = FakeDatabase()
     original_connect = database.engine.connect
 
@@ -671,36 +571,6 @@ def test_run_sync_job_closes_connections_when_acquire_lock_itself_raises(monkeyp
     out of the pool at that point and must still be closed.
     """
     import sync_orchestrator
-
-    class FakeConnection:
-        def __init__(self):
-            self.closed = False
-
-        def execution_options(self, **_kwargs):
-            return self
-
-        def close(self):
-            self.closed = True
-
-    class FakeSession:
-        def __init__(self):
-            self.closed = False
-
-        def close(self):
-            self.closed = True
-
-    class FakeEngine:
-        def connect(self):
-            return FakeConnection()
-
-    class FakeDatabase:
-        def __init__(self):
-            self.engine = FakeEngine()
-            self.control_db = FakeSession()
-            self.lock_conn = None
-
-        def get_db(self):
-            return self.control_db
 
     database = FakeDatabase()
     original_connect = database.engine.connect
@@ -737,39 +607,6 @@ def test_run_sync_job_closes_connections_when_release_lock_raises_after_create_r
     just reached through a third trigger.
     """
     import sync_orchestrator
-
-    class FakeConnection:
-        def __init__(self):
-            self.closed = False
-
-        def execution_options(self, **_kwargs):
-            return self
-
-        def close(self):
-            self.closed = True
-
-    class FakeSession:
-        def __init__(self):
-            self.closed = False
-
-        def commit(self):
-            pass
-
-        def close(self):
-            self.closed = True
-
-    class FakeEngine:
-        def connect(self):
-            return FakeConnection()
-
-    class FakeDatabase:
-        def __init__(self):
-            self.engine = FakeEngine()
-            self.control_db = FakeSession()
-            self.lock_conn = None
-
-        def get_db(self):
-            return self.control_db
 
     database = FakeDatabase()
     original_connect = database.engine.connect
@@ -815,39 +652,6 @@ def test_run_sync_job_closes_connections_when_release_lock_raises_at_normal_fini
     to hit this, not just a contrived one.
     """
     import sync_orchestrator
-
-    class FakeConnection:
-        def __init__(self):
-            self.closed = False
-
-        def execution_options(self, **_kwargs):
-            return self
-
-        def close(self):
-            self.closed = True
-
-    class FakeSession:
-        def __init__(self):
-            self.closed = False
-
-        def commit(self):
-            pass
-
-        def close(self):
-            self.closed = True
-
-    class FakeEngine:
-        def connect(self):
-            return FakeConnection()
-
-    class FakeDatabase:
-        def __init__(self):
-            self.engine = FakeEngine()
-            self.control_db = FakeSession()
-            self.lock_conn = None
-
-        def get_db(self):
-            return self.control_db
 
     database = FakeDatabase()
     original_connect = database.engine.connect
@@ -906,39 +710,6 @@ def test_run_sync_job_releases_lock_even_when_notification_building_raises(monke
     raising for any reason must not prevent the release, and must not escape run_sync_job.
     """
     import sync_orchestrator
-
-    class FakeConnection:
-        def __init__(self):
-            self.closed = False
-
-        def execution_options(self, **_kwargs):
-            return self
-
-        def close(self):
-            self.closed = True
-
-    class FakeSession:
-        def __init__(self):
-            self.closed = False
-
-        def commit(self):
-            pass
-
-        def close(self):
-            self.closed = True
-
-    class FakeEngine:
-        def connect(self):
-            return FakeConnection()
-
-    class FakeDatabase:
-        def __init__(self):
-            self.engine = FakeEngine()
-            self.control_db = FakeSession()
-            self.lock_conn = None
-
-        def get_db(self):
-            return self.control_db
 
     database = FakeDatabase()
     original_connect = database.engine.connect
@@ -1134,10 +905,16 @@ def test_purge_old_jobs_if_due_throttles_to_once_per_interval():
 
 def test_cleanup_stale_runs_abandons_only_running_rows_and_counts_them():
     with _sqlite_session([SyncRun.__table__]) as session:
-        session.add_all([
-            SyncRun(mode='full', trigger_type='manual', status='running', initiator='x', started_at=datetime(2026, 1, 1)),
-            SyncRun(mode='full', trigger_type='manual', status='success', initiator='x', started_at=datetime(2026, 1, 2)),
-        ])
+        session.add_all(
+            [
+                SyncRun(
+                    mode='full', trigger_type='manual', status='running', initiator='x', started_at=datetime(2026, 1, 1)
+                ),
+                SyncRun(
+                    mode='full', trigger_type='manual', status='success', initiator='x', started_at=datetime(2026, 1, 2)
+                ),
+            ]
+        )
         session.commit()
 
         abandoned = SyncControlService().cleanup_stale_runs(session)

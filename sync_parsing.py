@@ -43,7 +43,11 @@ def parse_datetime(value: Any) -> datetime | None:
     text = str(value).strip()
     if not text:
         return None
-    normalized = text.replace('Z', '+00:00').replace(' ', 'T', 1) if 'T' not in text and ' ' in text else text.replace('Z', '+00:00')
+    normalized = (
+        text.replace('Z', '+00:00').replace(' ', 'T', 1)
+        if 'T' not in text and ' ' in text
+        else text.replace('Z', '+00:00')
+    )
     try:
         parsed = datetime.fromisoformat(normalized)
         if parsed.tzinfo is not None:

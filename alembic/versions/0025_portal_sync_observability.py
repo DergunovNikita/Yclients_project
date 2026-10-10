@@ -86,7 +86,9 @@ def upgrade() -> None:
             'progress_pct': sa.Column('progress_pct', sa.Integer(), nullable=False, server_default='0'),
             'current_stage': sa.Column('current_stage', sa.String(), nullable=True),
             'step_results': sa.Column('step_results', sa.JSON(), nullable=True),
-            'cancel_requested': sa.Column('cancel_requested', sa.Boolean(), nullable=False, server_default=sa.text('false')),
+            'cancel_requested': sa.Column(
+                'cancel_requested', sa.Boolean(), nullable=False, server_default=sa.text('false')
+            ),
         }
         for name, column in sync_job_columns.items():
             if not _has_column(inspector, 'sync_jobs', name, schema='system'):
@@ -145,7 +147,9 @@ def upgrade() -> None:
             schema='system',
         )
         op.create_index('ix_sync_job_events_job_id', 'sync_job_events', ['job_id'], schema='system')
-        op.create_index('ix_sync_job_events_portal_account_id', 'sync_job_events', ['portal_account_id'], schema='system')
+        op.create_index(
+            'ix_sync_job_events_portal_account_id', 'sync_job_events', ['portal_account_id'], schema='system'
+        )
         op.create_index('ix_sync_job_events_credential_id', 'sync_job_events', ['credential_id'], schema='system')
         op.create_index('ix_sync_job_events_company_id', 'sync_job_events', ['company_id'], schema='system')
         op.create_index('ix_sync_job_events_stage_key', 'sync_job_events', ['stage_key'], schema='system')
@@ -173,8 +177,12 @@ def upgrade() -> None:
             sa.ForeignKeyConstraint(['portal_account_id'], ['system.portal_accounts.id']),
             schema='system',
         )
-        op.create_index('ix_portal_audit_events_actor_user_id', 'portal_audit_events', ['actor_user_id'], schema='system')
-        op.create_index('ix_portal_audit_events_portal_account_id', 'portal_audit_events', ['portal_account_id'], schema='system')
+        op.create_index(
+            'ix_portal_audit_events_actor_user_id', 'portal_audit_events', ['actor_user_id'], schema='system'
+        )
+        op.create_index(
+            'ix_portal_audit_events_portal_account_id', 'portal_audit_events', ['portal_account_id'], schema='system'
+        )
         op.create_index('ix_portal_audit_events_action', 'portal_audit_events', ['action'], schema='system')
         op.create_index('ix_portal_audit_events_target_type', 'portal_audit_events', ['target_type'], schema='system')
         op.create_index('ix_portal_audit_events_target_id', 'portal_audit_events', ['target_id'], schema='system')
@@ -207,7 +215,15 @@ def downgrade() -> None:
             op.drop_index(index_name, table_name='sync_jobs', schema='system')
         except Exception:
             pass
-    for column in ('cancel_requested', 'step_results', 'current_stage', 'progress_pct', 'company_ids', 'credential_id', 'portal_account_id'):
+    for column in (
+        'cancel_requested',
+        'step_results',
+        'current_stage',
+        'progress_pct',
+        'company_ids',
+        'credential_id',
+        'portal_account_id',
+    ):
         if _has_column(inspector, 'sync_jobs', column, schema='system'):
             op.drop_column('sync_jobs', column, schema='system')
 

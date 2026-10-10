@@ -1,14 +1,11 @@
-from contextlib import contextmanager
 from datetime import datetime
 
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
-from models import Base, PortalAccount, YClientsCredential, YClientsCredentialCompany
+from helpers import sqlite_session_with_system
+from models import PortalAccount, YClientsCredential, YClientsCredentialCompany
 from yclients_credentials import (
     load_active_credentials_sync,
     load_credentials_for_companies_async,
@@ -20,28 +17,12 @@ from yclients_credentials import (
 )
 
 
-@contextmanager
 def _sync_credential_session():
-    engine = create_engine(
-        'sqlite+pysqlite:///:memory:',
-        future=True,
-        connect_args={'check_same_thread': False},
-        poolclass=StaticPool,
-    )
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(engine, tables=[
+    return sqlite_session_with_system([
         PortalAccount.__table__,
         YClientsCredential.__table__,
         YClientsCredentialCompany.__table__,
     ])
-    session_local = sessionmaker(bind=engine)
-    session = session_local()
-    try:
-        yield session
-    finally:
-        session.close()
-        engine.dispose()
 
 
 def _credential(**overrides) -> YClientsCredential:

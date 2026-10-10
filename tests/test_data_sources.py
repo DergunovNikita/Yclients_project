@@ -127,7 +127,9 @@ async def test_yclients_materialize_branches_scopes_external_ids_by_tenant(async
     groups = (await async_session.execute(select(Group).order_by(Group.portal_account_id))).scalars().all()
     assert [(group.portal_account_id, group.external_id) for group in groups] == [(1, 10), (2, 10)]
 
-    branches = (await async_session.execute(select(PortalBranch).order_by(PortalBranch.portal_account_id))).scalars().all()
+    branches = (
+        (await async_session.execute(select(PortalBranch).order_by(PortalBranch.portal_account_id))).scalars().all()
+    )
     assert [(branch.portal_account_id, branch.company_id) for branch in branches] == [
         (1, tenant_a_ids[0]),
         (2, tenant_b_ids[0]),

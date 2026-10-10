@@ -34,7 +34,9 @@ def upgrade() -> None:
         op.add_column('plan_metrics', sa.Column('staff_category', sa.String(), nullable=True), schema='public')
         op.create_index('ix_plan_metrics_staff_category', 'plan_metrics', ['staff_category'], schema='public')
 
-    constraints = {constraint['name'] for constraint in inspector.get_unique_constraints('plan_metrics', schema='public')}
+    constraints = {
+        constraint['name'] for constraint in inspector.get_unique_constraints('plan_metrics', schema='public')
+    }
     if 'uq_plan_metric_period_company_metric' in constraints:
         op.drop_constraint(
             'uq_plan_metric_period_company_metric',
@@ -90,7 +92,9 @@ def downgrade() -> None:
     if 'staff_id' in columns:
         op.drop_column('plan_metrics', 'staff_id', schema='public')
 
-    constraints = {constraint['name'] for constraint in inspector.get_unique_constraints('plan_metrics', schema='public')}
+    constraints = {
+        constraint['name'] for constraint in inspector.get_unique_constraints('plan_metrics', schema='public')
+    }
     if 'uq_plan_metric_period_company_metric' not in constraints:
         op.create_unique_constraint(
             'uq_plan_metric_period_company_metric',

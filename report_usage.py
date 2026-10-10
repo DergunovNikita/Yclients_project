@@ -181,7 +181,9 @@ def track_report_usage(
 
 
 def _catalog() -> list[tuple[str, str]]:
-    return [(definition.id, definition.title) for definition in REPORT_REGISTRY.values() if definition.id != REPORT_USAGE_ID]
+    return [
+        (definition.id, definition.title) for definition in REPORT_REGISTRY.values() if definition.id != REPORT_USAGE_ID
+    ]
 
 
 async def fetch_report_usage(
@@ -220,7 +222,9 @@ async def fetch_report_usage(
         row.report_id: row.user_days
         for row in (
             await db.execute(
-                select(user_days_source.c.report_id, func.count().label('user_days')).group_by(user_days_source.c.report_id)
+                select(user_days_source.c.report_id, func.count().label('user_days')).group_by(
+                    user_days_source.c.report_id
+                )
             )
         ).all()
     }
@@ -343,7 +347,11 @@ async def fetch_report_usage(
     }
     if tracking_since is None:
         base['notes'].append(
-            {'kind': 'warning', 'title': 'Данных пока нет', 'text': 'Учёт открытий отчётов ещё не накопил ни одной записи.'}
+            {
+                'kind': 'warning',
+                'title': 'Данных пока нет',
+                'text': 'Учёт открытий отчётов ещё не накопил ни одной записи.',
+            }
         )
     elif min(start, unused_since) < tracking_since:
         # The «not opened» list reads UNUSED_WINDOW_DAYS back from the period end, so it can reach before

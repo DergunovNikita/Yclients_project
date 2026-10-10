@@ -18,6 +18,7 @@ import yclients_credential_routes
 from api import app
 from auth_sessions import ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME
 from auth_service import TOKEN_PURPOSE_RESET, create_access_token, create_email_token, hash_password
+from conftest import issue_access_token
 from config import AUTH_CSRF_COOKIE_NAME
 from report_helpers import get_summary
 from yclients_credentials import new_credential
@@ -257,16 +258,16 @@ async def test_sessions_list_removes_inactive_and_oldest_excess_sessions(auth_db
 
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
-    bearer = create_access_token(1, 'owner')
+    bearer = create_access_token(1, 'owner', 0, 100)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         response = await client.get('/auth/sessions', headers={'Authorization': f'Bearer {bearer}'})
         removed_session = await client.get(
             '/auth/me',
-            headers={'Authorization': f'Bearer {create_access_token(1, "owner", session_id=104)}'},
+            headers={'Authorization': f'Bearer {create_access_token(1, "owner", 0, 104)}'},
         )
         kept_session = await client.get(
             '/auth/me',
-            headers={'Authorization': f'Bearer {create_access_token(1, "owner", session_id=100)}'},
+            headers={'Authorization': f'Bearer {create_access_token(1, "owner", 0, 100)}'},
         )
 
     app.dependency_overrides.clear()
@@ -374,7 +375,7 @@ async def test_cookie_mutation_requires_csrf_but_bearer_does_not(auth_db, monkey
             '/auth/change-password',
             json={'current_password': 'Admin12345!', 'new_password': 'Changed12345!'},
         )
-        cookie_bearer = create_access_token(1, 'owner')
+        cookie_bearer = await issue_access_token(auth_db, 1, 'owner')
         bearer_with_cookies_without_csrf = await cookie_client.post(
             '/auth/change-password',
             headers={'Authorization': f'Bearer {cookie_bearer}'},
@@ -394,7 +395,7 @@ async def test_cookie_mutation_requires_csrf_but_bearer_does_not(auth_db, monkey
     admin.token_version = 0
     await auth_db.commit()
 
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
     async with AsyncClient(transport=transport, base_url='http://test') as bearer_client:
         bearer = await bearer_client.post(
             '/auth/change-password',
@@ -430,7 +431,7 @@ async def test_platform_admin_me_without_selected_tenant(auth_db, monkeypatch):
     async def override_db():
         yield auth_db
 
-    token = create_access_token(50, 'platform_admin')
+    token = await issue_access_token(auth_db, 50, 'platform_admin')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -463,7 +464,7 @@ async def test_platform_admin_lists_portal_accounts(auth_db, monkeypatch):
     async def override_db():
         yield auth_db
 
-    token = create_access_token(51, 'platform_admin')
+    token = await issue_access_token(auth_db, 51, 'platform_admin')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -523,7 +524,7 @@ async def test_platform_admin_yclients_payload_test_requires_and_audits_selected
     async def override_db():
         yield auth_db
 
-    token = create_access_token(52, 'platform_admin')
+    token = await issue_access_token(auth_db, 52, 'platform_admin')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     payload = {
@@ -636,7 +637,7 @@ async def test_platform_admin_update_clears_platform_admin_tenant(auth_db, monke
     async def override_db():
         yield auth_db
 
-    token = create_access_token(55, 'platform_admin')
+    token = await issue_access_token(auth_db, 55, 'platform_admin')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -707,7 +708,7 @@ async def test_platform_admin_filters_yclients_credentials_by_selected_tenant(au
     async def override_db():
         yield auth_db
 
-    token = create_access_token(52, 'platform_admin')
+    token = await issue_access_token(auth_db, 52, 'platform_admin')
     headers = {'Authorization': f'Bearer {token}'}
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
@@ -790,7 +791,7 @@ async def test_platform_admin_move_yclients_credentials_requires_company_ids(aut
     async def override_db():
         yield auth_db
 
-    token = create_access_token(53, 'platform_admin')
+    token = await issue_access_token(auth_db, 53, 'platform_admin')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -861,7 +862,7 @@ async def test_platform_admin_move_yclients_credentials_updates_company_bindings
     async def override_db():
         yield auth_db
 
-    token = create_access_token(54, 'platform_admin')
+    token = await issue_access_token(auth_db, 54, 'platform_admin')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -903,7 +904,7 @@ async def test_platform_admin_create_yclients_credentials_rejects_unknown_tenant
     async def override_db():
         yield auth_db
 
-    token = create_access_token(57, 'platform_admin')
+    token = await issue_access_token(auth_db, 57, 'platform_admin')
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
@@ -967,7 +968,7 @@ async def test_platform_admin_user_management_is_scoped_to_selected_tenant(auth_
     async def override_db():
         yield auth_db
 
-    token = create_access_token(53, 'platform_admin')
+    token = await issue_access_token(auth_db, 53, 'platform_admin')
     headers = {'Authorization': f'Bearer {token}'}
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
@@ -1024,7 +1025,7 @@ async def test_platform_admin_creates_tenant_users_in_selected_existing_tenant(a
     async def override_db():
         yield auth_db
 
-    token = create_access_token(53, 'platform_admin')
+    token = await issue_access_token(auth_db, 53, 'platform_admin')
     headers = {'Authorization': f'Bearer {token}'}
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
@@ -1092,7 +1093,7 @@ async def test_dashboard_auth_alias_login(auth_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_branch_user_cannot_access_other_branch(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(2, 'manager')
+    token = await issue_access_token(auth_db, 2, 'manager')
 
     async def override_db():
         yield auth_db
@@ -1121,7 +1122,7 @@ async def test_branch_user_cannot_access_other_branch(auth_db, monkeypatch):
 async def test_onboarding_branches_queue_full_sync(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     class FakeYClientsAPI:
         def __init__(self, partner_token, login, password):
@@ -1205,7 +1206,7 @@ async def test_onboarding_credentials_rejects_branch_owned_by_other_tenant(auth_
         created_at=datetime.utcnow(),
     ))
     await auth_db.commit()
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     class FakeYClientsAPI:
         def __init__(self, partner_token, login, password):
@@ -1255,7 +1256,7 @@ async def test_onboarding_claims_branch_from_admin_only_tenant(auth_db, monkeypa
         created_at=datetime.utcnow(),
     ))
     await auth_db.commit()
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     class FakeYClientsAPI:
         def __init__(self, partner_token, login, password):
@@ -1341,7 +1342,7 @@ async def test_onboarding_claims_branch_from_admin_only_tenant_with_active_crede
     )
     auth_db.add(YClientsCredentialCompany(credential_id=5, company_id=3))
     await auth_db.commit()
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     class FakeYClientsAPI:
         def __init__(self, partner_token, login, password):
@@ -1687,7 +1688,7 @@ async def test_onboarding_credentials_creates_tenant_for_new_owner(auth_db, monk
     auth_db.add(owner)
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
     await auth_db.commit()
-    token = create_access_token(70, 'owner')
+    token = await issue_access_token(auth_db, 70, 'owner')
 
     class FakeYClientsAPI:
         def __init__(self, partner_token, login, password):
@@ -1734,7 +1735,7 @@ async def test_onboarding_credentials_creates_tenant_for_new_owner(auth_db, monk
 @pytest.mark.asyncio
 async def test_owner_creates_manager(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -1766,7 +1767,7 @@ async def test_owner_creates_manager(auth_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_owner_can_assign_multiple_branches_to_manager_and_viewer(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -1815,7 +1816,7 @@ async def test_owner_can_assign_multiple_branches_to_manager_and_viewer(auth_db,
 @pytest.mark.asyncio
 async def test_owner_updates_user_email_login(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -1850,7 +1851,7 @@ async def test_owner_updates_user_email_login(auth_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_owner_update_user_email_rejects_duplicate(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -1871,7 +1872,7 @@ async def test_owner_update_user_email_rejects_duplicate(auth_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_branch_admin_creates_viewer_in_own_branch(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(3, 'branch_admin')
+    token = await issue_access_token(auth_db, 3, 'branch_admin')
 
     async def override_db():
         yield auth_db
@@ -1898,7 +1899,7 @@ async def test_branch_admin_creates_viewer_in_own_branch(auth_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_branch_admin_cannot_create_peer_role(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(3, 'branch_admin')
+    token = await issue_access_token(auth_db, 3, 'branch_admin')
 
     async def override_db():
         yield auth_db
@@ -1924,7 +1925,7 @@ async def test_branch_admin_cannot_create_peer_role(auth_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_branch_admin_cannot_create_user_in_foreign_branch(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(3, 'branch_admin')
+    token = await issue_access_token(auth_db, 3, 'branch_admin')
 
     async def override_db():
         yield auth_db
@@ -1950,7 +1951,7 @@ async def test_branch_admin_cannot_create_user_in_foreign_branch(auth_db, monkey
 @pytest.mark.asyncio
 async def test_owner_lists_same_rank_and_lower(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -1972,7 +1973,7 @@ async def test_owner_lists_same_rank_and_lower(auth_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_manager_cannot_create_or_update_users(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(2, 'manager')
+    token = await issue_access_token(auth_db, 2, 'manager')
 
     async def override_db():
         yield auth_db
@@ -2048,7 +2049,7 @@ async def test_create_yclients_credential_failures_are_sanitized_and_audited(
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         response = await client.post(
             '/auth/admin/yclients-credentials',
-            headers={'Authorization': f"Bearer {create_access_token(1, 'owner')}"},
+            headers={'Authorization': f"Bearer {await issue_access_token(auth_db, 1, 'owner')}"},
             json={
                 'title': 'Credential that fails safely',
                 'partner_token': secret,
@@ -2078,7 +2079,7 @@ async def test_create_yclients_credential_failures_are_sanitized_and_audited(
 async def test_owner_manages_yclients_credentials(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
     partner_secret = 'partner-secret-value'
     login_secret = 'login-secret-value'
     password_secret = 'password-secret-value'
@@ -2321,7 +2322,7 @@ async def test_saved_yclients_credentials_test_failures_are_sanitized(auth_db, m
     partner_secret = 'saved-partner-secret'
     login_secret = 'saved-login-secret'
     password_secret = 'saved-password-secret'
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
     credential = new_credential(
         portal_account_id=1,
         title='Saved credential',
@@ -2409,7 +2410,7 @@ async def test_saved_yclients_credentials_test_failures_are_sanitized(auth_db, m
 @pytest.mark.asyncio
 async def test_branch_admin_cannot_manage_yclients_credentials(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(3, 'branch_admin')
+    token = await issue_access_token(auth_db, 3, 'branch_admin')
 
     async def override_db():
         yield auth_db
@@ -2426,7 +2427,7 @@ async def test_branch_admin_cannot_manage_yclients_credentials(auth_db, monkeypa
 @pytest.mark.asyncio
 async def test_owner_deletes_manager(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -2473,7 +2474,7 @@ async def test_cross_tenant_update_and_delete_match_not_found_response(auth_db, 
     )
     await auth_db.commit()
 
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -2505,7 +2506,7 @@ async def test_cross_tenant_update_and_delete_match_not_found_response(auth_db, 
 @pytest.mark.asyncio
 async def test_created_manager_appears_in_dashboard_staff(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -2536,7 +2537,7 @@ async def test_created_manager_appears_in_dashboard_staff(auth_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_branch_admin_appears_in_dashboard_staff(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -2578,7 +2579,7 @@ async def test_owner_updates_unlinked_staff(auth_db, monkeypatch):
         )
     )
     await auth_db.commit()
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -2618,7 +2619,7 @@ async def test_owner_deletes_unlinked_staff(auth_db, monkeypatch):
         )
     )
     await auth_db.commit()
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -2653,7 +2654,7 @@ async def test_provision_staff_account(auth_db, monkeypatch):
         )
     )
     await auth_db.commit()
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -2705,7 +2706,7 @@ async def test_provision_staff_account(auth_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_change_password_updates_hash_and_invalidates_old_password(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(2, 'manager')
+    token = await issue_access_token(auth_db, 2, 'manager')
 
     async def override_db():
         yield auth_db
@@ -2774,8 +2775,8 @@ async def test_initial_passwords_endpoint_lists_pending_invites_without_password
         ),
     ])
     await auth_db.commit()
-    super_token = create_access_token(1, 'owner')
-    branch_token = create_access_token(3, 'branch_admin')
+    super_token = await issue_access_token(auth_db, 1, 'owner')
+    branch_token = await issue_access_token(auth_db, 3, 'branch_admin')
 
     async def override_db():
         yield auth_db
@@ -2847,7 +2848,7 @@ async def test_create_account_without_a_role_takes_it_from_the_crm_position(auth
         ),
     ])
     await auth_db.commit()
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -2904,7 +2905,7 @@ async def test_mass_provision_requires_real_staff_email(auth_db, monkeypatch):
         )
     )
     await auth_db.commit()
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -2966,7 +2967,7 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
     auth_db.add(PortalUserBranch(user_id=11, company_id=1))
     await auth_db.commit()
 
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -3013,7 +3014,7 @@ async def test_distribute_credentials_reports_invite_failures_after_rollback(aut
         raise RuntimeError('smtp unavailable')
 
     monkeypatch.setattr('auth_routes.send_account_invite_email', _fail_after_rollback)
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -3068,7 +3069,7 @@ async def test_distribute_credentials_keeps_going_after_a_failed_invite_rolled_t
             raise RuntimeError('smtp unavailable')
 
     monkeypatch.setattr('auth_routes.send_account_invite_email', _fail_first_after_rollback)
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -3118,7 +3119,7 @@ async def test_distribute_credentials_does_not_leak_cross_tenant_email(auth_db, 
     )
     await auth_db.commit()
 
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -3274,7 +3275,7 @@ async def test_onboarding_state_done_for_demo_user(auth_db):
     # The demo tenant has branches but no YClients credentials, so a non-demo
     # owner would report 'pending_credentials'; 'done' proves the is_demo bypass.
     demo_id = await _seed_demo_owner(auth_db)
-    token = create_access_token(demo_id, 'owner')
+    token = await issue_access_token(auth_db, demo_id, 'owner')
 
     async def override_db():
         yield auth_db
@@ -3292,7 +3293,7 @@ async def test_onboarding_state_done_for_demo_user(auth_db):
 @pytest.mark.asyncio
 async def test_forbid_demo_blocks_writes_but_allows_reads(auth_db):
     demo_id = await _seed_demo_owner(auth_db)
-    headers = {'Authorization': f'Bearer {create_access_token(demo_id, "owner")}'}
+    headers = {'Authorization': f'Bearer {await issue_access_token(auth_db, demo_id, "owner")}'}
 
     async def override_db():
         yield auth_db
@@ -3329,7 +3330,7 @@ async def test_forbid_demo_blocks_writes_but_allows_reads(auth_db):
 
 @pytest.mark.asyncio
 async def test_forbid_demo_does_not_block_non_demo_owner(auth_db):
-    headers = {'Authorization': f'Bearer {create_access_token(1, "owner")}'}
+    headers = {'Authorization': f'Bearer {await issue_access_token(auth_db, 1, "owner")}'}
 
     async def override_db():
         yield auth_db
@@ -3397,7 +3398,7 @@ async def test_admin_and_barber_are_one_rank_under_two_names(auth_db, monkeypatc
     assert 'admin' not in BRANCH_SCOPE_ROLES and 'barber' not in BRANCH_SCOPE_ROLES
 
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = create_access_token(1, 'owner')
+    token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -3424,7 +3425,7 @@ async def test_admin_and_barber_are_one_rank_under_two_names(auth_db, monkeypatc
         # The rank tie is what makes the pair equal, so nothing about the name `admin` may
         # read as an administrator: the gates are membership in USER_ADMIN_ROLES, not a string.
         admin_headers = {
-            'Authorization': f'Bearer {create_access_token(created["admin"]["id"], "admin")}'
+            'Authorization': f'Bearer {await issue_access_token(auth_db, created["admin"]["id"], "admin")}'
         }
         refusals = {
             '/auth/admin/users': (await client.get('/auth/admin/users', headers=admin_headers)).status_code,
@@ -3467,7 +3468,7 @@ async def test_the_label_is_what_opens_the_manual_fact_tabs(auth_db, monkeypatch
     rule a readability cleanup — "write a human label into `position`" — breaks in silence.
     """
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    owner_token = create_access_token(1, 'owner')
+    owner_token = await issue_access_token(auth_db, 1, 'owner')
 
     async def override_db():
         yield auth_db
@@ -3492,7 +3493,7 @@ async def test_the_label_is_what_opens_the_manual_fact_tabs(auth_db, monkeypatch
             user_id = created.json()['data']['id']
             me = await client.get(
                 '/auth/me',
-                headers={'Authorization': f'Bearer {create_access_token(user_id, role)}'},
+                headers={'Authorization': f'Bearer {await issue_access_token(auth_db, user_id, role)}'},
             )
             assert me.status_code == 200
             scopes[role] = me.json()['data']['manual_fact_scope']
@@ -3586,7 +3587,7 @@ async def test_me_reports_the_manual_fact_scope(auth_db, monkeypatch):
         ):
             response = await client.get(
                 '/auth/me',
-                headers={'Authorization': f'Bearer {create_access_token(user_id, role)}'},
+                headers={'Authorization': f'Bearer {await issue_access_token(auth_db, user_id, role)}'},
             )
             assert response.status_code == 200
             payloads[user_id] = response.json()['data']
@@ -3640,7 +3641,7 @@ async def test_me_ignores_a_staff_row_outside_the_assigned_branches(auth_db, mon
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        headers = {'Authorization': f'Bearer {create_access_token(9103, "barber")}'}
+        headers = {'Authorization': f'Bearer {await issue_access_token(auth_db, 9103, "barber")}'}
         me = await client.get('/auth/me', headers=headers)
         editor = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01'}, headers=headers)
         summary = await get_summary(
@@ -3704,7 +3705,7 @@ async def test_unonboarded_owner_sees_no_users_from_other_tenants(auth_db, monke
 
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
-    token = create_access_token(55, 'owner')
+    token = await issue_access_token(auth_db, 55, 'owner')
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         headers = {'Authorization': f'Bearer {token}'}
         users = await client.get('/auth/admin/users', headers=headers)
@@ -3768,8 +3769,8 @@ async def test_admin_list_users_staff_repair_is_scoped_to_its_own_tenant(auth_db
 
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
-    tenant_a_token = create_access_token(1, 'owner')
-    tenant_b_token = create_access_token(60, 'owner')
+    tenant_a_token = await issue_access_token(auth_db, 1, 'owner')
+    tenant_b_token = await issue_access_token(auth_db, 60, 'owner')
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         from_tenant_a = await client.get(
             '/auth/admin/users',
@@ -3820,8 +3821,8 @@ async def test_delete_session_is_scoped_to_the_owning_user(auth_db, monkeypatch)
 
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
-    attacker_token = create_access_token(2, 'manager')  # a different user
-    owner_token = create_access_token(1, 'owner')  # the session's actual owner
+    attacker_token = await issue_access_token(auth_db, 2, 'manager')  # a different user
+    owner_token = await issue_access_token(auth_db, 1, 'owner')  # the session's actual owner
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         attack = await client.delete('/auth/sessions/501', headers={'Authorization': f'Bearer {attacker_token}'})
         still_present = await auth_db.scalar(
@@ -3963,8 +3964,8 @@ class _Api:
         app.dependency_overrides.clear()
 
 
-def _bearer(user_id, role):
-    return {'Authorization': f'Bearer {create_access_token(user_id, role)}'}
+async def _bearer(auth_db, user_id, role):
+    return {'Authorization': f'Bearer {await issue_access_token(auth_db, user_id, role)}'}
 
 
 def test_verify_password_never_raises_on_long_input_or_a_broken_hash():
@@ -4021,18 +4022,18 @@ async def test_every_password_entry_point_rejects_over_long_passwords_with_422(a
         reset = await client.post('/auth/reset-password', json={'token': reset_token, 'password': LONG_PASSWORD})
         change = await client.post(
             '/auth/change-password',
-            headers=_bearer(1, 'owner'),
+            headers=await _bearer(auth_db, 1, 'owner'),
             json={'current_password': 'Admin12345!', 'new_password': LONG_PASSWORD},
         )
         create = await client.post(
             '/auth/admin/users',
-            headers=_bearer(1, 'owner'),
+            headers=await _bearer(auth_db, 1, 'owner'),
             json={'email': 'created@example.com', 'password': LONG_PASSWORD, 'role': 'manager', 'company_ids': [1]},
         )
         # The longest ASCII password bcrypt can take in full is still accepted.
         ok = await client.post(
             '/auth/admin/users',
-            headers=_bearer(1, 'owner'),
+            headers=await _bearer(auth_db, 1, 'owner'),
             json={'email': 'fits@example.com', 'password': 'a' * 72, 'role': 'manager', 'company_ids': [1]},
         )
 
@@ -4061,7 +4062,9 @@ async def test_failed_login_and_rate_limit_are_logged_without_the_email(auth_db,
         with caplog.at_level('WARNING', logger='yclients.auth'):
             async with _Api(auth_db) as client:
                 first = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Wrong12345!'})
-                second = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Wrong12345!'})
+                second = await client.post(
+                    '/auth/login', json={'email': 'admin@example.com', 'password': 'Wrong12345!'}
+                )
     finally:
         auth_logger.removeHandler(caplog.handler)
         auth_routes._auth_rate_limit_hits.clear()
@@ -4132,7 +4135,7 @@ async def test_branch_admin_cannot_take_over_a_peer_with_extra_branches(auth_db,
     )
     auth_db.add_all([PortalUserBranch(user_id=30, company_id=1), PortalUserBranch(user_id=30, company_id=2)])
     await auth_db.commit()
-    headers = _bearer(3, 'branch_admin')  # holds branch 1 only
+    headers = await _bearer(auth_db, 3, 'branch_admin')  # holds branch 1 only
 
     async with _Api(auth_db) as client:
         listed = await client.get('/auth/admin/users', headers=headers)
@@ -4174,7 +4177,7 @@ async def two_tenants(auth_db):
 @pytest.mark.asyncio
 async def test_platform_admin_cannot_attach_another_tenants_branch_to_a_user(two_tenants, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    headers = _bearer(53, 'platform_admin')
+    headers = await _bearer(two_tenants, 53, 'platform_admin')
     async with _Api(two_tenants) as client:
         foreign = await client.patch('/auth/admin/users/2', headers=headers, json={'company_ids': [3]})
         mixed = await client.patch('/auth/admin/users/2', headers=headers, json={'company_ids': [1, 3]})
@@ -4183,14 +4186,16 @@ async def test_platform_admin_cannot_attach_another_tenants_branch_to_a_user(two
     assert foreign.status_code == 403
     assert mixed.status_code == 403
     assert own.status_code == 200
-    rows = (await two_tenants.execute(select(PortalUserBranch.company_id).where(PortalUserBranch.user_id == 2))).scalars()
+    rows = (
+        await two_tenants.execute(select(PortalUserBranch.company_id).where(PortalUserBranch.user_id == 2))
+    ).scalars()
     assert sorted(rows) == [2]
 
 
 @pytest.mark.asyncio
 async def test_platform_admin_cannot_move_a_staff_row_to_another_tenant(two_tenants, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    headers = {**_bearer(53, 'platform_admin'), 'X-Portal-Account-Id': '1'}
+    headers = {**(await _bearer(two_tenants, 53, 'platform_admin')), 'X-Portal-Account-Id': '1'}
     async with _Api(two_tenants) as client:
         foreign = await client.patch(
             '/auth/admin/staff/9300', headers=headers, json={'full_name': 'Floater', 'company_id': 3}
@@ -4208,7 +4213,9 @@ async def test_platform_admin_cannot_move_a_staff_row_to_another_tenant(two_tena
 async def test_owner_cannot_attach_a_branch_outside_the_tenant_on_update(two_tenants, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     async with _Api(two_tenants) as client:
-        response = await client.patch('/auth/admin/users/2', headers=_bearer(1, 'owner'), json={'company_ids': [3]})
+        response = await client.patch(
+            '/auth/admin/users/2', headers=await _bearer(two_tenants, 1, 'owner'), json={'company_ids': [3]}
+        )
 
     assert response.status_code == 403
 
@@ -4219,9 +4226,11 @@ async def test_owner_cannot_attach_a_branch_outside_the_tenant_on_update(two_ten
 async def test_admin_update_rejects_oversized_inputs_with_422(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     async with _Api(auth_db) as client:
-        long_name = await client.patch('/auth/admin/users/2', headers=_bearer(1, 'owner'), json={'full_name': 'x' * 256})
+        long_name = await client.patch(
+            '/auth/admin/users/2', headers=await _bearer(auth_db, 1, 'owner'), json={'full_name': 'x' * 256}
+        )
         many_ids = await client.patch(
-            '/auth/admin/users/2', headers=_bearer(1, 'owner'), json={'company_ids': list(range(1, 202))}
+            '/auth/admin/users/2', headers=await _bearer(auth_db, 1, 'owner'), json={'company_ids': list(range(1, 202))}
         )
 
     assert long_name.status_code == 422
@@ -4315,7 +4324,7 @@ async def test_change_password_invalidates_outstanding_reset_tokens(auth_db, mon
     async with _Api(auth_db) as client:
         changed = await client.post(
             '/auth/change-password',
-            headers=_bearer(1, 'owner'),
+            headers=await _bearer(auth_db, 1, 'owner'),
             json={'current_password': 'Admin12345!', 'new_password': 'Changed12345!'},
         )
         reset = await client.post('/auth/reset-password', json={'token': raw, 'password': 'Another12345!'})
@@ -4389,7 +4398,9 @@ def test_set_portal_password_script_revokes_sessions(monkeypatch):
             return factory()
 
     monkeypatch.setattr(set_portal_password, 'init_database', lambda *args: _Database())
-    monkeypatch.setattr('sys.argv', ['set_portal_password', '--email', 'CLI@example.com', '--password', 'NewPassword123!'])
+    monkeypatch.setattr(
+        'sys.argv', ['set_portal_password', '--email', 'CLI@example.com', '--password', 'NewPassword123!']
+    )
     assert set_portal_password.main() == 0
 
     with factory() as session:
@@ -4678,7 +4689,9 @@ async def test_refresh_route_retries_with_the_previous_cookie_within_grace(auth_
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        assert (await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})).status_code == 200
+        assert (
+            await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})
+        ).status_code == 200
         first_refresh = client.cookies.get(REFRESH_COOKIE_NAME)
         csrf = client.cookies.get(AUTH_CSRF_COOKIE_NAME)
         assert (await client.post('/auth/refresh', headers={'X-CSRF-Token': csrf})).status_code == 200
@@ -4692,6 +4705,9 @@ async def test_refresh_route_retries_with_the_previous_cookie_within_grace(auth_
 @pytest.mark.asyncio
 async def test_authenticated_requests_load_the_user_once_and_know_if_it_is_demo(auth_db):
     demo_id = await _seed_demo_owner(auth_db)
+    # Issued before the statement recorder starts: issuing a session writes rows of its own.
+    owner = {'Authorization': f'Bearer {await issue_access_token(auth_db, 1, "owner")}'}
+    demo = {'Authorization': f'Bearer {await issue_access_token(auth_db, demo_id, "owner")}'}
     statements = []
 
     def record(_conn, _cursor, statement, _params, _context, _executemany):
@@ -4705,7 +4721,6 @@ async def test_authenticated_requests_load_the_user_once_and_know_if_it_is_demo(
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url='http://test') as client:
-            owner = {'Authorization': f'Bearer {create_access_token(1, "owner")}'}
             me = await client.get('/auth/me', headers=owner)
             user_selects = [s for s in statements if s.startswith('SELECT') and 'FROM system.portal_users' in s]
             me_statements = len(statements)
@@ -4714,7 +4729,6 @@ async def test_authenticated_requests_load_the_user_once_and_know_if_it_is_demo(
             logout_all = await client.post('/auth/logout-all', headers=owner)
             logout_statements = len(statements)
 
-            demo = {'Authorization': f'Bearer {create_access_token(demo_id, "owner")}'}
             statements.clear()
             blocked = await client.post('/auth/change-password', headers=demo, json={})
             demo_user_selects = [s for s in statements if 'FROM system.portal_users' in s]
@@ -4738,8 +4752,8 @@ async def test_access_context_carries_is_demo(auth_db):
     demo_id = await _seed_demo_owner(auth_db)
     from auth_deps import _user_from_token
 
-    demo_user, demo_ctx = await _user_from_token(create_access_token(demo_id, 'owner'), auth_db)
-    owner_user, owner_ctx = await _user_from_token(create_access_token(1, 'owner'), auth_db)
+    demo_user, demo_ctx = await _user_from_token(await issue_access_token(auth_db, demo_id, 'owner'), auth_db)
+    owner_user, owner_ctx = await _user_from_token(await issue_access_token(auth_db, 1, 'owner'), auth_db)
     assert demo_ctx.is_demo is True and demo_user.id == demo_id
     assert owner_ctx.is_demo is False and owner_user.id == 1
 
@@ -4781,7 +4795,13 @@ async def test_every_route_open_before_stays_open_and_nothing_else_opens(auth_db
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        for path in ('/auth/logout-all', '/auth/logout-others', '/dashboard/auth/logout-all', '/auth/me', '/auth/sessions'):
+        for path in (
+            '/auth/logout-all',
+            '/auth/logout-others',
+            '/dashboard/auth/logout-all',
+            '/auth/me',
+            '/auth/sessions',
+        ):
             method = client.get if path in ('/auth/me', '/auth/sessions') else client.post
             response = await method(path)
             assert response.status_code == 401, (path, response.status_code)

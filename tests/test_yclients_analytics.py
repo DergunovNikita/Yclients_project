@@ -65,7 +65,9 @@ async def _seed_db_credentials(async_session, monkeypatch, company_ids=(1, 2)):
     async_session.add(Group(id=1, title='Group'))
     async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
     for company_id in company_ids:
-        async_session.add(Company(id=company_id, external_id=100 + company_id, title=f'Company {company_id}', group_id=1))
+        async_session.add(
+            Company(id=company_id, external_id=100 + company_id, title=f'Company {company_id}', group_id=1)
+        )
         async_session.add(PortalBranch(portal_account_id=1, company_id=company_id))
     async_session.add(Staff(id=7, external_id=77, source_type='yclients', name='Master', company_id=1))
     credential = new_credential(1, 'Analytics', 'partner', 'login', 'password')

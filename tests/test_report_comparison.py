@@ -69,7 +69,9 @@ def test_percent_change_keeps_precision_for_the_one_rounding_the_page_does():
 
 
 def test_comparison_carries_charts_and_tables_only_for_ids_the_current_payload_has():
-    current = _payload(charts=[{'id': 'a'}], tables=[{'id': 't1', 'row_key': 'k', 'rows': [{'k': 1}]}, {'id': 'events'}])
+    current = _payload(
+        charts=[{'id': 'a'}], tables=[{'id': 't1', 'row_key': 'k', 'rows': [{'k': 1}]}, {'id': 'events'}]
+    )
     previous = _payload(
         charts=[
             {'id': 'a', 'labels': ['x'], 'datasets': [{'label': 'L', 'data': [1]}], 'title': 'dropped'},
@@ -95,10 +97,17 @@ def test_comparison_table_carries_only_rows_the_current_table_can_pair_with():
         {'id': 'combos', 'row_key': 'pair', 'rows': [{'pair': 'A + B'}, {'pair': 'C + D'}]},
         {'id': 'periods', 'row_key': 'period', 'x_kind': 'time', 'rows': [{'period': '2026-09-01'}]},
     ])
-    previous = _payload(tables=[
-        {'id': 'combos', 'row_key': 'pair', 'rows': [{'pair': 'A + B'}, {'pair': 'X + Y'}, {'pair': 'C + D'}]},
-        {'id': 'periods', 'row_key': 'period', 'x_kind': 'time', 'rows': [{'period': '2026-08-01'}, {'period': '2026-08-02'}]},
-    ])
+    previous = _payload(
+        tables=[
+            {'id': 'combos', 'row_key': 'pair', 'rows': [{'pair': 'A + B'}, {'pair': 'X + Y'}, {'pair': 'C + D'}]},
+            {
+                'id': 'periods',
+                'row_key': 'period',
+                'x_kind': 'time',
+                'rows': [{'period': '2026-08-01'}, {'period': '2026-08-02'}],
+            },
+        ]
+    )
     comparison = _comparison_payload(current, previous, None)
     assert comparison['tables'] == [
         {'id': 'combos', 'rows': [{'pair': 'A + B'}, {'pair': 'C + D'}]},
@@ -138,7 +147,8 @@ async def test_only_an_explicit_comparison_window_drops_the_preset(monkeypatch):
 
     monkeypatch.setattr(dashboard_reports, '_fetch_report_payload', fake_payload)
     window = (date(2026, 9, 1), date(2026, 9, 30))
-    # Another employee on the same window leaves the preset alone: the deltas inside the tables keep the Overview's base.
+    # Another employee on the same window leaves the preset alone: the deltas inside the tables keep the
+    # Overview's base.
     await fetch_report_data(None, 'new_vs_returning_cross', *window, compare_staff_id=7, period_preset='month')
     await fetch_report_data(
         None, 'new_vs_returning_cross', *window, compare_staff_id=7, compare_previous=True, period_preset='month',
@@ -225,7 +235,9 @@ async def test_leaderboard_retries_only_database_failures(async_session, monkeyp
         return fetch_plan_fact
 
     window = (date(2026, 9, 1), date(2026, 9, 30))
-    monkeypatch.setattr(reports_team, 'fetch_plan_fact', failing_with(OperationalError('SELECT 1', {}, OSError('gone'))))
+    monkeypatch.setattr(
+        reports_team, 'fetch_plan_fact', failing_with(OperationalError('SELECT 1', {}, OSError('gone')))
+    )
     try:
         with pytest.raises(ReportCalculationError) as raised:
             await fetch_report_data(async_session, 'staff_leaderboard', *window, company_id=1, staff_id=7)

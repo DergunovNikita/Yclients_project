@@ -333,7 +333,9 @@ async def _load_rotatable_refresh(
             raise HTTPException(status_code=401, detail='Invalid refresh token')
         within_grace = refresh.rotated_at is not None and now - refresh.rotated_at <= REFRESH_ROTATION_GRACE
         if not within_grace:
-            logger.warning('refresh token replayed after rotation user_id=%s session_id=%s', refresh.user_id, refresh.id)
+            logger.warning(
+                'refresh token replayed after rotation user_id=%s session_id=%s', refresh.user_id, refresh.id
+            )
             await _end_session(db, refresh)
             raise HTTPException(status_code=401, detail='Invalid refresh token')
     if refresh.revoked_at is not None or refresh.expires_at < now:

@@ -1137,11 +1137,16 @@ async def _payment_methods_payload(
             if trend_drawn and any(row['yandex_pay'] is not None for row in monthly)
             else ''
         )
-        base['notes'].append({
-            'kind': 'warning',
-            'title': 'Яндекс Пэй не учтён',
-            'text': f'{_unapplied_phrases(unapplied, branches, end)} Безналичные показаны целиком, как в YClients.{trend_note}',
-        })
+        base['notes'].append(
+            {
+                'kind': 'warning',
+                'title': 'Яндекс Пэй не учтён',
+                'text': (
+                    f'{_unapplied_phrases(unapplied, branches, end)} '
+                    f'Безналичные показаны целиком, как в YClients.{trend_note}'
+                ),
+            }
+        )
     missing = [branch for branch in branches if branch['yandex_pay_missing_months']]
     if missing:
         # A long period turns "every missing month of every branch" into a wall of text, so a
@@ -1203,7 +1208,8 @@ def _unapplied_phrases(unapplied: list[dict[str, Any]], branches: list[dict[str,
         )
     if beyond:
         covered = ', '.join(
-            f"{b['title']} (данные по {format_day(date.fromisoformat(b['yandex_pay_unapplied_data_through']), end.year)})"
+            f"{b['title']} (данные по "
+            f"{format_day(date.fromisoformat(b['yandex_pay_unapplied_data_through']), end.year)})"
             for b in beyond
         )
         phrases.append(

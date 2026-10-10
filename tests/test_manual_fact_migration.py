@@ -1,26 +1,16 @@
 """Data migration 0040: manual fact rows are collapsed into calendar months."""
 
-import importlib.util
 from datetime import date, datetime
-from pathlib import Path
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine, select
 
+from helpers import load_migration
 from models import ManualFactMetric
 
 
-MIGRATION_PATH = (
-    Path(__file__).resolve().parents[1]
-    / 'alembic' / 'versions' / '0040_month_anchored_manual_facts.py'
-)
-
-
 def _load_migration():
-    spec = importlib.util.spec_from_file_location('migration_0040', MIGRATION_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_migration('0040_month_anchored_manual_facts.py', 'migration_0040')
 
 
 def _row(period_start, period_end, staff_id, value, updated_at, source='dashboard'):

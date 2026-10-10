@@ -58,7 +58,9 @@ def usage_app(async_session, monkeypatch):
         yield async_session
 
     monkeypatch.setattr(
-        report_usage, 'get_async_session_factory', lambda: async_sessionmaker(async_session.bind, expire_on_commit=False)
+        report_usage,
+        'get_async_session_factory',
+        lambda: async_sessionmaker(async_session.bind, expire_on_commit=False),
     )
     app.dependency_overrides[api.get_async_db] = override_db
     app.dependency_overrides[dashboard_routes.get_dashboard_access] = lambda: state['ctx']

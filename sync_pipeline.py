@@ -854,8 +854,13 @@ def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int | Non
                     company = existing_companies.get(company_id)
                     if not company:
                         legacy_company = db.get(Company, company_id) if portal_account_id is not None else None
-                        if legacy_company is not None and legacy_company.external_id is None and (
-                            legacy_company.portal_account_id is None or legacy_company.portal_account_id == portal_account_id
+                        if (
+                            legacy_company is not None
+                            and legacy_company.external_id is None
+                            and (
+                                legacy_company.portal_account_id is None
+                                or legacy_company.portal_account_id == portal_account_id
+                            )
                         ):
                             company = legacy_company
                             company.title = company_data.get('title', '') or company.title
@@ -2551,7 +2556,9 @@ def execute_sync(
         'completed': True,
         'success': overall_success,
         'step_results': step_results,
-        'mode': next(iter(result_modes)) if len(result_modes) == 1 else ('mixed' if result_modes else default_sync_mode),
+        'mode': next(iter(result_modes))
+        if len(result_modes) == 1
+        else ('mixed' if result_modes else default_sync_mode),
         'window_start': (result_window_start or default_start).isoformat(),
         'window_end': ed,
         'companies_count': companies_count,

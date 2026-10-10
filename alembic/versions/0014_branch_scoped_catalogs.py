@@ -33,7 +33,9 @@ def _create_catalog_tables(inspector) -> None:
             sa.ForeignKeyConstraint(['company_id'], ['public.companies.id'], ondelete='CASCADE'),
             schema='public',
         )
-        op.create_index('ix_service_category_catalog_category_id', 'service_category_catalog', ['category_id'], schema='public')
+        op.create_index(
+            'ix_service_category_catalog_category_id', 'service_category_catalog', ['category_id'], schema='public'
+        )
 
     if not inspector.has_table('service_catalog', schema='public'):
         op.create_table(
@@ -51,7 +53,9 @@ def _create_catalog_tables(inspector) -> None:
             schema='public',
         )
         op.create_index('ix_service_catalog_service_id', 'service_catalog', ['service_id'], schema='public')
-        op.create_index('ix_service_catalog_company_category', 'service_catalog', ['company_id', 'category_title'], schema='public')
+        op.create_index(
+            'ix_service_catalog_company_category', 'service_catalog', ['company_id', 'category_title'], schema='public'
+        )
 
     if not inspector.has_table('staff_position_catalog', schema='public'):
         op.create_table(
@@ -64,7 +68,9 @@ def _create_catalog_tables(inspector) -> None:
             sa.ForeignKeyConstraint(['company_id'], ['public.companies.id'], ondelete='CASCADE'),
             schema='public',
         )
-        op.create_index('ix_staff_position_catalog_position_id', 'staff_position_catalog', ['position_id'], schema='public')
+        op.create_index(
+            'ix_staff_position_catalog_position_id', 'staff_position_catalog', ['position_id'], schema='public'
+        )
 
     if not inspector.has_table('account_catalog', schema='public'):
         op.create_table(
@@ -109,7 +115,9 @@ def _create_catalog_tables(inspector) -> None:
             sa.ForeignKeyConstraint(['company_id'], ['public.companies.id'], ondelete='CASCADE'),
             schema='public',
         )
-        op.create_index('ix_good_category_catalog_category_id', 'good_category_catalog', ['category_id'], schema='public')
+        op.create_index(
+            'ix_good_category_catalog_category_id', 'good_category_catalog', ['category_id'], schema='public'
+        )
 
     if not inspector.has_table('good_catalog', schema='public'):
         op.create_table(
@@ -129,7 +137,9 @@ def _create_catalog_tables(inspector) -> None:
             schema='public',
         )
         op.create_index('ix_good_catalog_good_id', 'good_catalog', ['good_id'], schema='public')
-        op.create_index('ix_good_catalog_company_category', 'good_catalog', ['company_id', 'category_id'], schema='public')
+        op.create_index(
+            'ix_good_catalog_company_category', 'good_catalog', ['company_id', 'category_id'], schema='public'
+        )
 
 
 def _backfill_catalogs() -> None:
@@ -205,8 +215,10 @@ def _backfill_catalogs() -> None:
     """)
     op.execute("""
         INSERT INTO public.good_catalog
-            (company_id, good_id, title, cost, actual_cost, barcode, unit_short_title, category_id, last_change_date, updated_at)
-        SELECT company_id, good_id, title, cost, actual_cost, barcode, unit_short_title, category_id, last_change_date, CURRENT_TIMESTAMP
+            (company_id, good_id, title, cost, actual_cost, barcode, unit_short_title, category_id,
+             last_change_date, updated_at)
+        SELECT company_id, good_id, title, cost, actual_cost, barcode, unit_short_title, category_id,
+               last_change_date, CURRENT_TIMESTAMP
         FROM public.goods
         WHERE company_id IS NOT NULL
         ON CONFLICT (company_id, good_id) DO NOTHING

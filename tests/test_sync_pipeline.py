@@ -1,13 +1,13 @@
 from datetime import date, datetime, time, timedelta
 import importlib
 import io
-from contextlib import contextmanager, redirect_stdout
+from contextlib import redirect_stdout
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
+from helpers import sqlite_session_with_system
 from models import (
     Base,
     Appointment,
@@ -176,26 +176,6 @@ def patch_execute_sync_dependencies(monkeypatch, db, credential, *, purge_result
     )
     for name in SYNC_STEP_FUNCTIONS:
         monkeypatch.setattr(sync_pipeline, name, lambda *_args, **_kwargs: True)
-
-
-@contextmanager
-def sqlite_session_with_system(tables):
-    engine = create_engine(
-        'sqlite+pysqlite:///:memory:',
-        future=True,
-        connect_args={'check_same_thread': False},
-        poolclass=StaticPool,
-    )
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(engine, tables=tables)
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
-        yield db
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_full_sync_start_date_uses_history_start_when_sync_days_is_unlimited(monkeypatch):
@@ -904,7 +884,9 @@ def test_execute_sync_does_not_checkpoint_when_full_cleanup_fails(monkeypatch):
         )
         patch_execute_sync_dependencies(monkeypatch, db, credential, purge_result=False)
         skipped_calls = []
-        monkeypatch.setattr(sync_pipeline, 'sync_service_categories', lambda *_args, **_kwargs: skipped_calls.append('company') or True)
+        monkeypatch.setattr(
+            sync_pipeline, 'sync_service_categories', lambda *_args, **_kwargs: skipped_calls.append('company') or True
+        )
 
         result = execute_sync(mode='full', end_date=date(2026, 6, 30), portal_account_id=7)
 
@@ -914,7 +896,9 @@ def test_execute_sync_does_not_checkpoint_when_full_cleanup_fails(monkeypatch):
             SyncState, sync_pipeline.historical_coverage_state_key(1)
         ) is None
         assert skipped_calls == []
-        cleanup = next(item for item in result['step_results'] if item['key'] == sync_pipeline.FULL_REFRESH_CLEANUP_STEP)
+        cleanup = next(
+            item for item in result['step_results'] if item['key'] == sync_pipeline.FULL_REFRESH_CLEANUP_STEP
+        )
         assert cleanup['success'] is False
 
 
@@ -2353,7 +2337,11 @@ def test_sync_services_fills_category_from_category_filtered_services():
     try:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon 1', group_id=1))
-        db.add(ServiceCategoryCatalog(company_id=1, category_id=100, title='Уход', updated_at=datetime(2025, 1, 1, 0, 0, 0)))
+        db.add(
+            ServiceCategoryCatalog(
+                company_id=1, category_id=100, title='Уход', updated_at=datetime(2025, 1, 1, 0, 0, 0)
+            )
+        )
         db.commit()
 
         api = FakeServicesAPI(
@@ -2755,7 +2743,11 @@ def test_unreliably_read_window_is_not_purged_on_any_source(fn_name, model, seed
     ('fn_name', 'model', 'seed'),
     [
         ('sync_records', Appointment, dict(id=1, company_id=1, external_id=77, date=date(2026, 6, 10))),
-        ('sync_goods_transactions', GoodTransaction, dict(id=1, company_id=1, external_id=55, date=datetime(2026, 6, 10))),
+        (
+            'sync_goods_transactions',
+            GoodTransaction,
+            dict(id=1, company_id=1, external_id=55, date=datetime(2026, 6, 10)),
+        ),
         ('sync_comments', Comment, dict(id=1, company_id=1, external_id=66, date=datetime(2026, 6, 10))),
         (
             'sync_financial_transactions',
