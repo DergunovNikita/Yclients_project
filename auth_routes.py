@@ -604,6 +604,23 @@ async def verify_email(body: TokenRequest, db: AsyncSession = Depends(get_async_
     return {'success': True, 'message': 'Email подтверждён. Теперь можно войти в кабинет.'}
 
 
+# (sender name, user id) -> monotonic time the mail was queued. The resend cooldown is stamped only after the
+# mail has gone out, so without this a burst of requests lands inside the SMTP round trip, each passes the
+# cooldown check and each queues its own mail. The time bounds the entry if a task is ever lost.
+_auth_emails_in_flight: dict[tuple[str, int], float] = {}
+_AUTH_EMAIL_IN_FLIGHT_SECONDS = 60.0
+
+
+def _queue_auth_email(background_tasks: BackgroundTasks, user_id: int, sender) -> None:
+    key = (getattr(sender, '__name__', repr(sender)), user_id)
+    queued_at = _auth_emails_in_flight.get(key)
+    now = time.monotonic()
+    if queued_at is not None and now - queued_at < _AUTH_EMAIL_IN_FLIGHT_SECONDS:
+        return
+    _auth_emails_in_flight[key] = now
+    background_tasks.add_task(_send_auth_email_after_response, user_id, sender)
+
+
 async def _send_auth_email_after_response(user_id: int, sender) -> None:
     """Mail the user once the response is gone, so latency and SMTP errors never reveal the address exists.
 
@@ -616,6 +633,8 @@ async def _send_auth_email_after_response(user_id: int, sender) -> None:
                 await sender(session, user)
     except Exception as exc:
         logger.warning('auth email failed user_id=%s error=%s', user_id, type(exc).__name__)
+    finally:
+        _auth_emails_in_flight.pop((getattr(sender, '__name__', repr(sender)), user_id), None)
 
 
 @router.post('/forgot-password')
@@ -629,7 +648,7 @@ async def forgot_password(
     enforce_auth_rate_limit(request, AUTH_RATE_LIMIT_ROUTES['forgot_password'], email)
     user = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
     if user is not None and user.is_active and not email_cooldown_active(user.password_reset_sent_at):
-        background_tasks.add_task(_send_auth_email_after_response, user.id, send_password_reset_email)
+        _queue_auth_email(background_tasks, user.id, send_password_reset_email)
     return {
         'success': True,
         'message': 'Если аккаунт с таким email существует, на почту отправлена ссылка для сброса пароля.',
@@ -651,7 +670,7 @@ async def resend_verification(
         and user.email_verified_at is None
         and not email_cooldown_active(user.email_verification_sent_at)
     ):
-        background_tasks.add_task(_send_auth_email_after_response, user.id, send_verification_email)
+        _queue_auth_email(background_tasks, user.id, send_verification_email)
     return {
         'success': True,
         'message': 'Если аккаунт существует и не подтверждён — письмо отправлено повторно.',

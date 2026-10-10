@@ -3940,6 +3940,28 @@ async def test_resend_verification_only_emails_pending_unverified_accounts(auth_
     assert sent == ['pending@example.com']
 
 
+@pytest.mark.asyncio
+async def test_a_burst_of_mail_requests_queues_one_mail_until_it_has_gone_out(auth_db):
+    """The cooldown stamp lands only after the SMTP round trip, so requests inside it must not queue more mail."""
+    from fastapi import BackgroundTasks
+
+    async def sender(_session, _user):
+        raise AssertionError('no such user: nothing may be sent')
+
+    tasks = BackgroundTasks()
+    auth_routes._queue_auth_email(tasks, 4242, sender)
+    auth_routes._queue_auth_email(tasks, 4242, sender)
+    auth_routes._queue_auth_email(tasks, 4243, sender)
+    assert len(tasks.tasks) == 2
+
+    await tasks()
+    assert auth_routes._auth_emails_in_flight == {}
+    again = BackgroundTasks()
+    auth_routes._queue_auth_email(again, 4242, sender)
+    assert len(again.tasks) == 1
+    await again()
+
+
 # ---------- password length: bcrypt only reads 72 bytes ----------
 
 LONG_PASSWORD = 'Пароль' * 7  # 42 characters, 84 bytes: inside max_length, over the bcrypt limit
