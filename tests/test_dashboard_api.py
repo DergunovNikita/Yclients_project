@@ -2783,9 +2783,6 @@ async def test_dashboard_year_over_year_keeps_partial_multi_company_year(
     assert years[2024]['revenue_change_pct'] is None
     assert years[2025]['revenue'] is None
     assert years[2026]['revenue'] is None
-    cards = {card['label']: card['value'] for card in data['cards']}
-    assert cards['Выручка последнего года'] is None
-    assert cards['Визиты последнего года'] is None
     charts = {chart['id']: chart for chart in data['charts']}
     assert charts['year_revenue']['datasets'][0]['data'] == [None, None, None, None]
     assert charts['year_appointments']['datasets'][0]['data'] == [None, None, None, None]
@@ -3442,8 +3439,8 @@ async def test_year_over_year_payload_exposes_opz_charts_columns_and_cards(
     assert {dataset['format'] for dataset in charts['monthly_opz_pct_yoy']['datasets']} == {'percent'}
     assert charts['monthly_opz_yoy']['datasets'][1]['data'][:3] == [1.0, 1.0, 0.0]
 
-    labels = [card['label'] for card in report['cards']]
-    assert labels[-3:] == ['ОПЗ последнего года', 'Изменение ОПЗ год к году', 'ОПЗ % последнего года']
+    # The latest year is partial, so change cards could only show a dash; its values are on the charts.
+    assert report['cards'] == []
 
     columns = {
         table['id']: [column['key'] for column in table['columns']] for table in report['tables']

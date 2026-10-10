@@ -1593,17 +1593,8 @@ async def _year_over_year_payload(
         'end': report_end.isoformat(),
         'granularity': 'month',
     }
-    base['cards'] = [
-        _card('Выручка последнего года', latest.get('revenue', 0), MONEY_FORMAT),
-        _card('Изменение выручки год к году', latest.get('revenue_change_pct'), PERCENT_FORMAT),
-        _card('Визиты последнего года', latest.get('appointments', 0), NUMBER_FORMAT),
-        _card('Изменение визитов год к году', latest.get('appointments_change_pct'), PERCENT_FORMAT),
-        _card('Средний чек последнего года', latest.get('avg_check', 0), MONEY_FORMAT),
-        _card('Клиенты последнего года', latest.get('unique_clients', 0), NUMBER_FORMAT),
-        _card('ОПЗ последнего года', latest.get('opz_qty'), NUMBER_FORMAT),
-        _card('Изменение ОПЗ год к году', latest.get('opz_qty_change_pct'), PERCENT_FORMAT),
-        _card('ОПЗ % последнего года', latest.get('opz_pct'), PERCENT_FORMAT),
-    ]
+    # No cards: the latest year is almost always partial, so its change cards only showed a dash, and
+    # its values are already the last bar of every by-year chart. The report has no period to pick.
     # The grid is two columns wide, so each metric is a row: by year on the left, its
     # month-by-month year-over-year comparison on the right.
     base['charts'] = [
