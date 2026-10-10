@@ -10,6 +10,7 @@ from sqlalchemy.exc import OperationalError
 import api
 import dashboard_reports
 import dashboard_routes
+import reports_team
 from api import app
 from auth_scope import AccessContext
 from dashboard_reports import (
@@ -19,7 +20,7 @@ from dashboard_reports import (
     fetch_report_data,
 )
 from models import Appointment, Client, Company, Group, Staff
-from report_payload import ReportInputError
+from report_payload import ReportCalculationError, ReportInputError
 
 
 def _payload(**overrides):
@@ -127,6 +128,30 @@ async def test_comparison_is_built_even_when_the_primary_payload_is_partial(monk
 
 
 @pytest.mark.asyncio
+async def test_only_an_explicit_comparison_window_drops_the_preset(monkeypatch):
+    primary_presets = []
+
+    async def fake_payload(db, report_id, start, end, *args, for_comparison=False, **kwargs):
+        if not for_comparison:
+            primary_presets.append(args[-1] if args else kwargs.get('period_preset'))
+        return _payload(period={'start': start.isoformat(), 'end': end.isoformat()})
+
+    monkeypatch.setattr(dashboard_reports, '_fetch_report_payload', fake_payload)
+    window = (date(2026, 9, 1), date(2026, 9, 30))
+    # Another employee on the same window leaves the preset alone: the deltas inside the tables keep the Overview's base.
+    await fetch_report_data(None, 'new_vs_returning_cross', *window, compare_staff_id=7, period_preset='month')
+    await fetch_report_data(
+        None, 'new_vs_returning_cross', *window, compare_staff_id=7, compare_previous=True, period_preset='month',
+    )
+    # A window typed by hand governs the whole page.
+    await fetch_report_data(
+        None, 'new_vs_returning_cross', *window,
+        compare_start=date(2026, 7, 1), compare_end=date(2026, 7, 31), period_preset='month',
+    )
+    assert primary_presets == ['month', 'month', None]
+
+
+@pytest.mark.asyncio
 async def test_a_failed_primary_still_reports_the_comparison_status(monkeypatch):
     async def fake_payload(db, report_id, start, end, *args, **kwargs):
         status = 'ready' if start == date(2026, 9, 1) else 'partial'
@@ -200,9 +225,9 @@ async def test_leaderboard_retries_only_database_failures(async_session, monkeyp
         return fetch_plan_fact
 
     window = (date(2026, 9, 1), date(2026, 9, 30))
-    monkeypatch.setattr(dashboard_reports, 'fetch_plan_fact', failing_with(OperationalError('SELECT 1', {}, OSError('gone'))))
+    monkeypatch.setattr(reports_team, 'fetch_plan_fact', failing_with(OperationalError('SELECT 1', {}, OSError('gone'))))
     try:
-        with pytest.raises(dashboard_reports.ReportCalculationError) as raised:
+        with pytest.raises(ReportCalculationError) as raised:
             await fetch_report_data(async_session, 'staff_leaderboard', *window, company_id=1, staff_id=7)
     finally:
         logger.removeHandler(handler)
@@ -212,7 +237,7 @@ async def test_leaderboard_retries_only_database_failures(async_session, monkeyp
     assert not any('staff_id' in message for message in messages)
 
     # A defect in the calculation is not retryable: it must surface as itself (a 500), not as a 503.
-    monkeypatch.setattr(dashboard_reports, 'fetch_plan_fact', failing_with(ValueError('broken row')))
+    monkeypatch.setattr(reports_team, 'fetch_plan_fact', failing_with(ValueError('broken row')))
     with pytest.raises(ValueError, match='broken row'):
         await fetch_report_data(async_session, 'staff_leaderboard', *window, company_id=1)
 

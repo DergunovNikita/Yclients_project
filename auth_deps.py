@@ -17,48 +17,19 @@ from auth_service import (
     load_user_access_branch_ids,
 )
 from auth_sessions import ACCESS_COOKIE_NAME, enforce_csrf
-from config import API_KEY, AUTH_REQUIRE_LOGIN, IS_PRODUCTION
+from config import API_KEY, AUTH_REQUIRE_LOGIN
 from database import get_async_db
+from open_paths import OPEN_PATHS
 from models import PortalMetricVisibility, PortalRefreshToken, PortalUser
 from plan_config import ALL_MONEY_CODES, CONFIGURABLE_MONEY_ROLES, default_money_codes_for_role
 from sync_security import secure_equals
-
-OPEN_PATH_PREFIXES = (
-    '/health',
-    '/auth/register',
-    '/auth/login',
-    '/auth/demo-login',
-    '/auth/refresh',
-    '/auth/logout',
-    '/auth/verify-email',
-    '/auth/forgot-password',
-    '/auth/reset-password',
-    '/auth/resend-verification',
-    '/dashboard/auth/register',
-    '/dashboard/auth/login',
-    '/dashboard/auth/demo-login',
-    '/dashboard/auth/refresh',
-    '/dashboard/auth/logout',
-    '/dashboard/auth/verify-email',
-    '/dashboard/auth/forgot-password',
-    '/dashboard/auth/reset-password',
-    '/dashboard/auth/resend-verification',
-)
-
-DOCS_OPEN_PATHS = set() if IS_PRODUCTION else {'/openapi.json', '/docs', '/redoc'}
-
-
-def _is_open_path(path: str) -> bool:
-    if path == '/health' or path in DOCS_OPEN_PATHS:
-        return True
-    return any(path.startswith(prefix) for prefix in OPEN_PATH_PREFIXES)
 
 
 async def _user_from_token(
     token: str,
     db: AsyncSession,
     x_portal_account_id: int | None = None,
-) -> AccessContext:
+) -> tuple[PortalUser, AccessContext]:
     try:
         payload = decode_access_token(token)
     except jwt.PyJWTError as exc:
@@ -92,8 +63,10 @@ async def _user_from_token(
         active_account_id = x_portal_account_id
         if active_account_id is not None:
             branch_ids = await load_portal_account_branch_ids(db, active_account_id)
-            return AccessContext.from_user(user.id, user.role, active_account_id, branch_ids)
-        return AccessContext.from_user(user.id, user.role, None, None)
+            return user, AccessContext.from_user(
+                user.id, user.role, active_account_id, branch_ids, is_demo=bool(user.is_demo)
+            )
+        return user, AccessContext.from_user(user.id, user.role, None, None, is_demo=bool(user.is_demo))
 
     branch_ids = await load_user_access_branch_ids(db, user)
     staff_keys: tuple[tuple[int, int], ...] = ()
@@ -118,7 +91,7 @@ async def _user_from_token(
         ]
         staff_id = in_scope[0] if in_scope else (staff_rows[0][1] if staff_rows else None)
     money_metrics = await _resolve_money_metrics(db, user.portal_account_id, user.role)
-    return AccessContext.from_user(
+    return user, AccessContext.from_user(
         user.id,
         user.role,
         user.portal_account_id,
@@ -126,6 +99,7 @@ async def _user_from_token(
         staff_id=staff_id,
         money_metrics=money_metrics,
         staff_keys=staff_keys,
+        is_demo=bool(user.is_demo),
     )
 
 
@@ -163,14 +137,15 @@ async def require_auth(
     db: AsyncSession = Depends(get_async_db),
 ) -> AccessContext | None:
     """Global auth: JWT user (header or cookie), API key (full access), or open paths."""
-    if _is_open_path(request.url.path):
+    if request.url.path in OPEN_PATHS:
         return None
 
     token = _extract_access_token(request, authorization)
     if token:
-        ctx = await _user_from_token(token, db, x_portal_account_id)
+        user, ctx = await _user_from_token(token, db, x_portal_account_id)
         enforce_csrf(request)
         request.state.access = ctx
+        request.state.portal_user = user
         return ctx
 
     if API_KEY:
@@ -191,16 +166,15 @@ async def get_current_user(
     authorization: str | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
 ) -> PortalUser:
+    # `require_auth` already loaded the user and checked CSRF for this very token.
+    user = getattr(request.state, 'portal_user', None)
+    if user is not None:
+        return user
     token = _extract_access_token(request, authorization)
     if not token:
         raise HTTPException(status_code=401, detail='Authentication required')
-    ctx = await _user_from_token(token, db)
+    user, _ = await _user_from_token(token, db)
     enforce_csrf(request)
-    if ctx is None or ctx.user_id is None:
-        raise HTTPException(status_code=401, detail='Authentication required')
-    user = (await db.execute(select(PortalUser).where(PortalUser.id == ctx.user_id))).scalar_one_or_none()
-    if user is None:
-        raise HTTPException(status_code=401, detail='User not found')
     return user
 
 
@@ -232,25 +206,33 @@ def require_roles(*roles: str):
     return _dep
 
 
+async def _caller_is_demo(request: Request, authorization: str | None, db: AsyncSession) -> bool:
+    """Whether the request carries a valid demo JWT; any other caller is simply not demo.
+
+    Soft by design: API-key, X-Sync-Token and unauthenticated callers carry no JWT and keep full
+    behaviour, so token-based automation keeps working.
+    """
+    ctx = getattr(request.state, 'access', None)
+    if ctx is not None and ctx.user_id is not None:
+        return ctx.is_demo
+    # `require_auth` did not run (an open path): resolve the token the slow way.
+    token = _extract_access_token(request, authorization)
+    if not token:
+        return False
+    try:
+        user_id = int(decode_access_token(token).get('sub'))
+    except (jwt.PyJWTError, TypeError, ValueError):
+        return False
+    return bool(await db.scalar(select(PortalUser.is_demo).where(PortalUser.id == user_id)))
+
+
 async def is_demo_request(
     request: Request,
     authorization: str | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
 ) -> bool:
-    """Whether the caller is the shared read-only demo account.
-
-    Same soft token handling as ``forbid_demo``: callers without a valid demo JWT
-    (API key, sync token, anonymous) are not demo and keep full behaviour.
-    """
-    token = _extract_access_token(request, authorization)
-    if not token:
-        return False
-    try:
-        payload = decode_access_token(token)
-        user_id = int(payload.get('sub'))
-    except (jwt.PyJWTError, TypeError, ValueError):
-        return False
-    return bool(await db.scalar(select(PortalUser.is_demo).where(PortalUser.id == user_id)))
+    """Whether the caller is the shared read-only demo account."""
+    return await _caller_is_demo(request, authorization, db)
 
 
 async def forbid_demo(
@@ -260,22 +242,8 @@ async def forbid_demo(
 ) -> None:
     """Reject mutating requests made by the shared read-only demo account.
 
-    Soft by design: only a valid demo JWT is blocked with 403. API-key,
-    X-Sync-Token and unauthenticated callers carry no JWT and pass through
-    unchanged, so token-based automation keeps working. Attach per write route
-    via ``dependencies=[Depends(forbid_demo)]`` — never at router level, since
-    the routers also serve demo-allowed reads.
+    Attach per write route via ``dependencies=[Depends(forbid_demo)]`` — never at router level,
+    since the routers also serve demo-allowed reads.
     """
-    token = _extract_access_token(request, authorization)
-    if not token:
-        return
-    try:
-        payload = decode_access_token(token)
-    except jwt.PyJWTError:
-        return
-    try:
-        user_id = int(payload.get('sub'))
-    except (TypeError, ValueError):
-        return
-    if await db.scalar(select(PortalUser.is_demo).where(PortalUser.id == user_id)):
+    if await _caller_is_demo(request, authorization, db):
         raise HTTPException(status_code=403, detail='Demo account is read-only')

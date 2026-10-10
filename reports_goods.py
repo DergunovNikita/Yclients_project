@@ -9,7 +9,6 @@ from typing import Any
 from sqlalchemy import and_, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dashboard_reports import _period_key, _period_starts
 from dashboard_service import (
     _appt_revenue_filters,
     _coerce_date,
@@ -21,6 +20,7 @@ from dashboard_service import (
     financial_appointment_match_condition,
 )
 from models import AccountCatalog, Appointment, Company, FinancialTransaction, GoodTransaction
+from report_common import period_key, period_starts
 from report_payload import (
     DECIMAL_FORMAT,
     MONEY_FORMAT,
@@ -249,18 +249,18 @@ def _period_rows(
     periods: dict[str, dict[str, Any]] = defaultdict(
         lambda: {'revenue': 0.0, 'units': 0.0, 'sales_count': 0, 'completed_visits': 0, 'goods_visits': 0}
     )
-    for key in _period_starts(start, end, granularity):
+    for key in period_starts(start, end, granularity):
         periods[key]
     for row in unit_rows:
-        periods[_period_key(_coerce_date(row.day), granularity)]['units'] += float(row.units or 0)
+        periods[period_key(_coerce_date(row.day), granularity)]['units'] += float(row.units or 0)
     for row in paid_rows:
-        item = periods[_period_key(row['date'], granularity)]
+        item = periods[period_key(row['date'], granularity)]
         item['revenue'] += row['amount']
         item['sales_count'] += 1
     for day, count in visits.items():
-        periods[_period_key(day, granularity)]['completed_visits'] += count
+        periods[period_key(day, granularity)]['completed_visits'] += count
     for day, count in goods_visits.items():
-        periods[_period_key(day, granularity)]['goods_visits'] += count
+        periods[period_key(day, granularity)]['goods_visits'] += count
     return [
         {'period': period, **item, 'goods_share': _percent(item['goods_visits'], item['completed_visits'])}
         for period, item in sorted(periods.items())

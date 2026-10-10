@@ -47,10 +47,23 @@ import {
 
 import { escapeHtml } from './html.js';
 import {
+  appointmentsCards,
+  cardsHtml,
+  clientsCards,
+  formatMetricValue,
+  kpiCards,
+  revenueCards,
+  servicesCards,
+  staffBranchCards,
+  usesAdministratorSchedule,
+  visitCards,
+} from './overviewCards.js';
+import {
   BRANCH_PLAN_SETTING_FIELDS,
   STAFF_PLAN_SETTING_FIELDS_BY_CATEGORY,
   buildPlanSettingsPayload,
   isScheduleAttributionDiagnostic,
+  planSettingsInputReader,
 } from './planSettings.js';
 import {
   filterPlanFactForDisplay,
@@ -58,7 +71,7 @@ import {
   normalizeHiddenPlanMetricCodes,
   setPlanMetricHidden,
 } from './planMetricVisibility.js';
-import { inputDateValue, monthOfRange, monthRange, monthValue } from './period.js';
+import { branchToday, inputDateValue, monthOfRange, monthRange, monthValue } from './period.js';
 import { branchesForPeriod } from './reportingWindow.js';
 // i18n's formatDate parses a date-only string as UTC midnight, which renders a day early
 // for any viewer west of UTC. This one pins it to local midnight.
@@ -67,31 +80,20 @@ import { branchesForPeriod } from './reportingWindow.js';
 // see AGENTS.md) rendered as a misleading "0 ₽" instead of admitting it isn't shown. These
 // versions render "—" for null/undefined, same as Reports already did — see format.test.mjs.
 import {
-  deltaClass,
   formatDate,
-  formatDecimal,
   formatMoney,
-  formatMoneyExact,
   formatNumber,
-  formatPct,
 } from './reports/format.js';
 import { canEnterManualFacts, entersManualFactsForSelf } from './manualFactAccess.js';
 import { canViewBranchPayments } from './branchPaymentsAccess.js';
-import {
-  UNREADABLE_DATE,
-  buildYandexPayItems,
-  syncYandexPayDate,
-  yandexPayDateKey,
-  yandexPayDraftKey,
-  yandexPayMonthStart,
-  yandexPayTotal,
-} from './yandexPayInput.js';
-import { buildManualFactItems, manualFactRowKey, manualFactSaveScope } from './manualFactInput.js';
-import { BRANCH_TIME_ZONE, formatBranchDateTime, parseServerInstant } from './timestamps.js';
+import { formatInputNumber } from './manualFactInput.js';
+import { createManualEditors } from './manualEditors.js';
+import { formatBranchDateTime } from './timestamps.js';
 import { initReports } from './reports/index.js';
-import { applyTranslations, getLocale, intlLocale, mountLanguageSwitcher, t } from './i18n.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 import {
   createUnsavedChangesGuard,
+  editEventChecksDraft,
   editorSaveDockState,
   historyNavigationDecision,
   shouldHandleSameTabNavigation,
@@ -288,11 +290,8 @@ const PLAN_SCALE_GROUPS = [
   { format: 'percent', labelKey: 'dash.scalePercent', color: '#b45309' },
 ];
 
-const pageOpenedAt = new Date();
 let activeView = 'overview';
 let branchOptions = [];
-let reviewFactRows = [];
-let opzFactRows = [];
 let planSettingsData = null;
 let planSettingsSavedData = null;
 let planSettingsSavedSnapshot = '';
@@ -300,23 +299,6 @@ let planSettingsDirty = false;
 let planSettingsLoadedMonth = '';
 let planSettingsSaving = false;
 let planSettingsLoading = false;
-let reviewFactSavedSnapshot = '';
-let reviewFactSavedData = null;
-let reviewFactDirty = false;
-let reviewFactLoadedFilters = null;
-let reviewFactSaving = false;
-let opzFactSavedSnapshot = '';
-let opzFactSavedData = null;
-let opzFactDirty = false;
-let opzFactLoadedFilters = null;
-let opzFactSaving = false;
-let yandexPayRows = [];
-let yandexPayEditable = true;
-let yandexPaySavedSnapshot = '';
-let yandexPaySavedData = null;
-let yandexPayDirty = false;
-let yandexPayLoadedFilters = null;
-let yandexPaySaving = false;
 let serviceManagementData = { rows: [], groups: [], categories: [] };
 let serviceManagementSavedData = null;
 let serviceManagementSavedSnapshot = '';
@@ -375,18 +357,14 @@ function finishUnsavedChangesDialog() {
 function hasProtectedDirtyChanges() {
   return (
     (activeView === 'planSettings' && planSettingsDirty)
-    || (activeView === 'reviewFacts' && reviewFactDirty)
-    || (activeView === 'opzFacts' && opzFactDirty)
-    || (activeView === 'yandexPayFacts' && yandexPayDirty)
+    || Boolean(manualEditors.byView[activeView]?.dirty)
   );
 }
 
 function protectedSavePending() {
   return (
     (activeView === 'planSettings' && planSettingsSaving)
-    || (activeView === 'reviewFacts' && reviewFactSaving)
-    || (activeView === 'opzFacts' && opzFactSaving)
-    || (activeView === 'yandexPayFacts' && yandexPaySaving)
+    || Boolean(manualEditors.byView[activeView]?.saving)
   );
 }
 
@@ -395,21 +373,7 @@ function discardProtectedChanges() {
     if (planSettingsSavedData) renderPlanSettings(JSON.parse(JSON.stringify(planSettingsSavedData)));
     else setPlanSettingsDirty(false);
   }
-  if (activeView === 'reviewFacts') {
-    restoreReviewFactFilters();
-    if (reviewFactSavedData) renderReviewFactEditor(JSON.parse(JSON.stringify(reviewFactSavedData)));
-    else setReviewFactDirty(false);
-  }
-  if (activeView === 'opzFacts') {
-    restoreOpzFactFilters();
-    if (opzFactSavedData) renderOpzFactEditor(JSON.parse(JSON.stringify(opzFactSavedData)));
-    else setOpzFactDirty(false);
-  }
-  if (activeView === 'yandexPayFacts') {
-    restoreYandexPayFilters();
-    if (yandexPaySavedData) renderYandexPayEditor(JSON.parse(JSON.stringify(yandexPaySavedData)));
-    else setYandexPayDirty(false);
-  }
+  manualEditors.byView[activeView]?.discard();
 }
 
 const protectedChangesGuard = createUnsavedChangesGuard({
@@ -419,17 +383,40 @@ const protectedChangesGuard = createUnsavedChangesGuard({
   onDiscard: discardProtectedChanges,
 });
 
+const manualEditors = createManualEditors({
+  els,
+  filterEls,
+  host: {
+    fetchJson,
+    postJson,
+    beginViewRequest,
+    clearError,
+    showError,
+    setApiState,
+    setFilterLoading,
+    setLoadedApiState,
+    loadSyncStatus,
+    viewsWithData,
+    isSupersededRequest,
+    updateFloatingEditorSave,
+    refreshStaffForBranch,
+    refilterForPeriod,
+    guard: protectedChangesGuard,
+    filterDropdowns: customFilterDropdowns,
+  },
+});
+
 function updateFloatingEditorSave() {
   const state = editorSaveDockState({
     activeView,
     planSettingsDirty,
     planSettingsSaving,
-    reviewFactDirty,
-    reviewFactSaving,
-    opzFactDirty,
-    opzFactSaving,
-    yandexPayDirty,
-    yandexPaySaving,
+    reviewFactDirty: manualEditors.review.dirty,
+    reviewFactSaving: manualEditors.review.saving,
+    opzFactDirty: manualEditors.opz.dirty,
+    opzFactSaving: manualEditors.opz.saving,
+    yandexPayDirty: manualEditors.yandex.dirty,
+    yandexPaySaving: manualEditors.yandex.saving,
     isDemo: document.body.classList.contains('demo-mode'),
   });
   els.floatingEditorSave.hidden = !state.visible;
@@ -603,20 +590,6 @@ function applyFinancialVisibility(summary) {
   setOverviewSectionHidden('services', financialsHidden);
 }
 
-function formatMetricValue(value, format) {
-  if (value === null || value === undefined) return '—';
-  if (format === 'money') return formatMoney(value);
-  if (format === 'percent') return `${Number(value).toLocaleString(intlLocale(), { maximumFractionDigits: 2 })}%`;
-  return formatNumber(value);
-}
-
-function formatInputNumber(value) {
-  if (value === null || value === undefined || value === '') return '';
-  const number = Number(value);
-  if (Number.isNaN(number)) return '';
-  return String(number);
-}
-
 function setApiState(text, kind = 'warn') {
   els.apiState.textContent = text;
   els.apiState.className = `pill ${kind}`;
@@ -739,7 +712,7 @@ function patchJson(path, body, options = {}) {
 }
 
 function defaultDates(filter) {
-  const now = new Date(pageOpenedAt);
+  const now = branchToday();
   const start = new Date(now.getFullYear(), now.getMonth(), 1);
   filter.end.value = inputDateValue(now);
   filter.start.value = inputDateValue(start);
@@ -753,7 +726,7 @@ function defaultDates(filter) {
  * than reloading the view against a window nobody asked for.
  */
 function applyFilterMonth(filter) {
-  const range = monthRange(filter.month.value, new Date(pageOpenedAt));
+  const range = monthRange(filter.month.value);
   if (!range) return false;
   filter.start.value = range.start;
   filter.end.value = range.end;
@@ -761,7 +734,7 @@ function applyFilterMonth(filter) {
 }
 
 function setManualFactDefaultMonths() {
-  const month = monthValue(new Date(pageOpenedAt));
+  const month = monthValue(branchToday());
   filterEls.reviewFacts.month.value = month;
   filterEls.opzFacts.month.value = month;
   filterEls.yandexPay.month.value = month;
@@ -770,7 +743,7 @@ function setManualFactDefaultMonths() {
 }
 
 function overviewPresetRange(preset) {
-  const end = new Date(pageOpenedAt);
+  const end = branchToday();
   const start = new Date(end);
   if (preset === 'week') {
     const day = start.getDay() || 7;
@@ -797,11 +770,18 @@ function highlightOverviewPreset(preset) {
   });
 }
 
-function refilterForPeriod(filter) {
+/**
+ * Rebuild the branch and employee lists for the period a filter now holds.
+ *
+ * The employee list is scoped by the same window, so it is stale the moment the period moves: a branch
+ * that left takes its people out of the filter with it, and the selected employee may go too. A view
+ * that loads for the new period therefore waits for the list — a request sent first would carry the old
+ * employee while the selector already reads "all". Resolves false when a newer rebuild took over.
+ */
+async function refilterForPeriod(filter) {
   renderBranchOptions(filter);
-  // The employee list is scoped by the same window, so it is stale the moment the
-  // period moves: a branch that left takes its people out of the filter with it.
-  if (filter.staff) loadStaff(filter, { force: true });
+  if (!filter.staff) return true;
+  return (await loadStaff(filter, { force: true })) !== 'superseded';
 }
 
 function setOverviewPreset(preset) {
@@ -814,7 +794,7 @@ function setOverviewPreset(preset) {
   // Only the month button picks a month; the shorter presets can land on the same window
   // by accident (a quarter opening today, in its first month) without meaning one.
   filter.month.value = preset === 'month'
-    ? monthOfRange(filter.start.value, filter.end.value, new Date(pageOpenedAt))
+    ? monthOfRange(filter.start.value, filter.end.value)
     : '';
 }
 
@@ -826,7 +806,7 @@ function clearOverviewPeriodChoice() {
 }
 
 function currentMonthValue() {
-  return monthValue(new Date());
+  return monthValue(branchToday());
 }
 
 function previousMonthValue(month) {
@@ -850,103 +830,12 @@ function overviewReportUrl(reportId) {
   return `/reports/${encodeURIComponent(reportId)}?${params.toString()}`;
 }
 
-let cardHintSeq = 0;
-
-// The hint button sits next to the card, not inside it: a <button> nested in the
-// card's <a> would be invalid markup and the delegated [data-report-link] handler
-// would open the report on every tap of the hint.
-function renderCardHint(hint, label) {
-  if (!hint) return '';
-  const id = `card-hint-${++cardHintSeq}`;
-  return `
-          <button
-            type="button"
-            class="card__hint"
-            data-card-hint
-            aria-describedby="${id}"
-            aria-label="${escapeHtml(t('dash.hintAria', { label }))}"
-          >i</button>
-          <span class="card__hint-body" id="${id}" role="tooltip">${escapeHtml(hint)}</span>`;
-}
-
 function renderCards(target, cards) {
-  target.innerHTML = cards
-    .map(
-      (card) => {
-        const tag = card.href ? 'a' : 'article';
-        const actionLabel = card.href ? t('dash.openReportWithLabel', { label: card.label }) : '';
-        const attrs = card.href
-          ? ` href="${escapeHtml(card.href)}" data-report-link class="card card--link" aria-label="${escapeHtml(actionLabel)}" title="${escapeHtml(actionLabel)}"`
-          : ' class="card"';
-        // A card that names its column skips auto-placement — the last row of a grid
-        // keeps each card under its own column even where the rows above are full.
-        const slotStyle = card.column ? ` style="--card-column: ${Number(card.column)}"` : '';
-        return `
-        <div class="card-slot"${slotStyle}>
-          <${tag}${attrs}>
-            <div class="label">${escapeHtml(card.label)}</div>
-            <div class="value">${escapeHtml(card.value)}</div>
-            ${card.delta ? `<div class="delta ${deltaClass(card.deltaValue)}">${escapeHtml(card.delta)}</div>` : ''}
-            ${card.action ? `<div class="card__action">${escapeHtml(card.action)}</div>` : ''}
-          </${tag}>${renderCardHint(card.hint, card.label)}
-        </div>
-      `;
-      },
-    )
-    .join('');
-}
-
-function presentCards(cards) {
-  return cards.filter((card) => card.present !== false);
+  target.innerHTML = cardsHtml(cards);
 }
 
 function renderKpi(summary) {
-  const revenueBlock = summary.revenue;
-  const averageCheckBlock = summary.average_check;
-  const revenue = revenueBlock || {};
-  const averageCheck = averageCheckBlock || {};
-  const cards = [
-    {
-      label: t('dash.cardTotalRevenue'),
-      hint: t('dash.hintTotalRevenue'),
-      value: formatMoney(revenue.total),
-      delta: formatPct(revenue.change_pct),
-      deltaValue: revenue.change_pct,
-      present: Boolean(revenueBlock),
-    },
-    {
-      label: t('dash.cardVisitedAppointments'),
-      hint: t('dash.hintVisitedAppointments'),
-      value: formatNumber(revenue.appointments),
-      delta: formatPct(revenue.appointments_change_pct),
-      deltaValue: revenue.appointments_change_pct,
-      present: Boolean(revenueBlock),
-    },
-    {
-      label: averageCheck.source_status === 'partial'
-        ? t('dash.cardAverageCheckTotalPartial')
-        : t('dash.cardAverageCheckTotal'),
-      hint: averageCheck.source_status === 'partial'
-        ? t('dash.hintAverageCheckTotalPartial')
-        : t('dash.hintAverageCheckTotal'),
-      value: formatMoney(averageCheck.total),
-      delta: formatPct(averageCheck.total_change_pct),
-      deltaValue: averageCheck.total_change_pct,
-      present: Boolean(averageCheckBlock),
-    },
-  ];
-
-  renderCards(els.kpi, presentCards(cards));
-}
-
-function goodsRevenueShare(revenue) {
-  const total = Number(revenue.total || 0);
-  if (!total) return null;
-  return (Number(revenue.goods_revenue || 0) / total) * 100;
-}
-
-function usesAdministratorSchedule(summary) {
-  return summary?.service_attribution?.mode === 'administrator_schedule';
+  renderCards(els.kpi, kpiCards(summary));
 }
 
 function renderStaffPersonalScope() {
@@ -976,362 +865,31 @@ function renderStaffBranchMetrics(summary) {
   const selectedStaff = filterEls.overview.staff.selectedOptions[0]?.textContent?.trim()
     || t('dash.worker');
   els.staffBranchTitle.textContent = t('dash.branchShiftMetricsTitle', { name: selectedStaff });
-
-  const attribution = summary.service_attribution || {};
-  const revenue = summary.revenue || {};
-  const averageCheck = summary.average_check || {};
-  const visitMetrics = summary.visit_metrics || {};
-  const cards = [
-    {
-      label: t('dash.cardBranchShiftAppointments'),
-      hint: t('dash.hintBranchShiftAppointments'),
-      value: formatMetricValue(attribution.appointment_count, 'number'),
-    },
-    {
-      label: t('dash.cardBranchShiftClients'),
-      hint: t('dash.hintBranchShiftClients'),
-      value: formatMetricValue(attribution.unique_client_count, 'number'),
-    },
-    {
-      label: t('dash.cardExtraServiceCount'),
-      hint: t('dash.hintExtraServiceCount'),
-      value: formatMetricValue(revenue.extra_service_count, 'number'),
-      delta: formatPct(revenue.extra_service_count_change_pct),
-      deltaValue: revenue.extra_service_count_change_pct,
-    },
-    {
-      label: t('dash.cardExtraServicesPerAppointment'),
-      hint: t('dash.hintExtraServicesPerAppointment'),
-      value: formatMetricValue(visitMetrics.extra_services_per_appointment_pct, 'percent'),
-      delta: formatPct(visitMetrics.extra_services_per_appointment_pct_change_pct),
-      deltaValue: visitMetrics.extra_services_per_appointment_pct_change_pct,
-    },
-    {
-      label: t('dash.cardExtraServiceClients'),
-      hint: t('dash.hintExtraServiceClients'),
-      value: formatMetricValue(visitMetrics.extra_service_clients_pct, 'percent'),
-      delta: t('dash.uniqueClientsCount', { count: formatNumber(visitMetrics.extra_service_clients) }),
-      deltaValue: null,
-    },
-    {
-      label: t('dash.cardExtraServiceRevenue'),
-      hint: t('dash.hintExtraServiceRevenue'),
-      value: formatMetricValue(revenue.extra_service_revenue, 'money'),
-      delta: formatPct(revenue.extra_service_revenue_change_pct),
-      deltaValue: revenue.extra_service_revenue_change_pct,
-      present: !summary.financials_hidden,
-    },
-    {
-      label: t('dash.cardExtraServiceAverageCheck'),
-      hint: t('dash.hintExtraServiceAverageCheck'),
-      value: formatMetricValue(averageCheck.extra_services, 'money'),
-      delta: formatPct(averageCheck.extra_services_change_pct),
-      deltaValue: averageCheck.extra_services_change_pct,
-      present: !summary.financials_hidden,
-    },
-  ];
-
-  renderCards(els.staffBranchMetrics, presentCards(cards));
+  renderCards(els.staffBranchMetrics, staffBranchCards(summary));
 }
 
 function renderRevenueMetrics(summary) {
-  if (!summary.revenue) {
-    renderCards(els.revenueMetrics, []);
-    return;
-  }
-  const revenue = summary.revenue;
-  const cards = [
-    {
-      label: t('dash.cardServiceRevenue'),
-      hint: t('dash.hintServiceRevenue'),
-      value: formatMoney(revenue.service_revenue),
-      delta: formatPct(revenue.service_revenue_change_pct),
-      deltaValue: revenue.service_revenue_change_pct,
-    },
-    {
-      label: t('dash.cardGoodsRevenue'),
-      hint: t('dash.hintGoodsRevenue'),
-      value: formatMoney(revenue.goods_revenue),
-      delta: formatPct(revenue.goods_revenue_change_pct),
-      deltaValue: revenue.goods_revenue_change_pct,
-    },
-    {
-      label: t('dash.cardExtraServiceRevenue'),
-      hint: t('dash.hintExtraServiceRevenue'),
-      value: formatMoney(revenue.extra_service_revenue),
-      delta: formatPct(revenue.extra_service_revenue_change_pct),
-      deltaValue: revenue.extra_service_revenue_change_pct,
-    },
-  ];
-
-  renderCards(
-    els.revenueMetrics,
-    usesAdministratorSchedule(summary) ? cards.filter((_, index) => index !== 2) : cards,
-  );
+  renderCards(els.revenueMetrics, revenueCards(summary));
 }
 
 function renderServicesMetrics(summary) {
-  const revenueBlock = summary.revenue;
-  const averageCheckBlock = summary.average_check;
-  const revenue = revenueBlock || {};
-  const averageCheck = averageCheckBlock || {};
-  const visitMetrics = summary.visit_metrics || {};
-  const revenuePresent = Boolean(revenueBlock);
-  const averageCheckPresent = Boolean(averageCheckBlock);
-  // One column per kind of sale: counts fill the first row, each average check sits
-  // right under its own count, so the grid needs as many columns as visible kinds.
-  const columns = [
-    {
-      count: {
-        label: t('dash.cardServiceCount'),
-        hint: t('dash.hintServiceCount'),
-        value: formatNumber(revenue.service_count),
-        delta: formatPct(revenue.service_count_change_pct),
-        deltaValue: revenue.service_count_change_pct,
-        present: revenuePresent,
-      },
-      average: {
-        label: t('dash.cardServiceAverageCheck'),
-        hint: t('dash.hintServiceAverageCheck'),
-        value: formatMoney(averageCheck.services),
-        delta: formatPct(averageCheck.services_change_pct),
-        deltaValue: averageCheck.services_change_pct,
-        present: averageCheckPresent,
-      },
-    },
-    {
-      count: {
-        label: t('dash.cardGoodsCount'),
-        hint: t('dash.hintGoodsCount'),
-        value: formatNumber(revenue.goods_count),
-        delta: formatPct(revenue.goods_count_change_pct),
-        deltaValue: revenue.goods_count_change_pct,
-        present: revenuePresent,
-      },
-      average: {
-        label: t('dash.cardGoodsAverageCheck'),
-        hint: t('dash.hintGoodsAverageCheck'),
-        value: formatMoney(averageCheck.goods),
-        delta: formatPct(averageCheck.goods_change_pct),
-        deltaValue: averageCheck.goods_change_pct,
-        present: averageCheckPresent,
-      },
-      share: {
-        label: t('dash.cardGoodsRevenueShare'),
-        hint: t('dash.hintGoodsRevenueShare'),
-        value: formatMetricValue(goodsRevenueShare(revenue), 'percent'),
-        delta: t('dash.ofTotalRevenue'),
-        deltaValue: null,
-        present: revenuePresent,
-      },
-    },
-    {
-      count: {
-        label: t('dash.cardExtraServiceCount'),
-        hint: t('dash.hintExtraServiceCount'),
-        value: formatNumber(revenue.extra_service_count),
-        delta: formatPct(revenue.extra_service_count_change_pct),
-        deltaValue: revenue.extra_service_count_change_pct,
-        present: revenuePresent,
-      },
-      average: {
-        label: t('dash.cardExtraServiceAverageCheck'),
-        hint: t('dash.hintExtraServiceAverageCheck'),
-        value: formatMoney(averageCheck.extra_services),
-        delta: formatPct(averageCheck.extra_services_change_pct),
-        deltaValue: averageCheck.extra_services_change_pct,
-        present: averageCheckPresent,
-      },
-      // Also shown under Appointments: there it measures how often extras are sold,
-      // here it closes the extra-services column the same way the goods share does.
-      share: {
-        label: t('dash.cardExtraServicesPerAppointment'),
-        hint: t('dash.hintExtraServicesPerAppointment'),
-        value: formatMetricValue(visitMetrics.extra_services_per_appointment_pct, 'percent'),
-        delta: formatPct(visitMetrics.extra_services_per_appointment_pct_change_pct),
-        deltaValue: visitMetrics.extra_services_per_appointment_pct_change_pct,
-      },
-    },
-  ];
-
-  const visibleColumns = usesAdministratorSchedule(summary) ? columns.slice(0, 2) : columns;
-  els.servicesMetrics.style.setProperty('--metric-columns', String(visibleColumns.length));
-  renderCards(els.servicesMetrics, [
-    ...presentCards(visibleColumns.map((column) => column.count)),
-    ...presentCards(visibleColumns.map((column) => column.average)),
-    // The share row is shorter than the ones above it, so every card names its column.
-    ...presentCards(visibleColumns.flatMap((column, index) => (
-      column.share ? [{ ...column.share, column: index + 1 }] : []
-    ))),
-  ]);
+  const { cards, columnCount } = servicesCards(summary);
+  els.servicesMetrics.style.setProperty('--metric-columns', String(columnCount));
+  renderCards(els.servicesMetrics, cards);
 }
 
 function renderVisitMetrics(summary) {
-  const visitMetrics = summary.visit_metrics || {};
-  const cards = [
-    {
-      label: t('dash.cardOpzQty'),
-      hint: t('dash.hintOpzQty'),
-      value: formatNumber(visitMetrics.opz_qty),
-      delta: formatPct(visitMetrics.opz_qty_change_pct),
-      deltaValue: visitMetrics.opz_qty_change_pct,
-    },
-    {
-      label: t('dash.cardOpzPct'),
-      hint: t('dash.hintOpzPct'),
-      value: formatMetricValue(visitMetrics.opz_pct, 'percent'),
-      delta: formatPct(visitMetrics.opz_pct_change_pct),
-      deltaValue: visitMetrics.opz_pct_change_pct,
-    },
-    {
-      label: t('dash.cardExtraServicesPerAppointment'),
-      hint: t('dash.hintExtraServicesPerAppointment'),
-      value: formatMetricValue(visitMetrics.extra_services_per_appointment_pct, 'percent'),
-      delta: formatPct(visitMetrics.extra_services_per_appointment_pct_change_pct),
-      deltaValue: visitMetrics.extra_services_per_appointment_pct_change_pct,
-    },
-  ];
-
-  renderCards(
-    els.visitMetrics,
-    usesAdministratorSchedule(summary) ? cards.slice(0, 2) : cards,
-  );
+  renderCards(els.visitMetrics, visitCards(summary));
 }
 
 function renderClientsMetrics(summary) {
-  const visitMetrics = summary.visit_metrics || {};
-  const clientFrequency = visitMetrics.client_visit_frequency || {};
-  const oneVisit = clientFrequency.one_visit || {};
-  const twoToThreeVisits = clientFrequency.two_to_three_visits || {};
-  const fourPlusVisits = clientFrequency.four_plus_visits || {};
-  const cards = [
-    {
-      label: t('dash.cardUniqueClients'),
-      hint: t('dash.hintUniqueClients'),
-      value: formatNumber(visitMetrics.unique_clients),
-      delta: formatPct(visitMetrics.unique_clients_change_pct),
-      deltaValue: visitMetrics.unique_clients_change_pct,
-    },
-    {
-      label: t('dash.cardVisitsPerClient'),
-      hint: t('dash.hintVisitsPerClient'),
-      value: formatDecimal(visitMetrics.visits_per_client),
-      delta: formatPct(visitMetrics.visits_per_client_change_pct),
-      deltaValue: visitMetrics.visits_per_client_change_pct,
-    },
-    {
-      label: t('dash.cardExtraServiceClients'),
-      hint: t('dash.hintExtraServiceClients'),
-      value: formatMetricValue(visitMetrics.extra_service_clients_pct, 'percent'),
-      delta: t('dash.uniqueClientsCount', { count: formatNumber(visitMetrics.extra_service_clients) }),
-      deltaValue: null,
-    },
-    {
-      label: t('dash.cardOneVisitClients'),
-      hint: t('dash.hintOneVisitClients'),
-      value: formatNumber(oneVisit.count),
-      delta: t('dash.ofClients', { value: formatMetricValue(oneVisit.pct, 'percent') }),
-      deltaValue: null,
-    },
-    {
-      label: t('dash.cardTwoThreeVisitClients'),
-      hint: t('dash.hintTwoThreeVisitClients'),
-      value: formatNumber(twoToThreeVisits.count),
-      delta: t('dash.ofClients', { value: formatMetricValue(twoToThreeVisits.pct, 'percent') }),
-      deltaValue: null,
-    },
-    {
-      label: t('dash.cardFourPlusVisitClients'),
-      hint: t('dash.hintFourPlusVisitClients'),
-      value: formatNumber(fourPlusVisits.count),
-      delta: t('dash.ofClients', { value: formatMetricValue(fourPlusVisits.pct, 'percent') }),
-      deltaValue: null,
-    },
-    {
-      label: t('dash.cardNewClients'),
-      hint: t('dash.hintNewClients'),
-      value: formatNumber(visitMetrics.new_clients),
-      delta: formatPct(visitMetrics.new_clients_change_pct),
-      deltaValue: visitMetrics.new_clients_change_pct,
-      href: overviewReportUrl('new_vs_returning_cross'),
-      action: t('dash.openReport'),
-    },
-    {
-      label: t('dash.cardNewClientsPct'),
-      hint: t('dash.hintNewClientsPct'),
-      value: formatMetricValue(visitMetrics.new_clients_pct, 'percent'),
-      delta: formatPct(visitMetrics.new_clients_pct_change_pct),
-      deltaValue: visitMetrics.new_clients_pct_change_pct,
-      href: overviewReportUrl('new_vs_returning_cross'),
-      action: t('dash.openReport'),
-    },
-    {
-      label: t('dash.cardRepeatClients'),
-      hint: t('dash.hintRepeatClients'),
-      value: formatNumber(visitMetrics.repeat_clients),
-      delta: formatPct(visitMetrics.repeat_clients_change_pct),
-      deltaValue: visitMetrics.repeat_clients_change_pct,
-      href: overviewReportUrl('new_vs_returning_cross'),
-      action: t('dash.openReport'),
-    },
-    {
-      label: t('dash.cardRepeatClientsPct'),
-      hint: t('dash.hintRepeatClientsPct'),
-      value: formatMetricValue(visitMetrics.repeat_clients_pct, 'percent'),
-      delta: formatPct(visitMetrics.repeat_clients_pct_change_pct),
-      deltaValue: visitMetrics.repeat_clients_pct_change_pct,
-      href: overviewReportUrl('new_vs_returning_cross'),
-      action: t('dash.openReport'),
-    },
-  ];
-
-  renderCards(
-    els.clientsMetrics,
-    usesAdministratorSchedule(summary) ? cards.filter((_, index) => index !== 2) : cards,
-  );
+  renderCards(els.clientsMetrics, clientsCards(summary, overviewReportUrl));
 }
 
 function renderAppointmentsMetrics(summary) {
-  const breakdown = summary.appointments_breakdown || {};
-  const exact = breakdown.source_status === 'ready';
-  const ready = exact || breakdown.source_status === 'local';
-  const metricValue = (value) => (ready ? formatNumber(value) : t('dash.noData'));
-  const metricShare = (value) => (ready ? t('dash.ofTotal', { value: `${formatNumber(value)}%` }) : '');
-  const cards = [
-    {
-      label: t('dash.cardTotalAppointments'),
-      hint: t('dash.hintTotalAppointments'),
-      value: metricValue(breakdown.total),
-      delta: metricShare(breakdown.total_share_pct),
-      deltaValue: null,
-    },
-    {
-      label: t('dash.cardCancelledAppointments'),
-      hint: t('dash.hintCancelledAppointments'),
-      value: metricValue(breakdown.cancelled),
-      delta: metricShare(breakdown.cancelled_share_pct),
-      deltaValue: null,
-    },
-    {
-      label: t('dash.cardCompletedAppointments'),
-      hint: t('dash.hintCompletedAppointments'),
-      value: metricValue(breakdown.completed),
-      delta: metricShare(breakdown.completed_share_pct),
-      deltaValue: null,
-    },
-    {
-      label: t('dash.cardIncompleteAppointments'),
-      hint: t('dash.hintIncompleteAppointments'),
-      value: metricValue(breakdown.incomplete),
-      delta: metricShare(breakdown.incomplete_share_pct),
-      deltaValue: null,
-    },
-  ];
-
+  const { cards, exact, notice } = appointmentsCards(summary);
   renderCards(els.appointmentsMetrics, cards);
-  els.appointmentsWarning.textContent = ready
-    ? exact ? '' : t('dash.appointmentsLocalEstimate')
-    : t('dash.appointmentsUnavailable');
+  els.appointmentsWarning.textContent = notice;
   els.appointmentsWarning.classList.toggle('visible', !exact);
 }
 
@@ -2154,12 +1712,6 @@ function setPlanSettingsDirty(isDirty) {
   updateFloatingEditorSave();
 }
 
-function planSettingsInputValue(selector) {
-  const input = document.querySelector(selector);
-  const value = input?.value.trim() || '';
-  return value === '' ? null : value;
-}
-
 function planSettingFieldLabel(field) {
   const translationKeys = {
     wax_pct: 'dash.waxPct',
@@ -2180,12 +1732,9 @@ function planSettingFieldLabel(field) {
 }
 
 function collectPlanSettingsPayload() {
-  const readValue = (scope, row, field) => {
-    const idSelector = scope === 'branch'
-      ? `[data-company-id="${row.company_id}"]`
-      : `[data-staff-id="${row.staff_id}"]`;
-    return planSettingsInputValue(`input[data-plan-${scope}]${idSelector}[data-field="${field}"]`);
-  };
+  const readValue = planSettingsInputReader(
+    document.querySelectorAll('input[data-plan-branch], input[data-plan-staff]'),
+  );
   return buildPlanSettingsPayload(planSettingsData, readValue);
 }
 
@@ -2312,7 +1861,7 @@ function renderServiceBranchOptions() {
   // The catalogue is a setting, not a report, so there is no period to cut against and the
   // question is simply whether the branch is ours *now*: one that has left keeps its history
   // in the reports, but its services are no longer the tenant's to edit.
-  const today = inputDateValue(new Date(pageOpenedAt));
+  const today = inputDateValue(branchToday());
   const options = branchesForPeriod(branchOptions, today, today);
   els.serviceFilterBranch.innerHTML = `<option value="">${t('dash.allBranches')}</option>`;
   options.forEach((branch) => {
@@ -2652,638 +2201,6 @@ async function addServiceKpiGroup() {
   );
 }
 
-function manualFactSavedOn(value) {
-  const instant = parseServerInstant(value);
-  if (instant === null) return '';
-  // Branch time, like every other business timestamp — the viewer's own zone would make the
-  // same instant read as two different dates on two screens of the same dashboard.
-  return new Intl.DateTimeFormat(intlLocale(), { timeZone: BRANCH_TIME_ZONE }).format(instant);
-}
-
-// Two people may edit one row, so the row says which of them touched it last. Values saved
-// before the author column existed have a date and no name — keep the half we do have.
-function manualFactAuthorCell(row) {
-  const parts = [row.updated_by_name ? escapeHtml(row.updated_by_name) : '—'];
-  const savedOn = manualFactSavedOn(row.updated_at);
-  if (savedOn) parts.push(escapeHtml(savedOn));
-  return parts.join(' · ');
-}
-
-// `loadedFilters` is what `data` was fetched or saved for — the pickers may already show another scope.
-function renderReviewFactEditor(data, loadedFilters = reviewFactFilters()) {
-  reviewFactRows = data?.rows || [];
-  const totalValue = data?.total_value || 0;
-  els.reviewFactMeta.textContent = t('dash.reviewFactMeta', { admins: reviewFactRows.length, reviews: formatNumber(totalValue) });
-
-  if (!reviewFactRows.length) {
-    els.reviewFactEditor.innerHTML = `<div class="empty compact">${t('dash.noActiveAdministrators')}</div>`;
-  } else {
-    els.reviewFactEditor.innerHTML = `
-      <div class="table-scroll manual-fact-scroll">
-        <table class="manual-fact-table">
-          <thead>
-            <tr>
-              <th>${t('dash.branch')}</th>
-              <th>${t('dash.administrator')}</th>
-              <th class="number">${t('dash.reviewsFact')}</th>
-              <th>${t('dash.manualFactAuthor')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${reviewFactRows
-              .map((row) => {
-                const inactiveMark = row.is_active === false
-                  ? ` <span class="meta">· ${escapeHtml(t('dash.reviewFactInactive'))}</span>`
-                  : '';
-                return `
-                  <tr>
-                    <td>${escapeHtml(row.company_title || t('dash.branchFallbackWithId', { id: row.company_id }))}</td>
-                    <td>${escapeHtml(row.staff_name)}${inactiveMark}</td>
-                    <td class="number">
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        inputmode="numeric"
-                        data-company-id="${escapeHtml(row.company_id)}"
-                        data-staff-id="${escapeHtml(row.staff_id)}"
-                        value="${escapeHtml(formatInputNumber(row.value))}"
-                      />
-                    </td>
-                    <td class="meta">${manualFactAuthorCell(row)}</td>
-                  </tr>
-                `;
-              })
-              .join('')}
-          </tbody>
-        </table>
-      </div>
-    `;
-  }
-
-  reviewFactSavedData = JSON.parse(JSON.stringify(data || { rows: [] }));
-  reviewFactLoadedFilters = loadedFilters;
-  reviewFactSavedSnapshot = reviewFactDraftSnapshot();
-  setReviewFactDirty(false);
-}
-
-// Shared bookkeeping for the review-fact and OPZ-fact editors: same filters (month/branch/
-// staff), same dirty-snapshot comparison against the input rows, same save-button rule.
-function manualFactFilterValues(filter) {
-  return {
-    month: filter.month.value,
-    branch: filter.branch.value,
-    staff: filter.staff.value,
-  };
-}
-
-function restoreManualFactFilters(filter, loadedFilters) {
-  if (!loadedFilters) return;
-  filter.month.value = loadedFilters.month;
-  filter.branch.value = loadedFilters.branch;
-  filter.staff.value = loadedFilters.staff;
-  customFilterDropdowns[filter.branch.id]?.refresh();
-  customFilterDropdowns[filter.staff.id]?.refresh();
-}
-
-function manualFactDraftSnapshot(editorEl) {
-  return JSON.stringify([...editorEl.querySelectorAll('input[data-staff-id]')].map((input) => ({
-    companyId: input.dataset.companyId,
-    staffId: input.dataset.staffId,
-    value: input.value.trim(),
-  })));
-}
-
-function setManualFactDirty(isDirty, { assignDirty, saveButton, saving, rows }) {
-  assignDirty(isDirty);
-  saveButton.disabled = saving || !rows.length;
-  updateFloatingEditorSave();
-}
-
-// Every rendered row goes out with the value the last response showed for it, so the server
-// can tell an edit from a row someone else changed since this editor loaded.
-function manualFactPayload(loadedFilters, liveFilters, editorEl, rows, invalidMessageKey) {
-  const rawByKey = new Map([...editorEl.querySelectorAll('input[data-staff-id]')].map((input) => [
-    manualFactRowKey(input.dataset.companyId, input.dataset.staffId),
-    input.value,
-  ]));
-  const built = buildManualFactItems(rows, rawByKey);
-  if (built.error) throw new Error(t(invalidMessageKey));
-  return { ...manualFactSaveScope(loadedFilters, liveFilters), items: built.items };
-}
-
-// Someone saved the same month between our load and our save. Their value wins; what we typed
-// is not merged in, because the sum of two people's edits is nobody's intent.
-async function recoverFromManualFactConflict(reloadEditor, reloadView) {
-  try {
-    await reloadEditor();
-    showError(t('dash.manualFactConflict'), { apiStatus: 'ready' });
-  } catch (reloadError) {
-    showError(reloadError.message, { apiStatus: reloadError.apiStatus, retry: () => reloadView() });
-  }
-}
-
-function manualFactParams(filter) {
-  return {
-    month: filter.month.value,
-    company_id: filter.branch.value,
-    staff_id: filter.staff.value,
-  };
-}
-
-function reviewFactFilters() {
-  return manualFactFilterValues(filterEls.reviewFacts);
-}
-
-function restoreReviewFactFilters() {
-  restoreManualFactFilters(filterEls.reviewFacts, reviewFactLoadedFilters);
-}
-
-function reviewFactDraftSnapshot() {
-  return manualFactDraftSnapshot(els.reviewFactEditor);
-}
-
-function setReviewFactDirty(isDirty) {
-  setManualFactDirty(isDirty, {
-    assignDirty: (value) => { reviewFactDirty = value; },
-    saveButton: els.reviewFactSave,
-    saving: reviewFactSaving,
-    rows: reviewFactRows,
-  });
-}
-
-function updateReviewFactDirtyFromForm() {
-  setReviewFactDirty(reviewFactDraftSnapshot() !== reviewFactSavedSnapshot);
-}
-
-function reviewFactParams() {
-  return manualFactParams(filterEls.reviewFacts);
-}
-
-async function loadReviewFactEditor({ signal = null } = {}) {
-  const filters = reviewFactFilters();
-  const payload = await fetchJson('/dashboard/plan/reviews_fact', reviewFactParams(), {
-    retry: () => loadReviewFacts(),
-    signal,
-  });
-  renderReviewFactEditor(payload.data, filters);
-}
-
-function reviewFactPayload() {
-  return manualFactPayload(
-    reviewFactLoadedFilters, reviewFactFilters(), els.reviewFactEditor, reviewFactRows, 'dash.reviewFactNonNegative',
-  );
-}
-
-async function saveReviewFactEditor() {
-  if (reviewFactSaving || !reviewFactRows.length) return;
-  reviewFactSaving = true;
-  updateFloatingEditorSave();
-  clearError();
-  els.reviewFactSave.disabled = true;
-  els.reviewFactSave.textContent = t('common.saving');
-  setApiState(t('dash.apiSaving'), 'warn');
-
-  try {
-    // The saved response belongs to the scope the rows were loaded for, whatever the pickers show now.
-    const filters = reviewFactLoadedFilters || reviewFactFilters();
-    const payload = await postJson('/dashboard/plan/reviews_fact', reviewFactPayload());
-    renderReviewFactEditor(payload.data, filters);
-    setApiState(t('dash.apiConnected'), 'ok');
-  } catch (error) {
-    if (error.status === 409) await recoverFromManualFactConflict(loadReviewFactEditor, loadReviewFacts);
-    else showError(error.message, { apiStatus: error.apiStatus, retry: () => saveReviewFactEditor() });
-  } finally {
-    reviewFactSaving = false;
-    els.reviewFactSave.textContent = t('dash.saveFact');
-    setReviewFactDirty(reviewFactDirty);
-  }
-}
-
-function renderOpzFactEditor(data, loadedFilters = opzFactFilters()) {
-  opzFactRows = data?.rows || [];
-  els.opzFactMeta.textContent = t('dash.opzFactMeta', {
-    admins: opzFactRows.length,
-    current: formatNumber(data?.current_total || 0),
-    additional: formatNumber(data?.manual_total || 0),
-    total: formatNumber(data?.combined_total || 0),
-  });
-
-  if (!opzFactRows.length) {
-    els.opzFactEditor.innerHTML = `<div class="empty compact">${t('dash.noActiveAdministrators')}</div>`;
-  } else {
-    els.opzFactEditor.innerHTML = `
-      <div class="table-scroll manual-fact-scroll">
-        <table class="manual-fact-table">
-          <thead>
-            <tr>
-              <th>${t('dash.branch')}</th>
-              <th>${t('dash.administrator')}</th>
-              <th class="number">${t('dash.currentOpz')}</th>
-              <th class="number">${t('dash.additionalOpz')}</th>
-              <th class="number">${t('dash.opzFactTotal')}</th>
-              <th>${t('dash.manualFactAuthor')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${opzFactRows
-              .map((row) => {
-                const marks = [];
-                if (row.is_active === false) marks.push(t('dash.opzFactInactive'));
-                if (row.counted === false) marks.push(t('dash.opzFactNotCounted'));
-                const inactiveMark = marks.length
-                  ? ` <span class="meta">· ${escapeHtml(marks.join(' · '))}</span>`
-                  : '';
-                const current = Number(row.current_value || 0);
-                return `
-                  <tr data-current-value="${escapeHtml(current)}" data-counted="${row.counted === false ? 'false' : 'true'}">
-                    <td>${escapeHtml(row.company_title || t('dash.branchFallbackWithId', { id: row.company_id }))}</td>
-                    <td>${escapeHtml(row.staff_name)}${inactiveMark}</td>
-                    <td class="number">${escapeHtml(formatNumber(current))}</td>
-                    <td class="number">
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        inputmode="numeric"
-                        data-company-id="${escapeHtml(row.company_id)}"
-                        data-staff-id="${escapeHtml(row.staff_id)}"
-                        value="${escapeHtml(formatInputNumber(row.value))}"
-                      />
-                    </td>
-                    <td class="number" data-total-cell>${escapeHtml(formatNumber(row.total_value ?? current))}</td>
-                    <td class="meta">${manualFactAuthorCell(row)}</td>
-                  </tr>
-                `;
-              })
-              .join('')}
-          </tbody>
-        </table>
-      </div>
-    `;
-  }
-
-  opzFactSavedData = JSON.parse(JSON.stringify(data || { rows: [] }));
-  opzFactLoadedFilters = loadedFilters;
-  opzFactSavedSnapshot = opzFactDraftSnapshot();
-  setOpzFactDirty(false);
-}
-
-// The fact is the sum, so the row shows it before saving — not only after the reload.
-function refreshOpzFactTotals() {
-  let currentTotal = 0;
-  let additionalTotal = 0;
-  els.opzFactEditor.querySelectorAll('input[data-staff-id]').forEach((input) => {
-    const row = input.closest('tr');
-    if (!row) return;
-    const current = Number(row.dataset.currentValue || 0);
-    const rawValue = input.value.trim().replace(',', '.');
-    const parsed = rawValue === '' ? 0 : Number(rawValue);
-    const valid = Number.isFinite(parsed) && parsed >= 0;
-    // The server stores whole units, so the preview must not promise a fraction — and a
-    // row the reports ignore must not add itself to the totals either.
-    const counted = row.dataset.counted !== 'false';
-    const additional = valid && counted ? Math.round(parsed) : 0;
-    const totalCell = row.querySelector('[data-total-cell]');
-    if (totalCell) totalCell.textContent = formatNumber(current + additional);
-    currentTotal += current;
-    additionalTotal += additional;
-  });
-  els.opzFactMeta.textContent = t('dash.opzFactMeta', {
-    admins: opzFactRows.length,
-    current: formatNumber(currentTotal),
-    additional: formatNumber(additionalTotal),
-    total: formatNumber(currentTotal + additionalTotal),
-  });
-}
-
-function opzFactFilters() {
-  return manualFactFilterValues(filterEls.opzFacts);
-}
-
-function restoreOpzFactFilters() {
-  restoreManualFactFilters(filterEls.opzFacts, opzFactLoadedFilters);
-}
-
-function opzFactDraftSnapshot() {
-  return manualFactDraftSnapshot(els.opzFactEditor);
-}
-
-function setOpzFactDirty(isDirty) {
-  setManualFactDirty(isDirty, {
-    assignDirty: (value) => { opzFactDirty = value; },
-    saveButton: els.opzFactSave,
-    saving: opzFactSaving,
-    rows: opzFactRows,
-  });
-}
-
-function updateOpzFactDirtyFromForm() {
-  setOpzFactDirty(opzFactDraftSnapshot() !== opzFactSavedSnapshot);
-}
-
-function opzFactParams() {
-  return manualFactParams(filterEls.opzFacts);
-}
-
-async function loadOpzFactEditor({ signal = null } = {}) {
-  const filters = opzFactFilters();
-  const payload = await fetchJson('/dashboard/plan/opz_fact', opzFactParams(), {
-    retry: () => loadOpzFacts(),
-    signal,
-  });
-  renderOpzFactEditor(payload.data, filters);
-}
-
-async function loadOpzFacts() {
-  const filter = filterEls.opzFacts;
-  const request = beginViewRequest('opzFacts');
-  clearError();
-  setFilterLoading(filter, true);
-
-  const syncStatus = loadSyncStatus();
-  try {
-    await loadOpzFactEditor({ signal: request.signal });
-    if (!request.isCurrent()) return;
-    viewsWithData.add('opzFacts');
-    clearError();
-    setLoadedApiState(null, { empty: opzFactRows.length === 0 });
-    await syncStatus;
-  } catch (error) {
-    if (isSupersededRequest(error) || !request.isCurrent()) return;
-    showError(error.message, { apiStatus: error.apiStatus, retry: () => loadOpzFacts() });
-  } finally {
-    if (request.isCurrent()) {
-      setFilterLoading(filter, false);
-      request.finish();
-    }
-  }
-}
-
-function opzFactPayload() {
-  return manualFactPayload(
-    opzFactLoadedFilters, opzFactFilters(), els.opzFactEditor, opzFactRows, 'dash.opzFactNonNegative',
-  );
-}
-
-async function saveOpzFactEditor() {
-  if (opzFactSaving || !opzFactRows.length) return;
-  opzFactSaving = true;
-  updateFloatingEditorSave();
-  clearError();
-  els.opzFactSave.disabled = true;
-  els.opzFactSave.textContent = t('common.saving');
-  setApiState(t('dash.apiSaving'), 'warn');
-
-  try {
-    const filters = opzFactLoadedFilters || opzFactFilters();
-    const payload = await postJson('/dashboard/plan/opz_fact', opzFactPayload());
-    renderOpzFactEditor(payload.data, filters);
-    setApiState(t('dash.apiConnected'), 'ok');
-  } catch (error) {
-    if (error.status === 409) await recoverFromManualFactConflict(loadOpzFactEditor, loadOpzFacts);
-    else showError(error.message, { apiStatus: error.apiStatus, retry: () => saveOpzFactEditor() });
-  } finally {
-    opzFactSaving = false;
-    els.opzFactSave.textContent = t('dash.saveFact');
-    setOpzFactDirty(opzFactDirty);
-  }
-}
-
-function yandexPayInputs() {
-  return [...els.yandexPayEditor.querySelectorAll('input[data-company-id]')];
-}
-
-function yandexPayRawValues() {
-  return new Map(yandexPayInputs().map((input) => [input.dataset.companyId, input.value]));
-}
-
-function yandexPayDateInputs() {
-  return [...els.yandexPayEditor.querySelectorAll('input[data-through-company-id]')];
-}
-
-function yandexPayRawDates() {
-  return new Map(yandexPayDateInputs().map((input) => [
-    input.dataset.throughCompanyId,
-    input.validity?.badInput ? UNREADABLE_DATE : input.value,
-  ]));
-}
-
-// `loadedFilters` is what `data` was fetched or saved for — the pickers may already show another scope.
-function renderYandexPayEditor(data, loadedFilters = yandexPayFilters()) {
-  yandexPayRows = data?.rows || [];
-  yandexPayEditable = data?.editable !== false;
-  els.yandexPayFutureHint.hidden = yandexPayEditable;
-
-  const monthStart = yandexPayMonthStart(loadedFilters.month);
-  if (!yandexPayRows.length) {
-    els.yandexPayEditor.innerHTML = `<div class="empty compact">${t('dash.yandexPayNoBranches')}</div>`;
-  } else {
-    els.yandexPayEditor.innerHTML = `
-      <div class="table-scroll manual-fact-scroll">
-        <table class="manual-fact-table yandex-pay-table">
-          <thead>
-            <tr>
-              <th>${t('dash.branch')}</th>
-              <th class="number">${t('dash.yandexPayCashless')}</th>
-              <th class="number">${t('dash.yandexPayAmount')}</th>
-              <th>${t('dash.yandexPayDataThrough')}</th>
-              <th>${t('dash.manualFactAuthor')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${yandexPayRows
-              .map((row) => {
-                const counted = row.counted !== false;
-                const title = row.company_title || t('dash.branchFallbackWithId', { id: row.company_id });
-                const mark = counted
-                  ? ''
-                  : ` <span class="meta">· ${escapeHtml(t('dash.yandexPayNotCounted'))}</span>`;
-                return `
-                  <tr class="${counted ? '' : 'is-muted'}">
-                    <td>${escapeHtml(title)}${mark}</td>
-                    <td class="number">${escapeHtml(formatMoneyExact(row.cashless_yclients))}</td>
-                    <td class="number">
-                      <input
-                        type="text"
-                        inputmode="decimal"
-                        autocomplete="off"
-                        data-company-id="${escapeHtml(row.company_id)}"
-                        value="${escapeHtml(formatInputNumber(row.value))}"
-                        ${yandexPayEditable ? '' : 'disabled'}
-                      />
-                    </td>
-                    <td>
-                      <input
-                        type="date"
-                        autocomplete="off"
-                        data-through-company-id="${escapeHtml(row.company_id)}"
-                        aria-label="${escapeHtml(t('dash.yandexPayDataThrough'))}: ${escapeHtml(title)}"
-                        value="${escapeHtml(row.data_through || '')}"
-                        ${monthStart ? `min="${escapeHtml(monthStart)}"` : ''}
-                        ${row.max_data_through ? `max="${escapeHtml(row.max_data_through)}"` : ''}
-                        ${yandexPayEditable ? '' : 'disabled'}
-                      />
-                    </td>
-                    <td class="meta">${manualFactAuthorCell(row)}</td>
-                  </tr>
-                `;
-              })
-              .join('')}
-          </tbody>
-        </table>
-      </div>
-    `;
-  }
-
-  yandexPaySavedData = JSON.parse(JSON.stringify(data || { rows: [] }));
-  yandexPayLoadedFilters = loadedFilters;
-  yandexPaySavedSnapshot = yandexPayDraftSnapshot();
-  refreshYandexPayTotal();
-  setYandexPayDirty(false);
-}
-
-// The total is what the reports will count once saved, so it follows the cells while typing.
-function refreshYandexPayTotal() {
-  els.yandexPayMeta.textContent = t('dash.yandexPayMeta', {
-    branches: yandexPayRows.length,
-    total: formatMoneyExact(yandexPayTotal(yandexPayRows, yandexPayRawValues())),
-  });
-}
-
-function yandexPayFilters() {
-  return { month: filterEls.yandexPay.month.value, branch: filterEls.yandexPay.branch.value };
-}
-
-function restoreYandexPayFilters() {
-  if (!yandexPayLoadedFilters) return;
-  filterEls.yandexPay.month.value = yandexPayLoadedFilters.month;
-  filterEls.yandexPay.branch.value = yandexPayLoadedFilters.branch;
-  customFilterDropdowns[filterEls.yandexPay.branch.id]?.refresh();
-}
-
-// Typing an amount into an empty row proposes the date the server would pick anyway, so the
-// manager sees it before saving; emptying the amount empties the date, as no value has no date.
-function fillYandexPayDate(amountInput) {
-  const id = amountInput.dataset.companyId;
-  const dateInput = yandexPayDateInputs().find((input) => input.dataset.throughCompanyId === id);
-  if (!dateInput || dateInput.validity?.badInput) return;
-  const row = yandexPayRows.find((item) => String(item.company_id) === id);
-  dateInput.value = syncYandexPayDate(amountInput.value, dateInput.value, row?.default_data_through);
-}
-
-function yandexPayDraftSnapshot() {
-  const dates = yandexPayRawDates();
-  return JSON.stringify(yandexPayInputs().map((input) => [
-    input.dataset.companyId,
-    yandexPayDraftKey(input.value),
-    yandexPayDateKey(dates.get(input.dataset.companyId)),
-  ]));
-}
-
-function setYandexPayDirty(isDirty) {
-  yandexPayDirty = isDirty;
-  els.yandexPaySave.disabled = yandexPaySaving || !yandexPayRows.length || !yandexPayEditable;
-  updateFloatingEditorSave();
-}
-
-function updateYandexPayDirtyFromForm() {
-  setYandexPayDirty(yandexPayDraftSnapshot() !== yandexPaySavedSnapshot);
-}
-
-async function loadYandexPayEditor({ signal = null } = {}) {
-  const filters = yandexPayFilters();
-  const payload = await fetchJson('/dashboard/payments/yandex_pay', {
-    month: filters.month,
-    company_id: filters.branch,
-  }, {
-    retry: () => loadYandexPayFacts(),
-    signal,
-  });
-  renderYandexPayEditor(payload.data, filters);
-}
-
-async function loadYandexPayFacts() {
-  const filter = filterEls.yandexPay;
-  const request = beginViewRequest('yandexPayFacts');
-  clearError();
-  setFilterLoading(filter, true);
-
-  const syncStatus = loadSyncStatus();
-  try {
-    await loadYandexPayEditor({ signal: request.signal });
-    if (!request.isCurrent()) return;
-    viewsWithData.add('yandexPayFacts');
-    clearError();
-    setLoadedApiState(null, { empty: yandexPayRows.length === 0 });
-    await syncStatus;
-  } catch (error) {
-    if (isSupersededRequest(error) || !request.isCurrent()) return;
-    showError(error.message, { apiStatus: error.apiStatus, retry: () => loadYandexPayFacts() });
-  } finally {
-    if (request.isCurrent()) {
-      setFilterLoading(filter, false);
-      request.finish();
-    }
-  }
-}
-
-function yandexPayInvalidMessage(error, row) {
-  const branch = row.company_title || t('dash.branchFallbackWithId', { id: row.company_id });
-  const keys = {
-    range: 'dash.yandexPayInvalidRange',
-    precision: 'dash.yandexPayInvalidPrecision',
-    dateRequired: 'dash.yandexPayInvalidDateRequired',
-    dateFormat: 'dash.yandexPayInvalidDateFormat',
-    dateRange: 'dash.yandexPayInvalidDateRange',
-  };
-  return t(keys[error] || 'dash.yandexPayInvalidFormat', { branch });
-}
-
-async function saveYandexPayEditor() {
-  if (yandexPaySaving || !yandexPayRows.length || !yandexPayEditable) return;
-  // The month the rows were loaded for, not the picker: it may have moved without a reload.
-  const filters = yandexPayLoadedFilters || yandexPayFilters();
-  const built = buildYandexPayItems(yandexPayRows, yandexPayRawValues(), yandexPayRawDates(), filters.month);
-  if (built.error) {
-    showError(yandexPayInvalidMessage(built.error, built.row), { apiStatus: 'ready' });
-    return;
-  }
-  yandexPaySaving = true;
-  updateFloatingEditorSave();
-  clearError();
-  els.yandexPaySave.disabled = true;
-  els.yandexPaySave.textContent = t('common.saving');
-  setApiState(t('dash.apiSaving'), 'warn');
-
-  try {
-    const payload = await postJson('/dashboard/payments/yandex_pay', {
-      month: filters.month,
-      company_id: filters.branch ? Number(filters.branch) : null,
-      items: built.items,
-    });
-    renderYandexPayEditor(payload.data, filters);
-    setApiState(t('dash.apiConnected'), 'ok');
-  } catch (error) {
-    if (error.status === 409) {
-      // Someone saved the same month between our load and our save. Their value wins; what we
-      // typed is not merged in, because the sum of two people's edits is nobody's intent.
-      try {
-        await loadYandexPayEditor();
-        showError(t('dash.yandexPayConflict'), { apiStatus: 'ready' });
-      } catch (reloadError) {
-        showError(reloadError.message, { apiStatus: reloadError.apiStatus, retry: () => loadYandexPayFacts() });
-      }
-    } else {
-      showError(error.message, { apiStatus: error.apiStatus, retry: () => saveYandexPayEditor() });
-    }
-  } finally {
-    yandexPaySaving = false;
-    els.yandexPaySave.textContent = t('dash.saveFact');
-    setYandexPayDirty(yandexPayDirty);
-  }
-}
-
 // Which window the deltas are measured against depends on the preset, and the same dates
 // picked two ways can land on two different baselines — so show it rather than let the
 // reader guess.
@@ -3372,7 +2289,7 @@ async function loadBranches() {
 
 function filterPeriod(filter) {
   if (filter.start && filter.end) return { start: filter.start.value, end: filter.end.value };
-  const range = monthRange(filter.month?.value, new Date(pageOpenedAt));
+  const range = monthRange(filter.month?.value);
   return range || { start: '', end: '' };
 }
 
@@ -3494,9 +2411,18 @@ async function loadSyncStatus() {
     const lastRun = sync.last_run;
     const lastSuccessfulAt = sync.last_successful_sync_at
       || (lastRun?.status === 'success' ? lastRun.finished_at : null);
-    els.syncState.textContent = lastSuccessfulAt
-      ? t('dash.syncUpdatedAt', { value: formatBranchDateTime(lastSuccessfulAt) ?? lastSuccessfulAt })
-      : t('dash.syncNoSuccessfulUpdates');
+    const updatedAt = lastSuccessfulAt ? formatBranchDateTime(lastSuccessfulAt) ?? lastSuccessfulAt : null;
+    const failed = Boolean(sync.tenant_sync_failed);
+    els.syncState.classList.toggle('sync-state--warning', failed);
+    if (failed) {
+      els.syncState.textContent = updatedAt
+        ? t('dash.syncTenantFailed', { value: updatedAt })
+        : t('dash.syncTenantFailedNoUpdates');
+    } else {
+      els.syncState.textContent = updatedAt
+        ? t('dash.syncUpdatedAt', { value: updatedAt })
+        : t('dash.syncNoSuccessfulUpdates');
+    }
   } catch (error) {
     if (isSupersededRequest(error) || !request.isCurrent()) return;
     els.syncState.textContent = t('dash.syncStatusUnavailable');
@@ -3600,31 +2526,6 @@ async function loadPlanFact() {
   }
 }
 
-async function loadReviewFacts() {
-  const filter = filterEls.reviewFacts;
-  const request = beginViewRequest('reviewFacts');
-  clearError();
-  setFilterLoading(filter, true);
-
-  const syncStatus = loadSyncStatus();
-  try {
-    await loadReviewFactEditor({ signal: request.signal });
-    if (!request.isCurrent()) return;
-    viewsWithData.add('reviewFacts');
-    clearError();
-    setLoadedApiState(null, { empty: reviewFactRows.length === 0 });
-    await syncStatus;
-  } catch (error) {
-    if (isSupersededRequest(error) || !request.isCurrent()) return;
-    showError(error.message, { apiStatus: error.apiStatus, retry: () => loadReviewFacts() });
-  } finally {
-    if (request.isCurrent()) {
-      setFilterLoading(filter, false);
-      request.finish();
-    }
-  }
-}
-
 async function loadDashboard() {
   const filter = filterEls.overview;
   const request = beginViewRequest('overview');
@@ -3664,12 +2565,8 @@ async function loadCurrentView() {
     await loadPlanSettings();
   } else if (activeView === 'serviceManagement') {
     await loadServiceManagement();
-  } else if (activeView === 'reviewFacts') {
-    await loadReviewFacts();
-  } else if (activeView === 'opzFacts') {
-    await loadOpzFacts();
-  } else if (activeView === 'yandexPayFacts') {
-    await loadYandexPayFacts();
+  } else if (manualEditors.byView[activeView]) {
+    await manualEditors.byView[activeView].load();
   } else if (activeView === 'reports') {
     await reportsController?.loadFromLocation();
   } else {
@@ -3880,28 +2777,30 @@ els.tenantSelect?.addEventListener('change', async () => {
   if (!changed) els.tenantSelect.value = String(selectedTenant?.id || '');
 });
 [filterEls.overview.start, filterEls.overview.end].forEach((input) => {
-  input.addEventListener('change', clearOverviewPeriodChoice);
+  input.addEventListener('change', () => {
+    clearOverviewPeriodChoice();
+    refilterForPeriod(filterEls.overview);
+  });
 });
-filterEls.overview.month.addEventListener('change', () => {
+filterEls.overview.month.addEventListener('change', async () => {
   if (!applyFilterMonth(filterEls.overview)) return;
   overviewPreset = 'month';
   // The quick button says "this month", so it only lights up for the month it means —
   // the baseline stays month-over-month for every other one.
   highlightOverviewPreset(
-    filterEls.overview.month.value === monthValue(new Date(pageOpenedAt)) ? 'month' : '',
+    filterEls.overview.month.value === monthValue(branchToday()) ? 'month' : '',
   );
-  loadDashboard();
+  if (await refilterForPeriod(filterEls.overview)) loadDashboard();
 });
 filterEls.overview.branch.addEventListener('change', async () => {
   await refreshStaffForBranch(filterEls.overview, loadDashboard);
 });
 filterEls.overview.staff.addEventListener('change', () => loadDashboard());
 els.overviewPresetButtons.forEach((button) => {
-  button.addEventListener('click', () => {
+  button.addEventListener('click', async () => {
     setOverviewPreset(button.dataset.overviewPreset || 'month');
     // Assigning the dates fires no change event, so the selectors would keep the old window's lists.
-    refilterForPeriod(filterEls.overview);
-    loadDashboard();
+    if (await refilterForPeriod(filterEls.overview)) loadDashboard();
   });
 });
 els.overviewJumpButtons.forEach((button) => {
@@ -3914,10 +2813,13 @@ els.overviewJumpButtons.forEach((button) => {
 
 filterEls.plan.load.addEventListener('click', () => loadPlanFact());
 [filterEls.plan.start, filterEls.plan.end].forEach((input) => {
-  input.addEventListener('change', () => { filterEls.plan.month.value = ''; });
+  input.addEventListener('change', () => {
+    filterEls.plan.month.value = '';
+    refilterForPeriod(filterEls.plan);
+  });
 });
-filterEls.plan.month.addEventListener('change', () => {
-  if (applyFilterMonth(filterEls.plan)) loadPlanFact();
+filterEls.plan.month.addEventListener('change', async () => {
+  if (applyFilterMonth(filterEls.plan) && await refilterForPeriod(filterEls.plan)) loadPlanFact();
 });
 filterEls.plan.branch.addEventListener('change', async () => {
   await refreshStaffForBranch(filterEls.plan, loadPlanFact);
@@ -3952,112 +2854,11 @@ document.addEventListener('keydown', (event) => {
     setPlanColumnPickerOpen(false, { restoreFocus: true });
   }
 });
-filterEls.reviewFacts.load.addEventListener('click', () => protectedChangesGuard.run(() => loadReviewFacts()));
-filterEls.reviewFacts.month.addEventListener('change', async () => {
-  const requestedMonth = filterEls.reviewFacts.month.value;
-  const changed = await protectedChangesGuard.run(async () => {
-    filterEls.reviewFacts.month.value = requestedMonth;
-    await loadReviewFacts();
-  });
-  if (!changed) restoreReviewFactFilters();
-});
-filterEls.reviewFacts.branch.addEventListener('change', async () => {
-  const requestedBranch = filterEls.reviewFacts.branch.value;
-  const changed = await protectedChangesGuard.run(async () => {
-    filterEls.reviewFacts.branch.value = requestedBranch;
-    customFilterDropdowns[filterEls.reviewFacts.branch.id]?.refresh();
-    await refreshStaffForBranch(filterEls.reviewFacts, loadReviewFacts);
-  });
-  if (!changed) restoreReviewFactFilters();
-});
-filterEls.reviewFacts.staff.addEventListener('change', async () => {
-  const requestedStaff = filterEls.reviewFacts.staff.value;
-  const changed = await protectedChangesGuard.run(async () => {
-    filterEls.reviewFacts.staff.value = requestedStaff;
-    customFilterDropdowns[filterEls.reviewFacts.staff.id]?.refresh();
-    await loadReviewFacts();
-  });
-  if (!changed) restoreReviewFactFilters();
-});
-els.reviewFactSave.addEventListener('click', () => saveReviewFactEditor());
 els.floatingEditorSaveButton.addEventListener('click', () => {
   if (activeView === 'planSettings') savePlanSettings();
-  if (activeView === 'reviewFacts') saveReviewFactEditor();
-  if (activeView === 'opzFacts') saveOpzFactEditor();
-  if (activeView === 'yandexPayFacts') saveYandexPayEditor();
-});
-els.reviewFactEditor.addEventListener('input', () => updateReviewFactDirtyFromForm());
-filterEls.opzFacts.load.addEventListener('click', () => protectedChangesGuard.run(() => loadOpzFacts()));
-filterEls.opzFacts.month.addEventListener('change', async () => {
-  const requestedMonth = filterEls.opzFacts.month.value;
-  const changed = await protectedChangesGuard.run(async () => {
-    filterEls.opzFacts.month.value = requestedMonth;
-    await loadOpzFacts();
-  });
-  if (!changed) restoreOpzFactFilters();
-});
-filterEls.opzFacts.branch.addEventListener('change', async () => {
-  const requestedBranch = filterEls.opzFacts.branch.value;
-  const changed = await protectedChangesGuard.run(async () => {
-    filterEls.opzFacts.branch.value = requestedBranch;
-    customFilterDropdowns[filterEls.opzFacts.branch.id]?.refresh();
-    await refreshStaffForBranch(filterEls.opzFacts, loadOpzFacts);
-  });
-  if (!changed) restoreOpzFactFilters();
-});
-filterEls.opzFacts.staff.addEventListener('change', async () => {
-  const requestedStaff = filterEls.opzFacts.staff.value;
-  const changed = await protectedChangesGuard.run(async () => {
-    filterEls.opzFacts.staff.value = requestedStaff;
-    customFilterDropdowns[filterEls.opzFacts.staff.id]?.refresh();
-    await loadOpzFacts();
-  });
-  if (!changed) restoreOpzFactFilters();
-});
-els.opzFactSave.addEventListener('click', () => saveOpzFactEditor());
-els.opzFactEditor.addEventListener('input', () => {
-  refreshOpzFactTotals();
-  updateOpzFactDirtyFromForm();
-});
-filterEls.yandexPay.load.addEventListener('click', () => protectedChangesGuard.run(() => loadYandexPayFacts()));
-filterEls.yandexPay.month.addEventListener('change', async () => {
-  const requestedMonth = filterEls.yandexPay.month.value;
-  // A half-typed month has no data to ask for; leave the editor on the month it holds.
-  if (!requestedMonth) {
-    restoreYandexPayFilters();
-    return;
-  }
-  const changed = await protectedChangesGuard.run(async () => {
-    filterEls.yandexPay.month.value = requestedMonth;
-    await loadYandexPayFacts();
-  });
-  if (!changed) restoreYandexPayFilters();
-});
-filterEls.yandexPay.branch.addEventListener('change', async () => {
-  const requestedBranch = filterEls.yandexPay.branch.value;
-  const changed = await protectedChangesGuard.run(async () => {
-    filterEls.yandexPay.branch.value = requestedBranch;
-    customFilterDropdowns[filterEls.yandexPay.branch.id]?.refresh();
-    await loadYandexPayFacts();
-  });
-  if (!changed) restoreYandexPayFilters();
-});
-els.yandexPaySave.addEventListener('click', () => saveYandexPayEditor());
-els.yandexPayEditor.addEventListener('input', (event) => {
-  const amount = event.target.closest?.('input[data-company-id]');
-  if (amount) fillYandexPayDate(amount);
-  refreshYandexPayTotal();
-  updateYandexPayDirtyFromForm();
+  else manualEditors.byView[activeView]?.save();
 });
 els.planSettingsLoad.addEventListener('click', () => reloadPlanSettingsMonth());
-// The branch list depends on the period, so every filter re-renders its own options when
-// its dates move. Registered after the month handlers above, which set start/end first.
-Object.values(filterEls).forEach((filter) => {
-  [filter.month, filter.start, filter.end]
-    .filter(Boolean)
-    .forEach((input) => input.addEventListener('change', () => refilterForPeriod(filter)));
-});
-
 els.planSettingsMonth.addEventListener('change', () => reloadPlanSettingsMonth());
 els.planSettingsCopy.addEventListener('click', () => copyPreviousPlanSettings());
 els.planSettingsReset.addEventListener('click', () => {
@@ -4076,10 +2877,11 @@ els.serviceFilterExtra.addEventListener('change', () => loadServiceManagement())
 els.serviceFilterQuery.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') loadServiceManagement();
 });
-els.serviceCatalogTable.addEventListener('input', () => updateServiceManagementDirtyFromForm());
-els.serviceCatalogTable.addEventListener('change', () => updateServiceManagementDirtyFromForm());
-els.serviceKpiGroupsTable.addEventListener('input', () => updateServiceManagementDirtyFromForm());
-els.serviceKpiGroupsTable.addEventListener('change', () => updateServiceManagementDirtyFromForm());
+[els.serviceCatalogTable, els.serviceKpiGroupsTable].forEach((table) => {
+  ['input', 'change'].forEach((type) => table.addEventListener(type, (event) => {
+    if (editEventChecksDraft(event)) updateServiceManagementDirtyFromForm();
+  }));
+});
 els.serviceKpiGroupsTable.addEventListener('click', (event) => {
   const button = event.target.closest('[data-service-group-archive]');
   if (!button) return;
@@ -4295,12 +3097,7 @@ window.addEventListener('beforeunload', (event) => {
   if (
     !planSettingsDirty
     && !planSettingsSaving
-    && !reviewFactDirty
-    && !reviewFactSaving
-    && !opzFactDirty
-    && !opzFactSaving
-    && !yandexPayDirty
-    && !yandexPaySaving
+    && !Object.values(manualEditors.byView).some((editor) => editor.dirty || editor.saving)
     && !serviceManagementDirty
     && !serviceManagementMutationPending
   ) return;

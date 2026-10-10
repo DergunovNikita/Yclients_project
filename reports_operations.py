@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Iterable
-from datetime import UTC
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import and_, case, extract, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from dashboard_reports import _appointment_conditions, _period_key, _period_starts, _staff_rows
 from dashboard_service import (
     COMPLETED_ATTENDANCE,
     _appointment_company_ids,
@@ -17,9 +17,13 @@ from dashboard_service import (
     _company_scope_clause,
     _company_timezone_names,
     _local_moment,
+    _physical_account_condition,
+    _service_paid_filters,
     fetch_appointments_breakdown,
+    financial_appointment_match_condition,
 )
-from models import Appointment, Company, Staff
+from models import AccountCatalog, Appointment, Company, FinancialTransaction, Staff
+from report_common import appointment_conditions, period_key, period_starts
 from report_payload import (
     DECIMAL_FORMAT,
     MONEY_FORMAT,
@@ -62,7 +66,7 @@ async def _records_by_period(req: ReportRequest, measures: dict[str, Any]) -> li
                 for name, condition in measures.items()
             ],
         )
-        .where(and_(*_appointment_conditions(
+        .where(and_(*appointment_conditions(
             req.start,
             req.end,
             req.company_id,
@@ -74,10 +78,10 @@ async def _records_by_period(req: ReportRequest, measures: dict[str, Any]) -> li
     )
     rows = {
         key: {'period': key, 'records': 0, **{name: 0 for name in measures}}
-        for key in _period_starts(req.start, req.end, req.granularity)
+        for key in period_starts(req.start, req.end, req.granularity)
     }
     for row in (await req.db.execute(stmt)).all():
-        item = rows[_period_key(row.day, req.granularity)]
+        item = rows[period_key(row.day, req.granularity)]
         item['records'] += int(row.records or 0)
         for name in measures:
             item[name] += int(getattr(row, name) or 0)
@@ -108,7 +112,7 @@ async def _staff_records(req: ReportRequest) -> list[dict[str, Any]]:
         )
         .outerjoin(Staff, Staff.id == Appointment.staff_id)
         .outerjoin(Company, Company.id == Staff.company_id)
-        .where(and_(*_appointment_conditions(
+        .where(and_(*appointment_conditions(
             req.start,
             req.end,
             req.company_id,
@@ -254,7 +258,7 @@ async def _local_visit_cells(req: ReportRequest) -> tuple[dict[tuple[int, int], 
     for company_id in company_ids:
         companies_by_timezone[_branch_timezone(names.get(company_id)).key].append(company_id)
 
-    conditions = _appointment_conditions(
+    conditions = appointment_conditions(
         req.start,
         req.end,
         req.company_id,
@@ -446,6 +450,114 @@ async def build_booking_channels(req: ReportRequest) -> dict[str, Any]:
 
 
 # --- staff_efficiency --------------------------------------------------------------------------------------------
+
+
+async def _staff_rows(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int | None,
+    staff_id: int | None,
+    allowed_company_ids: list[int] | None,
+    factual_at: datetime,
+) -> list[dict[str, Any]]:
+    appt_stmt = (
+        select(
+            Appointment.staff_id.label('staff_id'),
+            func.min(Staff.name).label('staff_name'),
+            func.min(Company.title).label('company_title'),
+            func.count(func.distinct(Appointment.id)).label('appointments'),
+            func.count(
+                func.distinct(
+                    case((Appointment.attendance == COMPLETED_ATTENDANCE, Appointment.id))
+                )
+            ).label('completed'),
+            func.count(func.distinct(Appointment.client_id)).label('clients'),
+        )
+        .outerjoin(Staff, Staff.id == Appointment.staff_id)
+        .outerjoin(Company, Company.id == Appointment.company_id)
+        .where(and_(*appointment_conditions(
+            start,
+            end,
+            company_id,
+            staff_id,
+            allowed_company_ids=allowed_company_ids,
+            factual_at=factual_at,
+        )))
+        .group_by(Appointment.staff_id)
+    )
+    rev_stmt = (
+        select(
+            Appointment.staff_id.label('staff_id'),
+            func.min(Staff.name).label('staff_name'),
+            func.min(Company.title).label('company_title'),
+            func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+        )
+        .select_from(FinancialTransaction)
+        .join(Appointment, financial_appointment_match_condition())
+        .outerjoin(
+            AccountCatalog,
+            and_(
+                AccountCatalog.company_id == FinancialTransaction.company_id,
+                AccountCatalog.account_id == FinancialTransaction.account_id,
+            ),
+        )
+        .outerjoin(Staff, Staff.id == Appointment.staff_id)
+        .outerjoin(Company, Company.id == Appointment.company_id)
+        .where(
+            _service_paid_filters(
+                start,
+                end,
+                company_id,
+                staff_id,
+                allowed_company_ids=allowed_company_ids,
+                factual_at=factual_at,
+            ),
+            _physical_account_condition(),
+        )
+        .group_by(Appointment.staff_id)
+    )
+    appt_rows = (await db.execute(appt_stmt)).all()
+    rows_by_staff: dict[int | None, dict[str, Any]] = {}
+    for row in appt_rows:
+        completed = int(row.completed or 0)
+        rows_by_staff[row.staff_id] = {
+            'staff_id': row.staff_id,
+            'staff_name': row.staff_name or f"Сотрудник {row.staff_id or '—'}",
+            'company_title': row.company_title,
+            'appointments': int(row.appointments or 0),
+            'completed': completed,
+            'clients': int(row.clients or 0),
+            'revenue': 0.0,
+            'avg_check': 0.0,
+        }
+    for row in (await db.execute(rev_stmt)).all():
+        item = rows_by_staff.setdefault(row.staff_id, {
+            'staff_id': row.staff_id,
+            'staff_name': row.staff_name or f"Сотрудник {row.staff_id or '—'}",
+            'company_title': row.company_title,
+            'appointments': 0,
+            'completed': 0,
+            'clients': 0,
+            'revenue': 0.0,
+            'avg_check': 0.0,
+        })
+        item['revenue'] = float(row.revenue or 0)
+        item['avg_check'] = (
+            item['revenue'] / item['completed'] if item['completed'] else 0.0
+        )
+    rows = list(rows_by_staff.values())
+    # staff_id is a unique final tiebreaker: without it, staff tied on revenue and
+    # completed count swap places whenever the query plan changes.
+    rows.sort(
+        key=lambda item: (
+            item['revenue'],
+            item['completed'],
+            item['staff_id'] if item['staff_id'] is not None else -1,
+        ),
+        reverse=True,
+    )
+    return rows
 
 
 async def _staff_branch_titles(req: ReportRequest) -> dict[int, str]:

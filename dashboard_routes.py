@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import date, datetime
 from typing import Annotated, Any, Callable
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, BeforeValidator, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,7 +40,6 @@ from dashboard_service import (
     PLAN_SETTINGS_CONFLICT_DETAIL,
     PlanSettingsConflict,
     fetch_branches,
-    fetch_extra_services,
     fetch_manual_opz_facts,
     fetch_manual_review_facts,
     fetch_plan_fact,
@@ -58,15 +59,15 @@ from dashboard_reports import (
     DEMO_UNAVAILABLE_REPORTS,
     REPORT_GRANULARITIES,
     REPORT_USAGE_ID,
-    ReportCalculationError,
-    ReportInputError,
     fetch_report_data,
     fetch_report_registry,
     report_requires_financials,
     resolve_report_id,
 )
 from database import get_async_db
-from models import Company, PortalAccount, PortalMetricVisibility, Staff
+from models import (
+    Company, PortalAccount, PortalMetricVisibility, Staff, SyncState, YClientsCredential, YClientsCredentialCompany,
+)
 from plan_config import (
     ALL_MONEY_CODES,
     AVERAGE_CHECK_REVENUE_FIELDS,
@@ -85,10 +86,14 @@ from payment_methods import (
     save_yandex_pay,
 )
 from portal_audit import log_portal_audit
+from report_payload import ReportCalculationError, ReportInputError
 from report_usage import fetch_report_usage, track_report_usage
 from sync_orchestrator import get_sync_status
+from sync_parsing import serialize_dt
+from sync_pipeline import transactional_state_key
 
-logger = logging.getLogger(__name__)
+# Under `yclients`, whose handler and level `api._configure_logging` sets: a module-named logger would drop INFO.
+logger = logging.getLogger('yclients.dashboard')
 
 router = APIRouter()
 
@@ -112,7 +117,7 @@ class MetricVisibilityPayload(BaseModel):
     visible_codes: list[str]
 
 
-class ManualReviewFactItem(BaseModel):
+class ManualFactItem(BaseModel):
     company_id: int
     staff_id: int
     # Strict: lax float parsing turns `true` into one review.
@@ -121,27 +126,11 @@ class ManualReviewFactItem(BaseModel):
     previous_value: float | None = Field(None, strict=True)
 
 
-class ManualReviewFactsPayload(BaseModel):
+class ManualFactsPayload(BaseModel):
     month: str
     company_id: int | None = None
     staff_id: int | None = None
-    items: list[ManualReviewFactItem]
-
-
-class ManualOpzFactItem(BaseModel):
-    company_id: int
-    staff_id: int
-    # Strict: lax float parsing turns `true` into one review.
-    value: float | None = Field(None, strict=True)
-    # What the last GET showed for this row: the save is an edit only where `value` differs.
-    previous_value: float | None = Field(None, strict=True)
-
-
-class ManualOpzFactsPayload(BaseModel):
-    month: str
-    company_id: int | None = None
-    staff_id: int | None = None
-    items: list[ManualOpzFactItem]
+    items: list[ManualFactItem]
 
 
 ISO_DAY = re.compile(r'^\d{4}-\d{2}-\d{2}$')
@@ -467,29 +456,31 @@ async def _validated_widget_scope(
     return scope, scoped_staff_id
 
 
-async def _default_portal_account_id(db: AsyncSession) -> int:
-    account_id = await db.scalar(select(PortalAccount.id).order_by(PortalAccount.id.asc()).limit(1))
-    if account_id is not None:
-        return int(account_id)
-    account = PortalAccount(label='default', created_at=datetime.utcnow())
-    db.add(account)
-    await db.flush()
-    return int(account.id)
-
-
-async def _kpi_portal_account_id(db: AsyncSession, ctx: AccessContext) -> int | None:
-    if ctx.portal_account_id is not None:
-        return ctx.portal_account_id
-    if ctx.full_access:
-        return await _default_portal_account_id(db)
-    return None
-
-
-async def _require_kpi_portal_account_id(db: AsyncSession, ctx: AccessContext) -> int:
-    portal_account_id = await _kpi_portal_account_id(db, ctx)
+async def _require_kpi_portal_account_id(
+    db: AsyncSession, ctx: AccessContext, x_portal_account_id: int | None
+) -> int:
+    """Tenant of a settings route. An API key has none of its own, so it has to name one."""
+    portal_account_id = ctx.portal_account_id
+    if portal_account_id is None and ctx.full_access and x_portal_account_id is not None:
+        if await db.get(PortalAccount, x_portal_account_id) is None:
+            raise HTTPException(status_code=400, detail='unknown X-Portal-Account-Id')
+        portal_account_id = x_portal_account_id
     if portal_account_id is None:
         raise HTTPException(status_code=400, detail='X-Portal-Account-Id is required')
     return portal_account_id
+
+
+@contextmanager
+def _value_error_as_400() -> Iterator[None]:
+    """Answer a `ValueError` the service raised for a rejected input as 400 with its message.
+
+    Wrap the whole try/except of a route, not a part of it: handlers for narrower exceptions
+    (conflicts, closed rows) must see them first, even when they subclass `ValueError`.
+    """
+    try:
+        yield
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get('/branches')
@@ -536,6 +527,7 @@ async def dashboard_services(
     category: str | None = Query(None),
     is_extra: bool | None = Query(None),
     kpi_group_id: int | None = Query(None),
+    x_portal_account_id: int | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -552,7 +544,7 @@ async def dashboard_services(
             is_extra=is_extra,
             kpi_group_id=kpi_group_id,
             allowed_company_ids=scope['allowed_company_ids'],
-            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
+            portal_account_id=await _require_kpi_portal_account_id(db, ctx, x_portal_account_id),
         ),
     }
 
@@ -560,44 +552,44 @@ async def dashboard_services(
 @router.patch('/services', dependencies=[Depends(forbid_demo)])
 async def dashboard_services_save(
     payload: ServiceManagementPayload,
+    x_portal_account_id: int | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     """Atomically persist dashboard-managed service and KPI group changes."""
     _require_settings_admin(ctx)
     allowed_company_ids, _ = user_branch_ids(ctx)
-    try:
+    portal_account_id = await _require_kpi_portal_account_id(db, ctx, x_portal_account_id)
+    with _value_error_as_400():
         data = await save_service_management(
             db,
             row_changes=[item.model_dump(exclude_unset=True) for item in payload.row_changes],
             group_changes=[item.model_dump(exclude_unset=True) for item in payload.group_changes],
             allowed_company_ids=allowed_company_ids,
-            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
+            portal_account_id=portal_account_id,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}
 
 
 @router.post('/services/kpi_groups', dependencies=[Depends(forbid_demo)])
 async def dashboard_service_kpi_group_create(
     payload: ServiceKpiGroupPayload,
+    x_portal_account_id: int | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     _require_settings_admin(ctx)
-    try:
+    portal_account_id = await _require_kpi_portal_account_id(db, ctx, x_portal_account_id)
+    with _value_error_as_400():
         data = await create_service_kpi_group(
             db,
-            portal_account_id=await _require_kpi_portal_account_id(db, ctx),
+            portal_account_id=portal_account_id,
             title=payload.title or '',
             code=payload.code,
             description=payload.description,
             sort_order=payload.sort_order,
             is_active=True if payload.is_active is None else payload.is_active,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}
 
 
@@ -729,18 +721,73 @@ async def dashboard_report_data(
     return {'success': True, 'data': data}
 
 
+async def _tenant_sync_health(
+    db: AsyncSession, portal_account_id: int, company_ids: list[int] | None,
+) -> dict[str, Any] | None:
+    """The tenant's own sync freshness, or None when it has no credentials to sync with.
+
+    The global run status says nothing about one tenant: a run that skipped a tenant whose
+    credentials broke still ends `success`. Freshness is therefore the oldest per-branch
+    checkpoint (written only when that branch's records, payments, goods and comments all
+    loaded), and `failed` is the credential's own `needs_reauth` flag, which auth and decrypt
+    failures set and the next successful auth clears.
+    """
+    credentials = (await db.execute(
+        select(YClientsCredential.id, YClientsCredential.needs_reauth).where(
+            YClientsCredential.portal_account_id == portal_account_id,
+            YClientsCredential.is_active.is_(True),
+        )
+    )).all()
+    if not credentials:
+        return None
+    linked = set((await db.execute(
+        select(YClientsCredentialCompany.company_id).where(
+            YClientsCredentialCompany.credential_id.in_([row.id for row in credentials])
+        )
+    )).scalars().all())
+    if company_ids is not None:
+        linked &= set(company_ids)
+    keys = [transactional_state_key(company_id) for company_id in sorted(linked)]
+    checkpoints = {}
+    if keys:
+        checkpoints = dict((await db.execute(
+            select(SyncState.key, SyncState.updated_at).where(SyncState.key.in_(keys))
+        )).all())
+    # A branch that never completed a pass has no checkpoint, and the tenant is only as fresh as it.
+    stamps = [checkpoints.get(key) for key in keys]
+    fresh_at = min(stamps) if stamps and all(stamps) else None
+    return {
+        'last_successful_sync_at': serialize_dt(fresh_at),
+        'failed': any(row.needs_reauth for row in credentials),
+    }
+
+
 @router.get('/widget/sync_status')
-async def dashboard_widget_sync_status(ctx: AccessContext = Depends(get_dashboard_access)):
-    require_tenant_context(ctx, allow_full_access=True)
+async def dashboard_widget_sync_status(
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    portal_account_id = require_tenant_context(ctx, allow_full_access=True)
     sync_payload = await asyncio.to_thread(get_sync_status)
     # The run is global, so tenants get only what the header line needs: no log path, run
     # message (raw exception text), initiator or job queue. /sync/status keeps the full payload.
     last_run = sync_payload.get('last_run')
-    return {'success': True, 'data': {'sync': {
+    sync = {
         'running': sync_payload['running'],
         'last_successful_sync_at': sync_payload.get('last_successful_sync_at'),
         'last_run': {'status': last_run['status'], 'finished_at': last_run['finished_at']} if last_run else None,
-    }}}
+        'tenant_sync_failed': False,
+    }
+    health = await _tenant_sync_health(db, portal_account_id, ctx.company_ids) if portal_account_id else None
+    if health is not None:
+        # The global timestamp and run would read as this tenant's even when it was skipped; a
+        # null last_run also keeps the page from falling back to the global run's finish time.
+        sync.update(
+            last_successful_sync_at=health['last_successful_sync_at'],
+            last_run=None,
+            tenant_sync_failed=health['failed'],
+        )
+    return {'success': True, 'data': {'sync': sync}}
 
 
 @router.get('/widget/plan_fact')
@@ -783,7 +830,7 @@ async def dashboard_plan_settings(
     _require_settings_admin(ctx)
     require_financial_access(ctx)
     branch_ids, force_allowed = user_branch_ids(ctx)
-    try:
+    with _value_error_as_400():
         data = await fetch_plan_settings(
             db,
             month,
@@ -791,8 +838,6 @@ async def dashboard_plan_settings(
             allowed_company_ids=branch_ids,
             force_allowed=force_allowed,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}
 
 
@@ -805,23 +850,22 @@ async def dashboard_plan_settings_save(
     _require_settings_admin(ctx)
     require_financial_access(ctx)
     branch_ids, force_allowed = user_branch_ids(ctx)
-    try:
-        data = await save_plan_settings(
-            db,
-            payload.month,
-            [item.model_dump() for item in payload.branches],
-            [item.model_dump() for item in payload.staff],
-            allowed_company_ids=branch_ids,
-            force_allowed=force_allowed,
-            replace_existing_plan=payload.copy_from is not None,
-            actor_user_id=ctx.user_id,
-            portal_account_id=ctx.portal_account_id,
-        )
-    except PlanSettingsConflict as exc:
-        logger.info('plan settings save refused, concurrent save: month=%s user=%s', payload.month, ctx.user_id)
-        raise HTTPException(status_code=409, detail=PLAN_SETTINGS_CONFLICT_DETAIL) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with _value_error_as_400():
+        try:
+            data = await save_plan_settings(
+                db,
+                payload.month,
+                [item.model_dump() for item in payload.branches],
+                [item.model_dump() for item in payload.staff],
+                allowed_company_ids=branch_ids,
+                force_allowed=force_allowed,
+                replace_existing_plan=payload.copy_from is not None,
+                actor_user_id=ctx.user_id,
+                portal_account_id=ctx.portal_account_id,
+            )
+        except PlanSettingsConflict as exc:
+            logger.warning('plan settings save refused, concurrent save: month=%s user=%s', payload.month, ctx.user_id)
+            raise HTTPException(status_code=409, detail=PLAN_SETTINGS_CONFLICT_DETAIL) from exc
     return {'success': True, 'data': data}
 
 
@@ -844,7 +888,7 @@ async def _manual_fact_get(
     _assert_manual_fact_staff_allowed(staff_keys, staff_id)
     await _validate_dashboard_scope(db, scope['company_id'], staff_id, allowed_company_ids=scope['branch_ids'])
     branch_ids, force_allowed = user_branch_ids(ctx)
-    try:
+    with _value_error_as_400():
         data = await fetch_fn(
             db,
             month,
@@ -855,8 +899,6 @@ async def _manual_fact_get(
             allowed_staff_keys=staff_keys,
             portal_account_id=ctx.portal_account_id,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}
 
 
@@ -880,30 +922,29 @@ async def _manual_fact_post(
     _assert_manual_fact_staff_allowed(staff_keys, staff_id)
     _assert_manual_fact_rows_allowed(staff_keys, items)
     branch_ids, force_allowed = user_branch_ids(ctx)
-    try:
-        data = await save_manual_facts(
-            db,
-            month,
-            metric_code,
-            scope['company_id'],
-            staff_id,
-            [item.model_dump(exclude_unset=True) for item in items],
-            allowed_company_ids=branch_ids,
-            force_allowed=force_allowed,
-            allowed_staff_keys=staff_keys,
-            actor_user_id=ctx.user_id,
-            portal_account_id=ctx.portal_account_id,
-        )
-    except ManualFactConflict as exc:
-        logger.info('manual fact save refused, stale value: month=%s user=%s', month, ctx.user_id)
-        raise HTTPException(status_code=409, detail=MANUAL_FACT_CONFLICT_DETAIL) from exc
-    except ManualFactRowNotOpen as exc:
-        # The reason names staff and branch ids, and the SPA prints `detail` verbatim —
-        # the editors are open to rank-and-file staff now, so it belongs in the log.
-        logger.info('manual fact row not open for entry: %s', exc)
-        raise HTTPException(status_code=400, detail='Manual fact row is not open for entry') from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with _value_error_as_400():
+        try:
+            data = await save_manual_facts(
+                db,
+                month,
+                metric_code,
+                scope['company_id'],
+                staff_id,
+                [item.model_dump(exclude_unset=True) for item in items],
+                allowed_company_ids=branch_ids,
+                force_allowed=force_allowed,
+                allowed_staff_keys=staff_keys,
+                actor_user_id=ctx.user_id,
+                portal_account_id=ctx.portal_account_id,
+            )
+        except ManualFactConflict as exc:
+            logger.info('manual fact save refused, stale value: month=%s user=%s', month, ctx.user_id)
+            raise HTTPException(status_code=409, detail=MANUAL_FACT_CONFLICT_DETAIL) from exc
+        except ManualFactRowNotOpen as exc:
+            # The reason names staff and branch ids, and the SPA prints `detail` verbatim —
+            # the editors are open to rank-and-file staff now, so it belongs in the log.
+            logger.info('manual fact row not open for entry: %s', exc)
+            raise HTTPException(status_code=400, detail='Manual fact row is not open for entry') from exc
     return {'success': True, 'data': data}
 
 
@@ -920,7 +961,7 @@ async def dashboard_plan_reviews_fact(
 
 @router.post('/plan/reviews_fact', dependencies=[Depends(forbid_demo)])
 async def dashboard_plan_reviews_fact_save(
-    payload: ManualReviewFactsPayload,
+    payload: ManualFactsPayload,
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -942,7 +983,7 @@ async def dashboard_plan_opz_fact(
 
 @router.post('/plan/opz_fact', dependencies=[Depends(forbid_demo)])
 async def dashboard_plan_opz_fact_save(
-    payload: ManualOpzFactsPayload,
+    payload: ManualFactsPayload,
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -958,7 +999,7 @@ async def _yandex_pay_editor(
     company_id: int | None,
 ) -> dict[str, Any]:
     branch_ids, force_allowed = user_branch_ids(ctx)
-    try:
+    with _value_error_as_400():
         data = await fetch_yandex_pay_editor(
             db,
             month,
@@ -967,8 +1008,6 @@ async def _yandex_pay_editor(
             force_allowed=force_allowed,
             portal_account_id=ctx.portal_account_id,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'success': True, 'data': data}
 
 
@@ -1000,25 +1039,24 @@ async def dashboard_yandex_pay_save(
         if any(item.company_id not in allowed for item in payload.items):
             raise HTTPException(status_code=403, detail='Branch not allowed')
     branch_ids, force_allowed = user_branch_ids(ctx)
-    try:
-        await save_yandex_pay(
-            db,
-            payload.month,
-            scope['company_id'],
-            [item.model_dump() for item in payload.items],
-            allowed_company_ids=branch_ids,
-            force_allowed=force_allowed,
-            actor_user_id=ctx.user_id,
-            portal_account_id=ctx.portal_account_id,
-        )
-    except ManualPaymentConflict as exc:
-        logger.info('yandex pay save refused, stale value: month=%s user=%s', payload.month, ctx.user_id)
-        raise HTTPException(status_code=409, detail=CONFLICT_DETAIL) from exc
-    except PaymentRowNotOpen as exc:
-        logger.info('yandex pay row not open for entry: %s', exc)
-        raise HTTPException(status_code=400, detail='Payment row is not open for entry') from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with _value_error_as_400():
+        try:
+            await save_yandex_pay(
+                db,
+                payload.month,
+                scope['company_id'],
+                [item.model_dump() for item in payload.items],
+                allowed_company_ids=branch_ids,
+                force_allowed=force_allowed,
+                actor_user_id=ctx.user_id,
+                portal_account_id=ctx.portal_account_id,
+            )
+        except ManualPaymentConflict as exc:
+            logger.info('yandex pay save refused, stale value: month=%s user=%s', payload.month, ctx.user_id)
+            raise HTTPException(status_code=409, detail=CONFLICT_DETAIL) from exc
+        except PaymentRowNotOpen as exc:
+            logger.info('yandex pay row not open for entry: %s', exc)
+            raise HTTPException(status_code=400, detail='Payment row is not open for entry') from exc
     return await _yandex_pay_editor(db, ctx, payload.month, scope['company_id'])
 
 
@@ -1029,11 +1067,12 @@ def _require_visibility_admin(ctx: AccessContext) -> None:
 
 @router.get('/metric-visibility')
 async def dashboard_metric_visibility(
+    x_portal_account_id: int | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     _require_visibility_admin(ctx)
-    portal_account_id = await _require_kpi_portal_account_id(db, ctx)
+    portal_account_id = await _require_kpi_portal_account_id(db, ctx, x_portal_account_id)
     stored = {
         row.role: [code for code in (row.visible_codes or []) if code in ALL_MONEY_CODES]
         for row in (
@@ -1061,11 +1100,12 @@ async def dashboard_metric_visibility(
 @router.put('/metric-visibility', dependencies=[Depends(forbid_demo)])
 async def dashboard_metric_visibility_save(
     payload: MetricVisibilityPayload,
+    x_portal_account_id: int | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     _require_visibility_admin(ctx)
-    portal_account_id = await _require_kpi_portal_account_id(db, ctx)
+    portal_account_id = await _require_kpi_portal_account_id(db, ctx, x_portal_account_id)
     if payload.role not in CONFIGURABLE_MONEY_ROLES:
         raise HTTPException(status_code=400, detail='Role visibility is not configurable')
     unknown = sorted(set(payload.visible_codes) - ALL_MONEY_CODES)
@@ -1166,7 +1206,7 @@ async def dashboard_bundle(
         factual_at=factual_at,
         use_administrator_schedule=True,
     )
-    extra_services = await fetch_extra_services(
+    extra_services = await fetch_top_services(
         db,
         start,
         end,
@@ -1176,6 +1216,7 @@ async def dashboard_bundle(
         allowed_company_ids=scope['allowed_company_ids'],
         factual_at=factual_at,
         use_administrator_schedule=True,
+        only_extra=True,
     )
     return {
         'success': True,

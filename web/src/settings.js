@@ -1,6 +1,6 @@
 import './auth.css';
 import './settings.css';
-import { authFetch, loadCurrentUser, logout, requireAuthRedirect, setToken, USER_ADMIN_ROLES } from './auth.js';
+import { authFetch, loadCurrentUser, logout, requireAuthRedirect, clearLocalSession, USER_ADMIN_ROLES } from './auth.js';
 import { escapeHtml } from './html.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 import { formatBranchDateTime } from './timestamps.js';
@@ -106,7 +106,7 @@ els.changePasswordForm.addEventListener('submit', async (event) => {
     els.passwordSuccess.textContent = t('settings.passwordUpdated');
     els.passwordSuccess.hidden = false;
     setTimeout(() => {
-      setToken();
+      clearLocalSession();
       window.location.href = '/login.html';
     }, 1500);
   } catch (error) {
@@ -169,7 +169,7 @@ els.logoutAll.addEventListener('click', async () => {
   if (!confirm(t('settings.logoutAllConfirm'))) return;
   try {
     await authFetch('/auth/logout-all', { method: 'POST' });
-    setToken();
+    clearLocalSession();
     window.location.href = '/login.html';
   } catch (error) {
     showError(els.sessionsError, error.message);

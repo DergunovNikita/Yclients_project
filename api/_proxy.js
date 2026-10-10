@@ -55,6 +55,22 @@ function trustedPeerIp(req) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function firstHop(value) {
+  const text = Array.isArray(value) ? value[0] : value;
+  return typeof text === 'string' ? text.split(',')[0].trim() : '';
+}
+
+// On Vercel the platform overwrites these headers with the visitor's address; the socket peer
+// is Vercel's own infrastructure, so it is only the last resort.
+function visitorIp(req) {
+  return (
+    firstHop(req.headers['x-vercel-forwarded-for'])
+    || firstHop(req.headers['x-real-ip'])
+    || firstHop(req.headers['x-forwarded-for'])
+    || trustedPeerIp(req)
+  );
+}
+
 export function forwardedHeaders(req) {
   const headers = {};
   for (const [name, value] of Object.entries(req.headers)) {
@@ -64,12 +80,18 @@ export function forwardedHeaders(req) {
     }
   }
 
-  const peerIp = trustedPeerIp(req);
-  if (peerIp) {
-    // The VM trusts these headers for session metadata and rate limits. Browser-supplied
-    // forwarding headers are intentionally ignored; only this proxy's socket peer is forwarded.
-    headers['x-forwarded-for'] = peerIp;
-    headers['x-real-ip'] = peerIp;
+  // x-proxy-secret is not in the allowlist, so a browser-supplied one never gets here; it is
+  // only ever set from the environment below.
+  const proxySecret = env('VM_PROXY_SECRET');
+  const clientIp = proxySecret ? visitorIp(req) : trustedPeerIp(req);
+  if (clientIp) {
+    // Without the shared secret the VM ignores these and sees this proxy's address. With it,
+    // the VM believes x-forwarded-for as the visitor, so only the real visitor address is sent.
+    headers['x-forwarded-for'] = clientIp;
+    headers['x-real-ip'] = clientIp;
+  }
+  if (proxySecret) {
+    headers['x-proxy-secret'] = proxySecret;
   }
 
   return headers;

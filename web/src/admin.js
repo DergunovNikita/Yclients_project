@@ -9,6 +9,7 @@ import {
   setSelectedPortalAccountId,
   USER_ADMIN_ROLES,
 } from './auth.js';
+import { createModalManager, tenantRequestGuard } from './adminPage.js';
 import { buildCsv } from './adminSecurity.js';
 import { escapeHtml } from './html.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
@@ -248,6 +249,11 @@ function selectedPortalAccountId() {
   return adminMeta?.portal_account_id ? String(adminMeta.portal_account_id) : '';
 }
 
+// Lists of the tenant on screen: an answer that arrives after the platform admin switched away is dropped.
+function tenantGuard() {
+  return tenantRequestGuard(selectedPortalAccountId);
+}
+
 function portalAccountLabel(account) {
   const branchText = t('admin.branchCount', { count: account.branch_count || 0 });
   return `${account.label || `Tenant ${account.id}`} · ${branchText}`;
@@ -344,27 +350,12 @@ function openCreateModal() {
     createRoleSelect.selectedIndex = 0;
     createRoleDropdown.syncFromNative();
   }
-  createModal.hidden = false;
-  document.body.classList.add('admin-modal-open');
+  modals.open(createModal);
   createEmail.focus();
 }
 
-function isAnyModalOpen() {
-  return (
-    !createModal.hidden ||
-    !editModal.hidden ||
-    !editStaffModal.hidden ||
-    !createStaffAccountModal.hidden ||
-    !deleteConfirmModal.hidden ||
-    !credentialsModal.hidden
-  );
-}
-
 function closeCreateModal() {
-  createModal.hidden = true;
-  if (!isAnyModalOpen()) {
-    document.body.classList.remove('admin-modal-open');
-  }
+  modals.close(createModal);
   hideFieldError(createErrorEl);
 }
 
@@ -378,17 +369,13 @@ function openEditModal(user) {
   editRoleSelect.value = user.role;
   renderBranchOptions(editBranchSelect, editBranchDropdown, user.company_ids || []);
   editRoleDropdown.syncFromNative();
-  editModal.hidden = false;
-  document.body.classList.add('admin-modal-open');
+  modals.open(editModal);
   editName.focus();
 }
 
 function closeEditModal() {
-  editModal.hidden = true;
+  modals.close(editModal);
   editingUserId = null;
-  if (!isAnyModalOpen()) {
-    document.body.classList.remove('admin-modal-open');
-  }
   hideFieldError(editErrorEl);
 }
 
@@ -399,17 +386,13 @@ function openEditStaffModal(staff) {
   editStaffName.value = staff.full_name || '';
   editStaffPosition.value = staff.position || '';
   renderBranchOptions(editStaffBranchSelect, editStaffBranchDropdown, staff.company_ids || [], false);
-  editStaffModal.hidden = false;
-  document.body.classList.add('admin-modal-open');
+  modals.open(editStaffModal);
   editStaffName.focus();
 }
 
 function closeEditStaffModal() {
-  editStaffModal.hidden = true;
+  modals.close(editStaffModal);
   editingStaffId = null;
-  if (!isAnyModalOpen()) {
-    document.body.classList.remove('admin-modal-open');
-  }
   hideFieldError(editStaffErrorEl);
 }
 
@@ -424,17 +407,13 @@ function openCreateStaffAccountModal(staff) {
   createStaffAccountRoleSelect.value = staff.suggested_role || 'barber';
   createStaffAccountRoleDropdown.syncFromNative();
   renderBranchOptions(createStaffAccountBranchSelect, createStaffAccountBranchDropdown, staff.company_ids || []);
-  createStaffAccountModal.hidden = false;
-  document.body.classList.add('admin-modal-open');
+  modals.open(createStaffAccountModal);
   createStaffAccountEmail.focus();
 }
 
 function closeCreateStaffAccountModal() {
-  createStaffAccountModal.hidden = true;
+  modals.close(createStaffAccountModal);
   pendingStaffAccountId = null;
-  if (!isAnyModalOpen()) {
-    document.body.classList.remove('admin-modal-open');
-  }
   hideFieldError(createStaffAccountErrorEl);
 }
 
@@ -449,17 +428,13 @@ function openDeleteConfirm({ type, id, label, subjectType }) {
     <p class="admin-modal__confirm-text">${lead}<strong class="admin-modal__confirm-target">${safeLabel}</strong>?</p>
     <p class="admin-modal__confirm-warning">${t('admin.deleteIrreversible')}</p>
   `;
-  deleteConfirmModal.hidden = false;
-  document.body.classList.add('admin-modal-open');
+  modals.open(deleteConfirmModal);
   confirmDeleteBtn.focus();
 }
 
 function closeDeleteConfirm() {
-  deleteConfirmModal.hidden = true;
+  modals.close(deleteConfirmModal);
   pendingDelete = null;
-  if (!isAnyModalOpen()) {
-    document.body.classList.remove('admin-modal-open');
-  }
 }
 
 function hideCredentialsAlerts() {
@@ -488,8 +463,7 @@ function showCredentialsModal(items) {
     <p class="admin-modal__confirm-text">${escapeHtml(t('admin.saveCredentialsHint'))}</p>
     <div class="credentials-list">${rows}</div>
   `;
-  credentialsModal.hidden = false;
-  document.body.classList.add('admin-modal-open');
+  modals.open(credentialsModal);
 }
 
 function saveCredentialsAsCsv() {
@@ -554,13 +528,20 @@ async function distributeCredentials() {
 }
 
 function closeCredentialsModal() {
-  credentialsModal.hidden = true;
+  modals.close(credentialsModal);
   currentCredentialsItems = [];
   hideCredentialsAlerts();
-  if (!isAnyModalOpen()) {
-    document.body.classList.remove('admin-modal-open');
-  }
 }
+
+// Escape closes the first open one, so the list runs from the modal that stacks on top of the others.
+const modals = createModalManager([
+  { modal: credentialsModal, close: closeCredentialsModal },
+  { modal: deleteConfirmModal, close: closeDeleteConfirm },
+  { modal: createStaffAccountModal, close: closeCreateStaffAccountModal },
+  { modal: editStaffModal, close: closeEditStaffModal },
+  { modal: editModal, close: closeEditModal },
+  { modal: createModal, close: closeCreateModal },
+], document.body);
 
 async function loadAdminMeta() {
   const payload = await authFetch('/auth/admin/meta');
@@ -569,7 +550,9 @@ async function loadAdminMeta() {
 }
 
 async function loadBranches() {
+  const isCurrentTenant = tenantGuard();
   const payload = await authFetch('/dashboard/branches');
+  if (!isCurrentTenant()) return;
   branches = payload.data || [];
   applyAdminMeta();
 }
@@ -746,7 +729,9 @@ function renderInitialPasswordsTable() {
 
 async function loadInitialPasswords() {
   if (!canManageUsers()) return;
+  const isCurrentTenant = tenantGuard();
   const payload = await authFetch('/auth/admin/initial-passwords');
+  if (!isCurrentTenant()) return;
   initialPasswords = payload.data || [];
   renderInitialPasswordsTable();
 }
@@ -819,7 +804,9 @@ function renderYclientsCredentialsTable() {
 
 async function loadYclientsCredentials() {
   if (!canManageYclientsCredentials()) return;
+  const isCurrentTenant = tenantGuard();
   const payload = await authFetch('/auth/admin/yclients-credentials');
+  if (!isCurrentTenant()) return;
   yclientsCredentials = payload.data || [];
   renderYclientsCredentialsTable();
 }
@@ -833,7 +820,9 @@ async function loadMetricVisibility() {
     return;
   }
   metricVisibilitySection.hidden = false;
+  const isCurrentTenant = tenantGuard();
   const payload = await authFetch('/dashboard/metric-visibility');
+  if (!isCurrentTenant()) return;
   metricVisibilityData = payload.data || null;
   renderMetricVisibility();
 }
@@ -933,7 +922,9 @@ function editYclientsCredential(credentialId) {
 }
 
 async function loadUsers() {
+  const isCurrentTenant = tenantGuard();
   const payload = await authFetch('/auth/admin/users');
+  if (!isCurrentTenant()) return;
   users = payload.data || [];
   renderUsers();
 }
@@ -1352,12 +1343,7 @@ createStaffAccountModal.querySelector('[data-close-modal="create-staff-account"]
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   if (closeAllRowMenus()) return;
-  if (!credentialsModal.hidden) closeCredentialsModal();
-  else if (!deleteConfirmModal.hidden) closeDeleteConfirm();
-  else if (!createStaffAccountModal.hidden) closeCreateStaffAccountModal();
-  else if (!editStaffModal.hidden) closeEditStaffModal();
-  else if (!editModal.hidden) closeEditModal();
-  else if (!createModal.hidden) closeCreateModal();
+  modals.closeTopmost();
 });
 
 document.getElementById('back-profile').addEventListener('click', () => {
@@ -1394,11 +1380,12 @@ async function init() {
 tenantSelect?.addEventListener('change', async () => {
   setSelectedPortalAccountId(tenantSelect.value);
   hideAlerts();
+  const isCurrentTenant = tenantGuard();
   try {
     await reloadTenantScopedAdminData();
-    showSuccess(t('admin.businessTenantSelected'));
+    if (isCurrentTenant()) showSuccess(t('admin.businessTenantSelected'));
   } catch (error) {
-    showError(error.message);
+    if (isCurrentTenant()) showError(error.message);
   }
 });
 

@@ -19,7 +19,7 @@ import report_usage
 from api import app
 from auth_scope import AccessContext
 from models import Company, Group, ReportUsageEvent, Staff, SyncState
-from report_payload import ReportInputError
+from report_payload import ReportCalculationError, ReportInputError
 from sync_control import SyncControlService
 
 PARAMS = {'start_date': '2026-03-01', 'end_date': '2026-03-31'}
@@ -166,7 +166,7 @@ async def test_failures_are_recorded_with_their_status(async_session, usage_app,
 
     monkeypatch.setattr(dashboard_routes, 'fetch_report_data', failing(ReportInputError('bad window')))
     bad = await _data()
-    monkeypatch.setattr(dashboard_routes, 'fetch_report_data', failing(dashboard_reports.ReportCalculationError('x')))
+    monkeypatch.setattr(dashboard_routes, 'fetch_report_data', failing(ReportCalculationError('x')))
     unavailable = await _data()
     monkeypatch.setattr(dashboard_routes, 'fetch_report_data', failing(RuntimeError('boom')))
     crashed = await _get(raise_app_exceptions=False, report_id=REPORT, **PARAMS)

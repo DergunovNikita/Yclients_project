@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Company, Group, PortalBranch, YClientsCredential
-from portal_tenant_ownership import reassign_branch_from_admin_only_tenant
+from portal_tenant_ownership import can_reassign_branch_from_tenant, reassign_branch_from_admin_only_tenant
 from yclients_api import YClientsAPI
 from yclients_credentials import decrypt_secret
 
@@ -21,6 +21,66 @@ SUPPORTED_SOURCE_TYPES = (SOURCE_YCLIENTS,)
 
 # Sources authenticated with partner_token/login/password (credential onboarding).
 CREDENTIAL_SOURCE_TYPES = (SOURCE_YCLIENTS,)
+
+
+async def companies_claimed_elsewhere(
+    db: AsyncSession,
+    source_type: str,
+    external_ids: list[int],
+    portal_account_id: int | None,
+) -> list[int]:
+    """External ids whose location already belongs to another tenant that cannot be taken over.
+
+    The unique index on `companies` is per tenant, so nothing in the schema stops a second tenant
+    with valid credentials from getting its own copy of a claimed location (double ingestion,
+    two tenants reporting the same branch). Every path that links locations asks this first.
+    A tenant with no business users (platform admins only) is not a claim.
+    """
+    ids = list(dict.fromkeys(external_ids))
+    if not ids:
+        return []
+    company_ids_by_external: dict[int, list[int]] = {}
+    rows = await db.execute(
+        select(Company.id, Company.external_id).where(
+            Company.source_type == source_type, Company.external_id.in_(ids)
+        )
+    )
+    for company_id, external_id in rows.all():
+        company_ids_by_external.setdefault(external_id, []).append(company_id)
+    unmatched = [item for item in ids if item not in company_ids_by_external]
+    if unmatched:
+        # Rows from before external ids existed carry the YClients id as their own id.
+        legacy = await db.execute(
+            select(Company.id).where(Company.id.in_(unmatched), Company.external_id.is_(None))
+        )
+        for company_id in legacy.scalars():
+            company_ids_by_external[company_id] = [company_id]
+
+    all_company_ids = [cid for group in company_ids_by_external.values() for cid in group]
+    if not all_company_ids:
+        return []
+    tenant_by_company = dict(
+        (
+            await db.execute(
+                select(PortalBranch.company_id, PortalBranch.portal_account_id).where(
+                    PortalBranch.company_id.in_(all_company_ids)
+                )
+            )
+        ).all()
+    )
+    takeover_allowed: dict[int, bool] = {}
+    claimed: list[int] = []
+    for external_id in ids:
+        for company_id in company_ids_by_external.get(external_id, []):
+            owner = tenant_by_company.get(company_id)
+            if owner is None or owner == portal_account_id:
+                continue
+            if owner not in takeover_allowed:
+                takeover_allowed[owner] = await can_reassign_branch_from_tenant(db, owner, portal_account_id or -1)
+            if not takeover_allowed[owner]:
+                claimed.append(external_id)
+                break
+    return claimed
 
 
 @dataclass(frozen=True)
@@ -145,6 +205,11 @@ class YClientsDataSourceAdapter(DataSourceAdapter):
         unknown = [cid for cid in company_ids if cid not in available]
         if unknown:
             raise HTTPException(status_code=400, detail=f'Companies not available for credential: {unknown}')
+        claimed = await companies_claimed_elsewhere(db, self.source_type, company_ids, portal_account_id)
+        if claimed:
+            raise HTTPException(
+                status_code=409, detail=f'Companies already linked to another tenant: {sorted(claimed)}'
+            )
 
         materialized_company_ids: list[int] = []
         for cid in company_ids:

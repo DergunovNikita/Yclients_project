@@ -508,6 +508,8 @@
     "totalMoneyMeta": "{value} total",
     "syncUpdatedAt": "data updated at {value}",
     "syncNoSuccessfulUpdates": "data freshness: no successful updates",
+    "syncTenantFailed": "data may be out of date: YClients access failed, last updated {value}",
+    "syncTenantFailedNoUpdates": "data may be out of date: YClients access failed, no successful updates",
     "syncStatusUnavailable": "data freshness: status unavailable",
     "planSubhead": "Plan/actual by branches and employees",
     "planSettingsSubhead": "Monthly plan setup",

@@ -14,6 +14,8 @@ import config
 import dashboard_reports
 import dashboard_routes
 import dashboard_service
+import reports_finance
+import reports_team
 import sync_pipeline
 from auth_scope import AccessContext
 from auth_service import create_access_token, hash_password
@@ -256,8 +258,8 @@ def test_every_report_definition_has_a_builder():
     import inspect
 
     assert dashboard_reports.REPORT_REGISTRY
-    for report_id in dashboard_reports.REPORT_REGISTRY:
-        builder = dashboard_reports._builder_for(report_id)
+    for report_id, definition in dashboard_reports.REPORT_REGISTRY.items():
+        builder = definition.builder
         assert inspect.iscoroutinefunction(builder), report_id
         assert list(inspect.signature(builder).parameters) == ['req'], report_id
 
@@ -3223,7 +3225,7 @@ async def test_opz_year_facts_annual_events_are_the_first_monthly_event_of_the_y
     assert [event.event_id for event in month_events] == [5, 2, 3]
     assert facts['counts'] == {2024: 1.0, 2025: 1.0}
     assert facts['monthly_counts'] == {2024: {3: 1.0}, 2025: {1: 1.0, 2: 1.0}}
-    assert facts['latest_date'] == date(2025, 1, 10)
+    assert 'latest_date' not in facts
     assert facts['appointment_dependencies'] == {
         2024: {1: (date(2024, 3, 10), date(2024, 4, 1))},
         2025: {1: (date(2025, 1, 10), date(2025, 2, 5))},
@@ -3447,7 +3449,7 @@ def test_with_year_changes_compares_opz_year_over_year():
             'opz_pct': opz_pct,
         }
 
-    rows = dashboard_reports._with_year_changes([
+    rows = reports_finance._with_year_changes([
         year_row(2023, 10.0, 5.0),
         year_row(2024, 15.0, 4.0),
         year_row(2025, None, None),
@@ -3509,7 +3511,6 @@ async def test_opz_year_facts_ignore_later_same_day_visit_for_staff(
         factual_at=datetime(2026, 8, 1, 12),
     )
 
-    assert facts['latest_date'] == date(2026, 8, 1)
     assert facts['counts'] == {2026: 1.0}
 
 
@@ -4119,8 +4120,8 @@ async def test_service_breakdowns_use_the_overview_physical_account_filter(async
     top_services = await dashboard_service.fetch_top_services(
         async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1
     )
-    extra_services = await dashboard_service.fetch_extra_services(
-        async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1
+    extra_services = await dashboard_service.fetch_top_services(
+        async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1, limit=None, only_extra=True
     )
     leaderboard_extra_revenue = await dashboard_service._extra_service_revenue_by_staff(
         async_session,
@@ -4142,12 +4143,10 @@ async def test_dashboard_staff_leaderboard_report_returns_retryable_503_on_total
     async_session.add(Company(id=1, title='Salon', group_id=1))
     await async_session.commit()
 
-    import dashboard_reports
-
     async def boom(*args, **kwargs):
         raise OperationalError('SELECT 1', {}, OSError('connection lost'))
 
-    monkeypatch.setattr(dashboard_reports, 'fetch_plan_fact', boom)
+    monkeypatch.setattr(reports_team, 'fetch_plan_fact', boom)
 
     async def override_db():
         yield async_session
@@ -4162,7 +4161,7 @@ async def test_dashboard_staff_leaderboard_report_returns_retryable_503_on_total
         async def defect(*args, **kwargs):
             raise RuntimeError('boom')
 
-        monkeypatch.setattr(dashboard_reports, 'fetch_plan_fact', defect)
+        monkeypatch.setattr(reports_team, 'fetch_plan_fact', defect)
         crashed = await client.get('/dashboard/reports/data', params=params)
     app.dependency_overrides.clear()
 
@@ -4340,7 +4339,7 @@ async def test_staff_leaderboard_applies_component_money_permissions_without_raw
             money_metrics=frozenset({'cosmo_sum'}),
         )
 
-    monkeypatch.setattr(dashboard_reports, 'fetch_plan_fact', fake_plan_fact)
+    monkeypatch.setattr(reports_team, 'fetch_plan_fact', fake_plan_fact)
     app.dependency_overrides[api.get_async_db] = override_db
     app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
     transport = ASGITransport(app=app)
@@ -4570,7 +4569,6 @@ async def test_dashboard_bundle_passes_one_factual_cutoff_to_every_metric_block(
     monkeypatch.setattr(dashboard_routes, 'fetch_summary', fake_fetch({}))
     monkeypatch.setattr(dashboard_routes, 'fetch_revenue_daily', fake_fetch([]))
     monkeypatch.setattr(dashboard_routes, 'fetch_top_services', fake_fetch([]))
-    monkeypatch.setattr(dashboard_routes, 'fetch_extra_services', fake_fetch([]))
 
     async def override_db():
         yield async_session
@@ -5048,7 +5046,7 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
             json={'role': 'manager', 'visible_codes': []},
             headers=owner_headers,
         )
-        monkeypatch.setattr(dashboard_reports, 'fetch_plan_fact', fake_plan_fact_all_hidden)
+        monkeypatch.setattr(reports_team, 'fetch_plan_fact', fake_plan_fact_all_hidden)
         leaderboard_all_hidden = await client.get(
             '/dashboard/reports/data',
             params={'report_id': 'staff_leaderboard', 'start_date': '2025-01-01', 'end_date': '2025-01-31'},
@@ -12176,11 +12174,13 @@ async def test_administrator_service_scope_follows_monthly_role_transitions(
         ))
     await async_session.commit()
 
-    rows = await dashboard_service.fetch_extra_services(
+    rows = await dashboard_service.fetch_top_services(
         async_session,
         date(2025, 1, 1),
         date(2025, 2, 28),
         company_id=1,
+        limit=None,
+        only_extra=True,
         staff_id=2,
         factual_at=datetime(2025, 3, 1),
         use_administrator_schedule=True,
@@ -13640,6 +13640,7 @@ async def test_opz_period_uses_future_appointment_create_date(async_session):
 
 @pytest.mark.asyncio
 async def test_dashboard_services_api_updates_extra_label_and_metrics(async_session):
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime(2025, 1, 1)))
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
     async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
@@ -13694,7 +13695,9 @@ async def test_dashboard_services_api_updates_extra_label_and_metrics(async_sess
 
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
+    async with AsyncClient(
+        transport=transport, base_url='http://test', headers={'X-Portal-Account-Id': '1'}
+    ) as client:
         listed = await client.get('/dashboard/services', params={'company_id': 1})
         assert listed.status_code == 200
         row = listed.json()['data']['rows'][0]
@@ -13729,6 +13732,7 @@ async def test_dashboard_services_api_updates_extra_label_and_metrics(async_sess
 
 @pytest.mark.asyncio
 async def test_dashboard_service_kpi_groups_and_single_assignment(async_session):
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime(2025, 1, 1)))
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
     async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
@@ -13761,7 +13765,9 @@ async def test_dashboard_service_kpi_groups_and_single_assignment(async_session)
 
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
+    async with AsyncClient(
+        transport=transport, base_url='http://test', headers={'X-Portal-Account-Id': '1'}
+    ) as client:
         first = await client.post('/dashboard/services/kpi_groups', json={'title': 'Уход лицо', 'code': 'face_care'})
         assert first.status_code == 200
         first_group = first.json()['data']
@@ -13831,7 +13837,9 @@ async def test_dashboard_service_batch_update_is_atomic_and_normalized(async_ses
 
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
+    async with AsyncClient(
+        transport=transport, base_url='http://test', headers={'X-Portal-Account-Id': '1'}
+    ) as client:
         group_id = 1
 
         updated = await client.patch('/dashboard/services', json={

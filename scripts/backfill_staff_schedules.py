@@ -6,6 +6,8 @@ date is not configured, the first stored appointment is used instead.
 Run: ``python -m scripts.backfill_staff_schedules``
 Limit the range: ``python -m scripts.backfill_staff_schedules --start 2026-01-01 --end 2026-08-31``
 Limit branches: ``python -m scripts.backfill_staff_schedules --company-id 123 --company-id 456``
+Force one stored credential for every branch: ``python -m scripts.backfill_staff_schedules --credential-id 7``
+Without it each branch uses the credential assigned to it in the portal.
 """
 from __future__ import annotations
 
@@ -14,12 +16,16 @@ from datetime import date, timedelta
 
 from sqlalchemy import func
 
-from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER, LOGIN, PARTNER_TOKEN, PASSWORD
+from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from database import init_database
 from models import Appointment, Company
 from sync_control import SyncControlService
 from sync_pipeline import _build_api_for_credential, sync_staff_schedules
-from yclients_credentials import YClientsCredentialValue, load_credentials_for_companies_sync
+from yclients_credentials import (
+    YClientsCredentialValue,
+    load_active_credentials_sync,
+    load_credentials_for_companies_sync,
+)
 
 DEMO_SOURCE_TYPE = 'demo'
 
@@ -36,6 +42,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--start', type=_parse_date, help='Override the start date for every branch')
     parser.add_argument('--end', type=_parse_date, default=date.today(), help='End date (default: today)')
     parser.add_argument('--company-id', action='append', type=int, dest='company_ids', help='Internal branch id')
+    parser.add_argument(
+        '--credential-id', type=int,
+        help='Use this stored credential (system.yclients_credentials.id) for every branch, '
+             'e.g. for a branch no longer assigned to one',
+    )
     parser.add_argument('--chunk-days', type=int, default=31, help='Days per YClients request (default: 31)')
     args = parser.parse_args()
     if args.chunk_days < 1 or args.chunk_days > 366:
@@ -45,17 +56,8 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def _fallback_credential(company_ids: list[int]) -> YClientsCredentialValue | None:
-    if not all((PARTNER_TOKEN.strip(), LOGIN.strip(), PASSWORD.strip())):
-        return None
-    return YClientsCredentialValue(
-        id=None,
-        title='Environment credentials',
-        partner_token=PARTNER_TOKEN,
-        login=LOGIN,
-        password=PASSWORD,
-        company_ids=tuple(company_ids),
-    )
+def _stored_credential(db, credential_id: int) -> YClientsCredentialValue | None:
+    return next((item for item in load_active_credentials_sync(db) if item.id == credential_id), None)
 
 
 def _company_start(company: Company, first_appointment: date | None, override: date | None) -> date:
@@ -108,8 +110,13 @@ def main() -> int:
             return 1
 
         company_ids = [int(company.id) for company in companies]
-        credential_by_company = load_credentials_for_companies_sync(db, company_ids)
-        fallback = _fallback_credential(company_ids)
+        forced = None
+        if args.credential_id is not None:
+            forced = _stored_credential(db, args.credential_id)
+            if forced is None:
+                print(f'Credential {args.credential_id} is not an active, decryptable stored credential.')
+                return 1
+        credential_by_company = {} if forced else load_credentials_for_companies_sync(db, company_ids)
         first_appointments = dict(
             db.query(Appointment.company_id, func.min(Appointment.date))
             .filter(Appointment.company_id.in_(company_ids))
@@ -121,7 +128,7 @@ def main() -> int:
         failed = 0
         completed = 0
         for company in companies:
-            credential = credential_by_company.get(int(company.id)) or fallback
+            credential = forced or credential_by_company.get(int(company.id))
             if credential is None:
                 print(f'[{company.id}] skipped: no active YClients credentials')
                 failed += 1

@@ -25,6 +25,7 @@ from models import (
     SyncState,
     SyncSourceState,
     Transaction,
+    YClientsCredential,
 )
 import config
 import sync_pipeline
@@ -163,6 +164,7 @@ def test_company_timezone_prefers_valid_source_and_defaults_to_moscow():
 def patch_execute_sync_dependencies(monkeypatch, db, credential, *, purge_result=True):
     monkeypatch.setattr(sync_pipeline, 'init_database', lambda *_args, **_kwargs: FakeSyncDatabase(db))
     monkeypatch.setattr(sync_pipeline, 'load_active_credentials_sync', lambda *_args, **_kwargs: [credential])
+    monkeypatch.setattr(sync_pipeline, '_undecryptable_credentials', lambda *_a, **_k: [])
     monkeypatch.setattr(sync_pipeline, '_build_api_for_credential', lambda _credential: FakeSyncAPI())
     monkeypatch.setattr(sync_pipeline, 'mark_credential_success_sync', lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sync_pipeline, 'mark_credential_failure_sync', lambda *_args, **_kwargs: None)
@@ -683,6 +685,7 @@ def test_one_credentials_auth_exception_does_not_stop_the_other_tenants(monkeypa
         ]
         patch_execute_sync_dependencies(monkeypatch, db, credentials[0])
         monkeypatch.setattr(sync_pipeline, 'load_active_credentials_sync', lambda *_a, **_k: credentials)
+        monkeypatch.setattr(sync_pipeline, '_undecryptable_credentials', lambda *_a, **_k: [])
         failures = []
         built = []
 
@@ -703,6 +706,64 @@ def test_one_credentials_auth_exception_does_not_stop_the_other_tenants(monkeypa
         assert failures == [(11, 'ValueError')]
         failed = [step for step in result['step_results'] if step['key'] == 'credentials_auth']
         assert len(failed) == 1 and failed[0]['success'] is False
+
+
+_REAL_UNDECRYPTABLE_CREDENTIALS = sync_pipeline._undecryptable_credentials
+
+
+def test_credential_that_will_not_decrypt_is_recorded_as_a_failed_step(monkeypatch):
+    """The loader drops it silently; without a step the tenant looked as healthy as the others."""
+    with sqlite_session_with_system(
+        [Group.__table__, Company.__table__, SyncState.__table__, YClientsCredential.__table__]
+    ) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        now = datetime(2026, 6, 1, 10, 0)
+        db.add(YClientsCredential(
+            id=1, portal_account_id=8, title='Broken tenant', partner_token_encrypted='x', login_encrypted='x',
+            password_encrypted='x', is_active=True, needs_reauth=True, created_at=now, updated_at=now,
+        ))
+        db.add(YClientsCredential(
+            id=2, portal_account_id=8, title='Switched off', partner_token_encrypted='x', login_encrypted='x',
+            password_encrypted='x', is_active=False, needs_reauth=False, created_at=now, updated_at=now,
+        ))
+        db.commit()
+
+        healthy = YClientsCredentialValue(
+            id=11, title='Healthy tenant', partner_token='p', login='l', password='x',
+            company_ids=(1,), portal_account_id=7,
+        )
+        patch_execute_sync_dependencies(monkeypatch, db, healthy)
+        monkeypatch.setattr(sync_pipeline, '_undecryptable_credentials', _REAL_UNDECRYPTABLE_CREDENTIALS)
+
+        result = execute_sync(mode='incremental', end_date=date(2026, 6, 30))
+
+        failed = [step for step in result['step_results'] if step['key'] == 'credentials_decrypt']
+        assert [(step['name'], step['success']) for step in failed] == [
+            ('Credentials decrypt [#8 · Broken tenant]', False),
+        ]
+        # One tenant's problem is a warning on the run, not a verdict on the other tenants.
+        assert result['success'] is True
+
+
+def test_run_with_only_undecryptable_credentials_reports_them_in_its_result(monkeypatch):
+    with sqlite_session_with_system(
+        [Group.__table__, Company.__table__, SyncState.__table__, YClientsCredential.__table__]
+    ) as db:
+        now = datetime(2026, 6, 1, 10, 0)
+        db.add(YClientsCredential(
+            id=1, portal_account_id=8, title='Broken tenant', partner_token_encrypted='x', login_encrypted='x',
+            password_encrypted='x', is_active=True, needs_reauth=True, created_at=now, updated_at=now,
+        ))
+        db.commit()
+        patch_execute_sync_dependencies(monkeypatch, db, None)
+        monkeypatch.setattr(sync_pipeline, 'load_active_credentials_sync', lambda *_a, **_k: [])
+        monkeypatch.setattr(sync_pipeline, '_undecryptable_credentials', _REAL_UNDECRYPTABLE_CREDENTIALS)
+
+        result = execute_sync(mode='incremental', end_date=date(2026, 6, 30), portal_account_id=8)
+
+        assert result['completed'] is True and result['success'] is False
+        assert [step['key'] for step in result['step_results']] == ['credentials_decrypt']
 
 
 def test_execute_sync_does_not_certify_incomplete_historical_coverage(monkeypatch):
@@ -981,6 +1042,7 @@ def test_execute_sync_skips_credentials_without_assigned_companies(monkeypatch):
         )
         monkeypatch.setattr(sync_pipeline, 'init_database', lambda *_args, **_kwargs: FakeSyncDatabase(db))
         monkeypatch.setattr(sync_pipeline, 'load_active_credentials_sync', lambda *_args, **_kwargs: [credential])
+        monkeypatch.setattr(sync_pipeline, '_undecryptable_credentials', lambda *_a, **_k: [])
         monkeypatch.setattr(sync_pipeline, '_build_api_for_credential', lambda _credential: FakeSyncAPI())
         monkeypatch.setattr(sync_pipeline, 'mark_credential_success_sync', lambda *_args, **_kwargs: None)
         monkeypatch.setattr(sync_pipeline, 'mark_credential_failure_sync', lambda *_args, **_kwargs: None)

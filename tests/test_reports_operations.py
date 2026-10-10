@@ -5,6 +5,7 @@ import pytest
 
 import dashboard_reports
 import dashboard_service
+import report_common
 from models import Appointment, Company, Group, Staff
 
 JUNE = (date(2026, 6, 1), date(2026, 6, 30))
@@ -142,12 +143,12 @@ async def test_peak_load_respects_the_staff_filter_and_has_no_money(async_sessio
 
 
 def test_period_axis_is_bounded_and_survives_the_end_of_the_calendar():
-    assert len(dashboard_reports._period_starts(date(2018, 1, 1), date(2026, 10, 9), 'day')) == 3204
+    assert len(report_common.period_starts(date(2018, 1, 1), date(2026, 10, 9), 'day')) == 3204
     with pytest.raises(ValueError, match='too long'):
-        dashboard_reports._period_starts(date(1000, 1, 1), date(2026, 10, 9), 'day')
+        report_common.period_starts(date(1000, 1, 1), date(2026, 10, 9), 'day')
     # Nothing follows 9999-12-31, so the axis simply ends there instead of overflowing.
-    assert dashboard_reports._period_starts(date(9999, 12, 1), date(9999, 12, 31), 'month') == ['9999-12-01']
-    assert dashboard_reports._period_starts(date(9999, 12, 29), date(9999, 12, 31), 'day')[-1] == '9999-12-31'
+    assert report_common.period_starts(date(9999, 12, 1), date(9999, 12, 31), 'month') == ['9999-12-01']
+    assert report_common.period_starts(date(9999, 12, 29), date(9999, 12, 31), 'day')[-1] == '9999-12-31'
 
 
 @pytest.mark.asyncio

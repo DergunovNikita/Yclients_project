@@ -1,6 +1,6 @@
-// Local-calendar date helpers, kept free of i18n imports so node --test can load them.
-// Every value here stays on the calendar day the user sees: toISOString() would move
-// the window a day back for any timezone ahead of UTC.
+// Calendar-day helpers. Every value here stays on the calendar day the user sees:
+// toISOString() would move the window a day back for any timezone ahead of UTC.
+import { BRANCH_TIME_ZONE } from './timestamps.js';
 
 export function inputDateValue(date) {
   const year = date.getFullYear();
@@ -13,11 +13,30 @@ export function monthValue(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 }
 
-export function defaultReportDates() {
-  const now = new Date();
+/**
+ * The branch's calendar day as a local-midnight Date, so every helper here can keep reading it
+ * with the plain getters.
+ *
+ * "Today" is the branch's day, like everywhere else in the product: the viewer's own clock puts
+ * a visitor in another timezone a day off around midnight. Read it per use; a tab left open
+ * across midnight must not keep offering yesterday.
+ */
+export function branchToday(now = new Date()) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: BRANCH_TIME_ZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(now).map((part) => [part.type, part.value]),
+  );
+  return new Date(Number(parts.year), Number(parts.month) - 1, Number(parts.day));
+}
+
+export function defaultReportDates(today = branchToday()) {
   return {
-    start: inputDateValue(new Date(now.getFullYear(), now.getMonth(), 1)),
-    end: inputDateValue(now),
+    start: inputDateValue(new Date(today.getFullYear(), today.getMonth(), 1)),
+    end: inputDateValue(today),
   };
 }
 
@@ -28,7 +47,7 @@ export function defaultReportDates() {
  * for them would put a part-month of data against a whole month of plan, and every
  * average would be divided by days that never happened.
  */
-export function monthRange(value, today = new Date()) {
+export function monthRange(value, today = branchToday()) {
   const match = /^(\d{4})-(\d{2})$/.exec(String(value ?? ''));
   if (!match) return null;
   const year = Number(match[1]);
@@ -50,7 +69,7 @@ export function monthRange(value, today = new Date()) {
  * compare field shows, and inferring a month here would render one delta beside a
  * compare window describing another.
  */
-export function monthOfRange(startValue, endValue, today = new Date()) {
+export function monthOfRange(startValue, endValue, today = branchToday()) {
   const match = /^(\d{4})-(\d{2})-01$/.exec(String(startValue ?? ''));
   if (!match) return '';
   const month = `${match[1]}-${match[2]}`;

@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
 from pydantic import AfterValidator, BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +53,7 @@ from auth_sessions import (
     REFRESH_COOKIE_NAME,
     bump_user_token_version,
     clear_auth_cookies,
+    client_ip,
     enforce_csrf,
     issue_session,
     list_user_sessions,
@@ -63,8 +64,8 @@ from auth_sessions import (
     set_auth_cookies,
 )
 from dashboard_service import manual_fact_entry_keys
-from database import get_async_db
-from models import Company, PortalAccount, PortalBranch, PortalUser, Staff
+from database import get_async_db, get_async_session_factory
+from models import Company, PortalAccount, PortalBranch, PortalUser, PortalUserBranch, Staff
 from portal_audit import log_portal_audit
 from portal_account_provision import provision_all_unlinked_staff, provision_staff_account, role_for_staff
 from portal_staff_sync import (
@@ -338,25 +339,32 @@ async def login(
     return await _finalize_session_response(db, response, user, session)
 
 
-# Best-effort in-memory rate limit for the unauthenticated demo login (per process,
-# per client IP). Caps refresh-token churn from abuse without pulling in a dependency.
+# Best-effort in-memory rate limits (per process, per client IP): demo login caps refresh-token
+# churn from abuse, the auth buckets slow password guessing. No dependency, no shared state.
 _DEMO_LOGIN_WINDOW_SECONDS = 60.0
 _DEMO_LOGIN_MAX_PER_WINDOW = 10
+_RATE_LIMIT_SWEEP_INTERVAL_SECONDS = 60.0
 _demo_login_hits: dict[str, list[float]] = {}
 _auth_rate_limit_hits: dict[tuple[str, str, str, str], list[float]] = {}
+_last_rate_limit_sweep = 0.0
 
 
-def _prune_rate_limit_hits(now: float, window_seconds: float) -> None:
-    for key, timestamps in list(_auth_rate_limit_hits.items()):
-        recent = [ts for ts in timestamps if now - ts < window_seconds]
-        if recent:
-            _auth_rate_limit_hits[key] = recent
-        else:
-            _auth_rate_limit_hits.pop(key, None)
+def _sweep_idle_rate_limit_keys(now: float) -> None:
+    """Drop keys whose every hit left the window; touched keys are pruned on access instead."""
+    global _last_rate_limit_sweep
+    if now - _last_rate_limit_sweep < _RATE_LIMIT_SWEEP_INTERVAL_SECONDS:
+        return
+    _last_rate_limit_sweep = now
+    for hits, window_seconds in (
+        (_auth_rate_limit_hits, float(AUTH_RATE_LIMIT_WINDOW_SECONDS)),
+        (_demo_login_hits, _DEMO_LOGIN_WINDOW_SECONDS),
+    ):
+        for key in [key for key, stamps in hits.items() if not stamps or now - stamps[-1] >= window_seconds]:
+            del hits[key]
 
 
 def _auth_rate_limit_client_ip(request: Request) -> str:
-    return request.client.host if request.client else 'unknown'
+    return client_ip(request) or 'unknown'
 
 
 def _check_rate_limit_bucket(
@@ -367,8 +375,9 @@ def _check_rate_limit_bucket(
 ) -> None:
     if max_requests <= 0:
         return
-    recent = _auth_rate_limit_hits.get(key, [])
+    recent = [ts for ts in _auth_rate_limit_hits.get(key, ()) if now - ts < window_seconds]
     if len(recent) >= max_requests:
+        _auth_rate_limit_hits[key] = recent
         retry_after = max(1, int(window_seconds - (now - recent[0])))
         logger.warning('auth rate limit hit route=%s bucket=%s', key[1], key[0])
         raise HTTPException(
@@ -388,7 +397,7 @@ def enforce_auth_rate_limit(request: Request, route: str, email: str | None = No
         return
 
     now = time.monotonic()
-    _prune_rate_limit_hits(now, window_seconds)
+    _sweep_idle_rate_limit_keys(now)
     ip = _auth_rate_limit_client_ip(request)
     _check_rate_limit_bucket(('ip', route, ip, ''), max_ip_requests, window_seconds, now)
     if email:
@@ -402,6 +411,7 @@ def enforce_auth_rate_limit(request: Request, route: str, email: str | None = No
 
 def _demo_login_allowed(ip: str | None) -> bool:
     now = time.monotonic()
+    _sweep_idle_rate_limit_keys(now)
     key = ip or 'unknown'
     recent = [ts for ts in _demo_login_hits.get(key, ()) if now - ts < _DEMO_LOGIN_WINDOW_SECONDS]
     if len(recent) >= _DEMO_LOGIN_MAX_PER_WINDOW:
@@ -496,6 +506,9 @@ async def logout_others(
     db: AsyncSession = Depends(get_async_db),
 ):
     current_refresh = request.cookies.get(REFRESH_COOKIE_NAME)
+    if not current_refresh:
+        # Without the cookie the caller's own session cannot be told apart and would be revoked too.
+        raise HTTPException(status_code=400, detail='Refresh cookie is required to keep the current session')
     await revoke_user_sessions(db, user.id, except_refresh=current_refresh)
     await db.commit()
     return {'success': True}
@@ -506,7 +519,7 @@ async def list_sessions(
     user: PortalUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
-    sessions = await list_user_sessions(db, user.id, enforce_limit=not user.is_demo)
+    sessions = await list_user_sessions(db, user.id, is_demo=user.is_demo)
     await db.commit()
     return {
         'success': True,
@@ -591,17 +604,32 @@ async def verify_email(body: TokenRequest, db: AsyncSession = Depends(get_async_
     return {'success': True, 'message': 'Email подтверждён. Теперь можно войти в кабинет.'}
 
 
+async def _send_auth_email_after_response(user_id: int, sender) -> None:
+    """Mail the user once the response is gone, so latency and SMTP errors never reveal the address exists.
+
+    Runs on its own session: the request session may already be closed by the time a background task runs.
+    """
+    try:
+        async with get_async_session_factory()() as session:
+            user = await session.get(PortalUser, user_id)
+            if user is not None:
+                await sender(session, user)
+    except Exception as exc:
+        logger.warning('auth email failed user_id=%s error=%s', user_id, type(exc).__name__)
+
+
 @router.post('/forgot-password')
 async def forgot_password(
     body: ForgotPasswordRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_async_db),
 ):
     email = normalize_email(body.email)
     enforce_auth_rate_limit(request, AUTH_RATE_LIMIT_ROUTES['forgot_password'], email)
     user = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
     if user is not None and user.is_active and not email_cooldown_active(user.password_reset_sent_at):
-        await send_password_reset_email(db, user)
+        background_tasks.add_task(_send_auth_email_after_response, user.id, send_password_reset_email)
     return {
         'success': True,
         'message': 'Если аккаунт с таким email существует, на почту отправлена ссылка для сброса пароля.',
@@ -612,13 +640,14 @@ async def forgot_password(
 async def resend_verification(
     body: ResendVerificationRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_async_db),
 ):
     email = normalize_email(body.email)
     enforce_auth_rate_limit(request, AUTH_RATE_LIMIT_ROUTES['resend_verification'], email)
     user = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
     if user is not None and user.email_verified_at is None and not email_cooldown_active(user.email_verification_sent_at):
-        await send_verification_email(db, user)
+        background_tasks.add_task(_send_auth_email_after_response, user.id, send_verification_email)
     return {
         'success': True,
         'message': 'Если аккаунт существует и не подтверждён — письмо отправлено повторно.',
@@ -815,6 +844,34 @@ async def _load_staff_ids_by_portal_user(db: AsyncSession, portal_user_ids: list
     return mapping
 
 
+async def _load_access_branch_ids_by_user(db: AsyncSession, users: list[PortalUser]) -> dict[int, list[int]]:
+    """`load_user_access_branch_ids` for a whole list: one query per kind of role, not one per user."""
+    result: dict[int, list[int]] = {user.id: [] for user in users}
+    owner_tenants = {user.portal_account_id for user in users if user.role == 'owner' and user.portal_account_id}
+    scoped_ids = [user.id for user in users if user.role not in ('owner', 'platform_admin')]
+    tenant_branches: dict[int, list[int]] = {tenant: [] for tenant in owner_tenants}
+    if owner_tenants:
+        rows = await db.execute(
+            select(PortalBranch.portal_account_id, PortalBranch.company_id)
+            .where(PortalBranch.portal_account_id.in_(owner_tenants))
+            .order_by(PortalBranch.company_id.asc())
+        )
+        for tenant, company_id in rows.all():
+            tenant_branches[tenant].append(company_id)
+    if scoped_ids:
+        rows = await db.execute(
+            select(PortalUserBranch.user_id, PortalUserBranch.company_id)
+            .where(PortalUserBranch.user_id.in_(scoped_ids))
+            .order_by(PortalUserBranch.company_id.asc())
+        )
+        for user_id, company_id in rows.all():
+            result[user_id].append(company_id)
+    for user in users:
+        if user.role == 'owner':
+            result[user.id] = list(tenant_branches.get(user.portal_account_id, []))
+    return result
+
+
 @router.get('/admin/users')
 async def admin_list_users(
     x_portal_account_id: int | None = Header(default=None),
@@ -828,15 +885,17 @@ async def admin_list_users(
         # Scoped to the resolved tenant only: unscoped, this repaired every tenant's Staff
         # mirror rows on any admin's GET — a branch_admin of tenant A writing and committing
         # rows for tenant B. See portal_staff_sync.sync_all_portal_users_staff.
-        await sync_all_portal_users_staff(db, active_portal_account_id)
-    await db.commit()
+        # Commit only a real repair: this is a GET, and a demo owner can reach it too.
+        if await sync_all_portal_users_staff(db, active_portal_account_id):
+            await db.commit()
 
     payload = []
     staff_ids_by_user = await _load_staff_ids_by_portal_user(db, [user.id for user in users])
+    branch_ids_by_user = await _load_access_branch_ids_by_user(db, users)
     for user in users:
         if not _same_tenant(actor, user, active_portal_account_id):
             continue
-        branch_ids = await load_user_access_branch_ids(db, user)
+        branch_ids = branch_ids_by_user[user.id]
         if can_list_user(actor.role, actor_branch_ids, user.role, branch_ids):
             manageable = user.id != actor.id and can_manage_user(
                 actor.role, actor_branch_ids, user.role, branch_ids
@@ -1168,12 +1227,13 @@ async def admin_list_initial_passwords(
         PortalUser.last_login_at.is_(None),
     )
     staff_ids_by_user = await _load_staff_ids_by_portal_user(db, [user.id for user in users])
+    branch_ids_by_user = await _load_access_branch_ids_by_user(db, users)
 
     payload = []
     for user in users:
         if not _same_tenant(actor, user, active_portal_account_id):
             continue
-        branch_ids = await load_user_access_branch_ids(db, user)
+        branch_ids = branch_ids_by_user[user.id]
         if not can_manage_user(actor.role, actor_branch_ids, user.role, branch_ids):
             continue
         payload.append({
@@ -1207,6 +1267,7 @@ async def admin_distribute_credentials(
     # below before the _same_tenant check further down gets a chance to reject it.
     users = await _tenant_scoped_users(db, active_portal_account_id, PortalUser.id.in_(unique_ids))
     users_by_id = {user.id: user for user in users}
+    branch_ids_by_user = await _load_access_branch_ids_by_user(db, users)
 
     sent: list[dict] = []
     skipped: list[dict] = []
@@ -1225,7 +1286,7 @@ async def admin_distribute_credentials(
         if not _same_tenant(actor, user, active_portal_account_id):
             errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Access denied'})
             continue
-        branch_ids = await load_user_access_branch_ids(db, user)
+        branch_ids = branch_ids_by_user[user.id]
         if not can_manage_user(actor.role, actor_branch_ids, user_role, branch_ids):
             errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Access denied'})
             continue
@@ -1245,6 +1306,9 @@ async def admin_distribute_credentials(
             errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Email delivery failed'})
             # The sender rolled the session back, which expired every loaded row; reading an expired
             # attribute in the next iteration would raise MissingGreenlet and 500 the whole batch.
+            # A database error before the sender's own try leaves the session needing a rollback
+            # first, or the refresh itself raises PendingRollbackError.
+            await db.rollback()
             for loaded in (actor, *users_by_id.values()):
                 await db.refresh(loaded)
             continue

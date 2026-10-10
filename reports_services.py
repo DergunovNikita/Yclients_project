@@ -11,7 +11,6 @@ from dashboard_service import (
     _appt_revenue_filters,
     _service_group_key,
     _transaction_service_catalog_join,
-    fetch_extra_services,
     fetch_top_services,
 )
 from models import Appointment, ServiceCatalog, Transaction
@@ -53,7 +52,7 @@ async def build_avg_check_by_service(req: ReportRequest) -> dict[str, Any]:
         factual_at=req.factual_at,
     )
     services = await fetch_top_services(req.db, req.start, req.end, **common)
-    extra = await fetch_extra_services(req.db, req.start, req.end, **common)
+    extra = await fetch_top_services(req.db, req.start, req.end, **common, only_extra=True)
     total_revenue = sum(float(row['revenue']) for row in services)
     total_sold = sum(int(row['sold']) for row in services)
 

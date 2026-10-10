@@ -52,6 +52,46 @@ def test_root_proxy_forwards_real_client_ip_headers():
     assert result.returncode == 0, result.stderr
 
 
+def test_proxy_sends_the_shared_secret_and_visitor_ip_only_when_configured():
+    root = Path(__file__).resolve().parents[1]
+    node = root / '.venv/node-v24.15.0-darwin-arm64/bin/node'
+    node_cmd = str(node) if node.exists() else shutil.which('node')
+    if not node_cmd:
+        pytest.skip('node is required to execute api/_proxy.js')
+    script = """
+        import assert from 'node:assert/strict';
+        import { forwardedHeaders } from './api/_proxy.js';
+
+        const req = () => ({
+          headers: {
+            'x-proxy-secret': 'browser-guess',
+            'x-vercel-forwarded-for': '203.0.113.7',
+            'x-forwarded-for': '203.0.113.10',
+          },
+          socket: { remoteAddress: '198.51.100.42' },
+        });
+
+        delete process.env.VM_PROXY_SECRET;
+        let headers = forwardedHeaders(req());
+        assert.equal(headers['x-proxy-secret'], undefined);
+        assert.equal(headers['x-forwarded-for'], '198.51.100.42');
+
+        process.env.VM_PROXY_SECRET = 'a-long-shared-secret-of-32-plus-characters';
+        headers = forwardedHeaders(req());
+        assert.equal(headers['x-proxy-secret'], 'a-long-shared-secret-of-32-plus-characters');
+        assert.equal(headers['x-forwarded-for'], '203.0.113.7');
+    """
+    result = subprocess.run(
+        [node_cmd, '--input-type=module', '-e', script],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_production_workflows_fail_closed():
     root = Path(__file__).resolve().parents[1]
     deploy = (root / '.github/workflows/deploy-vm.yml').read_text()

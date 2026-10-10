@@ -69,7 +69,7 @@ cp .env.example .env
 - стабильный `PORTAL_CREDENTIALS_ENCRYPTION_KEY` длиной не менее 32 символов
 - `AUTH_COOKIE_SECURE=false` и `AUTH_CONSOLE_EMAIL=true` для локального HTTP без SMTP
 
-`PARTNER_TOKEN`, `YCLIENTS_LOGIN` и `YCLIENTS_PASSWORD` в `.env` нужны только для одноразовой миграции старой установки через `scripts/migrate_env_credentials.py`. Новая установка сохраняет credentials в зашифрованном виде через onboarding/admin.
+Учётные данные YClients в `.env` не задаются: они сохраняются в зашифрованном виде через onboarding/admin.
 
 ### 2. Применить миграции
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import date
 from typing import Any, Iterable
 
@@ -10,12 +11,21 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import YCLIENTS_TIMEOUT
+from config import YCLIENTS_RETRY_BACKOFF, YCLIENTS_RETRY_TOTAL, YCLIENTS_TIMEOUT
 from models import Company, Staff
+from yclients_api import YClientsAPI
 from yclients_credentials import YClientsCredentialValue, load_credentials_for_companies_async
 
-YCLIENTS_BASE_URL = 'https://api.yclients.com/api/v1'
 MAX_CONCURRENT_ANALYTICS_REQUESTS = 4
+# A user token outlives this by far; the TTL only bounds how long a revoked one keeps failing.
+USER_TOKEN_TTL_SECONDS = 600
+# The ETL client waits out a 429 for up to a minute. A dashboard request cannot: past this the
+# call fails and the page falls back to local counts, as it does for any other YClients error.
+MAX_RETRY_WAIT_SECONDS = 5.0
+RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+# credential id + a digest of its secrets -> (user token, expiry). Editing a credential changes
+# the digest, so the old token is not reused for the new login.
+_user_tokens: dict[tuple[int, int], tuple[str, float]] = {}
 
 
 class YClientsAnalyticsError(RuntimeError):
@@ -50,9 +60,51 @@ def _parse_record_stats(payload: Any) -> dict[str, int]:
     }
 
 
+def _retry_delay(response: Any, attempt: int) -> float | None:
+    """Seconds to wait before retrying, or None when the wait is longer than a page load can afford."""
+    retry_after = getattr(response, 'headers', {}).get('Retry-After')
+    try:
+        delay = float(retry_after) if retry_after is not None else YCLIENTS_RETRY_BACKOFF * 2 ** attempt
+    except ValueError:
+        delay = YCLIENTS_RETRY_BACKOFF * 2 ** attempt
+    return delay if delay <= MAX_RETRY_WAIT_SECONDS else None
+
+
+async def _send(client: httpx.AsyncClient, method: str, url: str, **kwargs: Any) -> Any:
+    """One request, retried on 429/5xx the way the ETL client's urllib3 retry does."""
+    retries = max(0, YCLIENTS_RETRY_TOTAL)
+    for attempt in range(retries + 1):
+        response = await getattr(client, method)(url, **kwargs)
+        if response.status_code not in RETRYABLE_STATUSES or attempt == retries:
+            return response
+        delay = _retry_delay(response, attempt)
+        if delay is None:
+            return response
+        await asyncio.sleep(delay)
+
+
+def _token_key(credentials: YClientsCredentialValue) -> tuple[int, int] | None:
+    if credentials.id is None:
+        return None
+    return int(credentials.id), hash((credentials.partner_token, credentials.login, credentials.password))
+
+
+async def _user_token(client: httpx.AsyncClient, credentials: YClientsCredentialValue, *, refresh: bool = False) -> str:
+    key = _token_key(credentials)
+    cached = _user_tokens.get(key) if key is not None else None
+    if cached is not None and not refresh and cached[1] > time.monotonic():
+        return cached[0]
+    token = await _authenticate(client, credentials)
+    if key is not None:
+        _user_tokens[key] = (token, time.monotonic() + USER_TOKEN_TTL_SECONDS)
+    return token
+
+
 async def _authenticate(client: httpx.AsyncClient, credentials: YClientsCredentialValue) -> str:
-    response = await client.post(
-        f'{YCLIENTS_BASE_URL}/auth',
+    response = await _send(
+        client,
+        'post',
+        f'{YClientsAPI.BASE_URL}/auth',
         headers={
             'Authorization': f'Bearer {credentials.partner_token}',
             'Accept': 'application/vnd.yclients.v2+json',
@@ -140,18 +192,21 @@ async def fetch_record_stats(
                     'Accept': 'application/vnd.yclients.v2+json',
                     'Content-Type': 'application/json',
                 }
+                external_id = external_company_by_internal.get(company_id, company_id)
+                url = f'{YClientsAPI.BASE_URL}/company/{external_id}/analytics/overall/'
                 async with semaphore:
-                    response = await client.get(
-                        f'{YCLIENTS_BASE_URL}/company/{external_company_by_internal.get(company_id, company_id)}/analytics/overall/',
-                        headers=headers,
-                        params=params,
-                    )
+                    response = await _send(client, 'get', url, headers=headers, params=params)
+                    if response.status_code in (401, 403):
+                        # The cached token may have been revoked; one fresh login settles it.
+                        user_token = await _user_token(client, credentials, refresh=True)
+                        headers['Authorization'] = f'Bearer {credentials.partner_token}, User {user_token}'
+                        response = await _send(client, 'get', url, headers=headers, params=params)
                 response.raise_for_status()
                 return _parse_record_stats(response.json())
 
             rows = []
             for credentials, grouped_company_ids in credential_groups.values():
-                user_token = await _authenticate(client, credentials)
+                user_token = await _user_token(client, credentials)
                 rows.extend(
                     await asyncio.gather(
                         *(load_company(company_id, credentials, user_token) for company_id in grouped_company_ids)

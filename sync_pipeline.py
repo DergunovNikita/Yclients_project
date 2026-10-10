@@ -8,6 +8,7 @@ from typing import Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import or_
 from config import (
+    DEFAULT_BRANCH_TIMEZONE,
     DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD,
     SYNC_DAYS, SCHEDULE_DAYS, DB_BATCH_SIZE,
     SYNC_HISTORY_START_DATE, SYNC_INCREMENTAL, SYNC_LOOKBACK_DAYS,
@@ -33,7 +34,7 @@ from models import (
     GoodCategory, GoodCategoryCatalog, Good, GoodCatalog,
     Appointment, Transaction, FinancialTransaction, GoodTransaction,
     Comment, StaffSchedule,
-    SyncState, SyncSourceState,
+    SyncState, SyncSourceState, YClientsCredential,
 )
 from sync_parsing import (
     parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_int,
@@ -56,7 +57,6 @@ PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
 APPOINTMENTS_SOURCE = 'appointments_detail'
 GOODS_TRANSACTIONS_SOURCE = 'goods_transactions_detail'
 STAFF_SCHEDULE_SOURCE = 'staff_schedules'
-DEFAULT_BRANCH_TIMEZONE = 'Europe/Moscow'
 FULL_REFRESH_COVERAGE_SOURCES = (
     APPOINTMENTS_SOURCE,
     PERSONAL_ACCOUNT_SOURCE,
@@ -152,24 +152,58 @@ def load_existing_or_adopt_legacy_source_map(
     id_column,
     source_type: str = SOURCE_YCLIENTS,
 ):
+    ids = list(ids)  # walked twice: a generator would leave nothing to adopt
     existing = load_existing_source_branch_map(db, model, company_id, ids, id_column, source_type)
-    unique_ids = [int(item_id) for item_id in dict.fromkeys(ids) if item_id is not None]
-    for external_id in unique_ids:
-        if external_id in existing:
-            continue
-        legacy = db.get(model, external_id)
-        if legacy is None or getattr(legacy, 'company_id', None) != company_id:
-            continue
-        if getattr(legacy, 'external_id', None) is not None:
-            continue
-        legacy.external_id = external_id
-        legacy.source_type = source_type
-        existing[external_id] = legacy
+    missing = [
+        external_id
+        for external_id in dict.fromkeys(int(item_id) for item_id in ids if item_id is not None)
+        if external_id not in existing
+    ]
+    # Rows from before external ids existed carry the YClients id as their primary key.
+    for batch in chunked(missing, DB_BATCH_SIZE):
+        for legacy in (
+            db.query(model)
+            .filter(model.id.in_(batch), model.company_id == company_id, model.external_id.is_(None))
+            .all()
+        ):
+            legacy.external_id = legacy.id
+            legacy.source_type = source_type
+            existing[legacy.id] = legacy
     return existing
 
 
-def external_pk_kwargs(db, model, external_id: int) -> dict[str, int]:
-    return {'id': external_id} if db.get(model, external_id) is None else {}
+class ExternalPkAllocator:
+    """Hands new rows their YClients id as primary key, unless the table already uses that key.
+
+    Replaces one `db.get` per new row with one set query per chunk of ids. A row that does
+    not get its own id is numbered by the database sequence, and that number may be an id
+    still to come — the next lookup flushes and asks again, as the per-row `db.get` did.
+    """
+
+    def __init__(self, db, model, external_ids):
+        self._db = db
+        self._model = model
+        self._unassigned = {int(item) for item in external_ids if item is not None}
+        self._taken: set[int] = set()
+        self._stale = True
+
+    def kwargs(self, external_id: int) -> dict[str, int]:
+        if self._stale:
+            self._reload()
+        self._unassigned.discard(external_id)
+        if external_id in self._taken:
+            self._stale = True
+            return {}
+        self._taken.add(external_id)
+        return {'id': external_id}
+
+    def _reload(self) -> None:
+        self._db.flush()
+        for batch in chunked(sorted(self._unassigned), DB_BATCH_SIZE):
+            self._taken.update(
+                row[0] for row in self._db.query(self._model.id).filter(self._model.id.in_(batch))
+            )
+        self._stale = False
 
 
 def bulk_delete_by_ids(db, model, column, ids) -> int:
@@ -610,6 +644,19 @@ def _build_api_for_credential(credential: YClientsCredentialValue) -> YClientsAP
     if not adapter.authenticate():
         return None
     return adapter.build_sync_client()
+
+
+def _undecryptable_credentials(db, loaded: list[YClientsCredentialValue], portal_account_id, credential_id):
+    """Active credentials the loader skipped because they would not decrypt."""
+    query = db.query(
+        YClientsCredential.id, YClientsCredential.portal_account_id, YClientsCredential.title,
+    ).filter(YClientsCredential.is_active.is_(True))
+    if portal_account_id is not None:
+        query = query.filter(YClientsCredential.portal_account_id == portal_account_id)
+    if credential_id is not None:
+        query = query.filter(YClientsCredential.id == int(credential_id))
+    loaded_ids = {credential.id for credential in loaded}
+    return [row for row in query.order_by(YClientsCredential.id).all() if row.id not in loaded_ids]
 
 
 def format_company_label(company: Company) -> str:
@@ -1144,6 +1191,7 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
         cid = _db_company_id(company_id, db_company_id)
         staff_ids = {int(staff_member.get('id')) for staff_member in staff_list if staff_member.get('id') is not None}
         existing_staff = _load_staff_map(db, cid, staff_ids)
+        pk_allocator = ExternalPkAllocator(db, Staff, staff_ids)
         active_staff_ids: set[int] = set()
         for s in staff_list:
             staff_id = _staff_external_id(s)
@@ -1164,7 +1212,7 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
             obj = existing_staff.get(staff_id)
             if not obj:
                 obj = Staff(
-                    **external_pk_kwargs(db, Staff, staff_id),
+                    **pk_allocator.kwargs(staff_id),
                     external_id=staff_id,
                     source_type=SOURCE_YCLIENTS,
                     name=s.get('name', ''),
@@ -1684,6 +1732,7 @@ def sync_records(api: YClientsAPI, db, company_id: str,
             (record.get('staff_id') for record in records),
         )
 
+        appointments_with_services = []
         for r in records:
             record_id = r.get('id')
             if record_id is None:
@@ -1725,10 +1774,13 @@ def sync_records(api: YClientsAPI, db, company_id: str,
                 obj.attendance = r.get('attendance', 0)
                 obj.comment = r.get('comment')
 
-            if obj.id is None:
-                db.flush()
+            appointments_with_services.append((obj, r.get('services') or []))
 
-            for svc in (r.get('services') or []):
+        # One flush for the whole window instead of one per new appointment: the ids
+        # come back in insertion order, so they are the ones the per-row flush handed out.
+        db.flush()
+        for obj, services in appointments_with_services:
+            for svc in services:
                 tx = Transaction(
                     appointment_id=obj.id,
                     service_id=svc.get('id'),
@@ -1848,6 +1900,7 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
             (txn.get('id') for txn in txns),
             FinancialTransaction.external_id,
         )
+        pk_allocator = ExternalPkAllocator(db, FinancialTransaction, (_payload_id(t) for t in txns))
         client_map = _prepare_client_map(
             db,
             cid,
@@ -1878,7 +1931,7 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
 
             if not obj:
                 obj = FinancialTransaction(
-                    **external_pk_kwargs(db, FinancialTransaction, tid),
+                    **pk_allocator.kwargs(tid),
                     external_id=tid,
                     source_type=SOURCE_YCLIENTS,
                     document_id=parse_int(t.get('document_id')),
@@ -1965,6 +2018,7 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
             (txn.get('id') for txn in txns),
             GoodTransaction.external_id,
         )
+        pk_allocator = ExternalPkAllocator(db, GoodTransaction, (_payload_id(t) for t in txns))
         client_map = _prepare_client_map(
             db,
             cid,
@@ -2000,7 +2054,7 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
 
             if not obj:
                 obj = GoodTransaction(
-                    **external_pk_kwargs(db, GoodTransaction, tid),
+                    **pk_allocator.kwargs(tid),
                     external_id=tid,
                     source_type=SOURCE_YCLIENTS,
                     document_id=t.get('document_id'),
@@ -2085,6 +2139,7 @@ def sync_comments(api: YClientsAPI, db, company_id: str,
             (comment.get('id') for comment in comments),
             Comment.external_id,
         )
+        pk_allocator = ExternalPkAllocator(db, Comment, (_payload_id(c) for c in comments))
         staff_map = _load_staff_map(
             db,
             cid,
@@ -2098,7 +2153,7 @@ def sync_comments(api: YClientsAPI, db, company_id: str,
             master_id = _internal_staff_id(staff_map, c.get('master_id'))
             if not obj:
                 obj = Comment(
-                    **external_pk_kwargs(db, Comment, cmt_id),
+                    **pk_allocator.kwargs(cmt_id),
                     external_id=cmt_id,
                     source_type=SOURCE_YCLIENTS,
                     type=c.get('type'),
@@ -2332,11 +2387,30 @@ def execute_sync(
         credentials = load_active_credentials_sync(db, portal_account_id=portal_account_id)
         if credential_id is not None:
             credentials = [credential for credential in credentials if credential.id == int(credential_id)]
+        # The loader drops a credential it cannot decrypt without a word, and the run would
+        # then read as healthy for that tenant. Recorded as a step so it counts as a warning.
+        for undecryptable in _undecryptable_credentials(db, credentials, portal_account_id, credential_id):
+            label = f"#{undecryptable.portal_account_id} · {undecryptable.title}"
+            print(f"! Не удалось расшифровать учётные данные «{undecryptable.title}» — пропуск тенанта")
+            step_results.append({
+                'name': f"Credentials decrypt [{label}]",
+                'key': 'credentials_decrypt',
+                'success': False,
+                'elapsed': 0.0,
+            })
+            emit_progress(
+                'credentials_decrypt',
+                'failed',
+                5,
+                f'Credential decrypt failed: {undecryptable.title}',
+                payload={'credential_id': undecryptable.id, 'portal_account_id': undecryptable.portal_account_id},
+            )
         if not credentials:
             print('! Нет активных учётных данных YClients. Добавьте их через личный кабинет.')
             emit_progress('credentials', 'warning', 100, 'No active YClients credentials')
             return {
                 **empty_result,
+                'step_results': list(step_results),
                 'completed': True,
                 'mode': default_sync_mode,
                 'window_start': default_sd,

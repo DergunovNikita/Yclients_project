@@ -172,3 +172,139 @@ async def test_fetch_record_stats_wraps_timeout(async_session, monkeypatch):
             date(2026, 6, 30),
             db=async_session,
         )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_token_cache(monkeypatch):
+    monkeypatch.setattr(yclients_analytics, '_user_tokens', {})
+
+
+class CountingClient(FakeAsyncClient):
+    """Counts logins and lets a test script the statuses `get` answers with."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.posts = 0
+        self.statuses = list(CountingClient.script)
+        self.tokens_seen = []
+
+    script = []
+    token_base = 0
+
+    async def post(self, *args, **kwargs):
+        self.posts += 1
+        return FakeResponse({'success': True, 'data': {'user_token': f'token-{self.token_base + self.posts}'}})
+
+    async def get(self, url, *, headers, params):
+        self.tokens_seen.append(headers['Authorization'])
+        status = self.statuses.pop(0) if self.statuses else 200
+        if status != 200:
+            response = FakeResponse({}, status_code=status)
+            response.headers = {'Retry-After': '1'} if status == 429 else {}
+            return response
+        return await super().get(url, headers=headers, params=params)
+
+
+def _use_counting_client(monkeypatch, script=()):
+    clients = []
+    CountingClient.script = list(script)
+
+    def factory(*args, **kwargs):
+        client = CountingClient(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(yclients_analytics.httpx, 'AsyncClient', factory)
+    monkeypatch.setattr(yclients_analytics.asyncio, 'sleep', _no_sleep)
+    return clients
+
+
+async def _no_sleep(_seconds):
+    return None
+
+
+async def _record_stats(async_session, company_ids=(1,)):
+    return await yclients_analytics.fetch_record_stats(
+        list(company_ids), date(2026, 6, 1), date(2026, 6, 30), db=async_session,
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_token_is_reused_across_requests(async_session, monkeypatch):
+    await _seed_db_credentials(async_session, monkeypatch, company_ids=(1,))
+    clients = _use_counting_client(monkeypatch)
+
+    await _record_stats(async_session)
+    await _record_stats(async_session)
+
+    assert [client.posts for client in clients] == [1, 0]
+    assert all('User token-1' in header for client in clients for header in client.tokens_seen)
+
+
+@pytest.mark.asyncio
+async def test_expired_user_token_is_requested_again(async_session, monkeypatch):
+    await _seed_db_credentials(async_session, monkeypatch, company_ids=(1,))
+    clients = _use_counting_client(monkeypatch)
+    now = [1000.0]
+    monkeypatch.setattr(yclients_analytics.time, 'monotonic', lambda: now[0])
+
+    await _record_stats(async_session)
+    now[0] += yclients_analytics.USER_TOKEN_TTL_SECONDS + 1
+    await _record_stats(async_session)
+
+    assert [client.posts for client in clients] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_rejected_cached_token_is_replaced_once(async_session, monkeypatch):
+    await _seed_db_credentials(async_session, monkeypatch, company_ids=(1,))
+    clients = _use_counting_client(monkeypatch)
+    await _record_stats(async_session)
+
+    clients = _use_counting_client(monkeypatch, script=[401])
+    monkeypatch.setattr(CountingClient, 'token_base', 10)
+    result = await _record_stats(async_session)
+
+    assert result['total'] == 15
+    assert clients[0].posts == 1
+    assert clients[0].tokens_seen[0].endswith('User token-1')
+    assert clients[0].tokens_seen[1].endswith('User token-11')
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_request_is_retried_after_the_advertised_wait(async_session, monkeypatch):
+    await _seed_db_credentials(async_session, monkeypatch, company_ids=(1,))
+    clients = _use_counting_client(monkeypatch, script=[429, 503])
+
+    result = await _record_stats(async_session)
+
+    assert result['total'] == 15
+    assert len(clients[0].tokens_seen) == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_after_longer_than_a_page_load_can_wait_fails_fast(async_session, monkeypatch):
+    await _seed_db_credentials(async_session, monkeypatch, company_ids=(1,))
+    clients = _use_counting_client(monkeypatch, script=[429])
+
+    def too_long(response, attempt):
+        return None
+
+    monkeypatch.setattr(yclients_analytics, '_retry_delay', too_long)
+
+    with pytest.raises(yclients_analytics.YClientsAnalyticsError):
+        await _record_stats(async_session)
+    assert len(clients[0].tokens_seen) == 1
+
+
+def test_retry_delay_follows_retry_after_within_the_cap():
+    class Response:
+        def __init__(self, headers):
+            self.headers = headers
+
+    assert yclients_analytics._retry_delay(Response({'Retry-After': '2'}), 0) == 2.0
+    assert yclients_analytics._retry_delay(Response({'Retry-After': '600'}), 0) is None
+    assert yclients_analytics._retry_delay(Response({}), 0) == yclients_analytics.YCLIENTS_RETRY_BACKOFF
+    assert yclients_analytics._retry_delay(Response({'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT'}), 1) == (
+        yclients_analytics.YCLIENTS_RETRY_BACKOFF * 2
+    )

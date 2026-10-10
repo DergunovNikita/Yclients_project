@@ -1,3 +1,4 @@
+import './reauth.css';
 import { t } from './i18n.js';
 
 // Mirrors the backend's USER_ADMIN_ROLES (auth_hierarchy.py:26) — the only roles
@@ -294,7 +295,7 @@ function resolveApiPath(path) {
   return `${apiBase.replace(/\/$/, '')}${path}`;
 }
 
-export function setToken() {
+export function clearLocalSession() {
   activeSessionUser = null;
   activeSessionFingerprint = '';
   clearLocalAuthState({ clearEmail: true });
@@ -474,25 +475,6 @@ async function refreshSession() {
 function ensureReauthModal() {
   let modal = document.getElementById('reauth-modal');
   if (modal) return modal;
-
-  const style = document.createElement('style');
-  style.textContent = `
-    .reauth-modal[hidden]{display:none!important}
-    .reauth-modal{position:fixed;inset:0;z-index:10000;display:grid;place-items:center;background:rgba(15,23,42,.42);padding:20px}
-    .reauth-modal__dialog{width:min(420px,100%);background:#fff;border:1px solid #e2e8f0;border-radius:8px;box-shadow:0 24px 80px rgba(15,23,42,.24);padding:22px}
-    .reauth-modal__dialog h2{margin:0 0 8px;font-size:20px;letter-spacing:0;color:#0f172a}
-    .reauth-modal__dialog p{margin:0 0 16px;color:#64748b;font-size:14px;line-height:1.45}
-    .reauth-modal__dialog label{display:grid;gap:6px;margin-bottom:12px;color:#334155;font-size:13px;font-weight:600}
-    .reauth-modal__dialog input{min-height:38px;border:1px solid #cbd5e1;border-radius:6px;padding:8px 10px;font:inherit}
-    .reauth-modal__password{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;border:1px solid #cbd5e1;border-radius:6px;background:#fff}
-    .reauth-modal__password input{border:0;border-radius:6px;min-width:0}
-    .reauth-modal__password button{height:38px;border:0;background:transparent;color:#0f766e;padding:0 10px;font:inherit;font-weight:700;cursor:pointer}
-    .reauth-modal__error{margin:0 0 12px;color:#b91c1c;font-size:13px}
-    .reauth-modal__actions{display:flex;justify-content:flex-end;gap:10px;margin-top:16px}
-    .reauth-modal__actions button{min-width:92px;min-height:38px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#334155;padding:0 14px;font:inherit;font-weight:600;cursor:pointer}
-    .reauth-modal__actions button[type=submit]{border-color:#0f766e;background:#0f766e;color:#fff}
-  `;
-  document.head.appendChild(style);
 
   modal = document.createElement('div');
   modal.id = 'reauth-modal';

@@ -211,6 +211,67 @@ test('forwardedHeaders rewrites trusted client IP headers from the proxy socket 
   }
 });
 
+function withProxySecret(value, run) {
+  const original = process.env.VM_PROXY_SECRET;
+  if (value === undefined) delete process.env.VM_PROXY_SECRET;
+  else process.env.VM_PROXY_SECRET = value;
+  try {
+    run();
+  } finally {
+    if (original === undefined) delete process.env.VM_PROXY_SECRET;
+    else process.env.VM_PROXY_SECRET = original;
+  }
+}
+
+test('forwardedHeaders without VM_PROXY_SECRET never sends a proxy secret, even a browser-supplied one', () => {
+  withProxySecret(undefined, () => {
+    for (const proxy of [webProxy, rootProxy]) {
+      const headers = proxy.forwardedHeaders({
+        headers: {
+          'x-proxy-secret': 'attacker-guess',
+          'x-vercel-forwarded-for': '203.0.113.7',
+          'x-forwarded-for': '203.0.113.10',
+        },
+        socket: { remoteAddress: '198.51.100.42' },
+      });
+      assert.equal(headers['x-proxy-secret'], undefined);
+      assert.equal(headers['x-forwarded-for'], '198.51.100.42');
+      assert.equal(headers['x-real-ip'], '198.51.100.42');
+    }
+  });
+});
+
+test('forwardedHeaders with VM_PROXY_SECRET sends the secret and the visitor address', () => {
+  withProxySecret('s'.repeat(40), () => {
+    for (const proxy of [webProxy, rootProxy]) {
+      const socket = { remoteAddress: '198.51.100.42' };
+      // Vercel's own header wins over everything the visitor could have written.
+      let headers = proxy.forwardedHeaders({
+        headers: {
+          'x-proxy-secret': 'attacker-guess',
+          'x-vercel-forwarded-for': '203.0.113.7',
+          'x-real-ip': '203.0.113.8',
+          'x-forwarded-for': '203.0.113.9, 10.0.0.1',
+        },
+        socket,
+      });
+      assert.equal(headers['x-proxy-secret'], 's'.repeat(40));
+      assert.equal(headers['x-forwarded-for'], '203.0.113.7');
+      assert.equal(headers['x-real-ip'], '203.0.113.7');
+
+      headers = proxy.forwardedHeaders({ headers: { 'x-real-ip': '203.0.113.8', 'x-forwarded-for': '203.0.113.9' }, socket });
+      assert.equal(headers['x-forwarded-for'], '203.0.113.8');
+
+      headers = proxy.forwardedHeaders({ headers: { 'x-forwarded-for': '203.0.113.9, 10.0.0.1' }, socket });
+      assert.equal(headers['x-forwarded-for'], '203.0.113.9');
+
+      headers = proxy.forwardedHeaders({ headers: {}, socket });
+      assert.equal(headers['x-forwarded-for'], '198.51.100.42');
+      assert.equal(headers['x-proxy-secret'], 's'.repeat(40));
+    }
+  });
+});
+
 test('proxyToVm forwards only allowlisted request headers', async () => {
   const originalFetch = globalThis.fetch;
   let forwarded;

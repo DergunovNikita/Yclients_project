@@ -17,7 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from config import PORTAL_CREDENTIALS_ENCRYPTION_KEY, PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD
+from config import IS_PRODUCTION, PORTAL_CREDENTIALS_ENCRYPTION_KEY, PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD
 from models import Company, YClientsCredential, YClientsCredentialCompany
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,33 @@ def _fernet_from_key(raw_key: str) -> Fernet:
     except Exception:
         derived = base64.urlsafe_b64encode(hashlib.sha256(raw_key.encode('utf-8')).digest())
         return Fernet(derived)
+
+
+def warn_if_passphrase_keys() -> None:
+    """Log (never the key itself) when a production key is not a Fernet key and falls back to a bare SHA-256.
+
+    An unsalted hash of a low-entropy passphrase can be brute-forced offline from a database dump;
+    a generated Fernet key cannot. Only a warning: changing the key means re-encrypting every stored secret.
+    """
+    if not IS_PRODUCTION:
+        return
+    for name, raw_key in (
+        ('PORTAL_CREDENTIALS_ENCRYPTION_KEY', PORTAL_CREDENTIALS_ENCRYPTION_KEY),
+        ('PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD', PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD),
+    ):
+        if not raw_key:
+            continue
+        try:
+            Fernet(raw_key.encode('utf-8'))
+        except Exception:
+            logger.warning(
+                '%s is not a urlsafe-base64 32-byte Fernet key; the SHA-256 passphrase fallback is in use. '
+                'Generate one with Fernet.generate_key() and re-encrypt the stored credentials.',
+                name,
+            )
+
+
+warn_if_passphrase_keys()
 
 
 def _fernet() -> Fernet:

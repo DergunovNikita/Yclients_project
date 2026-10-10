@@ -129,3 +129,17 @@ export function mountLanguageSwitcher(container, { beforeChange, afterChange } =
   container.appendChild(select);
   return select;
 }
+
+/**
+ * Start of a public auth page: document language, translated markup, the page title and a language switcher
+ * that keeps the title in step.
+ */
+export function initPage({ titleKey }) {
+  document.documentElement.lang = getLocale();
+  applyTranslations();
+  const syncTitle = () => {
+    document.title = `${t(titleKey)} — ${t('brand.name')}`;
+  };
+  syncTitle();
+  mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListener('change', syncTitle);
+}

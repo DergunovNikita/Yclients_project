@@ -12,6 +12,7 @@ from urllib3.util.retry import Retry
 class YClientsAPI:
     """Класс для работы с YClients API"""
 
+    BASE_URL = 'https://api.yclients.com/api/v1'
     MAX_PER_PAGE = 200
     # Ceiling for an undated listing (clients, goods): 400k rows, far above any branch.
     MAX_PLAIN_PAGES = 2000
@@ -43,7 +44,7 @@ class YClientsAPI:
         self._split_seen: Optional[set] = None
         self._split_requests = 0
         self.last_dated_fetch_complete = True
-        self.base_url = 'https://api.yclients.com/api/v1'
+        self.base_url = self.BASE_URL
         self.request_delay = max(0.0, request_delay)
         self.timeout = max(1.0, timeout)
         self.retry_after_max = max(0, int(retry_after_max))

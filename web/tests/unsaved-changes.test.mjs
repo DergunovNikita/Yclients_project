@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   createUnsavedChangesGuard,
+  editEventChecksDraft,
   editorSaveDockState,
   historyNavigationDecision,
   shouldHandleSameTabNavigation,
@@ -254,4 +255,23 @@ test('same-tab navigation guard preserves modified link clicks', () => {
   assert.equal(shouldHandleSameTabNavigation({ button: 0, ctrlKey: true }), false);
   assert.equal(shouldHandleSameTabNavigation({ button: 0, shiftKey: true }), false);
   assert.equal(shouldHandleSameTabNavigation({ button: 0, altKey: true }), false);
+});
+
+test('one edit re-checks the draft once: change for toggles, input for typed cells', () => {
+  const control = (selectors) => ({ matches: (selector) => selector.split(', ').some((one) => selectors.includes(one)) });
+  const checkbox = control(['input[type="checkbox"]']);
+  const select = control(['select']);
+  const text = control([]);
+  const fired = (target, ...types) => types.filter((type) => editEventChecksDraft({ type, target })).length;
+
+  // A click on a checkbox or a pick in a select fires input and change; only one of them counts.
+  assert.equal(fired(checkbox, 'input', 'change'), 1);
+  assert.equal(fired(select, 'input', 'change'), 1);
+  assert.equal(editEventChecksDraft({ type: 'change', target: checkbox }), true);
+  // Typing fires input per keystroke and change once on blur; only the keystrokes count.
+  assert.equal(fired(text, 'input', 'change'), 1);
+  assert.equal(editEventChecksDraft({ type: 'input', target: text }), true);
+  // A target that cannot say what it is counts as typed.
+  assert.equal(editEventChecksDraft({ type: 'input', target: {} }), true);
+  assert.equal(editEventChecksDraft({ type: 'change', target: {} }), false);
 });

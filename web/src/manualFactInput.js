@@ -5,6 +5,14 @@ export function manualFactRowKey(companyId, staffId) {
   return `${companyId}:${staffId}`;
 }
 
+// Value for a number cell: an empty one stays empty, so it is not read back as a typed zero.
+export function formatInputNumber(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const number = Number(value);
+  if (Number.isNaN(number)) return '';
+  return String(number);
+}
+
 export function storedValue(row) {
   return row.value === null || row.value === undefined ? null : Number(row.value);
 }

@@ -4,28 +4,33 @@ from __future__ import annotations
 
 from calendar import monthrange
 from collections.abc import Iterator
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, case, extract, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from dashboard_reports import _client_pareto_rows, _clients_rows
 from dashboard_service import (
     COMPLETED_ATTENDANCE,
     DateRange,
     _appointment_factual_at_condition,
     _company_scope_clause,
     _DayShift,
+    _physical_account_condition,
+    _service_paid_filters,
     _service_revenue_union,
     business_appointment_condition,
     factual_branch_date,
     fetch_reporting_windows,
+    fetch_summary,
+    financial_appointment_match_condition,
     reporting_window_clause,
     shift_months_back,
 )
-from models import Appointment, Company, FinancialTransaction, Staff
-from payment_methods import month_label, short_month_label
+from models import AccountCatalog, Appointment, Company, FinancialTransaction, Staff
+from report_common import appointment_conditions, month_label, short_month_label
 from report_payload import (
+    DECIMAL_FORMAT,
     MAX_PERIOD_BUCKETS,
     MONEY_FORMAT,
     NO_MASTER,
@@ -99,6 +104,169 @@ async def _branch_horizons(req: ReportRequest) -> dict[int, date]:
 
 
 # --- top_clients_pareto ---------------------------------------------------------------------------------
+
+
+async def _clients_rows(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int | None,
+    staff_id: int | None,
+    allowed_company_ids: list[int] | None,
+    factual_at: datetime,
+) -> list[dict[str, Any]]:
+    visits_stmt = (
+        select(
+            Appointment.client_id.label('client_id'),
+            func.count(func.distinct(Appointment.id)).label('visits'),
+        )
+        .where(and_(*appointment_conditions(
+            start,
+            end,
+            company_id,
+            staff_id,
+            attended_only=True,
+            allowed_company_ids=allowed_company_ids,
+            factual_at=factual_at,
+        )))
+        .group_by(Appointment.client_id)
+    )
+    revenue_stmt = (
+        select(
+            Appointment.client_id.label('client_id'),
+            func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+        )
+        .select_from(FinancialTransaction)
+        .join(Appointment, financial_appointment_match_condition())
+        .outerjoin(
+            AccountCatalog,
+            and_(
+                AccountCatalog.company_id == FinancialTransaction.company_id,
+                AccountCatalog.account_id == FinancialTransaction.account_id,
+            ),
+        )
+        .where(
+            _service_paid_filters(
+                start,
+                end,
+                company_id,
+                staff_id,
+                allowed_company_ids=allowed_company_ids,
+                factual_at=factual_at,
+            ),
+            _physical_account_condition(),
+        )
+        .group_by(Appointment.client_id)
+    )
+    clients: dict[int | None, dict[str, Any]] = {}
+    for row in (await db.execute(visits_stmt)).all():
+        client_id = int(row.client_id) if row.client_id is not None else None
+        clients[client_id] = {
+            'visits': int(row.visits or 0),
+            'revenue': 0.0,
+            'lifetime_visits': 0,
+        }
+    for row in (await db.execute(revenue_stmt)).all():
+        client_id = int(row.client_id) if row.client_id is not None else None
+        client = clients.setdefault(
+            client_id,
+            {'visits': 0, 'revenue': 0.0, 'lifetime_visits': 0},
+        )
+        client['revenue'] = float(row.revenue or 0)
+    # Deliberately not bounded by the report's client ids: binding them would put tens of
+    # thousands of parameters into one statement and trip asyncpg's 32767 ceiling on a
+    # full-history report. The aggregate is grouped in Postgres and cheap. The staff
+    # filter is dropped on purpose — it selects clients, it does not shorten their
+    # history — and a client who only ever paid keeps a lifetime count of 0. Visit-frequency
+    # buckets follow the whole history, which the period-scoped `visits` cannot give.
+    lifetime_stmt = (
+        select(
+            Appointment.client_id.label('client_id'),
+            func.count(func.distinct(Appointment.id)).label('lifetime_visits'),
+        )
+        .where(and_(*appointment_conditions(
+            None,
+            end,
+            company_id,
+            None,
+            attended_only=True,
+            allowed_company_ids=allowed_company_ids,
+            factual_at=factual_at,
+        )))
+        .group_by(Appointment.client_id)
+    )
+    for row in (await db.execute(lifetime_stmt)).all():
+        client_id = int(row.client_id) if row.client_id is not None else None
+        client = clients.get(client_id)
+        if client is not None:
+            client['lifetime_visits'] = int(row.lifetime_visits or 0)
+
+    rows = [
+        {
+            'client_id': client_id,
+            'visits': int(client['visits']),
+            'lifetime_visits': int(client['lifetime_visits']),
+            'revenue': float(client['revenue']),
+        }
+        for client_id, client in clients.items()
+    ]
+    # client_id is a unique final tiebreaker (it can be None for the "no client" bucket,
+    # which sorts last): without it, clients tied on revenue swap places whenever the
+    # query plan changes.
+    rows.sort(
+        key=lambda item: (
+            item['revenue'],
+            item['client_id'] if item['client_id'] is not None else -1,
+        ),
+        reverse=True,
+    )
+    return rows
+
+
+def _client_pareto_rows(
+    rows: list[dict[str, Any]],
+    total_revenue: float | None = None,
+) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    # client_id as the final tiebreaker only decides which of two equally-ranked clients
+    # lands on which side of a decile cut; since they are tied on revenue, every bucket's
+    # revenue/clients totals are unaffected either way — this only removes the plan-order
+    # dependence of *which* client that is.
+    sorted_rows = sorted(
+        rows,
+        key=lambda item: (
+            float(item.get('revenue') or 0),
+            item.get('client_id') if item.get('client_id') is not None else -1,
+        ),
+        reverse=True,
+    )
+    revenue_denominator = (
+        float(total_revenue)
+        if total_revenue is not None
+        else sum(float(row.get('revenue') or 0) for row in sorted_rows)
+    )
+    total_clients = len(sorted_rows)
+    top_count = max(1, (total_clients + 9) // 10)
+    middle_count = max(0, (total_clients * 5 + 9) // 10 - top_count)
+    buckets = [
+        ('Топ 10% клиентов', sorted_rows[:top_count]),
+        ('Следующие 40%', sorted_rows[top_count:top_count + middle_count]),
+        ('Остальные 50%', sorted_rows[top_count + middle_count:]),
+    ]
+    out = []
+    for label, bucket_rows in buckets:
+        revenue = sum(float(row.get('revenue') or 0) for row in bucket_rows)
+        clients = len(bucket_rows)
+        out.append({
+            'bucket': label,
+            'clients': clients,
+            'clients_pct': 100.0 * clients / total_clients if total_clients else 0.0,
+            'revenue': revenue,
+            'revenue_pct': 100.0 * revenue / revenue_denominator if revenue_denominator else 0.0,
+            'avg_revenue_per_client': revenue / clients if clients else 0.0,
+        })
+    return out
 
 
 def _frequency_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -618,4 +786,97 @@ async def build_revenue_at_risk(req: ReportRequest) -> dict[str, Any]:
                 'Доля — от клиентов, которых мастер обслужил в периоде.'
             ),
         })
+    return base
+
+
+# --- new_vs_returning_cross -----------------------------------------------------------------------------
+
+
+async def build_new_vs_returning_cross(req: ReportRequest) -> dict[str, Any]:
+    return await _client_recency_payload(
+        req.db, req.base, req.start, req.end, req.company_id, req.staff_id, req.allowed_company_ids, req.factual_at,
+        req.period_preset,
+    )
+
+
+async def _client_recency_payload(
+    db: AsyncSession,
+    base: dict[str, Any],
+    start: date,
+    end: date,
+    company_id: int | None,
+    staff_id: int | None,
+    allowed_company_ids: list[int] | None,
+    factual_at: datetime,
+    period_preset: str | None = None,
+) -> dict[str, Any]:
+    # The Overview's new/repeat cards link straight here, so both must measure against
+    # the same baseline. Without the preset this would silently fall back to the plain
+    # preceding window and contradict the card the user just clicked.
+    summary = await fetch_summary(
+        db,
+        start,
+        end,
+        company_id,
+        staff_id,
+        allowed_company_ids=allowed_company_ids,
+        factual_at=factual_at,
+        period_preset=period_preset,
+        # Only visit_metrics is read; the breakdown would add a YClients call whose result is dropped.
+        include_appointments_breakdown=False,
+    )
+    visits = summary.get('visit_metrics', {})
+    rows = [
+        {
+            'segment': 'Новые',
+            'clients': int(visits.get('new_clients') or 0),
+            'share': float(visits.get('new_clients_pct') or 0),
+            'clients_change_pct': visits.get('new_clients_change_pct'),
+            'share_change_pct': visits.get('new_clients_pct_change_pct'),
+        },
+        {
+            'segment': 'Повторные',
+            'clients': int(visits.get('repeat_clients') or 0),
+            'share': float(visits.get('repeat_clients_pct') or 0),
+            'clients_change_pct': visits.get('repeat_clients_change_pct'),
+            'share_change_pct': visits.get('repeat_clients_pct_change_pct'),
+        },
+    ]
+    base['notes'].append({
+        'kind': 'formula',
+        'title': 'Обезличенный расчет',
+        'text': 'Отчет показывает только агрегаты по сегментам клиентов без имен, телефонов и клиентских карточек.',
+    })
+    base['cards'] = [
+        card('Уникальные клиенты', visits.get('unique_clients', 0), NUMBER_FORMAT),
+        card('Новые клиенты', visits.get('new_clients', 0), NUMBER_FORMAT),
+        card('Доля новых', visits.get('new_clients_pct', 0), PERCENT_FORMAT),
+        card('Повторные клиенты', visits.get('repeat_clients', 0), NUMBER_FORMAT),
+        card('Доля повторных', visits.get('repeat_clients_pct', 0), PERCENT_FORMAT),
+        card('Визитов на клиента', visits.get('visits_per_client', 0), DECIMAL_FORMAT),
+    ]
+    base['charts'] = [
+        chart(
+            'new_repeat_clients',
+            'Новые и повторные клиенты',
+            'doughnut',
+            [row['segment'] for row in rows],
+            [{'label': 'Клиентов', 'data': [row['clients'] for row in rows], 'format': NUMBER_FORMAT}],
+        )
+    ]
+    base['tables'] = [
+        table(
+            'segments',
+            'Сегменты за период',
+            [
+                ('segment', 'Сегмент', 'text'),
+                ('clients', 'Клиентов', NUMBER_FORMAT),
+                ('share', 'Доля', PERCENT_FORMAT),
+                ('clients_change_pct', 'Изменение клиентов', PERCENT_FORMAT),
+                ('share_change_pct', 'Изменение доли', PERCENT_FORMAT),
+            ],
+            rows,
+            row_key='segment',
+        )
+    ]
     return base

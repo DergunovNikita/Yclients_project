@@ -28,6 +28,7 @@ class AccessContext:
     company_ids: list[int] | None  # None = all branches; [] = none
     money_metrics: frozenset[str] = ALL_MONEY_CODES  # visible money metric codes
     staff_keys: tuple[tuple[int, int], ...] = ()  # (company_id, staff_id) rows the user owns
+    is_demo: bool = False  # the shared read-only demo account
 
     @classmethod
     def api_key(cls) -> AccessContext:
@@ -52,6 +53,7 @@ class AccessContext:
         staff_id: int | None = None,
         money_metrics: frozenset[str] | None = None,
         staff_keys: tuple[tuple[int, int], ...] = (),
+        is_demo: bool = False,
     ) -> AccessContext:
         is_platform_admin = role == 'platform_admin'
         if money_metrics is None:
@@ -66,6 +68,7 @@ class AccessContext:
             company_ids=company_ids or [],
             money_metrics=frozenset(money_metrics),
             staff_keys=tuple(staff_keys),
+            is_demo=is_demo,
         )
 
 

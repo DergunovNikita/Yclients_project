@@ -56,49 +56,6 @@ class ManualPaymentConflict(Exception):
     """The stored value differs from the one the editor was showing when the user edited it."""
 
 
-RU_MONTHS = (
-    'январь', 'февраль', 'март', 'апрель', 'май', 'июнь',
-    'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь',
-)
-
-
-def month_label(month: str) -> str:
-    """'2026-06' as 'июнь 2026', for text a person reads."""
-    year, number = month.split('-')
-    return f'{RU_MONTHS[int(number) - 1]} {year}'
-
-
-SHORT_RU_MONTHS = ('янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек')
-
-
-def short_month_label(month: str) -> str:
-    """'2026-06' as 'июн 2026', for an axis."""
-    year, number = month.split('-')
-    return f'{SHORT_RU_MONTHS[int(number) - 1]} {year}'
-
-
-def describe_months(months: list[str]) -> str:
-    """ISO months as calendar text; a run of three or more neighbours becomes 'январь 2026 – март 2026'."""
-    ordinals = sorted({int(month[:4]) * 12 + int(month[5:7]) - 1 for month in months})
-    runs: list[list[int]] = []
-    for ordinal in ordinals:
-        if runs and ordinal == runs[-1][-1] + 1:
-            runs[-1].append(ordinal)
-        else:
-            runs.append([ordinal])
-
-    def label(ordinal: int) -> str:
-        return month_label(f'{ordinal // 12:04d}-{ordinal % 12 + 1:02d}')
-
-    parts = []
-    for run in runs:
-        if len(run) > 2:
-            parts.append(f'{label(run[0])} – {label(run[-1])}')
-        else:
-            parts.extend(label(ordinal) for ordinal in run)
-    return ', '.join(parts)
-
-
 def _quantize(value: Decimal) -> Decimal:
     return value.quantize(CENT, rounding=ROUND_HALF_UP)
 
@@ -145,11 +102,6 @@ def entry_dates(month_start: date, month_end: date, today: date) -> tuple[Option
     if month_end < today:
         return month_end, latest
     return max(month_start, today - timedelta(days=1)), latest
-
-
-def format_day(day: date, reference_year: int) -> str:
-    """'07.10', or '07.10.2025' when the year is not the one the reader is looking at."""
-    return day.strftime('%d.%m') if day.year == reference_year else day.strftime('%d.%m.%Y')
 
 
 def parse_data_through(raw: Any, month_start: date, month_end: date, today: date) -> Optional[date]:

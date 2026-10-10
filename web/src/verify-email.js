@@ -1,14 +1,8 @@
 import './auth.css';
 import { authFetch } from './auth.js';
-import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
+import { initPage, t } from './i18n.js';
 
-document.documentElement.lang = getLocale();
-applyTranslations();
-const syncTitle = () => {
-  document.title = `${t('verify.title')} — ${t('brand.name')}`;
-};
-syncTitle();
-mountLanguageSwitcher(document.getElementById('lang-switcher'))?.addEventListener('change', syncTitle);
+initPage({ titleKey: 'verify.title' });
 
 const params = new URLSearchParams(window.location.search);
 const token = params.get('token');

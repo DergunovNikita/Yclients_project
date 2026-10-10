@@ -22,7 +22,7 @@ from auth_scope import AccessContext
 from dashboard_reports import REPORT_REGISTRY, REPORT_USAGE_ID
 from database import get_async_session_factory
 from models import ReportUsageEvent
-from report_payload import NUMBER_FORMAT, PERCENT_FORMAT, ReportRequest, card, table
+from report_payload import NUMBER_FORMAT, PERCENT_FORMAT, card, table
 
 logger = logging.getLogger('yclients.report_usage')
 
@@ -178,12 +178,6 @@ def track_report_usage(
 
 
 # --- Read side ---
-
-
-async def build_report_usage(req: ReportRequest) -> dict[str, Any]:
-    """Registry entry point. The report needs the tenant, which a `ReportRequest` does not carry,
-    so the route calls `fetch_report_usage` directly and this must never run in its place."""
-    raise RuntimeError('report_usage is built by fetch_report_usage with an explicit tenant')
 
 
 def _catalog() -> list[tuple[str, str]]:

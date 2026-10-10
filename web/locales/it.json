@@ -508,6 +508,8 @@
     "totalMoneyMeta": "{value} totale",
     "syncUpdatedAt": "dati aggiornati al {value}",
     "syncNoSuccessfulUpdates": "dati aggiornati: nessun aggiornamento riuscito",
+    "syncTenantFailed": "i dati potrebbero non essere aggiornati: accesso a YClients non riuscito, ultimo aggiornamento {value}",
+    "syncTenantFailedNoUpdates": "i dati potrebbero non essere aggiornati: accesso a YClients non riuscito, nessun aggiornamento riuscito",
     "syncStatusUnavailable": "dati aggiornati: stato non disponibile",
     "planSubhead": "Piano/consuntivo per filiali e dipendenti",
     "planSettingsSubhead": "Impostazione piani per mese",

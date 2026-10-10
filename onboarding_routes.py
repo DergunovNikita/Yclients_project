@@ -21,11 +21,11 @@ from data_sources import (
     SOURCE_YCLIENTS,
     adapter_from_credential,
     authenticated_adapter_from_payload,
+    companies_claimed_elsewhere,
     normalize_source_type,
 )
-from models import Company, PortalAccount, PortalBranch, PortalUser, YClientsCredential, YClientsCredentialCompany
+from models import PortalAccount, PortalBranch, PortalUser, YClientsCredential, YClientsCredentialCompany
 from portal_audit import log_portal_audit
-from portal_tenant_ownership import can_reassign_branch_from_tenant
 from yclients_credentials import (
     CREDENTIAL_STORAGE_FAILED_DETAIL,
     CredentialsConfigError,
@@ -155,39 +155,9 @@ async def onboarding_credentials(
     if not available:
         raise HTTPException(status_code=400, detail='Data source returned no companies for these credentials')
 
-    conflicting = []
-    for item in available:
-        companies = (
-            await db.execute(
-                select(Company).where(
-                    Company.source_type == source_type,
-                    Company.external_id == item['company_id'],
-                )
-            )
-        ).scalars().all()
-        if not companies:
-            legacy = await db.get(Company, item['company_id'])
-            if legacy is not None and legacy.external_id is None:
-                companies = [legacy]
-        if not companies:
-            continue
-        for company in companies:
-            existing = (
-                await db.execute(
-                    select(PortalBranch).where(PortalBranch.company_id == company.id)
-                )
-            ).scalar_one_or_none()
-            if (
-                existing is not None
-                and existing.portal_account_id != user.portal_account_id
-                and not await can_reassign_branch_from_tenant(
-                    db,
-                    existing.portal_account_id,
-                    user.portal_account_id or -1,
-                )
-            ):
-                conflicting.append(item['company_id'])
-                break
+    conflicting = await companies_claimed_elsewhere(
+        db, source_type, [item['company_id'] for item in available], user.portal_account_id
+    )
     if conflicting:
         raise HTTPException(
             status_code=409,

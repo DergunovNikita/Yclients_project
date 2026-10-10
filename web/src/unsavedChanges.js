@@ -110,3 +110,15 @@ export function shouldHandleSameTabNavigation({
 }) {
   return button === 0 && !altKey && !ctrlKey && !metaKey && !shiftKey;
 }
+
+/**
+ * Whether this event is the one that should re-check an editor's draft.
+ *
+ * Checkboxes and selects fire both `input` and `change` for one click, text cells fire `input` per keystroke
+ * and `change` once more on blur. Listening to both ran the whole-table draft comparison twice per click;
+ * taking `change` for toggles and `input` for typed cells runs it once for each.
+ */
+export function editEventChecksDraft(event) {
+  const toggle = Boolean(event.target?.matches?.('select, input[type="checkbox"]'));
+  return (event.type === 'change') === toggle;
+}

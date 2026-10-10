@@ -781,6 +781,7 @@ class PortalRefreshToken(Base):
     __tablename__ = 'portal_refresh_tokens'
     __table_args__ = (
         Index('ix_portal_refresh_tokens_user_state', 'user_id', 'revoked_at', 'last_used_at'),
+        Index('ix_portal_refresh_tokens_previous_hash', 'previous_token_hash'),
         {'schema': SYSTEM_SCHEMA},
     )
 
@@ -794,6 +795,10 @@ class PortalRefreshToken(Base):
     device_label = Column(String(100))
     ip_hash = Column(String(64))
     created_at = Column(DateTime, nullable=False)
+    # The token this session held before its last rotation, kept to tell a lost response
+    # (retry within the grace window) from a replayed, possibly stolen, token.
+    previous_token_hash = Column(String(64))
+    rotated_at = Column(DateTime)
 
 
 class PortalUserBranch(Base):

@@ -30,6 +30,14 @@ class ReportInputError(ValueError):
     """
 
 
+class ReportCalculationError(RuntimeError):
+    """Raised when a report cannot produce any usable payload."""
+
+    def __init__(self, message: str, *, stage: str = 'unknown') -> None:
+        super().__init__(message)
+        self.stage = stage
+
+
 @dataclass(frozen=True)
 class ReportRequest:
     """Everything a report builder needs; `base` is the payload skeleton the builder fills and returns."""

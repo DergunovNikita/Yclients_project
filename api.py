@@ -42,6 +42,7 @@ from config import (
 )
 from dashboard_routes import router as dashboard_router
 from auth_deps import forbid_demo
+from open_paths import OPEN_PATHS
 from auth_hierarchy import USER_MANAGER_ROLES
 from auth_routes import router as auth_router
 from auth_scope import (
@@ -83,6 +84,7 @@ from models import (
     Transaction,
 )
 from dashboard_service import (
+    PeriodOutOfRangeError,
     branch_window_overlap_clause,
     factual_branch_date,
     reporting_window_clause,
@@ -103,10 +105,6 @@ except Exception:
 MAX_PAGE_SIZE = 5000
 DEFAULT_PAGE_SIZE = 1000
 PII_CLIENT_ROLES = USER_MANAGER_ROLES
-
-OPEN_PATHS = {"/health", "/health/ready"}
-if not IS_PRODUCTION:
-    OPEN_PATHS.update({"/openapi.json", "/docs", "/redoc"})
 
 LOGGER = logging.getLogger('yclients.api')
 
@@ -254,6 +252,12 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={'detail': 'Internal server error'},
     )
+    return _apply_security_headers(request, response)
+
+
+@app.exception_handler(PeriodOutOfRangeError)
+async def period_out_of_range_handler(request: Request, exc: PeriodOutOfRangeError):
+    response = JSONResponse(status_code=400, content={'detail': str(exc)})
     return _apply_security_headers(request, response)
 
 

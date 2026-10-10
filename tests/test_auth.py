@@ -8,7 +8,8 @@ import pytest
 import pytest_asyncio
 from fastapi import HTTPException, Request
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import api
 import auth_routes
@@ -38,7 +39,11 @@ from models import (
 
 
 @pytest_asyncio.fixture
-async def auth_db(async_session):
+async def auth_db(async_session, monkeypatch):
+    # Mail goes out from a background task on its own session; point it at the same in-memory database.
+    monkeypatch.setattr(
+        auth_routes, 'get_async_session_factory', lambda: async_sessionmaker(async_session.bind, expire_on_commit=False)
+    )
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Branch 1', group_id=1))
     async_session.add(Company(id=2, title='Branch 2', group_id=1))
@@ -177,10 +182,10 @@ async def test_refresh_rotation_rejects_a_token_preloaded_before_a_competing_rot
     auth_db.add(refresh_record)
     await auth_db.commit()
 
-    async def load_preloaded_refresh(_db, _raw_refresh):
-        return refresh_record
+    async def load_preloaded_refresh(_db, _token_hash, _now):
+        return refresh_record, False
 
-    monkeypatch.setattr(auth_sessions, '_load_active_refresh', load_preloaded_refresh)
+    monkeypatch.setattr(auth_sessions, '_load_rotatable_refresh', load_preloaded_refresh)
     request = Request({
         'type': 'http',
         'headers': [],
@@ -743,7 +748,8 @@ async def test_platform_admin_filters_yclients_credentials_by_selected_tenant(au
         }
         for audit in audits
     )
-    assert any(audit.portal_account_id == 2 and audit.metadata_json == {'success': True, 'count': 1} for audit in audits)
+    # The successful list of tenant 2 left no row behind.
+    assert not any(audit.portal_account_id == 2 for audit in audits)
 
 
 @pytest.mark.asyncio
@@ -2281,14 +2287,11 @@ async def test_owner_manages_yclients_credentials(auth_db, monkeypatch):
     assert 'yclients_credentials.created' in actions
     assert actions.count('yclients_credentials.tested') == 2
     assert 'yclients_credentials.updated' in actions
-    assert 'yclients_credentials.listed' in actions
+    # A successful list is a read of masked payloads: it writes no audit row (only a refused tenant selection does).
+    assert 'yclients_credentials.listed' not in actions
     metadata_text = json.dumps([audit.metadata_json for audit in audits], sort_keys=True)
     for secret in all_secret_values:
         assert secret not in metadata_text
-    assert any(
-        audit.action == 'yclients_credentials.listed' and audit.metadata_json == {'success': True, 'count': 1}
-        for audit in audits
-    )
     assert any(
         audit.action == 'yclients_credentials.payload_tested'
         and audit.metadata_json == {'source_type': 'yclients', 'success': True}
@@ -3900,6 +3903,9 @@ async def test_resend_verification_only_emails_pending_unverified_accounts(auth_
     )
     auth_db.add(pending)
     await auth_db.commit()
+    # The mail goes out on the background task's own session, so the cooldown stamp it writes must be
+    # read back from the database; a copy held by this session would never see it.
+    auth_db.expunge(pending)
 
     sent = []
 
@@ -4397,3 +4403,388 @@ def test_set_portal_password_script_revokes_sessions(monkeypatch):
 
     monkeypatch.setattr('sys.argv', ['set_portal_password', '--email', 'cli@example.com', '--password', LONG_PASSWORD])
     assert set_portal_password.main() == 2
+
+
+# --------------------------------------------------------------------------- #
+# W3-A1: trusted client IP, rate-limit bookkeeping, session hardening, open paths #
+# --------------------------------------------------------------------------- #
+
+PROXY_SECRET = 'p' * 40
+
+
+def _request(headers: dict[str, str] | None = None, client_host: str = '198.51.100.10') -> Request:
+    return Request({
+        'type': 'http',
+        'headers': [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()],
+        'client': (client_host, 12345),
+        'scheme': 'https',
+        'server': ('test', 443),
+    })
+
+
+def test_client_ip_ignores_forwarded_for_without_the_proxy_secret(monkeypatch):
+    monkeypatch.setattr(auth_sessions, 'PROXY_SHARED_SECRET', '')
+    assert auth_sessions.client_ip(_request({'x-forwarded-for': '203.0.113.9'})) == '198.51.100.10'
+    # A secret presented while none is configured must not unlock the header either.
+    assert auth_sessions.client_ip(
+        _request({'x-forwarded-for': '203.0.113.9', 'x-proxy-secret': PROXY_SECRET})
+    ) == '198.51.100.10'
+
+    monkeypatch.setattr(auth_sessions, 'PROXY_SHARED_SECRET', PROXY_SECRET)
+    assert auth_sessions.client_ip(_request({'x-forwarded-for': '203.0.113.9'})) == '198.51.100.10'
+
+
+def test_client_ip_honours_forwarded_for_with_the_proxy_secret(monkeypatch):
+    monkeypatch.setattr(auth_sessions, 'PROXY_SHARED_SECRET', PROXY_SECRET)
+    request = _request({'x-forwarded-for': '203.0.113.9, 10.0.0.1', 'x-proxy-secret': PROXY_SECRET})
+    assert auth_sessions.client_ip(request) == '203.0.113.9'
+    # Secret right but nothing forwarded: fall back to the peer.
+    assert auth_sessions.client_ip(_request({'x-proxy-secret': PROXY_SECRET})) == '198.51.100.10'
+
+
+def test_client_ip_ignores_forwarded_for_with_a_wrong_or_non_ascii_secret(monkeypatch):
+    monkeypatch.setattr(auth_sessions, 'PROXY_SHARED_SECRET', PROXY_SECRET)
+    for wrong in ('q' * 40, PROXY_SECRET[:-1], 'é' * 40):
+        request = _request({'x-forwarded-for': '203.0.113.9', 'x-proxy-secret': wrong})
+        assert auth_sessions.client_ip(request) == '198.51.100.10'
+
+
+@pytest.mark.asyncio
+async def test_session_ip_hash_follows_the_trusted_client_ip(auth_db, monkeypatch):
+    monkeypatch.setattr(auth_sessions, 'PROXY_SHARED_SECRET', PROXY_SECRET)
+    user = await auth_db.get(PortalUser, 1)
+    forged = _request({'x-forwarded-for': '203.0.113.9', 'x-proxy-secret': 'wrong'})
+    trusted = _request({'x-forwarded-for': '203.0.113.9', 'x-proxy-secret': PROXY_SECRET})
+    await auth_sessions.issue_session(auth_db, user, forged, access_token_fn=lambda *_: 'a')
+    await auth_sessions.issue_session(auth_db, user, trusted, access_token_fn=lambda *_: 'a')
+    hashes = set((await auth_db.scalars(select(PortalRefreshToken.ip_hash))).all())
+    assert hashes == {auth_sessions._hash_ip('198.51.100.10'), auth_sessions._hash_ip('203.0.113.9')}
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_buckets_visitors_behind_the_trusted_proxy_separately(auth_db, monkeypatch):
+    monkeypatch.setattr(auth_sessions, 'PROXY_SHARED_SECRET', PROXY_SECRET)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_MAX_REQUESTS', 100)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_IP_MAX_REQUESTS', 2)
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_WINDOW_SECONDS', 60.0)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app, client=('198.51.100.10', 12345))
+
+    async def login(visitor: str, secret: str = PROXY_SECRET):
+        return await client.post(
+            '/auth/login',
+            json={'email': 'nobody@example.com', 'password': 'wrong'},
+            headers={'X-Forwarded-For': visitor, 'X-Proxy-Secret': secret},
+        )
+
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        noisy = [(await login('203.0.113.1')).status_code for _ in range(3)]
+        other_visitor = await login('203.0.113.2')
+        # A wrong secret falls back to the socket peer, whatever X-Forwarded-For claims.
+        forged = [(await login(f'203.0.113.{n}', 'wrong')).status_code for n in range(10, 13)]
+
+    app.dependency_overrides.clear()
+    assert noisy == [401, 401, 429]
+    assert other_visitor.status_code == 401
+    assert forged == [401, 401, 429]
+
+
+def test_rate_limit_check_prunes_only_the_touched_key(monkeypatch):
+    auth_routes._auth_rate_limit_hits.clear()
+    auth_routes._demo_login_hits.clear()
+    monkeypatch.setattr(auth_routes, '_last_rate_limit_sweep', 1000.0)
+    idle_key = ('ip', 'login', '203.0.113.50', '')
+    auth_routes._auth_rate_limit_hits[idle_key] = [1.0]
+    touched = ('ip', 'login', '203.0.113.51', '')
+    auth_routes._auth_rate_limit_hits[touched] = [1.0, 1005.0]
+
+    # Inside the sweep interval: the untouched stale key stays, the touched one is trimmed.
+    auth_routes._check_rate_limit_bucket(touched, 5, 60.0, 1010.0)
+    auth_routes._sweep_idle_rate_limit_keys(1010.0)
+
+    assert idle_key in auth_routes._auth_rate_limit_hits
+    assert auth_routes._auth_rate_limit_hits[touched] == [1005.0, 1010.0]
+
+
+def test_rate_limit_sweep_drops_idle_keys_of_both_limiters_periodically(monkeypatch):
+    auth_routes._auth_rate_limit_hits.clear()
+    auth_routes._demo_login_hits.clear()
+    monkeypatch.setattr('auth_routes.AUTH_RATE_LIMIT_WINDOW_SECONDS', 60.0)
+    monkeypatch.setattr(auth_routes, '_last_rate_limit_sweep', 0.0)
+    auth_routes._auth_rate_limit_hits[('ip', 'login', 'old', '')] = [100.0]
+    auth_routes._auth_rate_limit_hits[('ip', 'login', 'fresh', '')] = [990.0]
+    auth_routes._demo_login_hits['old'] = [100.0]
+    auth_routes._demo_login_hits['fresh'] = [995.0]
+
+    auth_routes._sweep_idle_rate_limit_keys(1000.0)
+
+    assert list(auth_routes._auth_rate_limit_hits) == [('ip', 'login', 'fresh', '')]
+    assert list(auth_routes._demo_login_hits) == ['fresh']
+    # A second call inside the interval does no work (a key added now survives untouched).
+    auth_routes._demo_login_hits['stale-again'] = [1.0]
+    auth_routes._sweep_idle_rate_limit_keys(1001.0)
+    assert 'stale-again' in auth_routes._demo_login_hits
+
+
+@pytest.mark.asyncio
+async def test_demo_sessions_are_capped_to_the_newest(auth_db, monkeypatch):
+    monkeypatch.setattr(auth_sessions, 'DEMO_MAX_ACTIVE_SESSIONS', 3)
+    demo_id = await _seed_demo_owner(auth_db)
+    demo = await auth_db.get(PortalUser, demo_id)
+    ids = []
+    for _ in range(5):
+        await auth_sessions.issue_session(auth_db, demo, _request(), access_token_fn=lambda *_: 'a')
+        await auth_db.commit()
+        ids.append(max((await auth_db.scalars(select(PortalRefreshToken.id))).all()))
+    remaining = sorted((await auth_db.scalars(
+        select(PortalRefreshToken.id).where(PortalRefreshToken.user_id == demo_id)
+    )).all())
+    assert remaining == ids[-3:]
+
+
+async def _issue(auth_db, user_id: int = 1):
+    user = await auth_db.get(PortalUser, user_id)
+    issued = await auth_sessions.issue_session(auth_db, user, _request(), access_token_fn=lambda *_: 'a')
+    await auth_db.commit()
+    return issued.refresh_token
+
+
+async def _rotate(auth_db, raw: str):
+    _, issued = await auth_sessions.rotate_session(
+        auth_db, raw, _request(), access_token_fn=lambda *_: 'a'
+    )
+    await auth_db.commit()
+    return issued.refresh_token
+
+
+async def _session_row(auth_db):
+    await auth_db.rollback()
+    return (await auth_db.scalars(select(PortalRefreshToken))).one()
+
+
+@pytest.mark.asyncio
+async def test_refresh_accepts_the_previous_token_once_more_within_the_grace_window(auth_db):
+    first = await _issue(auth_db)
+    second = await _rotate(auth_db, first)
+    # The response carrying `second` was lost: the client retries with `first`.
+    third = await _rotate(auth_db, first)
+
+    row = await _session_row(auth_db)
+    assert third not in (first, second)
+    assert row.token_hash == auth_sessions._hash_token(third)
+    assert row.previous_token_hash == auth_sessions._hash_token(first)
+    # The lost-response token is gone, the one the client holds works.
+    with pytest.raises(HTTPException):
+        await _rotate(auth_db, second)
+    assert await _rotate(auth_db, third)
+
+
+@pytest.mark.asyncio
+async def test_refresh_replay_after_the_grace_window_revokes_the_session(auth_db, caplog):
+    first = await _issue(auth_db)
+    second = await _rotate(auth_db, first)
+    row = await _session_row(auth_db)
+    row.rotated_at = datetime.utcnow() - auth_sessions.REFRESH_ROTATION_GRACE - timedelta(seconds=1)
+    await auth_db.commit()
+
+    # The `yclients` logger does not propagate to root (see api.py), so attach the capture handler directly.
+    auth_logger = logging.getLogger('yclients.auth')
+    auth_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger='yclients.auth'):
+            with pytest.raises(HTTPException) as exc_info:
+                await _rotate(auth_db, first)
+    finally:
+        auth_logger.removeHandler(caplog.handler)
+
+    assert exc_info.value.status_code == 401
+    assert (await auth_db.scalar(select(func.count()).select_from(PortalRefreshToken))) == 0
+    messages = ' '.join(record.getMessage() for record in caplog.records)
+    assert 'replayed' in messages
+    assert first not in messages and second not in messages
+    # The thief's rotated token died with the session.
+    with pytest.raises(HTTPException):
+        await _rotate(auth_db, second)
+
+
+@pytest.mark.asyncio
+async def test_refresh_rotation_stops_at_the_absolute_session_age(auth_db, monkeypatch):
+    monkeypatch.setattr(auth_sessions, 'AUTH_SESSION_MAX_AGE_DAYS', 90)
+    now = datetime.utcnow()
+    auth_db.add_all([
+        PortalRefreshToken(
+            id=701, user_id=1, token_hash=auth_sessions._hash_token('too-old'),
+            expires_at=now + timedelta(days=10), last_used_at=now, created_at=now - timedelta(days=91),
+        ),
+        PortalRefreshToken(
+            id=702, user_id=1, token_hash=auth_sessions._hash_token('nearly-old'),
+            expires_at=now + timedelta(days=10), last_used_at=now, created_at=now - timedelta(days=80),
+        ),
+    ])
+    await auth_db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _rotate(auth_db, 'too-old')
+    assert exc_info.value.status_code == 401
+    assert await auth_db.get(PortalRefreshToken, 701) is None
+
+    await _rotate(auth_db, 'nearly-old')
+    row = await auth_db.get(PortalRefreshToken, 702)
+    await auth_db.refresh(row)
+    # Sliding expiry would be 30 days out; the cap is 10 days out.
+    assert abs((row.expires_at - (row.created_at + timedelta(days=90))).total_seconds()) < 1
+
+
+@pytest.mark.asyncio
+async def test_issue_session_never_expires_past_the_absolute_cap(auth_db, monkeypatch):
+    monkeypatch.setattr(auth_sessions, 'AUTH_SESSION_MAX_AGE_DAYS', 7)
+    await _issue(auth_db)
+    row = await _session_row(auth_db)
+    assert abs((row.expires_at - (row.created_at + timedelta(days=7))).total_seconds()) < 1
+
+
+@pytest.mark.asyncio
+async def test_logout_others_without_a_refresh_cookie_is_a_400_and_keeps_every_session(auth_db):
+    now = datetime.utcnow()
+    auth_db.add(PortalRefreshToken(
+        id=801, user_id=1, token_hash='bearer-clients-own-session',
+        expires_at=now + timedelta(days=10), last_used_at=now, created_at=now,
+    ))
+    await auth_db.commit()
+    token = create_access_token(1, 'owner', 0, 801)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.post('/auth/logout-others', headers={'Authorization': f'Bearer {token}'})
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert await auth_db.get(PortalRefreshToken, 801) is not None
+
+
+@pytest.mark.asyncio
+async def test_refresh_route_retries_with_the_previous_cookie_within_grace(auth_db):
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        assert (await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})).status_code == 200
+        first_refresh = client.cookies.get(REFRESH_COOKIE_NAME)
+        csrf = client.cookies.get(AUTH_CSRF_COOKIE_NAME)
+        assert (await client.post('/auth/refresh', headers={'X-CSRF-Token': csrf})).status_code == 200
+        client.cookies.set(REFRESH_COOKIE_NAME, first_refresh, path='/auth')
+        csrf = client.cookies.get(AUTH_CSRF_COOKIE_NAME)
+        retry = await client.post('/auth/refresh', headers={'X-CSRF-Token': csrf})
+    app.dependency_overrides.clear()
+    assert retry.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_authenticated_requests_load_the_user_once_and_know_if_it_is_demo(auth_db):
+    demo_id = await _seed_demo_owner(auth_db)
+    statements = []
+
+    def record(_conn, _cursor, statement, _params, _context, _executemany):
+        statements.append(statement)
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    event.listen(auth_db.bind.sync_engine, 'before_cursor_execute', record)
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url='http://test') as client:
+            owner = {'Authorization': f'Bearer {create_access_token(1, "owner")}'}
+            me = await client.get('/auth/me', headers=owner)
+            user_selects = [s for s in statements if s.startswith('SELECT') and 'FROM system.portal_users' in s]
+            me_statements = len(statements)
+
+            statements.clear()
+            logout_all = await client.post('/auth/logout-all', headers=owner)
+            logout_statements = len(statements)
+
+            demo = {'Authorization': f'Bearer {create_access_token(demo_id, "owner")}'}
+            statements.clear()
+            blocked = await client.post('/auth/change-password', headers=demo, json={})
+            demo_user_selects = [s for s in statements if 'FROM system.portal_users' in s]
+    finally:
+        event.remove(auth_db.bind.sync_engine, 'before_cursor_execute', record)
+        app.dependency_overrides.clear()
+
+    assert me.status_code == 200
+    # Was 6 statements (the context and the user row loaded three times); now one user select.
+    assert len(user_selects) == 1
+    assert me_statements == 3
+    assert logout_all.status_code == 200
+    # Was 6: forbid_demo decoded the token and selected is_demo, get_current_user resolved again.
+    assert logout_statements == 4
+    assert blocked.status_code == 403
+    assert len(demo_user_selects) == 1
+
+
+@pytest.mark.asyncio
+async def test_access_context_carries_is_demo(auth_db):
+    demo_id = await _seed_demo_owner(auth_db)
+    from auth_deps import _user_from_token
+
+    demo_user, demo_ctx = await _user_from_token(create_access_token(demo_id, 'owner'), auth_db)
+    owner_user, owner_ctx = await _user_from_token(create_access_token(1, 'owner'), auth_db)
+    assert demo_ctx.is_demo is True and demo_user.id == demo_id
+    assert owner_ctx.is_demo is False and owner_user.id == 1
+
+
+def test_open_paths_are_exact_and_unchanged():
+    from open_paths import OPEN_PATHS
+
+    public_actions = (
+        'register', 'login', 'demo-login', 'refresh', 'logout',
+        'verify-email', 'forgot-password', 'reset-password', 'resend-verification',
+    )
+    expected = {'/health', '/health/ready', '/openapi.json', '/docs', '/redoc'} | {
+        f'{prefix}/{action}' for prefix in ('/auth', '/dashboard/auth') for action in public_actions
+    }
+    assert OPEN_PATHS == expected
+    # The two sessions routes that used to ride on the `/auth/logout` prefix are protected now.
+    for path in ('/auth/logout-all', '/auth/logout-others', '/dashboard/auth/logout-all', '/auth/login/extra'):
+        assert path not in OPEN_PATHS
+
+
+@pytest.mark.asyncio
+async def test_every_route_open_before_stays_open_and_nothing_else_opens(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setattr('auth_deps.API_KEY', '')
+    from open_paths import OPEN_PATHS
+
+    # Routes that answered without credentials before the change: the prefix list, minus the
+    # two logout variants that always needed a user anyway.
+    open_before = {
+        route.path
+        for route in app.routes
+        if getattr(route, 'path', '') in OPEN_PATHS
+    }
+    assert {'/auth/login', '/auth/refresh', '/auth/logout', '/dashboard/auth/demo-login', '/health'} <= open_before
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        for path in ('/auth/logout-all', '/auth/logout-others', '/dashboard/auth/logout-all', '/auth/me', '/auth/sessions'):
+            method = client.get if path in ('/auth/me', '/auth/sessions') else client.post
+            response = await method(path)
+            assert response.status_code == 401, (path, response.status_code)
+        # `/auth/logout` stays open: a client with an expired session can still clear cookies.
+        assert (await client.post('/auth/logout')).status_code == 200
+    app.dependency_overrides.clear()

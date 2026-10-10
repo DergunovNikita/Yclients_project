@@ -19,6 +19,22 @@ slot covers the same ground anyway. It is not harmless in reverse: give `refresh
 remember a branch missing its coverage marker escalates `refresh` to a full history run,
 which for a branch open since 2018 takes hours rather than minutes.
 
+## Which scheduler is live
+
+Two mechanisms exist, and the repository shows only one of them running:
+
+- **Worker auto-enqueue** (`sync_worker.py`, `SYNC_AUTO_ENQUEUE_ENABLED`, default on; every
+  `SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES`, default 240) is started by `docker compose up -d api worker`,
+  which the auto-deploy script runs. It enqueues only `incremental` jobs, one per active tenant
+  credential, and skips a tenant that has a recent job.
+- **The timers in this directory** are the only thing in the repository that schedules `refresh` and
+  `full`. Nothing in the deploy script or workflows installs them (no `systemctl enable` anywhere), so
+  they exist on a host only if someone installed them by hand. Without them nothing re-reads the
+  trailing window or the full history: deleted and late-registered payments are never reconciled.
+
+The overlap on `incremental` is harmless (one advisory lock, a loser exits 75). The API is not a
+systemd service: it runs in Docker (`docker compose`), and the old host-venv unit was removed.
+
 These files are generic templates and the cadences in them are defaults to adjust per
 environment. Production installation steps, service users, the schedules actually in
 force, host paths and troubleshooting commands are intentionally kept out of this

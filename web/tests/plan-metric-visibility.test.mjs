@@ -15,8 +15,8 @@ const metrics = [
   { code: 'clients', label: 'Clients', format: 'number' },
 ];
 
-// The page filters through filterPlanFactForDisplay; this is the plain "what is left" view of a hidden set.
-const visiblePlanMetrics = (all, hidden) => all.filter((metric) => !hidden.has(metric.code));
+// What the page shows for a hidden set is whatever filterPlanFactForDisplay leaves, so that is what these tests read.
+const visiblePlanMetrics = (all, hidden) => filterPlanFactForDisplay({ metrics: all }, hidden).metrics;
 
 test('plan metric visibility exposes only server-provided metrics', () => {
   const normalized = normalizeHiddenPlanMetricCodes(metrics, ['revenue', 'forbidden_metric']);

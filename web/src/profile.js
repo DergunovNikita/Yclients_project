@@ -1,5 +1,5 @@
 import './auth.css';
-import { authFetch, hasSessionHint, logout, requireAuthRedirect, setToken, USER_ADMIN_ROLES } from './auth.js';
+import { authFetch, hasSessionHint, logout, requireAuthRedirect, clearLocalSession, USER_ADMIN_ROLES } from './auth.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
 document.documentElement.lang = getLocale();
@@ -89,7 +89,7 @@ changePasswordForm.addEventListener('submit', async (event) => {
     passwordSuccessEl.hidden = false;
     // The backend revokes every session on a password change; staying on the page would leave a dead one.
     setTimeout(() => {
-      setToken();
+      clearLocalSession();
       window.location.href = '/login.html';
     }, 1500);
   } catch (error) {

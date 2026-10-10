@@ -13,6 +13,7 @@ import auth_deps
 import dashboard_reports
 import dashboard_service
 import payment_methods
+import report_common
 from api import app
 from auth_scope import AccessContext, can_view_branch_payments
 from auth_service import create_access_token, hash_password
@@ -985,11 +986,11 @@ async def test_months_in_the_warnings_read_like_a_calendar(client, seeded):
 
 
 def test_describe_months_squeezes_runs_of_three_or_more():
-    assert payment_methods.describe_months(['2026-07']) == 'июль 2026'
-    assert payment_methods.describe_months(['2026-08', '2026-07']) == 'июль 2026, август 2026'
-    assert payment_methods.describe_months(['2026-01', '2026-02', '2026-03']) == 'январь 2026 – март 2026'
+    assert report_common.describe_months(['2026-07']) == 'июль 2026'
+    assert report_common.describe_months(['2026-08', '2026-07']) == 'июль 2026, август 2026'
+    assert report_common.describe_months(['2026-01', '2026-02', '2026-03']) == 'январь 2026 – март 2026'
     # Across a year boundary, with a gap in the middle.
-    assert payment_methods.describe_months(
+    assert report_common.describe_months(
         ['2025-11', '2025-12', '2026-01', '2026-02', '2026-04']
     ) == 'ноябрь 2025 – февраль 2026, апрель 2026'
 
@@ -1234,8 +1235,8 @@ async def test_a_month_where_yandex_pay_exceeds_cashless_is_named_even_if_the_pe
 
 
 def test_short_month_labels():
-    assert payment_methods.short_month_label('2026-01') == 'янв 2026'
-    assert payment_methods.short_month_label('2025-12') == 'дек 2025'
+    assert report_common.short_month_label('2026-01') == 'янв 2026'
+    assert report_common.short_month_label('2025-12') == 'дек 2025'
 
 
 @pytest.mark.asyncio
@@ -1554,6 +1555,6 @@ async def test_the_note_groups_branches_by_date_and_stays_silent_for_whole_month
 
 @pytest.mark.asyncio
 async def test_the_note_uses_the_year_only_when_it_differs_from_the_period(client, seeded):
-    note = payment_methods.format_day
+    note = report_common.format_day
     assert note(date(2026, 8, 5), 2026) == '05.08'
     assert note(date(2025, 12, 31), 2026) == '31.12.2025'

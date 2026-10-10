@@ -213,6 +213,36 @@ def test_production_config_policy_requires_public_https_app_url_for_smtp(url):
     assert errors == ['APP_PUBLIC_URL must be a public https URL when e-mail is sent through SMTP']
 
 
+@pytest.mark.parametrize(
+    ('secret', 'rejected'),
+    [('', False), (None, False), ('p' * 32, False), ('p' * 31, True), ('change_me_proxy_secret', True)],
+)
+def test_production_config_policy_requires_a_strong_proxy_shared_secret_when_set(secret, rejected):
+    errors = collect_production_config_errors(
+        api_key='',
+        auth_require_login=True,
+        auth_public_registration_enabled=False,
+        auth_jwt_secret='a-long-production-jwt-secret-32-plus',
+        sync_api_token='sync-token-32-plus-non-default-value',
+        db_password='db-password-32-plus-non-default',
+        portal_credentials_encryption_key='credential-key-32-plus-non-default',
+        auth_cookie_secure=True,
+        auth_cookie_samesite='lax',
+        auth_console_email=False,
+        smtp_host='smtp.example.com',
+        smtp_user='mailer@example.com',
+        smtp_password='smtp-password-32-plus-non-default',
+        smtp_from='noreply@example.com',
+        dashboard_cors_origins='https://dashboard.example.com',
+        dashboard_cors_origin_regex='',
+        app_public_url='https://portal.example.com',
+        proxy_shared_secret=secret,
+    )
+
+    expected = ['PROXY_SHARED_SECRET must be unset or set to a strong non-default value'] if rejected else []
+    assert errors == expected
+
+
 def _run_import_api(env_overrides: dict[str, str]) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.update({
@@ -244,7 +274,7 @@ def _run_import_api(env_overrides: dict[str, str]) -> subprocess.CompletedProces
             (
                 'import api; '
                 'print(api.app.docs_url, api.app.redoc_url, api.app.openapi_url, '
-                'sorted(api.OPEN_PATHS))'
+                'sorted(p for p in api.OPEN_PATHS if not p.startswith(("/auth/", "/dashboard/auth/"))))'
             ),
         ],
         cwd=os.getcwd(),
@@ -551,7 +581,7 @@ print('ok')
 
 def test_vercel_configs_define_security_headers():
     expected = {
-        'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'self'; object-src 'none'",
+        'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'self'; object-src 'none'; script-src 'self'",
         'Referrer-Policy': 'strict-origin-when-cross-origin',
         'X-Content-Type-Options': 'nosniff',
         'X-Frame-Options': 'DENY',

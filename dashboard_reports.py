@@ -2,85 +2,27 @@
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
-import logging
-import time
-from collections import defaultdict
+import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from calendar import monthrange
-from datetime import date, datetime, timedelta
-from functools import lru_cache
+from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from plan_config import normalize_staff_category
-
 import dashboard_service
-from dashboard_service import (
-    COMPLETED_ATTENDANCE,
-    GOODS_SALE_TYPE_ID,
-    GOODS_SOLD_ITEM_TYPE,
-    SERVICE_SOLD_ITEM_TYPE,
-    _business_financial_master_condition,
-    _business_staff_id_condition,
-    _company_scope_clause,
-    _appointment_factual_at_condition,
-    _financial_staff_attribution_condition,
-    _appointment_company_ids,
-    _personal_account_condition,
-    _pct_change,
-    _physical_account_condition,
-    _service_paid_filters,
-    _source_coverage_status,
-    business_appointment_condition,
-    financial_appointment_match_condition,
-    fetch_opz_year_facts,
-    fetch_plan_fact,
-    fetch_summary,
-    fetch_reporting_windows,
-    fetch_year_over_year_facts,
-    DateRange,
-    factual_branch_date,
-    ReportingWindow,
-    reporting_window_clause,
-)
-from payment_methods import (
-    REASON_BEYOND_PERIOD,
-    REASON_STARTS_MID_MONTH,
-    describe_months,
-    fetch_payment_breakdown,
-    format_day,
-    month_label,
-    short_month_label,
-)
-from report_payload import (
-    DECIMAL_FORMAT,
-    MAX_PERIOD_BUCKETS,
-    MONEY_FORMAT,
-    NUMBER_FORMAT,
-    PERCENT_FORMAT,
-    ReportInputError,
-    ReportRequest,
-    card as _card,
-    chart as _chart,
-    ranking_table as _ranking_table,
-    table as _table,
-    without_empty_columns as _without_empty_columns,
-)
-from models import (
-    AccountCatalog,
-    Appointment,
-    Company,
-    FinancialTransaction,
-    GoodTransaction,
-    Staff,
-    SyncSourceState,
-)
+import reports_clients
+import reports_feedback
+import reports_finance
+import reports_goods
+import reports_operations
+import reports_services
+import reports_team
+from dashboard_service import DateRange, _appointment_company_ids
+from models import Company, Staff
+from plan_config import normalize_staff_category
+from report_payload import ReportInputError, ReportRequest
 
 REPORT_GRANULARITIES = {'day', 'week', 'month'}
 
@@ -91,35 +33,17 @@ def _report_now() -> datetime:
     return dashboard_service.factual_now()
 
 
-YOY_ANNUAL_SOURCES = (
-    'appointments_detail',
-    'financial_transactions_detail',
-    'goods_transactions_detail',
-)
-YOY_MONTHLY_SOURCES = YOY_ANNUAL_SOURCES[:2]
-
-
-logger = logging.getLogger('yclients.reports')
-# What makes a leaderboard run worth retrying: the database (or its connection) failed, not the request or the code.
-INFRASTRUCTURE_ERRORS = (SQLAlchemyError, OSError)
-
-
-class ReportCalculationError(RuntimeError):
-    """Raised when a report cannot produce any usable payload."""
-
-    def __init__(self, message: str, *, stage: str = 'unknown') -> None:
-        super().__init__(message)
-        self.stage = stage
-
-
 # Platform-admin only (`can_view_report_usage`) and built by the route with a tenant, unlike every other report.
 REPORT_USAGE_ID = 'report_usage'
 REPORT_GROUP_ORDER = ('finance', 'services', 'team', 'operations', 'clients', 'goods', 'diagnostics')
 
 
+ReportBuilder = Callable[[ReportRequest], Awaitable[dict[str, Any]]]
+
+
 @dataclass(frozen=True)
 class ReportDefinition:
-    """One catalog entry. `builder` is a lazy 'module:function' path (see `_builder_for`), not part of the payload."""
+    """One catalog entry. `builder` is the report's coroutine function and is not part of the payload."""
 
     id: str
     title: str
@@ -127,7 +51,7 @@ class ReportDefinition:
     group: str
     themes: tuple[str, ...]
     roles: tuple[str, ...]
-    builder: str
+    builder: ReportBuilder
     # Whether the payload carries money. A role without the `revenue` metric cannot open such a report
     # or see it in the catalog; unknown ids fail closed the same way.
     requires_financials: bool
@@ -161,6 +85,12 @@ _MANAGER_ROLES = ('управляющему', 'владельцу')
 _FRONT_DESK_ROLES = ('администратору', 'управляющему')
 _PLATFORM_ADMIN_ROLES = ('платформенному администратору',)
 
+async def _refuse_report_usage(req: ReportRequest) -> dict[str, Any]:
+    """The report needs a tenant, which a `ReportRequest` does not carry, so the route calls
+    `report_usage.fetch_report_usage` directly and the dispatcher must never run it."""
+    raise RuntimeError('report_usage is built by fetch_report_usage with an explicit tenant')
+
+
 # The catalog: one row per report. Catalog order is REPORT_GROUP_ORDER, then the order of this list.
 # `aliases` are retired ids that still resolve here, so old links and favourites keep working.
 REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
@@ -174,7 +104,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='finance',
         themes=('выручка', 'средний чек'),
         roles=_OWNER_ROLES,
-        builder='reports_finance:build_financial_overview',
+        builder=reports_finance.build_financial_overview,
         requires_financials=True,
         granularity=True,
         compare=True,
@@ -187,7 +117,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='finance',
         themes=('выручка',),
         roles=_OWNER_ROLES,
-        builder='dashboard_reports:build_payment_methods',
+        builder=reports_finance.build_payment_methods,
         requires_financials=True,
         # Branch-level totals by payment form have no per-employee reading.
         staff_filter=False,
@@ -199,7 +129,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='finance',
         themes=('выручка', 'средний чек'),
         roles=_OWNER_ROLES,
-        builder='dashboard_reports:build_year_over_year',
+        builder=reports_finance.build_year_over_year,
         requires_financials=True,
         date_range=False,
         aliases=('seasonality',),
@@ -214,7 +144,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='services',
         themes=('услуги', 'средний чек'),
         roles=_OWNER_ROLES,
-        builder='reports_services:build_avg_check_by_service',
+        builder=reports_services.build_avg_check_by_service,
         requires_financials=True,
         compare=True,
         aliases=('service_trends',),
@@ -226,7 +156,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='services',
         themes=('услуги', 'мастера'),
         roles=_OWNER_ROLES,
-        builder='reports_services:build_service_staff_profit',
+        builder=reports_services.build_service_staff_profit,
         requires_financials=True,
         compare=True,
         aliases=('staff_services',),
@@ -238,7 +168,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='services',
         themes=('услуги',),
         roles=_OWNER_ROLES,
-        builder='reports_services:build_service_combos',
+        builder=reports_services.build_service_combos,
         requires_financials=False,
         compare=True,
     ),
@@ -249,7 +179,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='team',
         themes=('мастера',),
         roles=_MANAGER_ROLES,
-        builder='reports_operations:build_staff_efficiency',
+        builder=reports_operations.build_staff_efficiency,
         requires_financials=True,
         compare=True,
     ),
@@ -263,7 +193,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='team',
         themes=('мастера',),
         roles=_MANAGER_ROLES,
-        builder='dashboard_reports:build_staff_leaderboard',
+        builder=reports_team.build_staff_leaderboard,
         # A mixed report (OPZ, reviews and percentages next to money): the route strips the money columns.
         requires_financials=False,
     ),
@@ -277,7 +207,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='operations',
         themes=('записи',),
         roles=_MANAGER_ROLES,
-        builder='reports_operations:build_peak_load',
+        builder=reports_operations.build_peak_load,
         requires_financials=False,
         compare=True,
         aliases=('staff_time_heatmap',),
@@ -289,7 +219,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='operations',
         themes=('записи',),
         roles=_MANAGER_ROLES,
-        builder='reports_operations:build_bookings_dynamics',
+        builder=reports_operations.build_bookings_dynamics,
         requires_financials=False,
         granularity=True,
         compare=True,
@@ -302,7 +232,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='operations',
         themes=('записи',),
         roles=_MANAGER_ROLES,
-        builder='reports_operations:build_booking_channels',
+        builder=reports_operations.build_booking_channels,
         # Counts only: record totals and shares, no money anywhere in the payload.
         requires_financials=False,
         granularity=True,
@@ -315,7 +245,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='clients',
         themes=('клиенты',),
         roles=_FRONT_DESK_ROLES,
-        builder='dashboard_reports:build_new_vs_returning_cross',
+        builder=reports_clients.build_new_vs_returning_cross,
         # Counts only, and the Overview links here, so a role without revenue must reach it.
         requires_financials=False,
         compare=True,
@@ -327,7 +257,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='clients',
         themes=('клиенты', 'выручка'),
         roles=_FRONT_DESK_ROLES,
-        builder='reports_clients:build_top_clients_pareto',
+        builder=reports_clients.build_top_clients_pareto,
         requires_financials=True,
         compare=True,
         aliases=('rfm_analysis', 'client_labels', 'client_journey'),
@@ -339,7 +269,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='clients',
         themes=('клиенты',),
         roles=_FRONT_DESK_ROLES,
-        builder='reports_clients:build_retention_3_6_12',
+        builder=reports_clients.build_retention_3_6_12,
         # Cohort sizes and percentages only; the payload carries no money.
         requires_financials=False,
         aliases=('client_cohorts', 'month_return'),
@@ -354,7 +284,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='clients',
         themes=('клиенты', 'отток'),
         roles=_FRONT_DESK_ROLES,
-        builder='reports_clients:build_revenue_at_risk',
+        builder=reports_clients.build_revenue_at_risk,
         requires_financials=True,
         compare=True,
         aliases=('lost_clients_list', 'return_priorities', 'losses_by_staff', 'churn_dynamics'),
@@ -369,7 +299,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='goods',
         themes=('товары', 'выручка'),
         roles=_OWNER_ROLES,
-        builder='reports_goods:build_goods_dynamics',
+        builder=reports_goods.build_goods_dynamics,
         requires_financials=True,
         granularity=True,
         compare=True,
@@ -382,7 +312,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         group='clients',
         themes=('клиенты', 'отзывы'),
         roles=_OWNER_ROLES,
-        builder='reports_feedback:build_nps_dashboard',
+        builder=reports_feedback.build_nps_dashboard,
         requires_financials=False,
         compare=True,
     ),
@@ -397,7 +327,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         themes=('диагностика',),
         roles=_PLATFORM_ADMIN_ROLES,
         # Dispatched by the route with an explicit tenant (the registry builder refuses to run without one).
-        builder='report_usage:build_report_usage',
+        builder=_refuse_report_usage,
         requires_financials=False,
         # Own gate: `can_view_report_usage`, not a money metric.
         staff_filter=False,
@@ -414,11 +344,8 @@ def _build_registry(definitions: tuple[ReportDefinition, ...]) -> dict[str, Repo
     for definition in definitions:
         if definition.group not in REPORT_GROUP_ORDER:
             raise RuntimeError(f'report {definition.id}: unknown group {definition.group}')
-        module_name, separator, function_name = definition.builder.partition(':')
-        if not (module_name and separator and function_name):
-            raise RuntimeError(f'report {definition.id}: builder must be "module:function"')
-        if importlib.util.find_spec(module_name) is None:
-            raise RuntimeError(f'report {definition.id}: builder module {module_name} not found')
+        if not inspect.iscoroutinefunction(definition.builder):
+            raise RuntimeError(f'report {definition.id}: builder must be an async function')
         for alias in definition.aliases:
             if alias in claimed:
                 raise RuntimeError(f'report alias {alias} of {definition.id} is already taken')
@@ -444,17 +371,6 @@ def report_requires_financials(report_id: str) -> bool:
     """Money gate of a report, read from the definition of the resolved id. Unknown ids fail closed."""
     definition = REPORT_REGISTRY.get(resolve_report_id(report_id) or '')
     return True if definition is None else definition.requires_financials
-
-
-@lru_cache(maxsize=None)
-def _builder_for(report_id: str) -> Callable[[ReportRequest], Awaitable[dict[str, Any]]]:
-    """Resolve the builder named by the definition.
-
-    Imported lazily: builder modules import helpers from this one, so importing them at the top
-    would be circular.
-    """
-    module_name, _, function_name = REPORT_REGISTRY[report_id].builder.partition(':')
-    return getattr(importlib.import_module(module_name), function_name)
 
 
 # The demo tenant is seeded, not synced: it holds a few months of activity and no
@@ -537,7 +453,7 @@ async def fetch_report_data(
         if compare_previous and compares
         else (start, end)
     )
-    if explicit_window or compare_staff_id is not None:
+    if explicit_window:
         period_preset = None
     data = await _fetch_report_payload(
         db,
@@ -674,32 +590,7 @@ async def _fetch_report_payload(
         period_preset=period_preset,
         for_comparison=for_comparison,
     )
-    return await _builder_for(report_id)(request)
-
-
-async def build_payment_methods(req: ReportRequest) -> dict[str, Any]:
-    return await _payment_methods_payload(
-        req.db, req.base, req.start, req.end, req.allowed_company_ids, req.factual_at
-    )
-
-
-async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
-    return await _year_over_year_payload(
-        req.db, req.base, req.company_id, req.staff_id, req.allowed_company_ids, req.factual_at
-    )
-
-
-async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
-    return await _leaderboard_payload(
-        req.db, req.base, req.start, req.end, req.company_id, req.staff_id, req.allowed_company_ids, req.factual_at
-    )
-
-
-async def build_new_vs_returning_cross(req: ReportRequest) -> dict[str, Any]:
-    return await _client_recency_payload(
-        req.db, req.base, req.start, req.end, req.company_id, req.staff_id, req.allowed_company_ids, req.factual_at,
-        req.period_preset,
-    )
+    return await definition.builder(request)
 
 
 async def _report_calculation_scope(
@@ -743,89 +634,6 @@ async def _report_calculation_scope(
     return {'kind': 'network', 'mode': 'aggregate'}
 
 
-def _appointment_conditions(
-    start: date | None,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    *,
-    attended_only: bool = False,
-    allowed_company_ids: list[int] | None = None,
-    factual_at: datetime | None = None,
-) -> list[Any]:
-    """Shared appointment filters. A `start` of None opens the window to full history."""
-    conditions = [
-        Appointment.date <= end,
-        business_appointment_condition(),
-        reporting_window_clause(Appointment.company_id, Appointment.date),
-    ]
-    if start is not None:
-        conditions.append(Appointment.date >= start)
-    if attended_only:
-        conditions.append(Appointment.attendance == COMPLETED_ATTENDANCE)
-    if factual_at is not None:
-        conditions.append(_appointment_factual_at_condition(factual_at))
-    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
-    if scope is not None:
-        conditions.append(scope)
-    if staff_id is not None:
-        conditions.append(Appointment.staff_id == staff_id)
-    return conditions
-
-
-def _period_key(value: date | datetime | None, granularity: str) -> str:
-    if value is None:
-        return ''
-    day = value.date() if isinstance(value, datetime) else value
-    if granularity == 'month':
-        return day.replace(day=1).isoformat()
-    if granularity == 'week':
-        return (day - timedelta(days=day.weekday())).isoformat()
-    return day.isoformat()
-
-
-def _period_starts(start: date, end: date, granularity: str) -> list[str]:
-    """Every period start from the one holding `start` to the one holding `end`, so empty periods stay on the axis.
-
-    Raises ReportInputError past `MAX_PERIOD_BUCKETS`: the axis is zero-filled, so a window of centuries by day would
-    otherwise allocate millions of rows for a request that has data on a few hundred of them.
-    """
-    current = date.fromisoformat(_period_key(start, granularity))
-    keys = []
-    while current <= end:
-        if len(keys) >= MAX_PERIOD_BUCKETS:
-            raise ReportInputError(
-                f'period is too long for granularity {granularity}: choose a coarser one or a shorter period'
-            )
-        keys.append(current.isoformat())
-        try:
-            if granularity == 'month':
-                current = (current + timedelta(days=32)).replace(day=1)
-            else:
-                current += timedelta(days=7 if granularity == 'week' else 1)
-        except OverflowError:
-            break
-    return keys
-
-
-def _aggregate_daily(rows: list[dict[str, Any]], granularity: str) -> list[dict[str, Any]]:
-    grouped: dict[str, dict[str, float]] = defaultdict(lambda: {
-        'revenue': 0.0,
-        'service_revenue': 0.0,
-        'goods_revenue': 0.0,
-        'topup_revenue': 0.0,
-        'appointments': 0.0,
-    })
-    for row in rows:
-        key = _period_key(date.fromisoformat(row['date']), granularity)
-        grouped[key]['revenue'] += float(row.get('revenue') or 0)
-        grouped[key]['service_revenue'] += float(row.get('service_revenue') or 0)
-        grouped[key]['goods_revenue'] += float(row.get('goods_revenue') or 0)
-        grouped[key]['topup_revenue'] += float(row.get('topup_revenue') or 0)
-        grouped[key]['appointments'] += float(row.get('appointments') or 0)
-    return [{'period': key, **values} for key, values in sorted(grouped.items())]
-
-
 def _comparison_rows(current_cards: list[dict[str, Any]], compare_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
     compare_by_label = {card.get('label'): card for card in compare_cards}
     rows = []
@@ -851,1669 +659,5 @@ def _comparison_rows(current_cards: list[dict[str, Any]], compare_cards: list[di
             'delta_pct': delta_pct,
         })
     return rows
-
-
-async def _year_over_year_activity_bounds(
-    db: AsyncSession,
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    now: datetime,
-) -> tuple[date, dict[str, Any]] | None:
-    """Return the first YClients record and the OPZ facts.
-
-    The first record includes every factual component used by Overview/plan-fact:
-    completed visits, paid services, goods/top-up payments and goods movements.
-    """
-    today = now.date()
-    appointment_conditions = [
-        Appointment.date.is_not(None),
-        Appointment.attendance == COMPLETED_ATTENDANCE,
-        or_(
-            Appointment.date < today,
-            and_(
-                Appointment.date == today,
-                or_(
-                    Appointment.datetime.is_(None),
-                    Appointment.datetime <= now,
-                ),
-            ),
-        ),
-        business_appointment_condition(),
-        reporting_window_clause(Appointment.company_id, Appointment.date),
-    ]
-    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
-    if scope is not None:
-        appointment_conditions.append(scope)
-    if staff_id is not None:
-        appointment_conditions.append(Appointment.staff_id == staff_id)
-    appointment_bounds = (
-        await db.execute(
-            select(
-                func.min(Appointment.date).label('activity_start'),
-            ).where(*appointment_conditions)
-        )
-    ).one()
-
-    payment_day = func.date(FinancialTransaction.date)
-    service_conditions = [
-        FinancialTransaction.date.is_not(None),
-        FinancialTransaction.date <= now,
-        FinancialTransaction.amount > 0,
-        FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
-        Appointment.attendance == COMPLETED_ATTENDANCE,
-        _appointment_factual_at_condition(now),
-        business_appointment_condition(),
-        _physical_account_condition(),
-        # Both anchors, matching _service_paid_filters — the payment clause is what
-        # stops this bound from opening a year the branch predates.
-        reporting_window_clause(Appointment.company_id, Appointment.date),
-        reporting_window_clause(FinancialTransaction.company_id, payment_day),
-    ]
-    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
-    if scope is not None:
-        service_conditions.append(scope)
-    if staff_id is not None:
-        service_conditions.append(Appointment.staff_id == staff_id)
-    service_bounds = (
-        await db.execute(
-            select(
-                func.min(payment_day).label('activity_start'),
-            )
-            .select_from(FinancialTransaction)
-            .join(Appointment, financial_appointment_match_condition())
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
-            .where(*service_conditions)
-        )
-    ).one()
-
-    direct_component = FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE
-    if staff_id is not None:
-        direct_component = or_(
-            and_(
-                FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
-                _financial_staff_attribution_condition(staff_id),
-            ),
-            and_(
-                _personal_account_condition(),
-                _financial_staff_attribution_condition(staff_id),
-            ),
-        )
-    else:
-        direct_component = or_(direct_component, _personal_account_condition())
-    direct_conditions = [
-        FinancialTransaction.date.is_not(None),
-        FinancialTransaction.date <= now,
-        FinancialTransaction.amount > 0,
-        _business_financial_master_condition(now),
-        _physical_account_condition(),
-        direct_component,
-        reporting_window_clause(FinancialTransaction.company_id, payment_day),
-    ]
-    scope = _company_scope_clause(FinancialTransaction.company_id, company_id, allowed_company_ids)
-    if scope is not None:
-        direct_conditions.append(scope)
-    direct_bounds = (
-        await db.execute(
-            select(
-                func.min(payment_day).label('activity_start'),
-            )
-            .select_from(FinancialTransaction)
-            .outerjoin(
-                AccountCatalog,
-                and_(
-                    AccountCatalog.company_id == FinancialTransaction.company_id,
-                    AccountCatalog.account_id == FinancialTransaction.account_id,
-                ),
-            )
-            .where(*direct_conditions)
-        )
-    ).one()
-
-    goods_day = func.date(GoodTransaction.date)
-    goods_conditions = [
-        GoodTransaction.date.is_not(None),
-        GoodTransaction.date <= now,
-        GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
-        _business_staff_id_condition(GoodTransaction.master_id),
-        reporting_window_clause(GoodTransaction.company_id, goods_day),
-    ]
-    scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
-    if scope is not None:
-        goods_conditions.append(scope)
-    if staff_id is not None:
-        goods_conditions.append(GoodTransaction.master_id == staff_id)
-    goods_bounds = (
-        await db.execute(
-            select(
-                func.min(goods_day).label('activity_start'),
-            ).where(*goods_conditions)
-        )
-    ).one()
-
-    def as_date(value: Any) -> date | None:
-        if value is None:
-            return None
-        return value if isinstance(value, date) and not isinstance(value, datetime) else date.fromisoformat(str(value)[:10])
-
-    component_bounds = (
-        appointment_bounds,
-        service_bounds,
-        direct_bounds,
-        goods_bounds,
-    )
-    starts = [
-        parsed
-        for bounds in component_bounds
-        if (parsed := as_date(bounds.activity_start)) is not None
-    ]
-    if not starts:
-        return None
-
-    activity_start = min(starts)
-    opz_facts = await fetch_opz_year_facts(
-        db,
-        activity_start,
-        today,
-        company_id,
-        staff_id,
-        allowed_company_ids,
-        factual_at=now,
-    )
-    return activity_start, opz_facts
-
-
-async def _year_over_year_source_states(
-    db: AsyncSession,
-    scope_company_ids: list[int],
-) -> dict[tuple[int, str], SyncSourceState]:
-    if not scope_company_ids:
-        return {}
-
-    states = (
-        await db.execute(
-            select(SyncSourceState).where(
-                SyncSourceState.company_id.in_(scope_company_ids),
-                SyncSourceState.source.in_(YOY_ANNUAL_SOURCES),
-            )
-        )
-    ).scalars().all()
-    return {(int(state.company_id), state.source): state for state in states}
-
-
-def _year_over_year_missing_sources(
-    state_by_key: dict[tuple[int, str], SyncSourceState],
-    scope_company_ids: list[int],
-    period_start: date,
-    period_end: date,
-    required_sources: tuple[str, ...] = YOY_ANNUAL_SOURCES,
-    appointment_dependencies: dict[int, tuple[date, date]] | None = None,
-    reporting_windows: dict[int, ReportingWindow] | None = None,
-) -> list[str]:
-    missing = set()
-    for item_company_id in scope_company_ids:
-        # A branch contributes no facts outside its reporting window, so demanding sync
-        # coverage there would blank a year the branch simply predates or has left — and a
-        # branch that did not exist yet has no coverage to demand at all.
-        # Unlike _source_coverage_status, which answers for a user-chosen range and calls
-        # a fully unreportable period uncertifiable, the years here are derived from already
-        # trimmed facts — a year outside every branch's window never reaches this function.
-        window = (reporting_windows or {}).get(item_company_id)
-        reportable = (
-            window.intersect(period_start, period_end)
-            if window is not None
-            else (period_start, period_end)
-        )
-        if reportable is None:
-            continue
-        branch_period_start, branch_period_end = reportable
-        for source in required_sources:
-            state = state_by_key.get((item_company_id, source))
-            required_start = branch_period_start
-            required_end = branch_period_end
-            if source == 'appointments_detail' and appointment_dependencies:
-                dependency = appointment_dependencies.get(item_company_id)
-                if dependency is not None:
-                    required_start = min(required_start, dependency[0])
-                    required_end = max(required_end, dependency[1])
-            if (
-                state is None
-                or state.period_start > required_start
-                or state.period_end < required_end
-            ):
-                missing.add(source)
-    return sorted(missing)
-
-
-def _mask_unknown_year_metrics(
-    row: dict[str, Any],
-    missing_sources: list[str],
-) -> None:
-    """Do not expose partial aggregates as factual zeroes or complete sums."""
-    missing = set(missing_sources)
-    appointments_known = 'appointments_detail' not in missing
-    financials_known = 'financial_transactions_detail' not in missing
-    goods_known = 'goods_transactions_detail' not in missing
-
-    if not appointments_known:
-        for metric in (
-            'appointments',
-            'service_count',
-            'extra_service_count',
-            'unique_clients',
-            'visits_per_client',
-            'opz_qty',
-            'opz_pct',
-        ):
-            row[metric] = None
-
-    if not (appointments_known and financials_known):
-        for metric in (
-            'revenue',
-            'service_revenue',
-            'goods_revenue',
-            'topup_revenue',
-            'extra_service_revenue',
-            'avg_check',
-        ):
-            row[metric] = None
-
-    if not goods_known:
-        row['goods_count'] = None
-    if 'staff_schedules' in missing:
-        row['extra_service_count'] = None
-        row['extra_service_revenue'] = None
-
-
-def _year_periods(activity_start: date, report_end: date) -> list[dict[str, Any]]:
-    periods = []
-    for year in range(activity_start.year, report_end.year + 1):
-        calendar_start = date(year, 1, 1)
-        calendar_end = date(year, 12, 31)
-        period_start = max(calendar_start, activity_start)
-        period_end = min(calendar_end, report_end)
-        is_partial_year = (
-            period_start != calendar_start
-            or period_end != calendar_end
-            or year == report_end.year
-        )
-        periods.append({
-            'year': year,
-            'start': period_start,
-            'end': period_end,
-            'is_partial_year': is_partial_year,
-        })
-    return periods
-
-
-def _year_row(
-    year: int,
-    period: dict[str, Any],
-    annual: dict[str, Any],
-    opz_qty: float,
-) -> dict[str, Any]:
-    appointments = int(annual.get('appointments') or 0)
-    revenue = float(annual.get('revenue') or 0)
-    unique_clients = int(annual.get('unique_clients') or 0)
-    is_partial_year = bool(period['is_partial_year'])
-    return {
-        'year': year,
-        'period_start': period['start'].isoformat(),
-        'period_end': period['end'].isoformat(),
-        'revenue': revenue,
-        'service_revenue': float(annual.get('service_revenue') or 0),
-        'goods_revenue': float(annual.get('goods_revenue') or 0),
-        'topup_revenue': float(annual.get('topup_revenue') or 0),
-        'appointments': appointments,
-        'service_count': float(annual.get('service_count') or 0),
-        'goods_count': float(annual.get('goods_count') or 0),
-        'extra_service_count': float(annual.get('extra_service_count') or 0),
-        'extra_service_revenue': float(annual.get('extra_service_revenue') or 0),
-        'unique_clients': unique_clients,
-        # No completed visits means no average check; a zero would draw a real bar.
-        'avg_check': revenue / appointments if appointments else None,
-        'visits_per_client': appointments / unique_clients if unique_clients else 0.0,
-        'opz_qty': opz_qty,
-        'opz_pct': 100.0 * opz_qty / appointments if appointments else 0.0,
-        'source_status': 'ready',
-        'missing_components': [],
-        'is_partial_year': is_partial_year,
-        'period_status': 'Неполный' if is_partial_year else 'Полный',
-    }
-
-
-def _monthly_yoy_rows(
-    year: int,
-    monthly_facts: dict[int, dict[str, Any]],
-    period_start: date,
-    period_end: date,
-    state_by_key: dict[tuple[int, str], SyncSourceState],
-    scope_company_ids: list[int],
-    appointment_dependencies: dict[int, dict[int, tuple[date, date]]] | None = None,
-    reporting_windows: dict[int, ReportingWindow] | None = None,
-    opz_counts: dict[int, float] | None = None,
-    opz_dependencies: dict[int, dict[int, tuple[date, date]]] | None = None,
-) -> list[dict[str, Any]]:
-    metrics = ('revenue', 'service_revenue', 'goods_revenue', 'topup_revenue', 'appointments')
-    monthly = {
-        month: {metric: float(monthly_facts.get(month, {}).get(metric) or 0) for metric in metrics}
-        for month in range(1, 13)
-    }
-
-    rows = []
-    for month, values in monthly.items():
-        month_start = date(year, month, 1)
-        month_end = date(year + (month == 12), 1 if month == 12 else month + 1, 1) - timedelta(days=1)
-        in_activity_period = month_end >= period_start and month_start <= period_end
-        slice_start = max(month_start, period_start)
-        slice_end = min(month_end, period_end)
-        missing_sources = (
-            _year_over_year_missing_sources(
-                state_by_key,
-                scope_company_ids,
-                slice_start,
-                slice_end,
-                YOY_MONTHLY_SOURCES,
-                (appointment_dependencies or {}).get(month),
-                reporting_windows,
-            )
-            if in_activity_period
-            else []
-        )
-        # Mirrors the annual row: an OPZ-only coverage gap hides OPZ but not revenue or visits.
-        opz_missing = (
-            _year_over_year_missing_sources(
-                state_by_key,
-                scope_company_ids,
-                slice_start,
-                slice_end,
-                required_sources=('appointments_detail',),
-                appointment_dependencies=(opz_dependencies or {}).get(month),
-                reporting_windows=reporting_windows,
-            )
-            if in_activity_period
-            else []
-        )
-        appointments_known = 'appointments_detail' not in missing_sources
-        financials_known = 'financial_transactions_detail' not in missing_sources
-        revenue_known = appointments_known and financials_known
-        opz_known = in_activity_period and appointments_known and 'appointments_detail' not in opz_missing
-        opz_qty = float((opz_counts or {}).get(month, 0.0)) if opz_known else None
-        # Same formula as the annual row: revenue over completed visits. A month with
-        # no visits has no average check rather than a zero one.
-        avg_check = (
-            values['revenue'] / values['appointments']
-            if in_activity_period and revenue_known and values['appointments']
-            else None
-        )
-        rows.append({
-            'year': year,
-            'month': month,
-            'month_label': f'{month:02d}',
-            'revenue': values['revenue'] if in_activity_period and revenue_known else None,
-            'service_revenue': values['service_revenue'] if in_activity_period and revenue_known else None,
-            'goods_revenue': values['goods_revenue'] if in_activity_period and revenue_known else None,
-            'topup_revenue': values['topup_revenue'] if in_activity_period and revenue_known else None,
-            'appointments': values['appointments'] if in_activity_period and appointments_known else None,
-            'avg_check': avg_check,
-            'opz_qty': opz_qty,
-            # Like avg_check: a month without visits has no rate rather than a zero one.
-            'opz_pct': 100.0 * opz_qty / values['appointments'] if opz_known and values['appointments'] else None,
-            'in_activity_period': in_activity_period,
-            'source_status': (
-                'ready' if in_activity_period and not missing_sources and not opz_missing else 'partial'
-            ),
-            'missing_components': sorted({*missing_sources, *opz_missing}),
-        })
-    return rows
-
-
-def _period_shape(row: dict[str, Any]) -> tuple[int, int, int, int]:
-    period_start = date.fromisoformat(row['period_start'])
-    period_end = date.fromisoformat(row['period_end'])
-    return period_start.month, period_start.day, period_end.month, period_end.day
-
-
-def _with_year_changes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    previous: dict[str, Any] | None = None
-    out = []
-    for row in sorted(rows, key=lambda item: item['year']):
-        enriched = dict(row)
-        comparable_period = (
-            previous is not None
-            and _period_shape(row) == _period_shape(previous)
-            and not row.get('is_partial_year')
-            and not previous.get('is_partial_year')
-        )
-        for metric in (
-            'revenue',
-            'appointments',
-            'avg_check',
-            'unique_clients',
-            'service_revenue',
-            'goods_revenue',
-            'topup_revenue',
-            'opz_qty',
-            'opz_pct',
-        ):
-            metric_comparable = (
-                comparable_period
-                and row.get(metric) is not None
-                and previous.get(metric) is not None
-            )
-            enriched[f'{metric}_change_pct'] = (
-                _pct_change(float(row[metric]), float(previous[metric]))
-                if metric_comparable
-                else None
-            )
-        if (
-            comparable_period
-            and row.get('source_status') == 'ready'
-            and previous.get('source_status') == 'ready'
-        ):
-            enriched['comparison_status'] = 'comparable'
-        elif previous is None:
-            enriched['comparison_status'] = 'no_previous'
-        elif row.get('source_status') != 'ready' or previous.get('source_status') != 'ready':
-            enriched['comparison_status'] = 'incomplete_source'
-        else:
-            enriched['comparison_status'] = 'different_period'
-        out.append(enriched)
-        previous = row
-    return out
-
-
-async def _year_over_year_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    report_now: datetime | None = None,
-) -> dict[str, Any]:
-    report_now = report_now or _report_now()
-    scope_company_ids = await _appointment_company_ids(
-        db, company_id, staff_id, allowed_company_ids
-    )
-    activity_bounds = await _year_over_year_activity_bounds(
-        db,
-        company_id,
-        staff_id,
-        scope_company_ids,
-        report_now,
-    )
-    if activity_bounds is None:
-        base['source_status'] = 'partial'
-        base['notes'].append({
-            'kind': 'missing',
-            'title': 'Нет фактических записей YClients',
-            'text': 'Для выбранного среза пока нельзя определить границы истории.',
-        })
-        return base
-
-    activity_start, opz_facts = activity_bounds
-    opz_by_year = opz_facts['counts']
-    opz_dependencies_by_year = opz_facts['appointment_dependencies']
-    report_end = report_now.date()
-    periods = _year_periods(activity_start, report_end)
-    state_by_key = await _year_over_year_source_states(db, scope_company_ids)
-    reporting_windows = await fetch_reporting_windows(db, scope_company_ids)
-    fact_rows = await fetch_year_over_year_facts(
-        db,
-        activity_start,
-        report_end,
-        company_id,
-        staff_id,
-        scope_company_ids,
-        factual_at=report_now,
-    )
-    year_rows = []
-    monthly_by_year: dict[int, list[dict[str, Any]]] = {}
-
-    for period in periods:
-        period_start = period['start']
-        period_end = period['end']
-        year = int(period['year'])
-        year_row = _year_row(
-            year,
-            period,
-            fact_rows['annual'].get(year, {}),
-            float(opz_by_year.get(year, 0.0)),
-        )
-        technical_missing = _year_over_year_missing_sources(
-            state_by_key,
-            scope_company_ids,
-            period_start,
-            period_end,
-            appointment_dependencies=fact_rows['appointment_dependencies']['annual'].get(year),
-            reporting_windows=reporting_windows,
-        )
-        opz_missing = _year_over_year_missing_sources(
-            state_by_key,
-            scope_company_ids,
-            period_start,
-            period_end,
-            required_sources=('appointments_detail',),
-            appointment_dependencies=opz_dependencies_by_year.get(year),
-            reporting_windows=reporting_windows,
-        )
-        year_row['missing_components'] = sorted({
-            *year_row['missing_components'],
-            *technical_missing,
-            *opz_missing,
-        })
-        if year_row['missing_components']:
-            year_row['source_status'] = 'partial'
-        _mask_unknown_year_metrics(year_row, technical_missing)
-        if 'appointments_detail' in opz_missing:
-            year_row['opz_qty'] = None
-            year_row['opz_pct'] = None
-        year_rows.append(year_row)
-        monthly_by_year[year] = _monthly_yoy_rows(
-            year,
-            fact_rows['monthly'].get(year, {}),
-            period_start,
-            period_end,
-            state_by_key,
-            scope_company_ids,
-            fact_rows['appointment_dependencies']['monthly'].get(year),
-            reporting_windows,
-            opz_facts['monthly_counts'].get(year),
-            opz_facts['monthly_appointment_dependencies'].get(year),
-        )
-
-    year_rows = _with_year_changes(year_rows)
-    months = [f'{month:02d}' for month in range(1, 13)]
-    monthly_rows = [
-        row
-        for year in sorted(monthly_by_year)
-        for row in monthly_by_year[year]
-    ]
-
-    base['notes'].append({
-        'kind': 'formula',
-        'title': 'Единая формула с Обзором и План/факт',
-        'text': (
-            'Выручка, завершенные визиты и средний чек рассчитаны по тем же '
-            'оплаченным компонентам и бизнес-фильтрам. Первый и последний годы '
-            'показываются за их фактический период. ОПЗ считается по формуле Обзора: '
-            'клиент засчитывается один раз в месяц в помесячном ряду и один раз в год '
-            'в годовом, поэтому сумма месяцев может превышать год. Ручные добавки ОПЗ '
-            'входят в итог филиала и сети и не учитываются при фильтре по сотруднику.'
-        ),
-    })
-    partial_rows = [row for row in year_rows if row.get('source_status') != 'ready']
-    if partial_rows:
-        base['source_status'] = 'partial'
-        base['missing_sources'] = sorted({
-            component
-            for row in partial_rows
-            for component in row.get('missing_components', [])
-        })
-        base['notes'].append({
-            'kind': 'warning',
-            'title': 'Есть технически неполные компоненты',
-            'text': 'Годы сохранены в отчете; доступные факты показаны вместе со статусом покрытия.',
-        })
-    base['period'] = {
-        'start': activity_start.isoformat(),
-        'end': report_end.isoformat(),
-        'granularity': 'month',
-    }
-    # No cards: the latest year is almost always partial, so its change cards only showed a dash, and
-    # its values are already the last bar of every by-year chart. The report has no period to pick.
-    # The grid is two columns wide, so each metric is a row: by year on the left, its
-    # month-by-month year-over-year comparison on the right.
-    base['charts'] = [
-        _chart(
-            'year_revenue',
-            'Выручка по годам',
-            'bar',
-            [str(row['year']) for row in year_rows],
-            [{'label': 'Выручка', 'data': [row['revenue'] for row in year_rows], 'format': MONEY_FORMAT}],
-        ),
-        _chart(
-            'monthly_revenue_yoy',
-            'Помесячная выручка год к году',
-            'line',
-            months,
-            [
-                {
-                    'label': str(year),
-                    'data': [row['revenue'] for row in monthly_by_year[year]],
-                    'format': MONEY_FORMAT,
-                    'fill': False,
-                }
-                for year in sorted(monthly_by_year)
-            ],
-        ),
-        _chart(
-            'year_appointments',
-            'Визиты по годам',
-            'bar',
-            [str(row['year']) for row in year_rows],
-            [{'label': 'Визиты', 'data': [row['appointments'] for row in year_rows], 'format': NUMBER_FORMAT}],
-        ),
-        _chart(
-            'monthly_appointments_yoy',
-            'Помесячные визиты год к году',
-            'line',
-            months,
-            [
-                {
-                    'label': str(year),
-                    'data': [row['appointments'] for row in monthly_by_year[year]],
-                    'format': NUMBER_FORMAT,
-                    'fill': False,
-                }
-                for year in sorted(monthly_by_year)
-            ],
-        ),
-        _chart(
-            'year_avg_check',
-            'Средний чек по годам',
-            'bar',
-            [str(row['year']) for row in year_rows],
-            [{
-                'label': 'Средний чек',
-                'data': [row['avg_check'] for row in year_rows],
-                'format': MONEY_FORMAT,
-            }],
-        ),
-        _chart(
-            'monthly_avg_check_yoy',
-            'Помесячный средний чек год к году',
-            'line',
-            months,
-            [
-                {
-                    'label': str(year),
-                    'data': [row['avg_check'] for row in monthly_by_year[year]],
-                    'format': MONEY_FORMAT,
-                    'fill': False,
-                }
-                for year in sorted(monthly_by_year)
-            ],
-        ),
-        _chart(
-            'year_opz',
-            'ОПЗ по годам',
-            'bar',
-            [str(row['year']) for row in year_rows],
-            [{'label': 'ОПЗ', 'data': [row['opz_qty'] for row in year_rows], 'format': NUMBER_FORMAT}],
-        ),
-        _chart(
-            'monthly_opz_yoy',
-            'Помесячные ОПЗ год к году',
-            'line',
-            months,
-            [
-                {
-                    'label': str(year),
-                    'data': [row['opz_qty'] for row in monthly_by_year[year]],
-                    'format': NUMBER_FORMAT,
-                    'fill': False,
-                }
-                for year in sorted(monthly_by_year)
-            ],
-        ),
-        _chart(
-            'year_opz_pct',
-            'ОПЗ % по годам',
-            'bar',
-            [str(row['year']) for row in year_rows],
-            [{'label': 'ОПЗ %', 'data': [row['opz_pct'] for row in year_rows], 'format': PERCENT_FORMAT}],
-        ),
-        _chart(
-            'monthly_opz_pct_yoy',
-            'Помесячный ОПЗ % год к году',
-            'line',
-            months,
-            [
-                {
-                    'label': str(year),
-                    'data': [row['opz_pct'] for row in monthly_by_year[year]],
-                    'format': PERCENT_FORMAT,
-                    'fill': False,
-                }
-                for year in sorted(monthly_by_year)
-            ],
-        ),
-    ]
-    base['tables'] = [
-        _table(
-            'years',
-            'Годовые агрегаты',
-            _without_empty_columns([
-                ('year', 'Год', NUMBER_FORMAT),
-                ('period_start', 'С', 'date'),
-                ('period_end', 'По', 'date'),
-                ('period_status', 'Период', 'text'),
-                ('source_status', 'Покрытие', 'text'),
-                ('revenue', 'Выручка', MONEY_FORMAT),
-                ('revenue_change_pct', 'Выручка YoY', PERCENT_FORMAT),
-                ('appointments', 'Визиты', NUMBER_FORMAT),
-                ('appointments_change_pct', 'Визиты YoY', PERCENT_FORMAT),
-                ('avg_check', 'Средний чек', MONEY_FORMAT),
-                ('avg_check_change_pct', 'Средний чек YoY', PERCENT_FORMAT),
-                ('unique_clients', 'Клиенты', NUMBER_FORMAT),
-                ('unique_clients_change_pct', 'Клиенты YoY', PERCENT_FORMAT),
-                ('service_revenue', 'Услуги', MONEY_FORMAT),
-                ('goods_revenue', 'Товары', MONEY_FORMAT),
-                ('topup_revenue', 'Пополнения', MONEY_FORMAT),
-                ('extra_service_count', 'Доп. услуги', NUMBER_FORMAT),
-                ('opz_qty', 'ОПЗ', NUMBER_FORMAT),
-                ('opz_qty_change_pct', 'ОПЗ YoY', PERCENT_FORMAT),
-                ('opz_pct', 'ОПЗ %', PERCENT_FORMAT),
-                ('opz_pct_change_pct', 'ОПЗ % YoY', PERCENT_FORMAT),
-            ], year_rows, {'topup_revenue'}),
-            year_rows,
-            row_key='year',
-        ),
-        _table(
-            'months',
-            'Помесячные агрегаты',
-            _without_empty_columns([
-                ('year', 'Год', NUMBER_FORMAT),
-                ('month_label', 'Месяц', 'text'),
-                ('revenue', 'Выручка', MONEY_FORMAT),
-                ('appointments', 'Визиты', NUMBER_FORMAT),
-                ('avg_check', 'Средний чек', MONEY_FORMAT),
-                ('opz_qty', 'ОПЗ', NUMBER_FORMAT),
-                ('opz_pct', 'ОПЗ %', PERCENT_FORMAT),
-                ('service_revenue', 'Услуги', MONEY_FORMAT),
-                ('goods_revenue', 'Товары', MONEY_FORMAT),
-                ('topup_revenue', 'Пополнения', MONEY_FORMAT),
-            ], monthly_rows, {'topup_revenue'}),
-            monthly_rows,
-        ),
-    ]
-    return base
-
-
-async def _payment_methods_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_ids: list[int],
-    factual_at: datetime,
-) -> dict[str, Any]:
-    breakdown = await fetch_payment_breakdown(db, start, end, company_ids, factual_at)
-    branches = breakdown['branches']
-    multi = len(branches) > 1
-    # Revenue includes top-ups, so the coverage verdict is the Overview's, not a new one.
-    source_status, missing_components = await _source_coverage_status(
-        db, start, end, None, None, company_ids_override=company_ids
-    )
-    base['missing_sources'] = sorted(missing_components)
-    if source_status == 'partial':
-        base['source_status'] = 'partial'
-    if not branches:
-        # Every branch of the selection is outside its reporting window for this period: there
-        # is no column to draw, and a table of one "Показатель" header reads as a broken report.
-        base['notes'].append({
-            'kind': 'warning',
-            'title': 'Нет данных',
-            'text': 'За выбранный период у филиала нет данных: он не входил в отчётность за эти даты.',
-        })
-        return base
-
-    def total_of(key: str) -> float | None:
-        values = [branch[key] for branch in branches if branch[key] is not None]
-        # `+ 0.0` keeps a cancelled-out sum from rounding to -0.0, which the SPA prints as "-0".
-        return round(sum(values), 2) + 0.0 if values else None
-
-    total = {
-        'revenue': total_of('revenue') or 0.0,
-        'cash': total_of('cash') or 0.0,
-        'cashless': total_of('cashless') or 0.0,
-        'yandex_pay': total_of('yandex_pay'),
-        'other': total_of('other') or 0.0,
-    }
-    forms = [('cash', 'Наличные'), ('cashless', 'Безналичные'), ('yandex_pay', 'Яндекс Пэй')]
-    if any(branch['other'] for branch in branches):
-        forms.append(('other', 'Прочие кассы'))
-
-    def share(value: float | None, revenue: float) -> float | None:
-        return round(value / revenue * 100, 2) if value is not None and revenue else None
-
-    def positive_or_none(value: float | None) -> float | None:
-        return value if value is not None and value >= 0 else None
-
-    columns = ([('total', 'Все филиалы')] if multi else []) + [
-        (f"company_{branch['company_id']}", branch['title']) for branch in branches
-    ]
-    column_values = ([total] if multi else []) + branches
-
-    def metric_row(label: str, key: str, as_share: bool) -> dict[str, Any]:
-        row: dict[str, Any] = {'metric': label}
-        for (column_key, _), values in zip(columns, column_values):
-            row[column_key] = share(values[key], values['revenue']) if as_share else values[key]
-        return row
-
-    base['cards'] = [
-        _card('Выручка', total['revenue'], MONEY_FORMAT),
-        _card('Доля наличных', share(total['cash'], total['revenue']), PERCENT_FORMAT),
-        _card('Доля безналичных', share(total['cashless'], total['revenue']), PERCENT_FORMAT),
-        _card('Доля Яндекс Пэй', share(total['yandex_pay'], total['revenue']), PERCENT_FORMAT),
-    ]
-    # The network column is last in the chart, first in the tables: bars read branch by branch.
-    chart_rows = branches + ([total] if multi else [])
-    chart_labels = [row['title'] for row in branches] + (['Все филиалы'] if multi else [])
-    base['charts'] = [
-        _chart(
-            'payment_shares_by_branch',
-            'Доли форм оплаты по филиалам',
-            'bar',
-            chart_labels,
-            [
-                {
-                    'label': label,
-                    'data': [share(values[key], values['revenue']) for values in chart_rows],
-                    'format': PERCENT_FORMAT,
-                }
-                for key, label in forms
-            ],
-            stacked=True,
-        ),
-        _chart(
-            'payment_shares_network',
-            'Структура выручки',
-            'doughnut',
-            [label for _, label in forms],
-            [{
-                'label': 'Доля',
-                # An arc is drawn from |value|, so a negative share (Yandex Pay above the cashless
-                # sum, flagged in the notes) would show up as a positive slice: left out here, and
-                # still negative in the tables.
-                'data': [positive_or_none(share(total[key], total['revenue'])) for key, _ in forms],
-                'format': PERCENT_FORMAT,
-            }],
-        ),
-    ]
-    if not total['revenue']:
-        # No revenue, no shares: both charts would be empty frames.
-        base['charts'] = []
-    # A trend needs two points; the last chart, across the whole grid, because twelve months do not fit half of it.
-    monthly = breakdown['monthly']
-    trend_drawn = bool(total['revenue']) and len(monthly) >= 2
-    if trend_drawn:
-        base['charts'].append(_chart(
-            'payment_shares_by_month',
-            'Доли форм оплаты по месяцам',
-            'line',
-            [short_month_label(row['month']) for row in monthly],
-            [
-                {
-                    'label': label,
-                    'data': [share(row[key], row['revenue']) for row in monthly],
-                    'format': PERCENT_FORMAT,
-                    'fill': False,
-                }
-                for key, label in forms
-            ],
-            wide=True,
-            x_kind='time',
-        ))
-    table_columns = [('metric', 'Показатель', 'text')]
-    # Shares first: the structure is what the report is read for, the roubles back it up.
-    # Branch titles are long column headers, so they wrap instead of stretching the table.
-    base['tables'] = [
-        _table(
-            'payment_shares',
-            'Доли форм оплаты',
-            table_columns + [(key, label, PERCENT_FORMAT) for key, label in columns],
-            [metric_row(label, key, True) for key, label in forms],
-            wrap_headers=True,
-            row_key='metric',
-        ),
-        _table(
-            'payment_amounts',
-            'Суммы по формам оплаты',
-            table_columns + [(key, label, MONEY_FORMAT) for key, label in columns],
-            [metric_row('Выручка', 'revenue', False)] + [metric_row(label, key, False) for key, label in forms],
-            wrap_headers=True,
-            row_key='metric',
-        ),
-    ]
-
-    base['notes'].append({
-        'kind': 'info',
-        'title': 'Методика',
-        'text': (
-            'Выручка считается так же, как на Обзоре: услуги завершённых визитов, товары и пополнения. '
-            'Кассы делятся по типу счёта YClients; счета без типа попадают в «Прочие кассы». '
-            'Яндекс Пэй вводится вручную за месяц с 1-го числа по дату «данные по» и вычитается из безналичных.'
-        ),
-    })
-    unapplied = [branch for branch in branches if not branch['yandex_pay_applied']]
-    if unapplied:
-        # The trend decides value by value, so it can carve Yandex Pay out where the tables above do not.
-        trend_note = (
-            ' На графике по месяцам Яндекс Пэй вычтен там, где введённая сумма укладывается в период.'
-            if trend_drawn and any(row['yandex_pay'] is not None for row in monthly)
-            else ''
-        )
-        base['notes'].append({
-            'kind': 'warning',
-            'title': 'Яндекс Пэй не учтён',
-            'text': f'{_unapplied_phrases(unapplied, branches, end)} Безналичные показаны целиком, как в YClients.{trend_note}',
-        })
-    missing = [branch for branch in branches if branch['yandex_pay_missing_months']]
-    if missing:
-        # A long period turns "every missing month of every branch" into a wall of text, so a
-        # branch with nothing entered is one name in one phrase, and the months are shown
-        # only where some were entered and the gap is the news.
-        untouched = [branch['title'] for branch in missing if branch['yandex_pay'] is None]
-        gaps = [
-            f"{branch['title']}: {describe_months(branch['yandex_pay_missing_months'])}"
-            for branch in missing
-            if branch['yandex_pay'] is not None
-        ]
-        phrases = gaps + ([f"Не введён ни за один месяц периода: {', '.join(untouched)}"] if untouched else [])
-        base['notes'].append({
-            'kind': 'warning',
-            'title': 'Яндекс Пэй введён не за все месяцы',
-            'text': '. '.join(phrases),
-        })
-    partial_note = _data_through_note(branches, end, factual_branch_date(factual_at))
-    if partial_note:
-        base['notes'].append(partial_note)
-    excess = [branch for branch in branches if branch['cashless'] < 0]
-    if excess:
-        base['notes'].append({
-            'kind': 'warning',
-            'title': 'Яндекс Пэй больше безналичных YClients',
-            'text': (
-                f"{', '.join(branch['title'] for branch in excess)}. "
-                'Проверьте введённую сумму или способ проведения оплат Яндекс Пэй в YClients.'
-            ),
-        })
-    # The table nets a branch over the whole period, so one month can dip below zero in the trend
-    # while every branch above stays positive; without a word the line reads as a broken report.
-    negative_months = [row['month'] for row in monthly if row['cashless'] < 0] if trend_drawn else []
-    if negative_months:
-        base['notes'].append({
-            'kind': 'warning',
-            'title': 'Яндекс Пэй больше безналичных YClients по месяцам',
-            'text': (
-                f"{describe_months(negative_months)}. "
-                'Проверьте введённую сумму или способ проведения оплат Яндекс Пэй в YClients.'
-            ),
-        })
-    return base
-
-
-def _unapplied_phrases(unapplied: list[dict[str, Any]], branches: list[dict[str, Any]], end: date) -> str:
-    """Why Yandex Pay is not netted out of these branches' cashless, in the words the period's reader needs."""
-
-    def who(group: list[dict[str, Any]]) -> str:
-        return '' if len(group) == len(branches) else f"{', '.join(branch['title'] for branch in group)}: "
-
-    starts_mid = [b for b in unapplied if b['yandex_pay_unapplied_reason'] == REASON_STARTS_MID_MONTH]
-    beyond = [b for b in unapplied if b['yandex_pay_unapplied_reason'] == REASON_BEYOND_PERIOD]
-    phrases = []
-    if starts_mid:
-        phrases.append(
-            f'{who(starts_mid)}Яндекс Пэй вводится за месяц с 1-го числа, а период начинается позже — '
-            'выберите период с 1-го числа месяца.'
-        )
-    if beyond:
-        covered = ', '.join(
-            f"{b['title']} (данные по {format_day(date.fromisoformat(b['yandex_pay_unapplied_data_through']), end.year)})"
-            for b in beyond
-        )
-        phrases.append(
-            f'Введённая сумма Яндекс Пэй покрывает дни после конца периода: {covered}. '
-            'Продлите период хотя бы до этой даты.'
-        )
-    return ' '.join(phrases)
-
-
-def _data_through_note(
-    branches: list[dict[str, Any]],
-    end: date,
-    today: date,
-) -> dict[str, Any] | None:
-    """Info note for counted Yandex Pay values entered before their month was over, by month and date."""
-    partial: dict[str, dict[date, list[str]]] = {}
-    for branch in branches:
-        for month, iso in branch['yandex_pay_data_through'].items():
-            through = date.fromisoformat(iso)
-            month_start = date.fromisoformat(f'{month}-01')
-            if through < month_start.replace(day=monthrange(month_start.year, month_start.month)[1]):
-                partial.setdefault(month, {}).setdefault(through, []).append(branch['title'])
-    if not partial:
-        return None
-    lines = []
-    for month, by_day in sorted(partial.items()):
-        groups = [
-            f"{'данные по' if index == 0 else 'по'} {format_day(through, end.year)} — {', '.join(titles)}"
-            for index, (through, titles) in enumerate(sorted(by_day.items(), reverse=True))
-        ]
-        lines.append(f"{month_label(month)}: {'; '.join(groups)}")
-    text = '. '.join(lines) + '.'
-    revenue_through = min(end, today)
-    if any(through < revenue_through for by_day in partial.values() for through in by_day):
-        text += (
-            f' Выручка YClients посчитана по {format_day(revenue_through, end.year)}, поэтому доля Яндекс Пэй '
-            'за дни после даты «данные по» может быть занижена.'
-        )
-    return {'kind': 'info', 'title': 'Яндекс Пэй внесён не за весь месяц', 'text': text}
-
-
-async def _staff_rows(
-    db: AsyncSession,
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-) -> list[dict[str, Any]]:
-    appt_stmt = (
-        select(
-            Appointment.staff_id.label('staff_id'),
-            func.min(Staff.name).label('staff_name'),
-            func.min(Company.title).label('company_title'),
-            func.count(func.distinct(Appointment.id)).label('appointments'),
-            func.count(
-                func.distinct(
-                    case((Appointment.attendance == COMPLETED_ATTENDANCE, Appointment.id))
-                )
-            ).label('completed'),
-            func.count(func.distinct(Appointment.client_id)).label('clients'),
-        )
-        .outerjoin(Staff, Staff.id == Appointment.staff_id)
-        .outerjoin(Company, Company.id == Appointment.company_id)
-        .where(and_(*_appointment_conditions(
-            start,
-            end,
-            company_id,
-            staff_id,
-            allowed_company_ids=allowed_company_ids,
-            factual_at=factual_at,
-        )))
-        .group_by(Appointment.staff_id)
-    )
-    rev_stmt = (
-        select(
-            Appointment.staff_id.label('staff_id'),
-            func.min(Staff.name).label('staff_name'),
-            func.min(Company.title).label('company_title'),
-            func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
-        )
-        .select_from(FinancialTransaction)
-        .join(Appointment, financial_appointment_match_condition())
-        .outerjoin(
-            AccountCatalog,
-            and_(
-                AccountCatalog.company_id == FinancialTransaction.company_id,
-                AccountCatalog.account_id == FinancialTransaction.account_id,
-            ),
-        )
-        .outerjoin(Staff, Staff.id == Appointment.staff_id)
-        .outerjoin(Company, Company.id == Appointment.company_id)
-        .where(
-            _service_paid_filters(
-                start,
-                end,
-                company_id,
-                staff_id,
-                allowed_company_ids=allowed_company_ids,
-                factual_at=factual_at,
-            ),
-            _physical_account_condition(),
-        )
-        .group_by(Appointment.staff_id)
-    )
-    appt_rows = (await db.execute(appt_stmt)).all()
-    rows_by_staff: dict[int | None, dict[str, Any]] = {}
-    for row in appt_rows:
-        completed = int(row.completed or 0)
-        rows_by_staff[row.staff_id] = {
-            'staff_id': row.staff_id,
-            'staff_name': row.staff_name or f"Сотрудник {row.staff_id or '—'}",
-            'company_title': row.company_title,
-            'appointments': int(row.appointments or 0),
-            'completed': completed,
-            'clients': int(row.clients or 0),
-            'revenue': 0.0,
-            'avg_check': 0.0,
-        }
-    for row in (await db.execute(rev_stmt)).all():
-        item = rows_by_staff.setdefault(row.staff_id, {
-            'staff_id': row.staff_id,
-            'staff_name': row.staff_name or f"Сотрудник {row.staff_id or '—'}",
-            'company_title': row.company_title,
-            'appointments': 0,
-            'completed': 0,
-            'clients': 0,
-            'revenue': 0.0,
-            'avg_check': 0.0,
-        })
-        item['revenue'] = float(row.revenue or 0)
-        item['avg_check'] = (
-            item['revenue'] / item['completed'] if item['completed'] else 0.0
-        )
-    rows = list(rows_by_staff.values())
-    # staff_id is a unique final tiebreaker: without it, staff tied on revenue and
-    # completed count swap places whenever the query plan changes.
-    rows.sort(
-        key=lambda item: (
-            item['revenue'],
-            item['completed'],
-            item['staff_id'] if item['staff_id'] is not None else -1,
-        ),
-        reverse=True,
-    )
-    return rows
-
-
-async def _clients_rows(
-    db: AsyncSession,
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-) -> list[dict[str, Any]]:
-    visits_stmt = (
-        select(
-            Appointment.client_id.label('client_id'),
-            func.count(func.distinct(Appointment.id)).label('visits'),
-        )
-        .where(and_(*_appointment_conditions(
-            start,
-            end,
-            company_id,
-            staff_id,
-            attended_only=True,
-            allowed_company_ids=allowed_company_ids,
-            factual_at=factual_at,
-        )))
-        .group_by(Appointment.client_id)
-    )
-    revenue_stmt = (
-        select(
-            Appointment.client_id.label('client_id'),
-            func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
-        )
-        .select_from(FinancialTransaction)
-        .join(Appointment, financial_appointment_match_condition())
-        .outerjoin(
-            AccountCatalog,
-            and_(
-                AccountCatalog.company_id == FinancialTransaction.company_id,
-                AccountCatalog.account_id == FinancialTransaction.account_id,
-            ),
-        )
-        .where(
-            _service_paid_filters(
-                start,
-                end,
-                company_id,
-                staff_id,
-                allowed_company_ids=allowed_company_ids,
-                factual_at=factual_at,
-            ),
-            _physical_account_condition(),
-        )
-        .group_by(Appointment.client_id)
-    )
-    clients: dict[int | None, dict[str, Any]] = {}
-    for row in (await db.execute(visits_stmt)).all():
-        client_id = int(row.client_id) if row.client_id is not None else None
-        clients[client_id] = {
-            'visits': int(row.visits or 0),
-            'revenue': 0.0,
-            'lifetime_visits': 0,
-        }
-    for row in (await db.execute(revenue_stmt)).all():
-        client_id = int(row.client_id) if row.client_id is not None else None
-        client = clients.setdefault(
-            client_id,
-            {'visits': 0, 'revenue': 0.0, 'lifetime_visits': 0},
-        )
-        client['revenue'] = float(row.revenue or 0)
-    # Deliberately not bounded by the report's client ids: binding them would put tens of
-    # thousands of parameters into one statement and trip asyncpg's 32767 ceiling on a
-    # full-history report. The aggregate is grouped in Postgres and cheap. The staff
-    # filter is dropped on purpose — it selects clients, it does not shorten their
-    # history — and a client who only ever paid keeps a lifetime count of 0. Visit-frequency
-    # buckets follow the whole history, which the period-scoped `visits` cannot give.
-    lifetime_stmt = (
-        select(
-            Appointment.client_id.label('client_id'),
-            func.count(func.distinct(Appointment.id)).label('lifetime_visits'),
-        )
-        .where(and_(*_appointment_conditions(
-            None,
-            end,
-            company_id,
-            None,
-            attended_only=True,
-            allowed_company_ids=allowed_company_ids,
-            factual_at=factual_at,
-        )))
-        .group_by(Appointment.client_id)
-    )
-    for row in (await db.execute(lifetime_stmt)).all():
-        client_id = int(row.client_id) if row.client_id is not None else None
-        client = clients.get(client_id)
-        if client is not None:
-            client['lifetime_visits'] = int(row.lifetime_visits or 0)
-
-    rows = [
-        {
-            'client_id': client_id,
-            'visits': int(client['visits']),
-            'lifetime_visits': int(client['lifetime_visits']),
-            'revenue': float(client['revenue']),
-        }
-        for client_id, client in clients.items()
-    ]
-    # client_id is a unique final tiebreaker (it can be None for the "no client" bucket,
-    # which sorts last): without it, clients tied on revenue swap places whenever the
-    # query plan changes.
-    rows.sort(
-        key=lambda item: (
-            item['revenue'],
-            item['client_id'] if item['client_id'] is not None else -1,
-        ),
-        reverse=True,
-    )
-    return rows
-
-
-def _client_pareto_rows(
-    rows: list[dict[str, Any]],
-    total_revenue: float | None = None,
-) -> list[dict[str, Any]]:
-    if not rows:
-        return []
-    # client_id as the final tiebreaker only decides which of two equally-ranked clients
-    # lands on which side of a decile cut; since they are tied on revenue, every bucket's
-    # revenue/clients totals are unaffected either way — this only removes the plan-order
-    # dependence of *which* client that is.
-    sorted_rows = sorted(
-        rows,
-        key=lambda item: (
-            float(item.get('revenue') or 0),
-            item.get('client_id') if item.get('client_id') is not None else -1,
-        ),
-        reverse=True,
-    )
-    revenue_denominator = (
-        float(total_revenue)
-        if total_revenue is not None
-        else sum(float(row.get('revenue') or 0) for row in sorted_rows)
-    )
-    total_clients = len(sorted_rows)
-    top_count = max(1, (total_clients + 9) // 10)
-    middle_count = max(0, (total_clients * 5 + 9) // 10 - top_count)
-    buckets = [
-        ('Топ 10% клиентов', sorted_rows[:top_count]),
-        ('Следующие 40%', sorted_rows[top_count:top_count + middle_count]),
-        ('Остальные 50%', sorted_rows[top_count + middle_count:]),
-    ]
-    out = []
-    for label, bucket_rows in buckets:
-        revenue = sum(float(row.get('revenue') or 0) for row in bucket_rows)
-        clients = len(bucket_rows)
-        out.append({
-            'bucket': label,
-            'clients': clients,
-            'clients_pct': 100.0 * clients / total_clients if total_clients else 0.0,
-            'revenue': revenue,
-            'revenue_pct': 100.0 * revenue / revenue_denominator if revenue_denominator else 0.0,
-            'avg_revenue_per_client': revenue / clients if clients else 0.0,
-        })
-    return out
-
-
-async def _client_recency_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-    period_preset: str | None = None,
-) -> dict[str, Any]:
-    # The Overview's new/repeat cards link straight here, so both must measure against
-    # the same baseline. Without the preset this would silently fall back to the plain
-    # preceding window and contradict the card the user just clicked.
-    summary = await fetch_summary(
-        db,
-        start,
-        end,
-        company_id,
-        staff_id,
-        allowed_company_ids=allowed_company_ids,
-        factual_at=factual_at,
-        period_preset=period_preset,
-        # Only visit_metrics is read; the breakdown would add a YClients call whose result is dropped.
-        include_appointments_breakdown=False,
-    )
-    visits = summary.get('visit_metrics', {})
-    rows = [
-        {
-            'segment': 'Новые',
-            'clients': int(visits.get('new_clients') or 0),
-            'share': float(visits.get('new_clients_pct') or 0),
-            'clients_change_pct': visits.get('new_clients_change_pct'),
-            'share_change_pct': visits.get('new_clients_pct_change_pct'),
-        },
-        {
-            'segment': 'Повторные',
-            'clients': int(visits.get('repeat_clients') or 0),
-            'share': float(visits.get('repeat_clients_pct') or 0),
-            'clients_change_pct': visits.get('repeat_clients_change_pct'),
-            'share_change_pct': visits.get('repeat_clients_pct_change_pct'),
-        },
-    ]
-    base['notes'].append({
-        'kind': 'formula',
-        'title': 'Обезличенный расчет',
-        'text': 'Отчет показывает только агрегаты по сегментам клиентов без имен, телефонов и клиентских карточек.',
-    })
-    base['cards'] = [
-        _card('Уникальные клиенты', visits.get('unique_clients', 0), NUMBER_FORMAT),
-        _card('Новые клиенты', visits.get('new_clients', 0), NUMBER_FORMAT),
-        _card('Доля новых', visits.get('new_clients_pct', 0), PERCENT_FORMAT),
-        _card('Повторные клиенты', visits.get('repeat_clients', 0), NUMBER_FORMAT),
-        _card('Доля повторных', visits.get('repeat_clients_pct', 0), PERCENT_FORMAT),
-        _card('Визитов на клиента', visits.get('visits_per_client', 0), DECIMAL_FORMAT),
-    ]
-    base['charts'] = [
-        _chart(
-            'new_repeat_clients',
-            'Новые и повторные клиенты',
-            'doughnut',
-            [row['segment'] for row in rows],
-            [{'label': 'Клиентов', 'data': [row['clients'] for row in rows], 'format': NUMBER_FORMAT}],
-        )
-    ]
-    base['tables'] = [
-        _table(
-            'segments',
-            'Сегменты за период',
-            [
-                ('segment', 'Сегмент', 'text'),
-                ('clients', 'Клиентов', NUMBER_FORMAT),
-                ('share', 'Доля', PERCENT_FORMAT),
-                ('clients_change_pct', 'Изменение клиентов', PERCENT_FORMAT),
-                ('share_change_pct', 'Изменение доли', PERCENT_FORMAT),
-            ],
-            rows,
-            row_key='segment',
-        )
-    ]
-    return base
-
-
-async def _leaderboard_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-) -> dict[str, Any]:
-    started_at = time.perf_counter()
-    try:
-        return await _leaderboard_payload_impl(
-            db,
-            base,
-            start,
-            end,
-            company_id,
-            staff_id,
-            allowed_company_ids,
-            factual_at,
-        )
-    except (ReportCalculationError, *INFRASTRUCTURE_ERRORS) as error:
-        # Only a failing database is retryable; anything else is a defect (500) or a refused input (400).
-        logger.exception(
-            'staff_leaderboard failed stage=%s start=%s end=%s company_id=%s',
-            getattr(error, 'stage', 'payload'), start.isoformat(), end.isoformat(), company_id,
-        )
-        try:
-            await db.rollback()
-        except Exception as rollback_error:  # noqa: BLE001 - the original failure is what the caller needs
-            logger.warning('staff_leaderboard rollback failed: %s', type(rollback_error).__name__)
-        if isinstance(error, ReportCalculationError):
-            raise
-        raise ReportCalculationError('staff leaderboard calculation failed', stage='payload') from error
-    finally:
-        logger.info(
-            'staff_leaderboard finished start=%s end=%s company_id=%s duration_ms=%s',
-            start.isoformat(), end.isoformat(), company_id, round((time.perf_counter() - started_at) * 1000),
-        )
-
-
-async def _leaderboard_payload_impl(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-) -> dict[str, Any]:
-    stage_started = time.perf_counter()
-    try:
-        plan = await fetch_plan_fact(
-            db,
-            start,
-            end,
-            company_id,
-            staff_id,
-            allowed_company_ids=allowed_company_ids,
-            force_allowed=allowed_company_ids is not None,
-            include_extra_service_revenue=True,
-            include_all_staff_in_leaderboards=True,
-            include_staff_leaderboards=True,
-            factual_at=factual_at,
-        )
-    except INFRASTRUCTURE_ERRORS as error:
-        raise ReportCalculationError('staff leaderboard plan/fact failed', stage='plan_fact') from error
-    logger.info(
-        'staff_leaderboard plan_fact ready start=%s end=%s company_id=%s duration_ms=%s',
-        start.isoformat(), end.isoformat(), company_id, round((time.perf_counter() - stage_started) * 1000),
-    )
-    boards = plan.get('staff_leaderboards', {})
-    partial_reasons = set(boards.get('_partial_reasons') or [])
-    if partial_reasons:
-        base['source_status'] = 'partial'
-        if 'extra_service_revenue' in partial_reasons:
-            base['notes'].append({
-                'kind': 'warning',
-                'title': 'Часть рейтинга временно недоступна',
-                'text': 'Не удалось рассчитать суммы допуслуг. Количество и проценты показаны полностью.',
-            })
-        if 'staff_schedules' in partial_reasons:
-            base['notes'].append({
-                'kind': 'warning',
-                'title': 'Не все графики администраторов загружены',
-                'text': (
-                    'Администраторы без полного покрытия выбранного периода исключены '
-                    'из рейтинга допуслуг.'
-                ),
-            })
-
-    staff_col = ('staff', 'Сотрудник', 'text')
-    branch_col = ('company_title', 'Барбершоп', 'text')
-    qty_col = ('qty', 'Кол-во, шт', NUMBER_FORMAT)
-    extra_share_col = ('share_pct', 'Доля доп. услуг по метке, %', PERCENT_FORMAT)
-    cosmo_share_col = ('share_pct', 'Доля продаж косметики, %', PERCENT_FORMAT)
-
-    revenue_barber = boards.get('revenue_barber', [])
-    revenue_admin = boards.get('revenue_admin', [])
-    if any(
-        boards.get(key)
-        for key in (
-            'extra_services_admin',
-            'opz_admin',
-            'revenue_admin',
-        )
-    ):
-        base['notes'].append({
-            'kind': 'info',
-            'title': 'Область расчета показателей администраторов',
-            'text': (
-                'Личная выручка и косметика относятся к самому продавцу; '
-                'ОПЗ — к записям под ответственностью администратора; '
-                'допуслуги — ко всему филиалу во время его смен.'
-            ),
-        })
-    if staff_id is not None:
-        selected_revenue = (revenue_barber or revenue_admin)
-        base['cards'] = [
-            _card(
-                'Личная выручка выбранного сотрудника',
-                selected_revenue[0]['value'] if selected_revenue else 0,
-                MONEY_FORMAT,
-            ),
-        ]
-    else:
-        base['cards'] = [
-            _card(
-                'Топ выручка мастера',
-                revenue_barber[0]['value'] if revenue_barber else 0,
-                MONEY_FORMAT,
-            ),
-        ]
-    charts = []
-    if revenue_barber:
-        charts.append(
-            _chart(
-                'leaderboard_revenue_barber',
-                'Топ по выручке — мастера',
-                'bar',
-                [row['staff'] for row in revenue_barber],
-                [{'label': 'Выручка', 'data': [row['value'] for row in revenue_barber], 'format': MONEY_FORMAT}],
-            )
-        )
-    if revenue_admin:
-        charts.append(
-            _chart(
-                'leaderboard_revenue_admin',
-                'Топ по личной выручке — администраторы',
-                'bar',
-                [row['staff'] for row in revenue_admin],
-                [{'label': 'Выручка', 'data': [row['value'] for row in revenue_admin], 'format': MONEY_FORMAT}],
-            )
-        )
-    if charts:
-        base['charts'] = charts
-    base['tables'] = [
-        _ranking_table(
-            'extra_services',
-            'Топ по допуслугам — мастера',
-            [staff_col, branch_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), ('pct', 'Доп. услуги, %', PERCENT_FORMAT), extra_share_col],
-            boards.get('extra_services_barber_rankings', {}),
-            'pct',
-            [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
-            hide_when_empty=True,
-        ),
-        _ranking_table(
-            'extra_services_admin',
-            'Топ по допуслугам филиала во время смен — администраторы',
-            [staff_col, branch_col, qty_col, ('pct', 'Доп. услуги, %', PERCENT_FORMAT)],
-            boards.get('extra_services_admin_rankings', {}),
-            'pct',
-            [('qty', 'По количеству'), ('pct', 'По проценту')],
-            hide_when_empty=True,
-        ),
-        _ranking_table(
-            'cosmo_barber',
-            'Топ по косметике — мастера',
-            [staff_col, branch_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), ('pct', 'Косметика, %', PERCENT_FORMAT), cosmo_share_col],
-            boards.get('cosmo_barber_rankings', {}),
-            'sum',
-            [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
-            hide_when_empty=True,
-        ),
-        _ranking_table(
-            'cosmo_admin',
-            'Топ по косметике — админы',
-            [staff_col, branch_col, qty_col, ('sum', 'Сумма', MONEY_FORMAT), ('pct', 'Косметика, %', PERCENT_FORMAT), cosmo_share_col],
-            boards.get('cosmo_admin_rankings', {}),
-            'sum',
-            [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
-            hide_when_empty=True,
-        ),
-        _ranking_table(
-            'opz_barber',
-            'Топ по ОПЗ — мастера',
-            [staff_col, branch_col, qty_col, ('pct', 'ОПЗ, %', PERCENT_FORMAT)],
-            boards.get('opz_barber_rankings', {}),
-            'pct',
-            [('qty', 'По количеству'), ('pct', 'По проценту')],
-            hide_when_empty=True,
-        ),
-        _ranking_table(
-            'opz_admin',
-            'Топ по ОПЗ в записях под ответственностью — администраторы',
-            [staff_col, branch_col, qty_col, ('pct', 'ОПЗ, %', PERCENT_FORMAT)],
-            boards.get('opz_admin_rankings', {}),
-            'pct',
-            [('qty', 'По количеству'), ('pct', 'По проценту')],
-            hide_when_empty=True,
-        ),
-        # Not hide_when_empty: manual review facts are often unfilled, so this
-        # top anchors the report (and shows its empty state) even when all
-        # other leaderboards are empty for the period.
-        _table(
-            'reviews_admin',
-            'Топ по отзывам — админы',
-            [staff_col, branch_col, ('value', 'Отзывы', NUMBER_FORMAT)],
-            boards.get('reviews_admin', []),
-        ),
-        _table(
-            'revenue_barber',
-            'Топ по выручке — мастера',
-            [staff_col, branch_col, ('value', 'Выручка', MONEY_FORMAT)],
-            revenue_barber,
-            hide_when_empty=True,
-        ),
-        _table(
-            'revenue_admin',
-            'Топ по личной выручке — администраторы',
-            [staff_col, branch_col, ('value', 'Выручка', MONEY_FORMAT)],
-            revenue_admin,
-            hide_when_empty=True,
-        ),
-        _table(
-            'avg_check_plan_branch',
-            'Топ выполнения плана среднего чека — барбершопы',
-            [('staff', 'Барбершоп', 'text'), ('plan', 'План', MONEY_FORMAT), ('fact', 'Факт', MONEY_FORMAT), ('pct', 'Выполнение, %', PERCENT_FORMAT)],
-            boards.get('avg_check_plan_branch', []),
-            hide_when_empty=True,
-        ),
-        _table(
-            'avg_check_plan_staff',
-            'Топ выполнения плана среднего чека — мастера',
-            [staff_col, branch_col, ('plan', 'План', MONEY_FORMAT), ('fact', 'Факт', MONEY_FORMAT), ('pct', 'Выполнение, %', PERCENT_FORMAT)],
-            boards.get('avg_check_plan_staff', []),
-            hide_when_empty=True,
-        ),
-    ]
-    return base
 
 

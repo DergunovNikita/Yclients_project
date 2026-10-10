@@ -6,6 +6,7 @@ import {
   STAFF_PLAN_SETTING_FIELDS,
   buildPlanSettingsPayload,
   isScheduleAttributionDiagnostic,
+  planSettingsInputReader,
 } from '../src/planSettings.js';
 
 test('plan settings payload preserves the editable field contract', () => {
@@ -87,4 +88,49 @@ test('schedule attribution diagnostics share the coverage renderer', () => {
   assert.equal(isScheduleAttributionDiagnostic('staff_schedule_coverage'), true);
   assert.equal(isScheduleAttributionDiagnostic('appointment_timestamp_coverage'), true);
   assert.equal(isScheduleAttributionDiagnostic('admin_barber_clients_mismatch'), false);
+});
+
+// The per-cell selector the payload used to run, modelled over a list of inputs in document order.
+function legacyRead(inputs, scope, row, field) {
+  const match = inputs.find(({ dataset }) => (
+    (scope === 'branch' ? dataset.planBranch !== undefined : dataset.planStaff !== undefined)
+    && (scope === 'branch'
+      ? dataset.companyId === String(row.company_id)
+      : dataset.staffId === String(row.staff_id))
+    && dataset.field === field
+  ));
+  const value = match?.value.trim() || '';
+  return value === '' ? null : value;
+}
+
+test('reading the inputs through one index gives what the per-cell selector gave', () => {
+  const input = (scope, ids, field, value) => ({
+    dataset: { [scope === 'branch' ? 'planBranch' : 'planStaff']: '', field, ...ids },
+    value,
+  });
+  const inputs = [
+    input('branch', { companyId: '7' }, 'wax_pct', ' 12,5 '),
+    input('branch', { companyId: '7' }, 'opz_pct', ''),
+    input('branch', { companyId: '8' }, 'wax_pct', '3'),
+    input('staff', { companyId: '7', staffId: '11' }, 'clients', '40'),
+    input('staff', { companyId: '7', staffId: '11' }, 'avg_check_total', '   '),
+    input('staff', { companyId: '7', staffId: '12' }, 'reviews_qty', '8'),
+    // The same staff id in a second branch row: the first one in the document keeps winning.
+    input('staff', { companyId: '9', staffId: '12' }, 'reviews_qty', '99'),
+    { dataset: { somethingElse: '' }, value: 'ignored' },
+  ];
+  const read = planSettingsInputReader(inputs);
+  const rows = [
+    ['branch', { company_id: 7 }], ['branch', { company_id: '8' }], ['branch', { company_id: 9 }],
+    ['staff', { company_id: 7, staff_id: 11 }], ['staff', { staff_id: '12' }], ['staff', { staff_id: 13 }],
+  ];
+  const fields = [...BRANCH_PLAN_SETTING_FIELDS, ...STAFF_PLAN_SETTING_FIELDS];
+  for (const [scope, row] of rows) {
+    for (const field of fields) {
+      assert.equal(read(scope, row, field), legacyRead(inputs, scope, row, field), `${scope} ${JSON.stringify(row)} ${field}`);
+    }
+  }
+  assert.equal(read('branch', { company_id: 7 }, 'wax_pct'), '12,5');
+  assert.equal(read('staff', { staff_id: 12 }, 'reviews_qty'), '8');
+  assert.equal(read('staff', { staff_id: 11 }, 'avg_check_total'), null);
 });

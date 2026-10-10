@@ -508,6 +508,8 @@
     "totalMoneyMeta": "{value} всего",
     "syncUpdatedAt": "данные актуальны на {value}",
     "syncNoSuccessfulUpdates": "данные актуальны: нет успешных обновлений",
+    "syncTenantFailed": "данные могли устареть: нет доступа к YClients, последнее обновление {value}",
+    "syncTenantFailedNoUpdates": "данные могли устареть: нет доступа к YClients, успешных обновлений нет",
     "syncStatusUnavailable": "данные актуальны: статус недоступен",
     "planSubhead": "План/факт по филиалам и сотрудникам",
     "planSettingsSubhead": "Установка планов по месяцам",

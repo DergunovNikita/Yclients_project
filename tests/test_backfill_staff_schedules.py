@@ -78,7 +78,7 @@ class FakeControl:
 
 
 def _args():
-    return Namespace(start=None, end=date(2025, 1, 31), company_ids=None, chunk_days=31)
+    return Namespace(start=None, end=date(2025, 1, 31), company_ids=None, chunk_days=31, credential_id=None)
 
 
 def test_backfill_windows_run_newest_first_without_gaps():
@@ -161,3 +161,72 @@ def test_backfill_locks_on_a_connection_no_pooled_session_can_take(monkeypatch):
         'the lock lives on the pooled ORM Session: a commit hands that connection back to '
         'the pool and the unlock lands on a different connection'
     )
+
+
+class CompanyQuery(FakeQuery):
+    def all(self):
+        return [type('CompanyStub', (), {
+            'id': 5, 'external_id': 500, 'title': 'Salon', 'reporting_start_date': date(2025, 1, 30),
+        })()]
+
+    def group_by(self, *_args):
+        return FakeQuery()
+
+
+class CompanySession(FakeSession):
+    def query(self, *_args):
+        return CompanyQuery()
+
+
+def _credential(credential_id=7):
+    from yclients_credentials import YClientsCredentialValue
+
+    return YClientsCredentialValue(
+        id=credential_id, title='Stored', partner_token='p', login='l', password='x', company_ids=(),
+        portal_account_id=1,
+    )
+
+
+def _patch_main(monkeypatch, session, **args):
+    database = FakeDatabase(session)
+    control = FakeControl(acquired=True)
+    monkeypatch.setattr(backfill_staff_schedules, 'parse_args', lambda: Namespace(**{
+        'start': None, 'end': date(2025, 1, 31), 'company_ids': None, 'chunk_days': 31,
+        'credential_id': None, **args,
+    }))
+    monkeypatch.setattr(backfill_staff_schedules, 'init_database', lambda *_args: database)
+    monkeypatch.setattr(backfill_staff_schedules, 'SyncControlService', lambda: control)
+    return control
+
+
+def test_backfill_refuses_a_credential_id_that_is_not_stored_and_active(monkeypatch):
+    control = _patch_main(monkeypatch, CompanySession(), credential_id=99)
+    monkeypatch.setattr(backfill_staff_schedules, 'load_active_credentials_sync', lambda _db: [_credential(7)])
+
+    assert backfill_staff_schedules.main() == 1
+    assert control.released is True
+
+
+def test_backfill_uses_the_requested_stored_credential_for_every_branch(monkeypatch):
+    _patch_main(monkeypatch, CompanySession(), credential_id=7)
+    monkeypatch.setattr(backfill_staff_schedules, 'load_active_credentials_sync', lambda _db: [_credential(3), _credential(7)])
+
+    def must_not_resolve_per_branch(*_args):
+        raise AssertionError('a forced credential replaces the per-branch lookup')
+
+    monkeypatch.setattr(backfill_staff_schedules, 'load_credentials_for_companies_sync', must_not_resolve_per_branch)
+    built = []
+    monkeypatch.setattr(backfill_staff_schedules, '_build_api_for_credential', lambda credential: built.append(credential.id) or object())
+    synced = []
+    monkeypatch.setattr(
+        backfill_staff_schedules, 'sync_staff_schedules',
+        lambda api, db, company_id, **kwargs: synced.append((company_id, kwargs['db_company_id'])) or True,
+    )
+
+    assert backfill_staff_schedules.main() == 0
+    assert built == [7]
+    assert synced and all(item == ('500', 5) for item in synced)
+
+
+def test_backfill_has_no_environment_credential_fallback():
+    assert not hasattr(backfill_staff_schedules, '_fallback_credential')

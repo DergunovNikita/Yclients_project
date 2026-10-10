@@ -27,6 +27,29 @@ export function isScheduleAttributionDiagnostic(code) {
   return code === 'staff_schedule_coverage' || code === 'appointment_timestamp_coverage';
 }
 
+/**
+ * `readValue` for `buildPlanSettingsPayload`, over the plan inputs currently on the page.
+ *
+ * The inputs are indexed once: the payload asks for every field of every row on each keystroke, and a
+ * selector scan of the whole document per field made that rows x fields scans. Where an id repeats the
+ * first input in document order wins, as it did with `querySelector`. An empty cell is `null`.
+ */
+export function planSettingsInputReader(inputs) {
+  const values = new Map();
+  for (const input of inputs) {
+    const { planBranch, planStaff, companyId, staffId, field } = input.dataset;
+    const scope = planBranch !== undefined ? 'branch' : planStaff !== undefined ? 'staff' : null;
+    if (!scope) continue;
+    const key = `${scope}:${scope === 'branch' ? companyId : staffId}:${field}`;
+    if (values.has(key)) continue;
+    const value = (input.value || '').trim();
+    values.set(key, value === '' ? null : value);
+  }
+  return (scope, row, field) => (
+    values.get(`${scope}:${scope === 'branch' ? row.company_id : row.staff_id}:${field}`) ?? null
+  );
+}
+
 function valuesFor(fields, scope, row, readValue) {
   return Object.fromEntries(fields.map((field) => [field, readValue(scope, row, field)]));
 }

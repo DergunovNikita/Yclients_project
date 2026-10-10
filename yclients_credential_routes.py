@@ -11,7 +11,7 @@ import asyncio
 from typing import NoReturn
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,12 +39,6 @@ CREDENTIAL_PAYLOAD_INVALID_DETAIL = 'Invalid credential request'
 CREDENTIAL_TEST_FAILED_DETAIL = 'Data source authentication failed'
 CREDENTIAL_DECRYPT_FAILED_DETAIL = 'Stored credentials could not be decrypted'
 CREDENTIAL_SOURCE_UNSUPPORTED_DETAIL = 'Unsupported credential source type'
-CREDENTIAL_TEXT_LIMITS = {
-    'source_type': 32,
-    'partner_token': 4096,
-    'login': 255,
-    'password': 255,
-}
 
 
 class YClientsCredentialCreateRequest(BaseModel):
@@ -58,6 +52,17 @@ class YClientsCredentialCreateRequest(BaseModel):
     company_ids: list[int] = Field(default_factory=list)
 
 
+class YClientsCredentialTestRequest(BaseModel):
+    """Body of the unsaved-credentials check; a bad body is answered with a generic 400, not a 422."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    source_type: str | None = Field(default=None, min_length=1, max_length=32)
+    partner_token: str = Field(min_length=1, max_length=4096)
+    login: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=255)
+
+
 class YClientsCredentialUpdateRequest(BaseModel):
     source_type: str | None = Field(default=None, min_length=1, max_length=32)
     title: str | None = Field(default=None, min_length=1, max_length=255)
@@ -67,10 +72,6 @@ class YClientsCredentialUpdateRequest(BaseModel):
     password: str | None = Field(default=None, min_length=1, max_length=255)
     is_active: bool | None = None
     company_ids: list[int] | None = None
-
-
-def _credentials_config_error() -> HTTPException:
-    return HTTPException(status_code=500, detail=CREDENTIAL_STORAGE_FAILED_DETAIL)
 
 
 async def _load_credential(
@@ -120,7 +121,7 @@ async def _validated_credential_account_id(
     return portal_account_id
 
 
-async def _audit_credential_action_failure(
+async def _record_credential_failure(
     db: AsyncSession,
     *,
     actor: PortalUser,
@@ -132,6 +133,7 @@ async def _audit_credential_action_failure(
     source_type: str | None = None,
     requested_portal_account_id: int | None = None,
 ) -> None:
+    """Audit a failed credential action and commit it, so the row survives the error that follows."""
     metadata: dict = {'success': False}
     if source_type is not None:
         metadata['source_type'] = source_type
@@ -150,40 +152,30 @@ async def _audit_credential_action_failure(
         target_id=target_id,
         metadata=metadata,
     )
+    await db.commit()
 
 
-async def _raise_credential_create_failure(
+async def _raise_credential_failure(
     db: AsyncSession,
     actor: PortalUser,
-    portal_account_id: int,
+    action: str,
     exc: Exception,
+    *,
+    detail: str = CREDENTIAL_TEST_FAILED_DETAIL,
+    **audit_fields,
 ) -> NoReturn:
-    error_type = 'HTTPException' if isinstance(exc, HTTPException) else exc.__class__.__name__
-    await _audit_credential_action_failure(
-        db,
-        actor=actor,
-        action='yclients_credentials.create_failed',
-        portal_account_id=portal_account_id,
-        error_type=error_type,
+    """Audit the failure and answer with a sanitized detail: the exception text can carry secrets or internals."""
+    await _record_credential_failure(
+        db, actor=actor, action=action, error_type=exc.__class__.__name__, **audit_fields
     )
-    await db.commit()
     status_code = exc.status_code if isinstance(exc, HTTPException) else 500
-    raise HTTPException(status_code=status_code, detail=CREDENTIAL_TEST_FAILED_DETAIL) from exc
+    raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
 def _credential_failure_audit_tenant_id(actor: PortalUser) -> int | None:
     if actor.role == 'platform_admin':
         return None
     return actor.portal_account_id
-
-
-def _credential_body_string(body: dict, key: str) -> str | None:
-    value = body.get(key)
-    if not isinstance(value, str) or not value:
-        return None
-    if len(value) > CREDENTIAL_TEXT_LIMITS[key]:
-        return None
-    return value
 
 
 async def _validate_credential_companies(
@@ -238,7 +230,9 @@ async def admin_list_yclients_credentials(
     try:
         portal_account_id = await _validated_credential_account_id(db, actor, x_portal_account_id)
     except HTTPException:
-        await _audit_credential_action_failure(
+        # Only the refused tenant selection is audited: a successful read of masked payloads
+        # would write and commit a row on every page view.
+        await _record_credential_failure(
             db,
             actor=actor,
             action='yclients_credentials.listed',
@@ -246,19 +240,8 @@ async def admin_list_yclients_credentials(
             requested_portal_account_id=x_portal_account_id,
             error_type='tenant_selection_failed',
         )
-        await db.commit()
         raise
-    payloads = await list_credential_payloads(db, portal_account_id)
-    await log_portal_audit(
-        db,
-        actor_user_id=actor.id,
-        portal_account_id=portal_account_id,
-        action='yclients_credentials.listed',
-        target_type='yclients_credential',
-        metadata={'success': True, 'count': len(payloads)},
-    )
-    await db.commit()
-    return {'success': True, 'data': payloads}
+    return {'success': True, 'data': await list_credential_payloads(db, portal_account_id)}
 
 
 @router.post('/admin/yclients-credentials', dependencies=[Depends(forbid_demo)])
@@ -278,13 +261,25 @@ async def admin_create_yclients_credentials(
             _authenticated_adapter, source_type, body.partner_token, body.login, body.password
         )
     except Exception as exc:
-        await _raise_credential_create_failure(db, actor, portal_account_id, exc)
+        await _raise_credential_failure(
+            db, actor, 'yclients_credentials.create_failed', exc, portal_account_id=portal_account_id
+        )
     company_ids = list(body.company_ids)
     if not company_ids:
         try:
             company_ids = await _sync_credential_companies_from_yclients(db, portal_account_id, adapter)
         except Exception as exc:
-            await _raise_credential_create_failure(db, actor, portal_account_id, exc)
+            # A 409 here says which locations another tenant already holds; masking it as an
+            # authentication failure would send the caller to fix the wrong thing.
+            claimed = isinstance(exc, HTTPException) and exc.status_code == 409
+            await _raise_credential_failure(
+                db,
+                actor,
+                'yclients_credentials.create_failed',
+                exc,
+                detail=exc.detail if claimed else CREDENTIAL_TEST_FAILED_DETAIL,
+                portal_account_id=portal_account_id,
+            )
     await _validate_credential_companies(db, portal_account_id, company_ids)
     try:
         credential = new_credential(
@@ -296,15 +291,14 @@ async def admin_create_yclients_credentials(
             body.is_active,
         )
     except CredentialsConfigError as exc:
-        await _audit_credential_action_failure(
+        await _raise_credential_failure(
             db,
-            actor=actor,
-            action='yclients_credentials.create_failed',
+            actor,
+            'yclients_credentials.create_failed',
+            exc,
+            detail=CREDENTIAL_STORAGE_FAILED_DETAIL,
             portal_account_id=portal_account_id,
-            error_type=exc.__class__.__name__,
         )
-        await db.commit()
-        raise _credentials_config_error() from exc
 
     db.add(credential)
     await db.flush()
@@ -357,16 +351,15 @@ async def admin_update_yclients_credentials(
             is_active=body.is_active,
         )
     except CredentialsConfigError as exc:
-        await _audit_credential_action_failure(
+        await _raise_credential_failure(
             db,
-            actor=actor,
-            action='yclients_credentials.update_failed',
+            actor,
+            'yclients_credentials.update_failed',
+            exc,
+            detail=CREDENTIAL_STORAGE_FAILED_DETAIL,
             portal_account_id=credential.portal_account_id,
             target_id=credential.id,
-            error_type=exc.__class__.__name__,
         )
-        await db.commit()
-        raise _credentials_config_error() from exc
 
     if body.company_ids is not None:
         await _validate_credential_companies(db, credential.portal_account_id, body.company_ids)
@@ -428,7 +421,7 @@ async def admin_test_saved_yclients_credentials(
     try:
         credential = await _load_credential(db, credential_id, actor, x_portal_account_id)
     except HTTPException:
-        await _audit_credential_action_failure(
+        await _record_credential_failure(
             db,
             actor=actor,
             action='yclients_credentials.tested',
@@ -437,53 +430,25 @@ async def admin_test_saved_yclients_credentials(
             target_id=credential_id,
             error_type='credential_lookup_failed',
         )
-        await db.commit()
         raise
+    failure = {
+        'action': 'yclients_credentials.tested',
+        'portal_account_id': credential.portal_account_id,
+        'target_id': credential.id,
+        'source_type': SOURCE_YCLIENTS,
+    }
     try:
         value = decrypted_credential(credential)
     except Exception as exc:
         await mark_credential_failure_async(db, credential.id, CREDENTIAL_DECRYPT_FAILED_DETAIL)
-        await _audit_credential_action_failure(
-            db,
-            actor=actor,
-            action='yclients_credentials.tested',
-            portal_account_id=credential.portal_account_id,
-            target_id=credential.id,
-            source_type=SOURCE_YCLIENTS,
-            error_type=exc.__class__.__name__,
-        )
-        await db.commit()
-        raise HTTPException(status_code=500, detail=CREDENTIAL_DECRYPT_FAILED_DETAIL) from exc
+        await _raise_credential_failure(db, actor, exc=exc, detail=CREDENTIAL_DECRYPT_FAILED_DETAIL, **failure)
     try:
         result = await asyncio.to_thread(
             _test_source_credentials, SOURCE_YCLIENTS, value.partner_token, value.login, value.password
         )
-    except HTTPException as exc:
-        await mark_credential_failure_async(db, credential.id, CREDENTIAL_TEST_FAILED_DETAIL)
-        await _audit_credential_action_failure(
-            db,
-            actor=actor,
-            action='yclients_credentials.tested',
-            portal_account_id=credential.portal_account_id,
-            target_id=credential.id,
-            source_type=SOURCE_YCLIENTS,
-            error_type='HTTPException',
-        )
-        await db.commit()
-        raise HTTPException(status_code=exc.status_code, detail=CREDENTIAL_TEST_FAILED_DETAIL) from exc
     except Exception as exc:
         await mark_credential_failure_async(db, credential.id, CREDENTIAL_TEST_FAILED_DETAIL)
-        await _audit_credential_action_failure(
-            db,
-            actor=actor,
-            action='yclients_credentials.tested',
-            portal_account_id=credential.portal_account_id,
-            target_id=credential.id,
-            source_type=SOURCE_YCLIENTS,
-            error_type=exc.__class__.__name__,
-        )
-        await db.commit()
-        raise HTTPException(status_code=500, detail=CREDENTIAL_TEST_FAILED_DETAIL) from exc
+        await _raise_credential_failure(db, actor, exc=exc, **failure)
     await mark_credential_success_async(db, credential.id)
     await log_portal_audit(
         db,
@@ -505,87 +470,58 @@ async def admin_test_yclients_credentials_payload(
     actor: PortalUser = Depends(require_roles(*CREDENTIAL_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
+    action = 'yclients_credentials.payload_tested'
     try:
         portal_account_id = await _validated_credential_account_id(db, actor, x_portal_account_id)
     except HTTPException:
-        await _audit_credential_action_failure(
+        await _record_credential_failure(
             db,
             actor=actor,
-            action='yclients_credentials.payload_tested',
+            action=action,
             portal_account_id=_credential_failure_audit_tenant_id(actor),
             requested_portal_account_id=x_portal_account_id,
             error_type='tenant_selection_failed',
         )
-        await db.commit()
         raise
-    raw_source_type = body.get('source_type')
-    if raw_source_type is not None and _credential_body_string(body, 'source_type') is None:
-        await _audit_credential_action_failure(
+    try:
+        request = YClientsCredentialTestRequest.model_validate(body)
+    except ValidationError as exc:
+        source_type_rejected = any(error['loc'] == ('source_type',) for error in exc.errors())
+        await _record_credential_failure(
             db,
             actor=actor,
-            action='yclients_credentials.payload_tested',
+            action=action,
             portal_account_id=portal_account_id,
-            source_type='invalid',
+            source_type='invalid' if source_type_rejected else SOURCE_YCLIENTS,
             reason='invalid_payload',
         )
-        await db.commit()
-        raise HTTPException(status_code=400, detail=CREDENTIAL_PAYLOAD_INVALID_DETAIL)
+        # The validation text would quote the submitted secrets back; the caller gets a fixed phrase.
+        raise HTTPException(status_code=400, detail=CREDENTIAL_PAYLOAD_INVALID_DETAIL) from None
     try:
-        source_type = normalize_source_type(_credential_body_string(body, 'source_type') or SOURCE_YCLIENTS)
+        source_type = normalize_source_type(request.source_type)
     except HTTPException as exc:
-        await _audit_credential_action_failure(
+        await _record_credential_failure(
             db,
             actor=actor,
-            action='yclients_credentials.payload_tested',
+            action=action,
             portal_account_id=portal_account_id,
             source_type='invalid',
             error_type='unsupported_source_type',
         )
-        await db.commit()
         raise HTTPException(status_code=exc.status_code, detail=CREDENTIAL_SOURCE_UNSUPPORTED_DETAIL) from exc
-    partner_token = _credential_body_string(body, 'partner_token')
-    login = _credential_body_string(body, 'login')
-    password = _credential_body_string(body, 'password')
-    if not all((partner_token, login, password)):
-        await _audit_credential_action_failure(
-            db,
-            actor=actor,
-            action='yclients_credentials.payload_tested',
-            portal_account_id=portal_account_id,
-            source_type=source_type,
-            reason='invalid_payload',
-        )
-        await db.commit()
-        raise HTTPException(status_code=400, detail=CREDENTIAL_PAYLOAD_INVALID_DETAIL)
     try:
-        result = await asyncio.to_thread(_test_source_credentials, source_type, partner_token, login, password)
-    except HTTPException:
-        await _audit_credential_action_failure(
-            db,
-            actor=actor,
-            action='yclients_credentials.payload_tested',
-            portal_account_id=portal_account_id,
-            source_type=source_type,
-            error_type='HTTPException',
+        result = await asyncio.to_thread(
+            _test_source_credentials, source_type, request.partner_token, request.login, request.password
         )
-        await db.commit()
-        raise HTTPException(status_code=400, detail=CREDENTIAL_TEST_FAILED_DETAIL)
     except Exception as exc:
-        await _audit_credential_action_failure(
-            db,
-            actor=actor,
-            action='yclients_credentials.payload_tested',
-            portal_account_id=portal_account_id,
-            source_type=source_type,
-            error_type=exc.__class__.__name__,
+        await _raise_credential_failure(
+            db, actor, action, exc, portal_account_id=portal_account_id, source_type=source_type
         )
-        await db.commit()
-        raise HTTPException(status_code=500, detail=CREDENTIAL_TEST_FAILED_DETAIL) from exc
     await log_portal_audit(
         db,
         actor_user_id=actor.id,
         portal_account_id=portal_account_id,
-        action='yclients_credentials.payload_tested',
+        action=action,
         target_type='yclients_credential',
         metadata={'source_type': source_type, 'success': True},
     )

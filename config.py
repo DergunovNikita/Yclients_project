@@ -21,6 +21,8 @@ IS_PRODUCTION = APP_ENV not in NON_PRODUCTION_ENV_NAMES
 LOG_LEVEL = (os.getenv('LOG_LEVEL', 'INFO').strip() or 'INFO').upper()
 if LOG_LEVEL not in logging.getLevelNamesMapping():
     raise RuntimeError(f'LOG_LEVEL must be one of: {", ".join(logging.getLevelNamesMapping())}')
+# Zone of a branch that reports none; the sync stores it and the dashboard's "today" is read in it.
+DEFAULT_BRANCH_TIMEZONE = 'Europe/Moscow'
 PLACEHOLDER_SECRET_VALUES = {
     'change_me_local_jwt_secret',
     'change_me_sync_api_token',
@@ -133,9 +135,6 @@ def _is_exact_cors_origin(value: str) -> bool:
 # ============================================================================
 # Настройки YClients API
 # ============================================================================
-PARTNER_TOKEN = os.getenv('PARTNER_TOKEN', '')
-LOGIN = os.getenv('YCLIENTS_LOGIN', '')
-PASSWORD = os.getenv('YCLIENTS_PASSWORD', '')
 YCLIENTS_REQUEST_DELAY = _get_float('YCLIENTS_REQUEST_DELAY', 0.25)
 YCLIENTS_TIMEOUT = _get_float('YCLIENTS_TIMEOUT', 30.0)
 YCLIENTS_RETRY_TOTAL = _get_int('YCLIENTS_RETRY_TOTAL', 3)
@@ -223,6 +222,11 @@ AUTH_REFRESH_TOKEN_EXPIRE_DAYS = _get_int('AUTH_REFRESH_TOKEN_EXPIRE_DAYS', 30)
 # Keep the most recently used browser sessions and retire older logins. The
 # shared demo account is exempt because many visitors use it concurrently.
 AUTH_MAX_ACTIVE_SESSIONS = _get_int('AUTH_MAX_ACTIVE_SESSIONS', 15)
+# Rotation slides a session's expiry forward; this is the hard ceiling from the day it was created.
+AUTH_SESSION_MAX_AGE_DAYS = _get_int('AUTH_SESSION_MAX_AGE_DAYS', 90)
+# Shared with the Vercel proxy (VM_PROXY_SECRET there). Only a request carrying it is believed
+# about the visitor's address in X-Forwarded-For; without it the socket peer is the client.
+PROXY_SHARED_SECRET = os.getenv('PROXY_SHARED_SECRET', '').strip()
 AUTH_REQUIRE_LOGIN = _get_bool('AUTH_REQUIRE_LOGIN', not bool(API_KEY))
 AUTH_PUBLIC_REGISTRATION_ENABLED = _get_bool(
     'AUTH_PUBLIC_REGISTRATION_ENABLED',
@@ -286,6 +290,7 @@ def collect_production_config_errors(
     dashboard_cors_origins: str | None = DASHBOARD_CORS_ORIGINS,
     dashboard_cors_origin_regex: str | None = DASHBOARD_CORS_ORIGIN_REGEX,
     app_public_url: str | None = APP_PUBLIC_URL,
+    proxy_shared_secret: str | None = PROXY_SHARED_SECRET,
 ) -> list[str]:
     """Return production-only startup configuration errors.
 
@@ -326,6 +331,10 @@ def collect_production_config_errors(
         # Verification and reset links are built from it; a loopback or plain-http base sends
         # every e-mail with a dead or downgradable link.
         errors.append('APP_PUBLIC_URL must be a public https URL when e-mail is sent through SMTP')
+    if not _is_blank(proxy_shared_secret) and (
+        _is_placeholder(proxy_shared_secret) or len(proxy_shared_secret.strip()) < 32
+    ):
+        errors.append('PROXY_SHARED_SECRET must be unset or set to a strong non-default value')
     if not _is_blank(dashboard_cors_origin_regex):
         errors.append('DASHBOARD_CORS_ORIGIN_REGEX must be empty in production')
     if any(not _is_exact_cors_origin(origin) for origin in _cors_origins_list(dashboard_cors_origins)):

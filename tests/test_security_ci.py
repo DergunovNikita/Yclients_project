@@ -72,3 +72,12 @@ def test_frontend_audit_allowlist_entries_are_explicit():
         assert entry['advisoryIds']
         assert entry['expires']
         assert len(entry['reason']) >= 40
+
+
+def test_python_requirements_are_pinned_exactly():
+    for name in ('requirements.txt', 'requirements-dev.txt'):
+        for raw in (ROOT / name).read_text().splitlines():
+            line = raw.split('#', 1)[0].strip()
+            if not line or line.startswith('-r '):
+                continue
+            assert '==' in line and '>' not in line and '<' not in line, f'{name}: {line} is not pinned with =='

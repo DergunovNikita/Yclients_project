@@ -42,6 +42,7 @@ from sqlalchemy.sql.expression import FunctionElement
 from sqlalchemy.sql.visitors import InternalTraversal
 
 import yclients_analytics
+from config import DEFAULT_BRANCH_TIMEZONE
 from models import (
     AccountCatalog,
     Appointment,
@@ -90,7 +91,6 @@ WAITLIST_STAFF_NAME = 'лист ожидания'
 ADMIN_PLACEHOLDER_STAFF_PREFIX = 'администратор'
 PLAN_SETTINGS_SOURCE = 'dashboard_plan_settings'
 GOODS_KPI_CODES = ('wax_qty', 'camouflage_qty', 'face_care_qty', 'head_care_qty')
-DEFAULT_BRANCH_TIMEZONE = 'Europe/Moscow'
 COMPLETED_ATTENDANCE = 1
 # Ids bound into the OPZ visits read; asyncpg allows 32767 parameters per statement.
 OPZ_SURVIVOR_ID_LIMIT = 20000
@@ -170,6 +170,10 @@ def shift_months_back(day: date, months: int) -> date:
     return date(year, month, min(day.day, monthrange(year, month)[1]))
 
 
+class PeriodOutOfRangeError(ValueError):
+    """A window at the very start of the calendar has no earlier window to be measured against."""
+
+
 @dataclass(frozen=True)
 class DateRange:
     start: date
@@ -203,9 +207,15 @@ class DateRange:
         The baseline never overlaps the period it measures. A preset that does not match
         the window it arrived with (only reachable by calling the API directly) would
         otherwise compare the period against itself.
+
+        Raises:
+            PeriodOutOfRangeError: the baseline would start before year 1; the API answers 400.
         """
-        previous = self._shifted_period(preset)
-        return previous if previous.end < self.start else self._preceding_window()
+        try:
+            previous = self._shifted_period(preset)
+            return previous if previous.end < self.start else self._preceding_window()
+        except (OverflowError, ValueError) as exc:
+            raise PeriodOutOfRangeError('the period has no previous period to compare with') from exc
 
     def _shifted_period(self, preset: Optional[str]) -> DateRange:
         if preset == 'week':
@@ -1191,29 +1201,21 @@ def _topup_revenue_filters(
     return and_(*parts)
 
 
-async def _source_coverage_status(
-    db: AsyncSession,
-    start: date,
-    end: date,
-    company_id: Optional[int],
-    staff_id: Optional[int],
-    company_ids_override: Optional[list[int]] = None,
-) -> tuple[str, list[str]]:
-    company_ids = (
-        company_ids_override
-        if company_ids_override is not None
-        else await _appointment_company_ids(db, company_id, staff_id)
-    )
+async def _personal_account_coverage(
+    db: AsyncSession, company_ids: list[int]
+) -> dict[int, tuple[Optional[date], Optional[date]]]:
+    """Synced top-up range per branch.
+
+    Deliberately NOT cached like fetch_reporting_windows/_company_timezone_names: unlike
+    those, sync_source_states can change between two calls on the same session (workers
+    write it independently of a dashboard request, and tests exercise exactly that by
+    mutating it mid-session), so a db.info cache would read a stale coverage verdict
+    instead of the current one. A caller that asks for several periods of one request
+    (`fetch_summary`) reads it once and passes it on as `covered_ranges`.
+    """
     if not company_ids:
-        return 'partial', ['personal_account_topups']
-    reporting_windows = await fetch_reporting_windows(db, company_ids)
-    # Deliberately NOT cached like fetch_reporting_windows/_company_timezone_names: unlike
-    # those, sync_source_states can change between two calls on the same session (workers
-    # write it independently of a dashboard request, and tests exercise exactly that by
-    # mutating it mid-session), so a db.info cache here would read a stale coverage verdict
-    # instead of the current one. Cur/prev do pay for this query twice; that is the safer
-    # side of the tradeoff.
-    covered_ranges = {
+        return {}
+    return {
         int(row.company_id): (_coerce_date(row.period_start), _coerce_date(row.period_end))
         for row in (
             await db.execute(
@@ -1228,6 +1230,27 @@ async def _source_coverage_status(
             )
         ).all()
     }
+
+
+async def _source_coverage_status(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: Optional[int],
+    staff_id: Optional[int],
+    company_ids_override: Optional[list[int]] = None,
+    covered_ranges: Optional[dict[int, tuple[Optional[date], Optional[date]]]] = None,
+) -> tuple[str, list[str]]:
+    company_ids = (
+        company_ids_override
+        if company_ids_override is not None
+        else await _appointment_company_ids(db, company_id, staff_id)
+    )
+    if not company_ids:
+        return 'partial', ['personal_account_topups']
+    reporting_windows = await fetch_reporting_windows(db, company_ids)
+    if covered_ranges is None:
+        covered_ranges = await _personal_account_coverage(db, company_ids)
     reportable = 0
     for item_company_id in company_ids:
         # A branch contributes no facts outside its reporting window, so demanding sync
@@ -1319,6 +1342,7 @@ async def _average_check_block(
     created_user_id: Optional[int] = None,
     company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
+    covered_ranges: Optional[dict[int, tuple[Optional[date], Optional[date]]]] = None,
 ) -> dict[str, Any]:
     visit_condition = _appt_revenue_filters(
         dr.start,
@@ -1410,6 +1434,7 @@ async def _average_check_block(
         company_id,
         staff_id,
         company_ids_override=company_ids,
+        covered_ranges=covered_ranges,
     )
     return {
         'source_status': source_status,
@@ -1530,6 +1555,26 @@ def _returning_bucket(count: int, total: int) -> dict[str, Any]:
     }
 
 
+def _client_scope_filters(
+    company_id: Optional[int],
+    allowed_company_ids: Optional[list[int]],
+    factual_at: Optional[datetime],
+) -> list:
+    """Completed, attributable visits of a known client: the history both client blocks read."""
+    filters = [
+        Appointment.attendance == COMPLETED_ATTENDANCE,
+        Appointment.client_id.is_not(None),
+        business_appointment_condition(),
+        reporting_window_clause(Appointment.company_id, Appointment.date),
+    ]
+    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
+    if scope is not None:
+        filters.append(scope)
+    if factual_at is not None:
+        filters.append(_appointment_factual_at_condition(factual_at))
+    return filters
+
+
 async def _client_visit_frequency_block(
     db: AsyncSession,
     dr: DateRange,
@@ -1545,17 +1590,7 @@ async def _client_visit_frequency_block(
     almost nobody reaches four visits inside one month, so the 4+ bucket sits at
     zero while "one visit" swallows ~85% of the base.
     """
-    scope_filters = [
-        Appointment.attendance == COMPLETED_ATTENDANCE,
-        Appointment.client_id.is_not(None),
-        business_appointment_condition(),
-        reporting_window_clause(Appointment.company_id, Appointment.date),
-    ]
-    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
-    if scope is not None:
-        scope_filters.append(scope)
-    if factual_at is not None:
-        scope_filters.append(_appointment_factual_at_condition(factual_at))
+    scope_filters = _client_scope_filters(company_id, allowed_company_ids, factual_at)
 
     period_filters = [*scope_filters, Appointment.date >= dr.start, Appointment.date <= dr.end]
     if staff_id is not None:
@@ -1633,17 +1668,7 @@ async def _client_recency_block(
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
-    scope_filters = [
-        Appointment.attendance == COMPLETED_ATTENDANCE,
-        Appointment.client_id.is_not(None),
-        business_appointment_condition(),
-        reporting_window_clause(Appointment.company_id, Appointment.date),
-    ]
-    if scope is not None:
-        scope_filters.append(scope)
-    if factual_at is not None:
-        scope_filters.append(_appointment_factual_at_condition(factual_at))
+    scope_filters = _client_scope_filters(company_id, allowed_company_ids, factual_at)
     current_filters = list(scope_filters)
     if staff_id is not None:
         current_filters.append(Appointment.staff_id == staff_id)
@@ -1953,14 +1978,15 @@ async def _revenue_block(
     factual_at: Optional[datetime] = None,
     extra_appointment_condition: Any = None,
 ) -> dict[str, Any]:
-    """Appointment/extra-service counts and extra-service revenue for a period.
+    """Extra-service counts and revenue for a period.
 
-    Deliberately does not compute service/goods/total revenue: fetch_summary's only
-    caller always overwrites those three fields with _average_check_block's right after
-    calling this (see the `for block, average_check in (...)` loop there), which is the
-    single implementation of "revenue for a period". Computing them here too used to mean
-    the same business rule lived in two places kept in sync by hand, for a value that was
-    thrown away on every call.
+    Deliberately does not compute service/goods/total revenue, nor the visit and client
+    counts: fetch_summary's only caller overwrites those fields with _average_check_block's
+    right after calling this (see the `for block, average_check in (...)` loop there), which
+    is the single implementation of "revenue for a period". Computing them here too used to
+    mean the same business rule lived in two places kept in sync by hand, for a value that
+    was thrown away on every call. The visit and client counts are the same two COUNT
+    DISTINCTs over the same `_appt_revenue_filters` that block runs.
     """
     cond = _appt_revenue_filters(
         dr.start,
@@ -1999,9 +2025,7 @@ async def _revenue_block(
         select(
             service_count.label('service_count'),
             extra_service_count.label('extra_service_count'),
-            func.count(func.distinct(Appointment.id)).label('appointments'),
             func.count(func.distinct(extra_appt)).label('extra_service_appointments'),
-            func.count(func.distinct(Appointment.client_id)).label('unique_clients'),
             func.count(func.distinct(extra_client)).label('extra_service_clients'),
         )
         .select_from(Appointment)
@@ -2056,9 +2080,7 @@ async def _revenue_block(
         'service_count': float(row.service_count or 0),
         'goods_count': goods_count,
         'extra_service_count': float(row.extra_service_count or 0),
-        'appointments': int(row.appointments or 0),
         'extra_service_appointments': int(row.extra_service_appointments or 0),
-        'unique_clients': int(row.unique_clients or 0),
         'extra_service_clients': int(row.extra_service_clients or 0),
     }
 
@@ -2181,6 +2203,8 @@ async def fetch_summary(
             _previous_period_countable_months(start, end, factual_at),
         )
     )
+    # Coverage does not depend on the period, so both blocks share one read of it.
+    covered_ranges = await _personal_account_coverage(db, effective_company_ids)
     cur_average_check = await _average_check_block(
         db,
         current_dr,
@@ -2188,6 +2212,7 @@ async def fetch_summary(
         staff_id,
         company_ids=effective_company_ids,
         factual_at=factual_at,
+        covered_ranges=covered_ranges,
     )
     prev_average_check = await _average_check_block(
         db,
@@ -2196,6 +2221,7 @@ async def fetch_summary(
         staff_id,
         company_ids=effective_company_ids,
         factual_at=factual_at,
+        covered_ranges=covered_ranges,
     )
     client_frequency = await _client_visit_frequency_block(
         db,
@@ -2226,6 +2252,8 @@ async def fetch_summary(
         block['goods_revenue'] = average_check['goods_revenue']
         block['topup_revenue'] = average_check['topup_revenue']
         block['revenue'] = average_check['numerator']
+        block['appointments'] = average_check['completed_appointments']
+        block['unique_clients'] = average_check['unique_clients']
     # Awaited inline, deliberately. This used to be an asyncio.create_task() launched ~150
     # lines above and joined here, so it ran while the revenue/average-check blocks were
     # awaiting on the SAME AsyncSession. One AsyncSession is one connection: two coroutines
@@ -3453,12 +3481,17 @@ async def fetch_top_services(
     *,
     use_administrator_schedule: bool = False,
     group_by_staff: bool = False,
+    only_extra: bool = False,
 ) -> list[dict[str, Any]]:
     """Services of completed visits: units sold and revenue paid for them.
 
     `group_by_staff` splits every service by the visit's master (`Appointment.staff_id`, the
     attribution `_staff_rows` uses); rows then carry `staff_id`, `staff_name` and `company_title`.
     The counted rows are the same either way, so totals do not move.
+
+    `only_extra` keeps the services labelled as extra (`ServiceLabel.is_extra`). Such a list is
+    keyed by the counted rows alone — a paid-only service is not listed — and ordered by units
+    sold before revenue, the reverse of the plain list.
     """
     factual_at = factual_at or factual_now()
     allowed_company_ids = await _appointment_company_ids(
@@ -3485,6 +3518,7 @@ async def fetch_top_services(
     title_expr = func.trim(func.coalesce(func.nullif(Transaction.service_title, ''), ServiceCatalog.title, ''))
     group_key = _service_group_key(title_expr, Transaction.service_id)
     staff_group = (Appointment.staff_id,) if group_by_staff else ()
+    extra_filter = [ServiceLabel.is_extra.is_(True)] if only_extra else []
     count_stmt = (
         select(
             group_key.label('group_key'),
@@ -3505,7 +3539,11 @@ async def fetch_top_services(
         )
         .select_from(Transaction)
         .join(Appointment, Appointment.id == Transaction.appointment_id)
-        .outerjoin(ServiceCatalog, _transaction_service_catalog_join())
+    )
+    if only_extra:
+        count_stmt = count_stmt.join(ServiceLabel, _transaction_service_label_join())
+    count_stmt = (
+        count_stmt.outerjoin(ServiceCatalog, _transaction_service_catalog_join())
         .where(
             _appt_revenue_filters(
                 start,
@@ -3516,6 +3554,7 @@ async def fetch_top_services(
                 factual_at=factual_at,
             ),
             *([administrator_filter] if administrator_filter is not None else []),
+            *extra_filter,
         )
         .group_by(*staff_group, group_key)
     )
@@ -3568,7 +3607,11 @@ async def fetch_top_services(
                     tx_titles.c.service_id == FinancialTransaction.sold_item_id,
                 ),
             )
-            .outerjoin(ServiceCatalog, _financial_service_catalog_join())
+        )
+        if only_extra:
+            branch = branch.join(ServiceLabel, _financial_service_label_join())
+        branch = (
+            branch.outerjoin(ServiceCatalog, _financial_service_catalog_join())
             .outerjoin(AccountCatalog, _financial_account_join())
             .where(
                 _service_paid_filters(
@@ -3580,6 +3623,7 @@ async def fetch_top_services(
                     factual_at=factual_at,
                 ),
                 *([administrator_filter] if administrator_filter is not None else []),
+                *extra_filter,
                 _physical_account_condition(),
             )
         )
@@ -3620,10 +3664,12 @@ async def fetch_top_services(
     counts_by_key = {row_key(r): r for r in count_rows}
     paid_by_key = {row_key(r): r for r in paid_rows}
     out = []
-    for key in counts_by_key.keys() | paid_by_key.keys():
+    for key in counts_by_key.keys() if only_extra else counts_by_key.keys() | paid_by_key.keys():
         counts = counts_by_key.get(key)
         paid = paid_by_key.get(key)
         source = counts if counts is not None else paid
+        # Paid-side counts stay out of an extra-only row: its counts come from the counted rows alone.
+        paid_counts = None if only_extra else paid
         out.append({
             **(
                 {
@@ -3642,11 +3688,11 @@ async def fetch_top_services(
             'revenue': float((paid.revenue if paid is not None else 0) or 0),
             'service_count': max(
                 int((counts.service_count if counts is not None else 0) or 0),
-                int((paid.service_count if paid is not None else 0) or 0),
+                int((paid_counts.service_count if paid_counts is not None else 0) or 0),
             ),
             'branch_count': max(
                 int((counts.branch_count if counts is not None else 0) or 0),
-                int((paid.branch_count if paid is not None else 0) or 0),
+                int((paid_counts.branch_count if paid_counts is not None else 0) or 0),
             ),
         })
     # service_id as the final tiebreaker: two different groups can share a blank title
@@ -3665,10 +3711,14 @@ async def fetch_top_services(
     # flipped. It holds structurally for the same reason — only rows tied on every preceding
     # key can move, and a tie means the numbers are equal — but treat it as reasoned, not
     # measured.
+    #
+    # The extra-only list always ranked by units first; it had no title tiebreaker before, so
+    # its ties were arbitrary rather than reversed.
+    primary, secondary = ('sold', 'revenue') if only_extra else ('revenue', 'sold')
     out.sort(
         key=lambda item: (
-            -float(item['revenue']),
-            -int(item['sold']),
+            -float(item[primary]),
+            -float(item[secondary]),
             str(item['title']),
             item['service_id'] if item['service_id'] is not None else -1,
         ),
@@ -3740,145 +3790,6 @@ async def fetch_paid_goods_rows(
         }
         for row in (await db.execute(stmt)).all()
     ]
-
-
-async def fetch_extra_services(
-    db: AsyncSession,
-    start: date,
-    end: date,
-    company_id: Optional[int] = None,
-    limit: Optional[int] = None,
-    staff_id: Optional[int] = None,
-    allowed_company_ids: Optional[list[int]] = None,
-    factual_at: Optional[datetime] = None,
-    *,
-    use_administrator_schedule: bool = False,
-) -> list[dict[str, Any]]:
-    factual_at = factual_at or factual_now()
-    allowed_company_ids = await _appointment_company_ids(
-        db, company_id, staff_id, allowed_company_ids
-    )
-    administrator_scope = (
-        await _administrator_service_scope(
-            db,
-            start,
-            end,
-            staff_id,
-            allowed_company_ids,
-            factual_at,
-        )
-        if use_administrator_schedule
-        else AdministratorServiceScope(is_administrator=False)
-    )
-    effective_staff_id = None if administrator_scope.is_administrator else staff_id
-    administrator_filter = (
-        administrator_scope.appointment_condition
-        if administrator_scope.is_administrator
-        else None
-    )
-    title_expr = func.trim(func.coalesce(func.nullif(Transaction.service_title, ''), ServiceCatalog.title, ''))
-    group_key = _service_group_key(title_expr, Transaction.service_id)
-    count_stmt = (
-        select(
-            group_key.label('group_key'),
-            func.min(Transaction.service_id).label('service_id'),
-            func.min(title_expr).label('service_title'),
-            func.coalesce(func.sum(Transaction.amount), 0).label('sold'),
-            func.count(func.distinct(Transaction.service_id)).label('service_count'),
-            func.count(func.distinct(Appointment.company_id)).label('branch_count'),
-        )
-        .select_from(Transaction)
-        .join(Appointment, Appointment.id == Transaction.appointment_id)
-        .join(ServiceLabel, _transaction_service_label_join())
-        .outerjoin(ServiceCatalog, _transaction_service_catalog_join())
-        .where(
-            _appt_revenue_filters(
-                start,
-                end,
-                company_id,
-                effective_staff_id,
-                allowed_company_ids=allowed_company_ids,
-                factual_at=factual_at,
-            ),
-            *([administrator_filter] if administrator_filter is not None else []),
-            ServiceLabel.is_extra.is_(True),
-        )
-        .group_by(group_key)
-    )
-    tx_titles = _transaction_title_lookup()
-    paid_title_expr = func.trim(
-        func.coalesce(
-            tx_titles.c.service_title,
-            func.nullif(ServiceCatalog.title, ''),
-            cast(FinancialTransaction.sold_item_id, String),
-        )
-    )
-    paid_group_key = _service_group_key(paid_title_expr, FinancialTransaction.sold_item_id)
-    paid_branches = _financial_appointment_branches_union(
-        lambda join_condition: (
-            select(
-                paid_group_key.label('group_key'),
-                FinancialTransaction.amount.label('amount'),
-            )
-            .select_from(FinancialTransaction)
-            .join(Appointment, join_condition)
-            .outerjoin(
-                tx_titles,
-                and_(
-                    tx_titles.c.appointment_id == Appointment.id,
-                    tx_titles.c.service_id == FinancialTransaction.sold_item_id,
-                ),
-            )
-            .join(ServiceLabel, _financial_service_label_join())
-            .outerjoin(ServiceCatalog, _financial_service_catalog_join())
-            .outerjoin(AccountCatalog, _financial_account_join())
-            .where(
-                _service_paid_filters(
-                    start,
-                    end,
-                    company_id,
-                    effective_staff_id,
-                    allowed_company_ids=allowed_company_ids,
-                    factual_at=factual_at,
-                ),
-                *([administrator_filter] if administrator_filter is not None else []),
-                ServiceLabel.is_extra.is_(True),
-                _physical_account_condition(),
-            )
-        )
-    )
-    paid_stmt = (
-        select(
-            paid_branches.c.group_key.label('group_key'),
-            func.coalesce(func.sum(paid_branches.c.amount), 0.0).label('revenue'),
-        )
-        .group_by(paid_branches.c.group_key)
-    )
-    count_rows = (await db.execute(count_stmt)).all()
-    paid_by_key = {str(r.group_key): float(r.revenue or 0) for r in (await db.execute(paid_stmt)).all()}
-    rows = [
-        {
-            'service_id': r.service_id,
-            'title': r.service_title or '',
-            'sold': int(r.sold or 0),
-            'revenue': paid_by_key.get(str(r.group_key), 0.0),
-            'service_count': int(r.service_count or 0),
-            'branch_count': int(r.branch_count or 0),
-        }
-        for r in count_rows
-    ]
-    # Related to fetch_top_services but not the same change: this sort had no title
-    # tiebreaker at all before, so ties were arbitrary rather than merely reversed: title can be blank for more than one group,
-    # so service_id is needed as the last, always-unique tiebreaker.
-    rows.sort(
-        key=lambda item: (
-            -float(item['sold'] or 0),
-            -float(item['revenue'] or 0),
-            item['title'],
-            item['service_id'] if item['service_id'] is not None else -1,
-        ),
-    )
-    return rows[:limit] if limit is not None else rows
 
 
 async def _service_group_counts(
@@ -4369,8 +4280,8 @@ async def fetch_opz_year_facts(
     A client counts once per calendar month in `monthly_counts` and once per calendar year in
     `counts`, so the months of a year can sum to more than the year. Both come from one
     per-month pass: events are ordered by creation, so a client's first event of a year is
-    exactly the one a per-year pass would have kept. `latest_date` and
-    `appointment_dependencies` describe the annual events only; `monthly_appointment_dependencies`
+    exactly the one a per-year pass would have kept. `appointment_dependencies` describes the
+    annual events only; `monthly_appointment_dependencies`
     is the same span per event month, as `{year: {month: {company_id: (first, last)}}}`.
     """
     company_ids = await _appointment_company_ids(
@@ -4384,7 +4295,6 @@ async def fetch_opz_year_facts(
     monthly_dependencies: defaultdict[
         int, defaultdict[int, dict[int, tuple[date, date]]]
     ] = defaultdict(lambda: defaultdict(dict))
-    latest_date: date | None = None
     timezone_names = await _company_timezone_names(db, company_ids)
     for item_company_id in company_ids:
         events = await _opz_events(
@@ -4422,17 +4332,10 @@ async def fetch_opz_year_facts(
                 continue
             counts[event_year] += 1.0
             _widen_dependency(appointment_dependencies[event_year], item_company_id, event)
-            latest_date = (
-                max(latest_date, event.event_date)
-                if latest_date is not None
-                else event.event_date
-            )
     # Any staff-level filter counts events by one attribution — the barber of the visit for
     # `staff_id`, the creator for `created_user_id` — and a top-up owned by an administrator
     # would reconcile with neither. The branch and network scopes carry it.
     if staff_id is None and created_user_id is None:
-        # `latest_date` bounds the whole year-over-year report, not just OPZ, so a manual
-        # month must not move it: the top-up would drag every other metric's window with it.
         manual_months = await _manual_opz_by_month(db, start, end, company_ids, factual_at)
         for month_start, manual_value in manual_months.items():
             counts[month_start.year] += manual_value
@@ -4440,7 +4343,6 @@ async def fetch_opz_year_facts(
     return {
         'counts': dict(counts),
         'monthly_counts': {year: dict(months) for year, months in monthly_counts.items()},
-        'latest_date': latest_date,
         'appointment_dependencies': {
             year: dict(values)
             for year, values in appointment_dependencies.items()
@@ -4722,7 +4624,7 @@ async def _administrator_role_periods_by_company(
     company_ids: list[int],
 ) -> dict[int, dict[int, list[tuple[date, date]]]]:
     # One request asks for the same window several times (overview, branch fact, network
-    # fact), and every miss costs two queries per branch. Safe while nothing writes the
+    # fact), and every miss costs a Staff query plus the role-period queries. Safe while nothing writes the
     # tables the roles come from (`PlanMetric`, `PlanStaffInput`, `Staff`) and then re-reads
     # roles in the same session — a save that starts doing so must drop this entry.
     cache: dict[Any, Any] = db.info.setdefault('administrator_role_periods', {})
@@ -4750,25 +4652,78 @@ async def _administrator_role_periods_by_company(
             continue
         rows_by_company[int(row.company_id)].append(row)
 
+    role_periods_by_company = await _staff_role_periods_by_company(
+        db,
+        start,
+        end,
+        {
+            int(company_id): {
+                int(row.id): row.position for row in rows_by_company.get(int(company_id), [])
+            }
+            for company_id in company_ids
+        },
+    )
     result: dict[int, dict[int, list[tuple[date, date]]]] = {
-        int(company_id): {} for company_id in company_ids
-    }
-    for company_id in company_ids:
-        company_staff = rows_by_company.get(int(company_id), [])
-        role_periods = await _staff_role_periods_by_staff(
-            db,
-            start,
-            end,
-            int(company_id),
-            {int(row.id): row.position for row in company_staff},
-        )
-        result[int(company_id)] = {
+        company_id: {
             staff_id: admin_periods
             for staff_id, (admin_periods, _) in role_periods.items()
             if admin_periods
         }
+        for company_id, role_periods in role_periods_by_company.items()
+    }
     cache[cache_key] = result
     return result
+
+
+RolePeriods = tuple[list[tuple[date, date]], list[tuple[date, date]]]
+
+
+def _drop_role_period_caches(db: AsyncSession) -> None:
+    db.info.pop('administrator_role_periods', None)
+    db.info.pop('staff_role_periods', None)
+
+
+async def _staff_role_periods_by_company(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    positions_by_company: dict[int, dict[int, Optional[str]]],
+) -> dict[int, dict[int, RolePeriods]]:
+    """Resolve monthly administrator/master periods for staff of several branches in two queries.
+
+    A member's periods depend only on their own plan rows and position, so each answer is kept in
+    `db.info` per `(start, end, company, staff, position)` and a request that asks again — the
+    network, branch and row views of Plan/fact all do — reads no tables. Safe while nothing
+    writes `PlanMetric`/`PlanStaffInput` and then re-reads roles in the same session: a save that
+    does so must drop `staff_role_periods`, as `save_plan_settings` does.
+    """
+    cache: dict[Any, RolePeriods] = db.info.setdefault('staff_role_periods', {})
+    requested = {
+        int(company_id): {int(staff_id): position for staff_id, position in current_positions.items()}
+        for company_id, current_positions in positions_by_company.items()
+    }
+    unresolved = {
+        company_id: {
+            staff_id: position
+            for staff_id, position in current_positions.items()
+            if (start, end, company_id, staff_id, position) not in cache
+        }
+        for company_id, current_positions in requested.items()
+    }
+    unresolved = {company_id: staff for company_id, staff in unresolved.items() if staff}
+    if unresolved:
+        resolved = await _resolve_staff_role_periods(db, start, end, unresolved)
+        for company_id, current_positions in unresolved.items():
+            for staff_id, position in current_positions.items():
+                cache[(start, end, company_id, staff_id, position)] = resolved[(company_id, staff_id)]
+    # Copies: callers own what they get back, the cache keeps its own lists.
+    return {
+        company_id: {
+            staff_id: tuple(list(periods) for periods in cache[(start, end, company_id, staff_id, position)])
+            for staff_id, position in current_positions.items()
+        }
+        for company_id, current_positions in requested.items()
+    }
 
 
 async def _staff_role_periods_by_staff(
@@ -4777,15 +4732,27 @@ async def _staff_role_periods_by_staff(
     end: date,
     company_id: int,
     current_positions: dict[int, Optional[str]],
-) -> dict[int, tuple[list[tuple[date, date]], list[tuple[date, date]]]]:
-    """Resolve monthly administrator/master periods for several staff in two queries."""
-    staff_ids = sorted({int(staff_id) for staff_id in current_positions})
-    if not staff_ids:
-        return {}
+) -> dict[int, RolePeriods]:
+    """`_staff_role_periods_by_company` for one branch."""
+    resolved = await _staff_role_periods_by_company(
+        db, start, end, {int(company_id): current_positions}
+    )
+    return resolved[int(company_id)]
+
+
+async def _resolve_staff_role_periods(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    positions_by_company: dict[int, dict[int, Optional[str]]],
+) -> dict[tuple[int, int], RolePeriods]:
     plan_start, plan_end = _month_window(start, end)
+    company_ids = sorted(positions_by_company)
+    staff_ids = sorted({staff_id for positions in positions_by_company.values() for staff_id in positions})
     input_rows = (
         await db.execute(
             select(
+                PlanStaffInput.company_id,
                 PlanStaffInput.staff_id,
                 PlanStaffInput.period_start,
                 PlanStaffInput.period_end,
@@ -4793,7 +4760,7 @@ async def _staff_role_periods_by_staff(
                 PlanStaffInput.updated_at,
             ).where(
                 PlanStaffInput.staff_id.in_(staff_ids),
-                PlanStaffInput.company_id == company_id,
+                PlanStaffInput.company_id.in_(company_ids),
                 PlanStaffInput.period_start <= plan_end,
                 PlanStaffInput.period_end >= plan_start,
             )
@@ -4802,6 +4769,7 @@ async def _staff_role_periods_by_staff(
     metric_rows = (
         await db.execute(
             select(
+                PlanMetric.company_id,
                 PlanMetric.staff_id,
                 PlanMetric.period_start,
                 PlanMetric.period_end,
@@ -4809,57 +4777,60 @@ async def _staff_role_periods_by_staff(
                 PlanMetric.updated_at,
             ).where(
                 PlanMetric.staff_id.in_(staff_ids),
-                PlanMetric.company_id == company_id,
+                PlanMetric.company_id.in_(company_ids),
                 PlanMetric.period_start <= plan_end,
                 PlanMetric.period_end >= plan_start,
                 PlanMetric.staff_category.in_(STAFF_CATEGORY_METRIC_CODES),
             )
         )
     ).all()
-    input_by_staff: dict[int, list[Any]] = defaultdict(list)
-    metric_by_staff: dict[int, list[Any]] = defaultdict(list)
+    # Keyed by branch too: a plan row filed under another branch than the one the staff row
+    # belongs to must not count for it.
+    input_by_staff: dict[tuple[int, int], list[Any]] = defaultdict(list)
+    metric_by_staff: dict[tuple[int, int], list[Any]] = defaultdict(list)
     for row in input_rows:
-        input_by_staff[int(row.staff_id)].append(row)
+        input_by_staff[(int(row.company_id), int(row.staff_id))].append(row)
     for row in metric_rows:
-        metric_by_staff[int(row.staff_id)].append(row)
+        metric_by_staff[(int(row.company_id), int(row.staff_id))].append(row)
 
-    resolved = {}
-    for staff_id in staff_ids:
-        fallback = normalize_staff_category(current_positions.get(staff_id)) or 'barber'
-        categorized: list[tuple[date, date, str]] = []
-        for slice_start, slice_end in _month_slices(start, end):
-            input_candidates = [
-                row for row in input_by_staff.get(staff_id, [])
-                if row.period_start <= slice_end and row.period_end >= slice_start
-                and row.staff_category in STAFF_CATEGORY_METRIC_CODES
-            ]
-            metric_candidates = [
-                row for row in metric_by_staff.get(staff_id, [])
-                if row.period_start <= slice_end and row.period_end >= slice_start
-            ]
-            candidates = metric_candidates or input_candidates
-            selected = max(
-                candidates,
-                key=lambda row: row.updated_at or datetime.min,
-                default=None,
+    resolved: dict[tuple[int, int], RolePeriods] = {}
+    for company_id, current_positions in positions_by_company.items():
+        for staff_id, position in current_positions.items():
+            fallback = normalize_staff_category(position) or 'barber'
+            categorized: list[tuple[date, date, str]] = []
+            for slice_start, slice_end in _month_slices(start, end):
+                input_candidates = [
+                    row for row in input_by_staff.get((company_id, staff_id), [])
+                    if row.period_start <= slice_end and row.period_end >= slice_start
+                    and row.staff_category in STAFF_CATEGORY_METRIC_CODES
+                ]
+                metric_candidates = [
+                    row for row in metric_by_staff.get((company_id, staff_id), [])
+                    if row.period_start <= slice_end and row.period_end >= slice_start
+                ]
+                candidates = metric_candidates or input_candidates
+                selected = max(
+                    candidates,
+                    key=lambda row: row.updated_at or datetime.min,
+                    default=None,
+                )
+                category = selected.staff_category if selected is not None else fallback
+                if categorized and categorized[-1][2] == category:
+                    categorized[-1] = (categorized[-1][0], slice_end, category)
+                else:
+                    categorized.append((slice_start, slice_end, category))
+            resolved[(company_id, staff_id)] = (
+                [
+                    (period_start, period_end)
+                    for period_start, period_end, category in categorized
+                    if category == 'administrator'
+                ],
+                [
+                    (period_start, period_end)
+                    for period_start, period_end, category in categorized
+                    if category != 'administrator'
+                ],
             )
-            category = selected.staff_category if selected is not None else fallback
-            if categorized and categorized[-1][2] == category:
-                categorized[-1] = (categorized[-1][0], slice_end, category)
-            else:
-                categorized.append((slice_start, slice_end, category))
-        resolved[staff_id] = (
-            [
-                (period_start, period_end)
-                for period_start, period_end, category in categorized
-                if category == 'administrator'
-            ],
-            [
-                (period_start, period_end)
-                for period_start, period_end, category in categorized
-                if category != 'administrator'
-            ],
-        )
     return resolved
 
 
@@ -5558,17 +5529,11 @@ async def _admin_clients_by_finished_appointments(
     if not staff_ids:
         return {}
 
-    appointment_filters = [
-        Appointment.company_id == company_id,
-        Appointment.date >= start,
-        Appointment.date <= end,
-        Appointment.attendance == COMPLETED_ATTENDANCE,
-        reporting_window_clause(Appointment.company_id, Appointment.date),
-    ]
+    # The visits the branch's "clients" fact counts, so a segment without barbers (no staff_id
+    # clause to hide the difference) cannot hand administrators the placeholder-staffed ones.
+    appointment_filters = [_appt_revenue_filters(start, end, company_id, factual_at=factual_at)]
     if barber_staff_ids:
         appointment_filters.append(Appointment.staff_id.in_(barber_staff_ids))
-    if factual_at is not None:
-        appointment_filters.append(_appointment_factual_at_condition(factual_at))
 
     appointment_rows = (
         await db.execute(
@@ -7761,7 +7726,7 @@ async def save_plan_settings(
 ) -> dict[str, Any]:
     period_start, period_end, normalized_branches, normalized_staff = _normalize_plan_settings_payload(month, branches, staff)
     # Staff categories come from the plan, so anything cached from before this write is stale.
-    db.info.pop('administrator_role_periods', None)
+    _drop_role_period_caches(db)
     branch_ids = sorted({int(row['company_id']) for row in normalized_branches})
     if not branch_ids:
         raise ValueError('at least one branch setting is required')
@@ -8077,6 +8042,8 @@ async def save_plan_settings(
         },
     )
     await db.commit()
+    # Anything the save itself resolved between the first drop and the write is stale too.
+    _drop_role_period_caches(db)
     return await fetch_plan_settings(
         db,
         _month_value(period_start),
