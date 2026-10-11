@@ -99,6 +99,8 @@ async def _leaderboard_payload_impl(
             include_extra_service_revenue=True,
             include_all_staff_in_leaderboards=True,
             include_staff_leaderboards=True,
+            # The boards read the branch row only when no staff is selected.
+            include_branch_row=staff_id is None,
             factual_at=factual_at,
         )
     except INFRASTRUCTURE_ERRORS as error:

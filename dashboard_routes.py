@@ -20,6 +20,7 @@ from auth_deps import forbid_demo, get_dashboard_access, is_demo_request
 from auth_hierarchy import USER_ADMIN_ROLES
 from auth_scope import (
     AccessContext,
+    BRANCH_SCOPE_ROLES,
     can_view_branch_payments,
     can_view_financials,
     can_view_report_usage,
@@ -810,6 +811,8 @@ async def dashboard_widget_plan_fact(
         staff_id,
         allowed_company_ids=branch_ids,
         force_allowed=force_allowed,
+        # `effective_staff_id` clamped a personal role to its own row: whole-branch totals are not its to read.
+        include_branch_row=ctx.full_access or ctx.role in BRANCH_SCOPE_ROLES,
     )
     hidden = hidden_money_codes(ctx)
     if hidden:

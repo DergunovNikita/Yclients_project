@@ -8681,6 +8681,67 @@ async def save_manual_facts(
     )
 
 
+async def _branch_row_and_diagnostics(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    branch: dict[str, Any],
+    groups: list[dict[str, Any]],
+    branch_opz_events: list[OpzEvent],
+    branch_plan: dict[str, float],
+    factual_at: datetime,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Whole-branch plan/fact row plus the branch-wide diagnostics of a single-branch view."""
+    branch_id = int(branch['id'])
+    branch_fact = await _fact_metric_components(
+        db,
+        start,
+        end,
+        branch_id,
+        opz_override=float(len(branch_opz_events)),
+        factual_at=factual_at,
+    )
+    role_periods_by_company = await _administrator_role_periods_by_company(db, start, end, [branch_id])
+    branch_review_facts = await _manual_fact_values_for_role_periods(
+        db,
+        role_periods_by_company,
+        REVIEWS_QTY_CODE,
+    )
+    branch_fact[REVIEWS_QTY_CODE] = branch_review_facts.get(branch_id, 0.0)
+    branch_manual_opz = await _manual_fact_values_for_role_periods(
+        db,
+        role_periods_by_company,
+        OPZ_QTY_CODE,
+        _countable_manual_months(start, end, factual_at),
+    )
+    _apply_manual_opz(branch_fact, branch_manual_opz.get(branch_id, 0.0))
+    parent_group = {
+        'company_id': branch_id,
+        'title': branch['title'],
+        'scope': 'branch',
+        'metrics': _metric_cells(branch_plan, branch_fact),
+    }
+    diagnostics = await _client_fact_diagnostics(db, start, end, branch_id, groups, factual_at)
+    branch_admin_periods = _merge_date_periods([
+        period
+        for periods in role_periods_by_company.get(branch_id, {}).values()
+        for period in periods
+    ])
+    if branch_admin_periods:
+        schedule_diagnostic = await _staff_schedule_coverage_diagnostic(
+            db,
+            start,
+            end,
+            branch_id,
+            branch['title'],
+            factual_at=factual_at,
+            periods=branch_admin_periods,
+        )
+        if schedule_diagnostic is not None:
+            diagnostics.append(schedule_diagnostic)
+    return parent_group, diagnostics
+
+
 async def fetch_plan_fact(
     db: AsyncSession,
     start: date,
@@ -8692,9 +8753,14 @@ async def fetch_plan_fact(
     include_extra_service_revenue: bool = False,
     include_all_staff_in_leaderboards: bool = False,
     include_staff_leaderboards: bool = False,
+    include_branch_row: bool = True,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    """Plan/fact payload; `staff_leaderboards` is built only for the ratings report, the SPA never reads it."""
+    """Plan/fact payload; `staff_leaderboards` is built only for the ratings report, the SPA never reads it.
+
+    `include_branch_row=False` withholds the single-branch view's `parent_group` and diagnostics (whole-branch
+    totals) from a staff-clamped personal role; only that role's own rows remain.
+    """
     factual_at = factual_at or factual_now()
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
     # A branch that left the tenant contributes neither plan nor fact, so its row could only
@@ -8749,33 +8815,6 @@ async def fetch_plan_fact(
         branch_opz_events = await _opz_events(
             db, start, end, branch_id, factual_at=factual_at
         )
-        branch_fact = await _fact_metric_components(
-            db,
-            start,
-            end,
-            branch_id,
-            opz_override=float(len(branch_opz_events)),
-            factual_at=factual_at,
-        )
-        role_periods_by_company = await _administrator_role_periods_by_company(
-            db,
-            start,
-            end,
-            [branch_id],
-        )
-        branch_review_facts = await _manual_fact_values_for_role_periods(
-            db,
-            role_periods_by_company,
-            REVIEWS_QTY_CODE,
-        )
-        branch_fact[REVIEWS_QTY_CODE] = branch_review_facts.get(branch_id, 0.0)
-        branch_manual_opz = await _manual_fact_values_for_role_periods(
-            db,
-            role_periods_by_company,
-            OPZ_QTY_CODE,
-            _countable_manual_months(start, end, factual_at),
-        )
-        _apply_manual_opz(branch_fact, branch_manual_opz.get(branch_id, 0.0))
         groups = await _staff_plan_groups_for_branch(
             db,
             start,
@@ -8789,33 +8828,20 @@ async def fetch_plan_fact(
             opz_events=branch_opz_events,
             factual_at=factual_at,
         )
-        parent_group = {
-            'company_id': branch_id,
-            'title': branch['title'],
-            'scope': 'branch',
-            'metrics': _metric_cells(plans_by_company.get(branch_id, {}), branch_fact),
-        }
         selected_staff_plan = _selected_staff_plan_payload(selected_staff, groups)
-        diagnostics = await _client_fact_diagnostics(
-            db, start, end, branch_id, groups, factual_at
-        )
-        branch_admin_periods = _merge_date_periods([
-            period
-            for periods in role_periods_by_company.get(branch_id, {}).values()
-            for period in periods
-        ])
-        if branch_admin_periods:
-            schedule_diagnostic = await _staff_schedule_coverage_diagnostic(
+        parent_group = None
+        diagnostics: list[dict[str, Any]] = []
+        if include_branch_row:
+            parent_group, diagnostics = await _branch_row_and_diagnostics(
                 db,
                 start,
                 end,
-                branch_id,
-                branch['title'],
-                factual_at=factual_at,
-                periods=branch_admin_periods,
+                branch,
+                groups,
+                branch_opz_events,
+                plans_by_company.get(branch_id, {}),
+                factual_at,
             )
-            if schedule_diagnostic is not None:
-                diagnostics.append(schedule_diagnostic)
         extra_revenue_result = (
             await _extra_service_revenue_by_staff(
                 db, start, end, [branch_id], factual_at
@@ -8830,7 +8856,7 @@ async def fetch_plan_fact(
             'branch': branch,
             'selected_staff': selected_staff,
             'selected_staff_plan': selected_staff_plan,
-            'parent_group': parent_group,
+            **({'parent_group': parent_group} if parent_group is not None else {}),
             'metrics': list(PLAN_FACT_METRICS),
             'metric_sets': _metric_sets_payload(),
             'diagnostics': diagnostics,
@@ -8842,7 +8868,7 @@ async def fetch_plan_fact(
                 groups,
                 extra_revenue_by_staff=extra_revenue_result or {},
                 extra_revenue_available=extra_revenue_result is not None,
-                branch_groups=[] if staff_id is not None else [parent_group],
+                branch_groups=[parent_group] if parent_group is not None and staff_id is None else [],
             )
         return payload
 
