@@ -40,6 +40,19 @@ def alembic_config_value(value: str) -> str:
     return value.replace('%', '%%')
 
 
+# A migration's DDL queues behind any transaction touching the table (a running sync, a long
+# report) and every later query on that table queues behind the DDL. Bounding the wait turns
+# "the deploy hangs and freezes the dashboard" into a failed migration that rolls back and retries.
+MIGRATION_LOCK_TIMEOUT_MS = 30_000
+
+
+def migration_connect_args(database_url: str) -> dict:
+    """Connection options for the migration engine; only PostgreSQL has a `lock_timeout`."""
+    if not database_url.startswith('postgresql'):
+        return {}
+    return {'options': f'-c lock_timeout={MIGRATION_LOCK_TIMEOUT_MS}'}
+
+
 def quote_identifier(dialect, value: str) -> str:
     """Validate and quote an identifier for raw DDL (views, TRUNCATE, CREATE SCHEMA).
 

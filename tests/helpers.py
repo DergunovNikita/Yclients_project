@@ -2,15 +2,27 @@
 
 import importlib.util
 from contextlib import contextmanager
+from functools import cache
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from auth_service import hash_password
 from models import Base
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / 'alembic' / 'versions'
+
+
+@cache
+def cached_password_hash(password: str) -> str:
+    """bcrypt hash of `password`, computed once per process.
+
+    A real hash costs ~0.2 s, and fixtures that only need a stored hash (not a salted fresh one)
+    would pay it on every test. Tests that check hashing itself call `hash_password` directly.
+    """
+    return hash_password(password)
 
 
 @contextmanager

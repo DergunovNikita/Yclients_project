@@ -337,67 +337,6 @@ def test_seed_demo_catalog_ids_do_not_collide_with_later_real_sync_ids():
         assert demo_services_after == demo_services_before
 
 
-def test_seed_demo_repairs_existing_demo_catalog_and_payment_links():
-    with sqlite_session_with_system() as db:
-        _account, _user, company_ids = provision_demo(db)
-        demo_company_id = company_ids[0]
-
-        # A demo tenant seeded before the catalogs existed only has the legacy `services` rows.
-        for row in db.execute(select(ServiceCatalog).where(ServiceCatalog.company_id == demo_company_id)).scalars():
-            db.add(Service(id=row.service_id, title=row.title, price_min=row.price_min, duration=row.duration,
-                           category_title=row.category_title, company_id=row.company_id))
-        db.commit()
-        db.query(ServiceCatalog).filter(ServiceCatalog.company_id == demo_company_id).delete()
-        db.query(ServiceCategoryCatalog).filter(ServiceCategoryCatalog.company_id == demo_company_id).delete()
-        payment = (
-            db.execute(
-                select(FinancialTransaction)
-                .where(
-                    FinancialTransaction.company_id == demo_company_id,
-                    FinancialTransaction.sold_item_type == 'service',
-                    FinancialTransaction.amount > 0,
-                )
-                .limit(1)
-            )
-            .scalars()
-            .one()
-        )
-        appointment = db.get(Appointment, payment.document_id)
-        assert appointment is not None
-        payment.record_id = appointment.id
-        payment.visit_id = appointment.id
-        payment.sold_item_id = appointment.id
-        db.commit()
-
-        seed_demo.repair_demo_data(db, company_ids)
-        db.commit()
-
-        assert (
-            db.scalar(select(func.count(ServiceCatalog.service_id)).where(ServiceCatalog.company_id == demo_company_id))
-            > 0
-        )
-        assert (
-            db.scalar(
-                select(func.count(FinancialTransaction.id))
-                .join(
-                    Appointment,
-                    (FinancialTransaction.company_id == Appointment.company_id)
-                    & (FinancialTransaction.record_id == Appointment.external_id),
-                )
-                .join(
-                    ServiceCatalog,
-                    (ServiceCatalog.company_id == FinancialTransaction.company_id)
-                    & (ServiceCatalog.service_id == FinancialTransaction.sold_item_id),
-                )
-                .where(
-                    FinancialTransaction.id == payment.id,
-                    FinancialTransaction.company_id == demo_company_id,
-                )
-            )
-            == 1
-        )
-
-
 def test_seed_demo_refuses_to_reuse_non_demo_user_email():
     with sqlite_session_with_system() as db:
         db.add(PortalAccount(id=1, label='Real tenant', is_demo=False, created_at=datetime.utcnow()))

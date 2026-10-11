@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import sys
+import types
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -10,8 +11,8 @@ from sqlalchemy import select
 
 import api
 from api import app
-from auth_service import hash_password
 from conftest import issue_access_token
+from helpers import cached_password_hash
 from models import (
     Client,
     Appointment,
@@ -31,6 +32,7 @@ from models import (
     Staff,
     StaffSchedule,
     Transaction,
+    YClientsCredential,
 )
 
 
@@ -114,7 +116,7 @@ async def test_legacy_api_filters_jwt_users_by_tenant_scope(async_session, monke
             id=100,
             portal_account_id=1,
             email='tenant-a@example.com',
-            password_hash=hash_password('TenantA123!'),
+            password_hash=cached_password_hash('TenantA123!'),
             full_name='Tenant A',
             role='manager',
             is_active=True,
@@ -175,7 +177,7 @@ async def test_groups_endpoint_scopes_jwt_users_to_accessible_branches(async_ses
             id=110,
             portal_account_id=1,
             email='manager-groups@example.com',
-            password_hash=hash_password('Manager123!'),
+            password_hash=cached_password_hash('Manager123!'),
             full_name='Manager',
             role='manager',
             is_active=True,
@@ -218,7 +220,7 @@ async def test_apply_company_scope_rejects_a_principal_with_no_branches(async_se
             id=140,
             portal_account_id=1,
             email='branchless-manager@example.com',
-            password_hash=hash_password('Manager123!'),
+            password_hash=cached_password_hash('Manager123!'),
             full_name='Branchless Manager',
             role='manager',
             is_active=True,
@@ -273,7 +275,7 @@ async def test_stats_rejects_a_principal_with_no_branches(async_session, monkeyp
             id=141,
             portal_account_id=1,
             email='branchless-branch-admin@example.com',
-            password_hash=hash_password('BranchAdmin123!'),
+            password_hash=cached_password_hash('BranchAdmin123!'),
             full_name='Branchless Branch Admin',
             role='branch_admin',
             is_active=True,
@@ -314,7 +316,7 @@ async def test_raw_api_staff_scopes_linked_viewer_and_exports(async_session, mon
             id=120,
             portal_account_id=1,
             email='linked-viewer@example.com',
-            password_hash=hash_password('Viewer123!'),
+            password_hash=cached_password_hash('Viewer123!'),
             full_name='Linked Viewer',
             role='barber',
             is_active=True,
@@ -385,7 +387,7 @@ async def test_raw_api_export_refuses_a_personal_role_with_no_staff_row(async_se
             id=130,
             portal_account_id=1,
             email='fired-barber@example.com',
-            password_hash=hash_password('Barber123!'),
+            password_hash=cached_password_hash('Barber123!'),
             full_name='Fired Barber',
             role='barber',
             is_active=True,
@@ -438,7 +440,7 @@ async def test_catalog_money_fields_are_hidden_from_non_financial_roles(async_se
             id=130,
             portal_account_id=1,
             email='manager-catalog@example.com',
-            password_hash=hash_password('Manager123!'),
+            password_hash=cached_password_hash('Manager123!'),
             full_name='Manager',
             role='manager',
             is_active=True,
@@ -508,7 +510,7 @@ async def test_csv_export_blanks_money_columns_for_non_financial_roles(async_ses
             id=151,
             portal_account_id=1,
             email='manager-csv@example.com',
-            password_hash=hash_password('Manager123!'),
+            password_hash=cached_password_hash('Manager123!'),
             full_name='Manager',
             role='manager',
             is_active=True,
@@ -519,7 +521,7 @@ async def test_csv_export_blanks_money_columns_for_non_financial_roles(async_ses
             id=152,
             portal_account_id=1,
             email='owner-csv@example.com',
-            password_hash=hash_password('Owner123!'),
+            password_hash=cached_password_hash('Owner123!'),
             full_name='Owner',
             role='owner',
             is_active=True,
@@ -585,7 +587,7 @@ async def _seed_client_pii_scope(async_session):
             id=201,
             portal_account_id=1,
             email='manager@example.com',
-            password_hash=hash_password('Manager123!'),
+            password_hash=cached_password_hash('Manager123!'),
             full_name='Manager',
             role='manager',
             is_active=True,
@@ -596,7 +598,7 @@ async def _seed_client_pii_scope(async_session):
             id=202,
             portal_account_id=1,
             email='viewer@example.com',
-            password_hash=hash_password('Viewer123!'),
+            password_hash=cached_password_hash('Viewer123!'),
             full_name='Viewer',
             role='barber',
             is_active=True,
@@ -607,7 +609,7 @@ async def _seed_client_pii_scope(async_session):
             id=203,
             portal_account_id=None,
             email='platform@example.com',
-            password_hash=hash_password('Platform123!'),
+            password_hash=cached_password_hash('Platform123!'),
             full_name='Platform',
             role='platform_admin',
             is_active=True,
@@ -863,7 +865,7 @@ async def test_stats_scopes_group_count_to_accessible_branches(async_session):
             id=161,
             portal_account_id=1,
             email='branch-admin-stats@example.com',
-            password_hash=hash_password('BranchAdmin123!'),
+            password_hash=cached_password_hash('BranchAdmin123!'),
             full_name='Branch Admin',
             role='branch_admin',
             is_active=True,
@@ -912,7 +914,7 @@ async def test_groups_csv_matches_the_scoped_groups_listing(async_session):
             id=162,
             portal_account_id=1,
             email='branch-admin-groups-csv@example.com',
-            password_hash=hash_password('BranchAdmin123!'),
+            password_hash=cached_password_hash('BranchAdmin123!'),
             full_name='Branch Admin',
             role='branch_admin',
             is_active=True,
@@ -1470,7 +1472,7 @@ def _portal_user(user_id: int, role: str, branches: list[int], email: str | None
             id=user_id,
             portal_account_id=1,
             email=email or f'user{user_id}@example.com',
-            password_hash=hash_password('Password123!'),
+            password_hash=cached_password_hash('Password123!'),
             full_name=f'User {user_id}',
             role=role,
             is_active=True,
@@ -1745,3 +1747,154 @@ async def test_sync_trigger_bounds_free_text_and_lists(async_session, monkeypatc
 
     assert long_initiator.status_code == 422
     assert long_list.status_code == 422
+
+
+def _credential(credential_id: int, portal_account_id: int) -> YClientsCredential:
+    now = datetime.utcnow()
+    return YClientsCredential(
+        id=credential_id,
+        portal_account_id=portal_account_id,
+        title=f'Credential {credential_id}',
+        partner_token_encrypted='x',
+        login_encrypted='x',
+        password_encrypted='x',
+        created_at=now,
+        updated_at=now,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_trigger_credential_must_belong_to_the_callers_tenant(async_session, monkeypatch):
+    """A foreign or missing credential id used to reach the FK as a bare 500 (or sit in the audit trail)."""
+    import auth_deps
+
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setattr(api, 'SYNC_API_TOKEN', 'test-sync-token')
+    async_session.add_all([
+        Group(id=1, title='G'),
+        Company(id=1, title='A', group_id=1),
+        Company(id=2, title='B', group_id=1),
+        PortalAccount(id=1, label='Tenant A', created_at=datetime.utcnow()),
+        PortalAccount(id=2, label='Tenant B', created_at=datetime.utcnow()),
+        PortalBranch(portal_account_id=1, company_id=1),
+        PortalBranch(portal_account_id=2, company_id=2),
+        *_portal_user(210, 'owner', [1]),
+        _credential(1, 1),
+        _credential(2, 2),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    headers = {
+        'Authorization': f'Bearer {await issue_access_token(async_session, 210, "owner")}',
+        'X-Sync-Token': 'test-sync-token',
+    }
+    app.dependency_overrides[api.get_async_db] = override_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            own = await client.post('/sync/trigger', json={'credential_id': 1}, headers=headers)
+            foreign = await client.post('/sync/trigger', json={'credential_id': 2}, headers=headers)
+            missing = await client.post('/sync/trigger', json={'credential_id': 999}, headers=headers)
+    finally:
+        app.dependency_overrides.clear()
+        monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
+
+    assert own.status_code == 200, own.text
+    assert own.json()['credential_id'] == 1
+    assert foreign.status_code == 404
+    assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_staff_csv_blanks_emails_and_user_ids_for_a_personal_role(async_session, monkeypatch):
+    """The JSON /staff leaves these columns out; the CSV must not hand them to the lowest ranks."""
+    async_session.add_all([
+        Group(id=1, title='G'),
+        Company(id=1, title='Branch', group_id=1),
+        PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()),
+        PortalBranch(portal_account_id=1, company_id=1),
+        *_portal_user(220, 'barber', [1]),
+        *_portal_user(221, 'owner', [1]),
+        Staff(
+            id=1, name='Colleague', company_id=1, email='colleague@example.com', user_id=777, portal_user_id=221
+        ),
+    ])
+    await async_session.commit()
+
+    barber = (await _get_as(async_session, monkeypatch, 220, 'barber', [('/export/csv/staff', {})]))[0]
+    owner = (await _get_as(async_session, monkeypatch, 221, 'owner', [('/export/csv/staff', {})]))[0]
+
+    barber_row = next(csv.DictReader(io.StringIO(barber.text)))
+    owner_row = next(csv.DictReader(io.StringIO(owner.text)))
+    assert barber_row['name'] == 'Colleague'
+    assert (barber_row['email'], barber_row['user_id'], barber_row['portal_user_id']) == ('', '', '')
+    assert (owner_row['email'], owner_row['user_id'], owner_row['portal_user_id']) == (
+        'colleague@example.com', '777', '221',
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_log_cannot_be_forged_through_the_path_or_report_id(async_session):
+    import logging
+
+    records = []
+
+    class Collector(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    logger = logging.getLogger('yclients.api')
+    handler = Collector()
+    logger.addHandler(handler)
+    previous_level = logger.level
+    logger.setLevel(logging.INFO)
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            await client.get(
+                '/dashboard/reports/data',
+                params={'report_id': 'a\n2026-10-11 00:00:00 INFO yclients.auth FORGED login ok'},
+            )
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+        app.dependency_overrides.clear()
+
+    timed = [message for message in records if 'dashboard_api_request' in message]
+    assert len(timed) == 1, timed
+    assert '\n' not in timed[0]
+    assert 'report_id=-' in timed[0]
+
+
+def test_logged_path_has_control_characters_escaped():
+    class FakeRequest:
+        url = types.SimpleNamespace(path='/dashboard/x\n2026-10-11 INFO yclients.auth FORGED\u2028')
+        query_params = {}
+
+    path, _ = api._timed_request_fields(FakeRequest())
+    assert '\n' not in path and '\u2028' not in path
+    assert path == '/dashboard/x\\n2026-10-11 INFO yclients.auth FORGED\\u2028'
+
+
+@pytest.mark.asyncio
+async def test_api_responses_are_not_cacheable_by_default(async_session):
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            listing = await client.get('/companies')
+            exported = await client.get('/export/csv/companies')
+            missing = await client.get('/export/csv/nope')
+    finally:
+        app.dependency_overrides.clear()
+
+    for response in (listing, exported, missing):
+        assert response.headers['cache-control'] == 'private, no-store'

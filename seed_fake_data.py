@@ -144,9 +144,7 @@ def seed_companies(
     source_type: str = "yclients",
     portal_account_id: int | None = None,
     negative_ids: bool = False,
-    negative_catalog_ids: bool = False,
 ) -> list[CompanyRefs]:
-    negative_catalog_ids = negative_catalog_ids or negative_ids
     group_id = next_negative_pk(db, Group, "id") if negative_ids else next_pk(db, Group, "id", 1)
     group = Group(
         id=group_id,
@@ -159,7 +157,7 @@ def seed_companies(
 
     refs: list[CompanyRefs] = []
     company_id = next_negative_pk(db, Company, "id") if negative_ids else max(1000, next_pk(db, Company, "id", 1000))
-    if negative_catalog_ids:
+    if negative_ids:
         service_cat_id = next_negative_pk(db, ServiceCategoryCatalog, "category_id")
         service_id = next_negative_pk(db, ServiceCatalog, "service_id")
         position_id = next_negative_pk(db, StaffPositionCatalog, "position_id")
@@ -208,7 +206,7 @@ def seed_companies(
             )
             db.add(cat)
             categories.append(cat)
-            service_cat_id = advance_pk(service_cat_id, negative=negative_catalog_ids)
+            service_cat_id = advance_pk(service_cat_id, negative=negative_ids)
 
         services: list[ServiceCatalog] = []
         for s_idx in range(max(8, len(SERVICE_NAMES))):
@@ -226,7 +224,7 @@ def seed_companies(
             )
             db.add(service)
             services.append(service)
-            service_id = advance_pk(service_id, negative=negative_catalog_ids)
+            service_id = advance_pk(service_id, negative=negative_ids)
 
         for title in shared_positions:
             db.add(
@@ -237,7 +235,7 @@ def seed_companies(
                     updated_at=now,
                 )
             )
-            position_id = advance_pk(position_id, negative=negative_catalog_ids)
+            position_id = advance_pk(position_id, negative=negative_ids)
 
         staff: list[Staff] = []
         for st_idx in range(staff_per_company):
@@ -293,7 +291,7 @@ def seed_companies(
             )
             db.add(account)
             accounts.append(account)
-            account_id = advance_pk(account_id, negative=negative_catalog_ids)
+            account_id = advance_pk(account_id, negative=negative_ids)
 
         company_good_category_ids: list[int] = []
         for s_idx, storage_title in enumerate(["Retail", "Care"]):
@@ -307,7 +305,7 @@ def seed_companies(
                     updated_at=now,
                 )
             )
-            good_category_id = advance_pk(good_category_id, negative=negative_catalog_ids)
+            good_category_id = advance_pk(good_category_id, negative=negative_ids)
 
         storages: list[StorageCatalog] = []
         for s_idx, storage_title in enumerate(["Main Storage", "Retail Shelf"]):
@@ -322,7 +320,7 @@ def seed_companies(
             )
             db.add(storage)
             storages.append(storage)
-            storage_id = advance_pk(storage_id, negative=negative_catalog_ids)
+            storage_id = advance_pk(storage_id, negative=negative_ids)
 
         goods: list[GoodCatalog] = []
         for g_idx in range(goods_per_company):
@@ -340,7 +338,7 @@ def seed_companies(
             )
             db.add(good)
             goods.append(good)
-            good_id = advance_pk(good_id, negative=negative_catalog_ids)
+            good_id = advance_pk(good_id, negative=negative_ids)
 
         refs.append(
             CompanyRefs(

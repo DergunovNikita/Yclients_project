@@ -41,7 +41,7 @@ from config import (
     SYNC_API_TOKEN,
 )
 from dashboard_routes import router as dashboard_router
-from auth_deps import forbid_demo
+from auth_deps import forbid_demo, require_auth
 from open_paths import OPEN_PATHS
 from auth_hierarchy import USER_MANAGER_ROLES
 from auth_routes import router as auth_router
@@ -75,6 +75,7 @@ from models import (
     StaffSchedule,
     StorageCatalog,
     Transaction,
+    YClientsCredential,
 )
 from dashboard_service import (
     PeriodOutOfRangeError,
@@ -87,13 +88,6 @@ from sync_orchestrator import get_sync_status
 from sync_security import validate_sync_token
 
 init_async_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
-
-try:
-    from auth_service import _email_delivery_mode
-
-    print(f'[auth] Email delivery: {_email_delivery_mode()}')
-except Exception:
-    pass
 
 MAX_PAGE_SIZE = 5000
 DEFAULT_PAGE_SIZE = 1000
@@ -124,11 +118,25 @@ _configure_logging()
 # Every dashboard route is timed. A hand-kept list of paths silently omits whatever
 # nobody remembered to add, and the log exists to answer "did anything get slower".
 TIMED_DASHBOARD_PREFIX = '/dashboard/'
+_CONTROL_CHARACTERS = re.compile(r'[\x00-\x1f\x7f-\x9f\u2028\u2029]')
+_REPORT_ID_TOKEN = re.compile(r'[A-Za-z0-9_]{1,64}')
+
+
 def _timed_request_fields(request: Request) -> tuple[str, str] | None:
+    """Return the path and report id as they may be written to the log.
+
+    Both come from an unauthenticated request and Starlette decodes `%0A`, so a raw value could
+    forge whole log lines: the path has control characters escaped and the report id is only
+    logged when it looks like a report id.
+    """
     path = request.url.path
     if not path.startswith(TIMED_DASHBOARD_PREFIX):
         return None
-    return path, request.query_params.get('report_id') or '-'
+    report_id = request.query_params.get('report_id') or ''
+    if not _REPORT_ID_TOKEN.fullmatch(report_id):
+        report_id = '-'
+    path = _CONTROL_CHARACTERS.sub(lambda match: match.group().encode('unicode_escape').decode(), path)
+    return path, report_id
 
 
 async def require_api_key(
@@ -139,8 +147,6 @@ async def require_api_key(
     db: AsyncSession = Depends(get_async_db),
 ):
     """Global auth: open paths, JWT user, or API key when configured."""
-    from auth_deps import require_auth
-
     if request.url.path in OPEN_PATHS:
         return
     await require_auth(
@@ -179,6 +185,8 @@ SECURITY_HEADERS = {
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'strict-origin-when-cross-origin',
     'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'self'; object-src 'none'",
+    # Everything the API answers is per-user data; a route that wants caching sets its own header.
+    'Cache-Control': 'private, no-store',
 }
 
 
@@ -317,6 +325,17 @@ def apply_company_scope(stmt, column, company_id: Optional[int], ctx: AccessCont
     return stmt.where(column.in_(allowed))
 
 
+def scope_group_stmt(stmt, ctx: AccessContext | None):
+    """Narrow a query over `Group` to the groups visible through the principal's branches.
+
+    Group has no company_id of its own, so the scope runs through a Company join; the
+    empty-branch-list refusal is `apply_company_scope`'s, so it is a 403, not an empty page.
+    """
+    if ctx is None or ctx.full_access:
+        return stmt
+    return apply_company_scope(stmt.join(Company, Company.group_id == Group.id).distinct(), Company.id, None, ctx)
+
+
 def apply_staff_scope(stmt, column, staff_id: Optional[int], ctx: AccessContext | None):
     scoped_staff_id = effective_staff_id(ctx, staff_id) if ctx is not None else staff_id
     return stmt.where(column == scoped_staff_id) if scoped_staff_id is not None else stmt
@@ -421,17 +440,10 @@ async def api_groups(
 ):
     limit, offset = pagination
     ctx = request_access(request)
-    stmt = select(Group)
+    stmt = scope_group_stmt(select(Group), ctx).order_by(Group.id.asc())
     count_company_filter = []
     if ctx is not None and not ctx.full_access:
-        # Group has no company_id of its own, so the scope has to run through the Company
-        # join — but the empty-allowed-list refusal is the same rule as apply_company_scope's,
-        # and must raise the same 403 rather than silently answering 200 with an empty page.
-        stmt = apply_company_scope(
-            stmt.join(Company, Company.group_id == Group.id).distinct(), Company.id, None, ctx
-        )
         count_company_filter.append(Company.id.in_(ctx.company_ids))
-    stmt = stmt.order_by(Group.id.asc())
     total, groups = await fetch_page(db, stmt, limit, offset)
     counts_result = await db.execute(
         select(Company.group_id, func.count())
@@ -919,7 +931,6 @@ async def api_staff_schedules(
 async def api_stats(request: Request, db: AsyncSession = Depends(get_async_db)):
     require_request_branch_payments(request)
     ctx = request_access(request)
-    allowed = None if ctx is None or ctx.full_access else (ctx.company_ids or [])
     revenue_result = await db.execute(
         scope_model_stmt(select(func.sum(Transaction.cost * Transaction.amount)), Transaction, ctx)
     )
@@ -935,22 +946,14 @@ async def api_stats(request: Request, db: AsyncSession = Depends(get_async_db)):
     fin_income = fin_result.scalar_one_or_none() or 0
 
     async def count_of(model):
-        if model is Group:
-            # Group has no company_id of its own (it's the parent of several companies), so
-            # unlike every other model here it fell through both branches below and stayed
-            # unscoped — a restricted principal got every tenant's group count. Scope it the
-            # way /groups does: by the companies it contains. Full access stays join-free so
-            # the unscoped count is unchanged.
-            stmt = select(func.count(func.distinct(Group.id))).select_from(Group)
-            if allowed is not None:
-                stmt = apply_company_scope(
-                    stmt.join(Company, Company.group_id == Group.id), Company.id, None, ctx
-                )
-            r = await db.execute(stmt)
-            return r.scalar_one()
         # The shared scoping refuses a zero-branch principal instead of compiling `IN ()` and
         # silently returning 0 — and must not depend on the queries above raising first.
-        r = await db.execute(scope_model_stmt(select(func.count()).select_from(model), model, ctx))
+        if model is Group:
+            # The group scope joins and de-duplicates, so rows are counted from a subquery.
+            ids = scope_model_stmt(select(Group.id), Group, ctx).subquery()
+            r = await db.execute(select(func.count()).select_from(ids))
+        else:
+            r = await db.execute(scope_model_stmt(select(func.count()).select_from(model), model, ctx))
         return r.scalar_one()
 
     attended_result = await db.execute(
@@ -1012,6 +1015,13 @@ async def trigger_sync(
         elif not payload.global_sync:
             raise HTTPException(status_code=400, detail='portal_account_id or global_sync=true is required')
         company_ids = [int(item) for item in dict.fromkeys(payload.company_ids)] or None
+
+    if credential_id is not None:
+        credential_stmt = select(YClientsCredential.id).where(YClientsCredential.id == credential_id)
+        if portal_account_id is not None:
+            credential_stmt = credential_stmt.where(YClientsCredential.portal_account_id == portal_account_id)
+        if (await db.execute(credential_stmt)).scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail='Credential not found')
 
     job = await SyncJobService().async_enqueue_job(
         db,
@@ -1093,11 +1103,11 @@ STAFF_SCOPED_EXPORT_COLUMNS = {
 # A fact carries the day it belongs to, so the export cuts it by the branch's reporting
 # window exactly as every dashboard query does.
 EXPORT_WINDOW_DAY_COLUMNS = {
-    Appointment: lambda: Appointment.date,
-    FinancialTransaction: lambda: FinancialTransaction.date,
-    GoodTransaction: lambda: GoodTransaction.date,
-    Comment: lambda: Comment.date,
-    StaffSchedule: lambda: StaffSchedule.date,
+    Appointment: Appointment.date,
+    FinancialTransaction: FinancialTransaction.date,
+    GoodTransaction: GoodTransaction.date,
+    Comment: Comment.date,
+    StaffSchedule: StaffSchedule.date,
 }
 
 
@@ -1127,9 +1137,6 @@ def transaction_window_clause():
             ),
         )
     )
-# `companies` is the one table that documents the cut instead of being subject to it: it
-# carries the window dates, and dropping the row would hide why the rest is trimmed.
-EXPORT_WINDOW_EXEMPT_MODELS = frozenset({Company})
 # Same fields /services and /goods redact for a role without financial access (api_services,
 # api_goods above). The CSV column must stay present — only the value is blanked, so a column
 # position parser doesn't break.
@@ -1137,6 +1144,9 @@ MONEY_EXPORT_COLUMNS: dict[type, frozenset[str]] = {
     ServiceCatalog: frozenset({ServiceCatalog.price_min.key}),
     GoodCatalog: frozenset({GoodCatalog.cost.key, GoodCatalog.actual_cost.key}),
 }
+# The JSON /staff omits these; the CSV dumps every column, so roles outside PII_CLIENT_ROLES
+# get them blanked (colleagues' CRM e-mails and internal user ids).
+STAFF_PII_EXPORT_COLUMNS = frozenset({Staff.email.key, Staff.user_id.key, Staff.portal_user_id.key})
 
 
 def scope_model_stmt(
@@ -1157,20 +1167,19 @@ def scope_model_stmt(
     if company_column is not None:
         stmt = apply_company_scope(stmt, company_column, company_id, ctx)
     elif model is Company:
+        # `companies` is not cut by the window: it carries the window dates, and dropping the
+        # row would hide why the rest is trimmed.
         stmt = apply_company_scope(stmt, Company.id, company_id, ctx)
     elif model is Group:
-        # Same rule as /groups: a group is visible through the branches it contains.
-        if ctx is not None and not ctx.full_access:
-            stmt = stmt.join(Company, Company.group_id == Group.id).distinct()
-            stmt = apply_company_scope(stmt, Company.id, None, ctx)
+        stmt = scope_group_stmt(stmt, ctx)
     elif ctx is not None and not ctx.full_access:
         stmt = stmt.where(False)
-    if company_column is not None and model not in EXPORT_WINDOW_EXEMPT_MODELS:
-        day_expr = EXPORT_WINDOW_DAY_COLUMNS.get(model)
+    if company_column is not None:
+        day_column = EXPORT_WINDOW_DAY_COLUMNS.get(model)
         if model is Transaction:
             stmt = stmt.where(transaction_window_clause())
-        elif day_expr is not None:
-            stmt = stmt.where(reporting_window_clause(company_column, day_expr()))
+        elif day_column is not None:
+            stmt = stmt.where(reporting_window_clause(company_column, day_column))
         else:
             # A reference row — a service, an employee, a client — carries no day, so the
             # question is the one the service catalogue asks: is the branch ours today.
@@ -1244,6 +1253,8 @@ async def export_csv(table_name: str, request: Request, db: AsyncSession = Depen
         require_request_branch_payments(request)
     show_financials = can_request_view_financials(request)
     blank_columns = frozenset() if show_financials else MONEY_EXPORT_COLUMNS.get(model, frozenset())
+    if model is Staff and ctx is not None and not ctx.full_access and ctx.role not in PII_CLIENT_ROLES:
+        blank_columns |= STAFF_PII_EXPORT_COLUMNS
     if model is Client:
         ctx, portal_account_id = require_client_pii_access(request)
         await log_portal_audit(

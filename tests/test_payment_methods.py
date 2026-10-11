@@ -18,6 +18,7 @@ from api import app
 from auth_scope import AccessContext, can_view_branch_payments
 from auth_service import create_access_token, hash_password
 from conftest import new_session_row
+from report_helpers import table as _table
 from models import (
     AccountCatalog,
     Appointment,
@@ -205,10 +206,6 @@ async def _store(session, company_id, amount, month=8, user_id=None, through=Non
         updated_by_user_id=user_id,
     ))
     await session.commit()
-
-
-def _table(payload, table_id):
-    return next(table for table in payload['tables'] if table['id'] == table_id)
 
 
 async def _breakdown(session, start=AUGUST[0], end=AUGUST[1], company_id=None):

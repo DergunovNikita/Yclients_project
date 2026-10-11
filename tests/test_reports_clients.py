@@ -9,6 +9,7 @@ import pytest
 import dashboard_reports
 import dashboard_service
 from dashboard_service import DateRange
+from report_helpers import cards, table_rows
 from models import Appointment, Company, FinancialTransaction, Group, Staff
 from report_payload import ReportRequest
 from reports_clients import (
@@ -66,14 +67,6 @@ def request(session, start, end, staff_id=None, factual_at=NOW):
         allowed_company_ids=[1],
         factual_at=factual_at,
     )
-
-
-def cards(payload):
-    return {item['label']: item['value'] for item in payload['cards']}
-
-
-def table_rows(payload, table_id):
-    return next(item for item in payload['tables'] if item['id'] == table_id)['rows']
 
 
 # --- retention ---------------------------------------------------------------------------------------

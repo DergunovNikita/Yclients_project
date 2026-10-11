@@ -7,6 +7,7 @@ import pytest
 import dashboard_reports
 import dashboard_service
 import reports_feedback
+from report_helpers import cards as _cards, table as _table
 from models import (
     Appointment,
     Client,
@@ -34,14 +35,6 @@ def _full_coverage(first_day, last_day):
 async def _report(session, report_id, window=JAN, **kwargs):
     kwargs.setdefault('allowed_company_ids', [1, 2])
     return await dashboard_reports.fetch_report_data(session, report_id, *window, **kwargs)
-
-
-def _cards(report):
-    return {card['label']: card['value'] for card in report['cards']}
-
-
-def _table(report, table_id):
-    return next(table for table in report['tables'] if table['id'] == table_id)
 
 
 def _service_payment(payment_id, company_id, appointment_id, amount, moment):

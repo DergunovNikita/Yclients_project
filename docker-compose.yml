@@ -11,6 +11,8 @@ x-app-base: &app-base
     APP_ENV: ${APP_ENV:-production}
     DB_HOST: postgres
     DB_PORT: 5432
+    # .env's API_PORT is the host port; the container always listens on 8000 (mapping and healthcheck below).
+    API_PORT: 8000
   volumes:
     - ./logs:/app/logs
   depends_on:

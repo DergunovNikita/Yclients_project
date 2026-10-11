@@ -6,6 +6,7 @@ import pytest
 import dashboard_reports
 import dashboard_service
 import report_common
+from report_helpers import cards, table
 from models import Appointment, Company, Group, Staff
 
 JUNE = (date(2026, 6, 1), date(2026, 6, 30))
@@ -50,14 +51,6 @@ def visit(day, company_id=1, staff_id=1, attendance=1, created_user_id=0, moment
 
 async def report(session, report_id, window=JUNE, **kwargs):
     return await dashboard_reports.fetch_report_data(session, report_id, *window, **kwargs)
-
-
-def cards(data):
-    return {item['label']: item['value'] for item in data['cards']}
-
-
-def table(data, table_id):
-    return next(item for item in data['tables'] if item['id'] == table_id)
 
 
 def chart(data, chart_id):

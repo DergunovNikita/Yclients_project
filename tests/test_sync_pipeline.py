@@ -4,12 +4,9 @@ import io
 from contextlib import redirect_stdout
 
 import pytest
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
 
 from helpers import sqlite_session_with_system
 from models import (
-    Base,
     Appointment,
     Client,
     Comment,
@@ -199,13 +196,7 @@ def test_historical_sync_start_date_uses_branch_reporting_start(monkeypatch):
 def test_full_window_starts_at_branch_reporting_start(monkeypatch):
     """A branch that reports from 2022 must not re-fetch the history it discards."""
     monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
-    engine = create_engine('sqlite:///:memory:')
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__])
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+    with sqlite_session_with_system([Group.__table__, Company.__table__]) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Trimmed', group_id=1, reporting_start_date=date(2022, 5, 1)))
         db.add(Company(id=2, title='Untrimmed', group_id=1))
@@ -217,9 +208,6 @@ def test_full_window_starts_at_branch_reporting_start(monkeypatch):
         assert sync_pipeline.resolve_company_sync_window(
             db, date(2026, 8, 6), 'full', 2
         ) == (date(2000, 1, 1), 'full')
-    finally:
-        db.close()
-        engine.dispose()
 
 
 TRANSACTIONAL_WINDOW_TABLES = [
@@ -1010,11 +998,7 @@ def test_execute_sync_refresh_purges_and_reloads_the_rolling_window(monkeypatch)
 
 
 def test_execute_sync_skips_credentials_without_assigned_companies(monkeypatch):
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__])
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+    with sqlite_session_with_system([Group.__table__, Company.__table__]) as db:
         credential = YClientsCredentialValue(
             id=1,
             title='Orphan credential',
@@ -1046,9 +1030,6 @@ def test_execute_sync_skips_credentials_without_assigned_companies(monkeypatch):
             Company.external_id == 10,
         ).one_or_none()
         assert company is not None
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_checkpoint_steps_treat_empty_results_as_success():
@@ -1066,20 +1047,15 @@ def test_checkpoint_steps_fail_when_source_is_unavailable():
 
 
 def test_empty_appointment_and_goods_windows_persist_source_coverage():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Appointment.__table__,
             GoodTransaction.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.commit()
@@ -1115,20 +1091,10 @@ def test_empty_appointment_and_goods_windows_persist_source_coverage():
             date(2025, 1, 1),
             date(2025, 1, 31),
         )
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_source_coverage_does_not_bridge_disjoint_sync_windows():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[Group.__table__, Company.__table__, SyncSourceState.__table__],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+    with sqlite_session_with_system([Group.__table__, Company.__table__, SyncSourceState.__table__]) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.commit()
@@ -1150,17 +1116,10 @@ def test_source_coverage_does_not_bridge_disjoint_sync_windows():
             date(2025, 1, 1),
             date(2025, 1, 31),
         )
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_clients_scopes_external_id_by_internal_company():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__, Client.__table__])
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+    with sqlite_session_with_system([Group.__table__, Company.__table__, Client.__table__]) as db:
         db.add(Group(id=1, title='G1'))
         db.add_all([
             Company(id=1, title='Salon 1', group_id=1),
@@ -1183,9 +1142,6 @@ def test_sync_clients_scopes_external_id_by_internal_company():
             (2, 'yclients', 42),
         ]
         assert rows[0].id != rows[1].id
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_clients_survives_a_client_repeated_in_the_listing():
@@ -1248,11 +1204,7 @@ def test_sync_groups_and_companies_creates_adopts_and_keeps_titles():
 
 
 def test_sync_staff_scopes_external_id_by_internal_company():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__, Staff.__table__])
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+    with sqlite_session_with_system([Group.__table__, Company.__table__, Staff.__table__]) as db:
         db.add(Group(id=1, title='G1'))
         db.add_all([
             Company(id=1, title='Salon 1', group_id=1),
@@ -1270,27 +1222,19 @@ def test_sync_staff_scopes_external_id_by_internal_company():
             (2, 'yclients', 7),
         ]
         assert rows[0].id != rows[1].id
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_records_uses_internal_client_and_appointment_keys():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Client.__table__,
             Staff.__table__,
             Appointment.__table__,
             Transaction.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add_all([
             Company(id=1, title='Salon', group_id=1),
@@ -1317,27 +1261,19 @@ def test_sync_records_uses_internal_client_and_appointment_keys():
         assert appointment.staff_id == 100
         assert appointment.id != appointment.external_id
         assert transaction.appointment_id == appointment.id
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_records_does_not_use_cross_tenant_staff_fallback():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Client.__table__,
             Staff.__table__,
             Appointment.__table__,
             Transaction.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add_all([
             Company(id=1, title='Salon', group_id=1),
@@ -1359,26 +1295,18 @@ def test_sync_records_does_not_use_cross_tenant_staff_fallback():
 
         appointment = db.query(Appointment).filter(Appointment.company_id == 1, Appointment.external_id == 500).one()
         assert appointment.staff_id is None
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_financial_transactions_scopes_external_id_by_internal_company():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Client.__table__,
             Staff.__table__,
             FinancialTransaction.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add_all([
             Company(id=1, title='Salon 1', group_id=1),
@@ -1405,27 +1333,19 @@ def test_sync_financial_transactions_scopes_external_id_by_internal_company():
             (2, 10, 999.0),
         ]
         assert rows[0].id != rows[1].id
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_financial_transactions_persists_expense_article_and_source_coverage():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Client.__table__,
             Staff.__table__,
             FinancialTransaction.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.commit()
@@ -1450,9 +1370,6 @@ def test_sync_financial_transactions_persists_expense_article_and_source_coverag
         )
         assert state.period_start == date(2025, 1, 1)
         assert state.period_end == date(2025, 1, 31)
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_financial_transactions_coerces_blank_numeric_fields():
@@ -1462,21 +1379,16 @@ def test_sync_financial_transactions_coerces_blank_numeric_fields():
     step of a full historical pass and left the branch with no financial rows at
     all after the full-refresh purge had already deleted them.
     """
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Client.__table__,
             Staff.__table__,
             FinancialTransaction.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.commit()
@@ -1501,25 +1413,17 @@ def test_sync_financial_transactions_coerces_blank_numeric_fields():
         for field in ('expense_id', 'document_id', 'record_id', 'visit_id', 'sold_item_id'):
             assert getattr(transaction, field) is None, field
         assert transaction.account_id == 134378
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_financial_transactions_empty_window_persists_source_coverage():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             FinancialTransaction.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.commit()
@@ -1539,18 +1443,11 @@ def test_sync_financial_transactions_empty_window_persists_source_coverage():
         assert state.period_start == date(2025, 2, 1)
         assert state.period_end == date(2025, 2, 28)
         assert db.query(FinancialTransaction).count() == 0
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_purge_source_window_keeps_goods_transactions_outside_requested_window():
-    engine = create_engine('sqlite:///:memory:')
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Appointment.__table__,
@@ -1561,11 +1458,8 @@ def test_purge_source_window_keeps_goods_transactions_outside_requested_window()
             StaffSchedule.__table__,
             SyncState.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add_all([
@@ -1579,9 +1473,6 @@ def test_purge_source_window_keeps_goods_transactions_outside_requested_window()
 
         remaining = db.query(GoodTransaction).order_by(GoodTransaction.id).all()
         assert [(row.id, row.cost) for row in remaining] == [(1, 10)]
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_purge_appointment_window_cascades_to_transactions():
@@ -1593,23 +1484,16 @@ def test_purge_appointment_window_cascades_to_transactions():
     own coverage — rows outside the window, and a counter sale with no appointment at all
     (see commit 6b5878d), must both survive untouched.
     """
-    engine = create_engine('sqlite:///:memory:')
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Appointment.__table__,
             Transaction.__table__,
             SyncState.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add_all([
@@ -1633,19 +1517,12 @@ def test_purge_appointment_window_cascades_to_transactions():
         assert (deleted_appointments, deleted_transactions) == (2, 2)
         assert {row.id for row in db.query(Appointment).all()} == {3}
         assert {row.id for row in db.query(Transaction).all()} == {3, 4}
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_full_refresh_purge_leaves_fact_rows_to_their_own_source():
     """Coverage is invalidated up front, but no fact row is deleted outside a reload."""
-    engine = create_engine('sqlite:///:memory:')
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Appointment.__table__,
@@ -1656,11 +1533,8 @@ def test_full_refresh_purge_leaves_fact_rows_to_their_own_source():
             StaffSchedule.__table__,
             SyncState.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add_all([
@@ -1677,9 +1551,6 @@ def test_full_refresh_purge_leaves_fact_rows_to_their_own_source():
         assert db.query(FinancialTransaction).count() == 1
         assert db.query(GoodTransaction).count() == 1
         assert db.query(Comment).count() == 1
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_failed_reload_rolls_back_its_own_purge(monkeypatch):
@@ -1688,23 +1559,16 @@ def test_failed_reload_rolls_back_its_own_purge(monkeypatch):
     This is the regression that emptied every branch's financial history: the purge
     was committed on its own, then the reload aborted on an id past int4.
     """
-    engine = create_engine('sqlite:///:memory:')
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Client.__table__,
             Staff.__table__,
             FinancialTransaction.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add(FinancialTransaction(
@@ -1734,30 +1598,20 @@ def test_failed_reload_rolls_back_its_own_purge(monkeypatch):
 
         surviving = db.query(FinancialTransaction).all()
         assert [(row.id, row.amount) for row in surviving] == [(500, 100.0)]
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_financial_transactions_accepts_ids_past_int4(tmp_path):
     """document_id and friends outgrew int4 upstream; PostgreSQL rejects them as INTEGER."""
-    engine = create_engine('sqlite:///:memory:')
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Client.__table__,
             Staff.__table__,
             FinancialTransaction.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.commit()
@@ -1783,19 +1637,12 @@ def test_sync_financial_transactions_accepts_ids_past_int4(tmp_path):
         saved = db.query(FinancialTransaction).one()
         assert saved.document_id == 2152046115
         assert saved.record_id == 1888713429
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_records_tolerates_a_record_repeated_across_pages():
     """A long paginated fetch can return the same record twice as upstream rows shift."""
-    engine = create_engine('sqlite:///:memory:')
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Client.__table__,
@@ -1803,11 +1650,8 @@ def test_sync_records_tolerates_a_record_repeated_across_pages():
             Appointment.__table__,
             Transaction.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.commit()
@@ -1824,28 +1668,18 @@ def test_sync_records_tolerates_a_record_repeated_across_pages():
 
         saved = db.query(Appointment).all()
         assert [row.external_id for row in saved] == [108295673]
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_comments_tolerates_a_comment_repeated_across_pages():
-    engine = create_engine('sqlite:///:memory:')
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Staff.__table__,
             Comment.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.commit()
@@ -1862,9 +1696,6 @@ def test_sync_comments_tolerates_a_comment_repeated_across_pages():
 
         saved = db.query(Comment).all()
         assert [row.external_id for row in saved] == [50317470]
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_bigint_columns_are_bigint_on_postgres():
@@ -1885,12 +1716,8 @@ def test_bigint_columns_are_bigint_on_postgres():
 
 
 def test_full_refresh_purge_invalidates_coverage_until_each_source_succeeds():
-    engine = create_engine('sqlite:///:memory:')
-    with engine.begin() as conn:
-        conn.execute(text("ATTACH DATABASE ':memory:' AS system"))
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Appointment.__table__,
@@ -1901,11 +1728,8 @@ def test_full_refresh_purge_invalidates_coverage_until_each_source_succeeds():
             StaffSchedule.__table__,
             SyncState.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add_all([
@@ -1994,26 +1818,18 @@ def test_full_refresh_purge_invalidates_coverage_until_each_source_succeeds():
             'incremental',
             1,
         )[1] == 'full'
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_staff_schedules_uses_internal_staff_id_for_tenant_scoped_staff():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Staff.__table__,
             StaffSchedule.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add(Staff(id=100, external_id=7, source_type='yclients', name='Master', company_id=1))
@@ -2041,26 +1857,18 @@ def test_sync_staff_schedules_uses_internal_staff_id_for_tenant_scoped_staff():
             date(2025, 1, 10),
             date(2025, 1, 10),
         )
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_staff_schedules_deduplicates_slots_and_keeps_past_days_on_empty_answer():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Staff.__table__,
             StaffSchedule.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add(Staff(id=100, external_id=7, source_type='yclients', name='Admin', company_id=1))
@@ -2099,9 +1907,6 @@ def test_sync_staff_schedules_deduplicates_slots_and_keeps_past_days_on_empty_an
             date(2025, 1, 1),
             date(2025, 1, 31),
         )
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_staff_schedules_empty_answer_clears_only_days_from_branch_today():
@@ -2152,20 +1957,15 @@ def test_sync_staff_schedules_empty_answer_clears_only_days_from_branch_today():
 
 
 def test_sync_staff_schedules_preserves_data_when_source_is_unavailable():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Staff.__table__,
             StaffSchedule.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add(Staff(id=100, external_id=7, source_type='yclients', name='Admin', company_id=1))
@@ -2189,9 +1989,6 @@ def test_sync_staff_schedules_preserves_data_when_source_is_unavailable():
         ) is False
         assert db.query(StaffSchedule).count() == 1
         assert db.query(SyncSourceState).count() == 0
-    finally:
-        db.close()
-        engine.dispose()
 
 
 class EveningUTCScheduleAPI(FakeSyncAPI):
@@ -2273,20 +2070,15 @@ def test_evening_utc_sync_ignores_the_day_yclients_adds_before_the_schedule_wind
     ],
 )
 def test_sync_staff_schedules_rejects_unusable_snapshot_before_replacement(payload):
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Staff.__table__,
             StaffSchedule.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add(Staff(id=100, external_id=7, source_type='yclients', name='Admin', company_id=1))
@@ -2316,17 +2108,10 @@ def test_sync_staff_schedules_rejects_unusable_snapshot_before_replacement(paylo
             time(22),
         )
         assert db.query(SyncSourceState).count() == 0
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_staff_marks_missing_staff_as_fired():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__, Staff.__table__])
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+    with sqlite_session_with_system([Group.__table__, Company.__table__, Staff.__table__]) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add(Staff(id=1, name='Existing', company_id=1, fired=0))
@@ -2353,17 +2138,10 @@ def test_sync_staff_marks_missing_staff_as_fired():
         assert active.fired == 0
         assert stale.fired == 1
         assert db.get(Staff, 900).fired == 0
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_staff_ignores_invalid_staff_email():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__, Staff.__table__])
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+    with sqlite_session_with_system([Group.__table__, Company.__table__, Staff.__table__]) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.commit()
@@ -2379,20 +2157,17 @@ def test_sync_staff_ignores_invalid_staff_email():
 
         assert sync_staff(api, db, '1') is True
         assert db.get(Staff, 1).email is None
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_services_writes_shared_ids_to_branch_scoped_catalog():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[Group.__table__, Company.__table__, Service.__table__, ServiceCatalog.__table__],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+    with sqlite_session_with_system(
+        [
+            Group.__table__,
+            Company.__table__,
+            Service.__table__,
+            ServiceCatalog.__table__,
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon 1', group_id=1))
         db.add(Company(id=2, title='Salon 2', group_id=1))
@@ -2421,26 +2196,18 @@ def test_sync_services_writes_shared_ids_to_branch_scoped_catalog():
             (1, 10, 'Воск'),
             (2, 10, 'Воск'),
         ]
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_services_fills_category_from_category_filtered_services():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Service.__table__,
             ServiceCatalog.__table__,
             ServiceCategoryCatalog.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon 1', group_id=1))
         db.add(
@@ -2459,26 +2226,18 @@ def test_sync_services_fills_category_from_category_filtered_services():
         row = db.get(ServiceCatalog, {'company_id': 1, 'service_id': 10})
         assert row.category_id == 100
         assert row.category_title == 'Уход'
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_services_preserves_catalog_when_snapshot_is_incomplete():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system(
+        [
             Group.__table__,
             Company.__table__,
             Service.__table__,
             ServiceCatalog.__table__,
             ServiceCategoryCatalog.__table__,
-        ],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add(Service(id=10, title='Care', company_id=1))
@@ -2512,20 +2271,17 @@ def test_sync_services_preserves_catalog_when_snapshot_is_incomplete():
         catalog = db.get(ServiceCatalog, {'company_id': 1, 'service_id': 10})
         assert catalog.is_active is True
         assert (catalog.category_id, catalog.category_title) == (100, 'Care category')
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_services_marks_only_current_yclients_catalog_rows_active():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[Group.__table__, Company.__table__, Service.__table__, ServiceCatalog.__table__],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+    with sqlite_session_with_system(
+        [
+            Group.__table__,
+            Company.__table__,
+            Service.__table__,
+            ServiceCatalog.__table__,
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon 1', group_id=1))
         db.add_all([
@@ -2572,20 +2328,18 @@ def test_sync_services_marks_only_current_yclients_catalog_rows_active():
         db.refresh(current)
         assert current.is_active is False
         assert archived.is_active is False
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_goods_transactions_preserves_embedded_titles():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[Group.__table__, Company.__table__, Client.__table__, Staff.__table__, GoodTransaction.__table__],
-    )
-    Session = sessionmaker(bind=engine)
-    db = Session()
-    try:
+    with sqlite_session_with_system(
+        [
+            Group.__table__,
+            Company.__table__,
+            Client.__table__,
+            Staff.__table__,
+            GoodTransaction.__table__,
+        ]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon 1', group_id=1))
         db.commit()
@@ -2608,9 +2362,6 @@ def test_sync_goods_transactions_preserves_embedded_titles():
         assert row.good_title == 'Archived pomade'
         assert row.storage_id == 300
         assert row.storage_title == 'Archive shelf'
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_empty_window_keeps_rows_when_not_refreshing():
