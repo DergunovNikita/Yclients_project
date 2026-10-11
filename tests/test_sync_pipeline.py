@@ -1207,6 +1207,46 @@ def test_sync_clients_survives_a_client_repeated_in_the_listing():
         engine.dispose()
 
 
+class FakeGroupsAPI:
+    def __init__(self, groups):
+        self._groups = groups
+
+    def get_groups(self):
+        return self._groups
+
+
+def test_sync_groups_and_companies_creates_adopts_and_keeps_titles():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__])
+    db = sessionmaker(bind=engine)()
+    try:
+        # A pre-tenant row (external_id IS NULL, id == YClients id) is adopted instead of duplicated.
+        db.add(Group(id=10, title='Legacy group'))
+        db.add(Company(id=500, title='Legacy salon', group_id=10))
+        db.commit()
+        groups = [{'id': 10, 'title': 'Net', 'companies': [
+            {'id': 500, 'title': 'Salon', 'timezone': 'Europe/Moscow'},
+            {'id': 501, 'title': 'New salon'},
+        ]}]
+
+        assert sync_pipeline.sync_groups_and_companies(FakeGroupsAPI(groups), db, 7) is True
+
+        assert [(g.id, g.external_id, g.portal_account_id, g.title) for g in db.query(Group)] == [(10, 10, 7, 'Net')]
+        rows = {c.external_id: c for c in db.query(Company)}
+        assert (rows[500].id, rows[500].portal_account_id, rows[500].title) == (500, 7, 'Salon')
+        assert (rows[501].group_id, rows[501].source_type, rows[501].title) == (10, 'yclients', 'New salon')
+
+        # A later answer that omits titles keeps what is stored, for groups and companies alike.
+        untitled = [{'id': 10, 'companies': [{'id': 500}, {'id': 501, 'title': ''}]}]
+        assert sync_pipeline.sync_groups_and_companies(FakeGroupsAPI(untitled), db, 7) is True
+        assert [g.title for g in db.query(Group)] == ['Net']
+        assert sorted(c.title for c in db.query(Company)) == ['New salon', 'Salon']
+        assert db.query(Company).count() == 2
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_sync_staff_scopes_external_id_by_internal_company():
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__, Staff.__table__])

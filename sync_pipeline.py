@@ -103,15 +103,6 @@ def chunked(items: Iterable[int], size: int):
         yield items[idx:idx + batch_size]
 
 
-def load_existing_map(db, model, ids, pk_column):
-    existing = {}
-    unique_ids = [item_id for item_id in dict.fromkeys(ids) if item_id is not None]
-    for batch in chunked(unique_ids, DB_BATCH_SIZE):
-        for obj in db.query(model).filter(pk_column.in_(batch)).all():
-            existing[getattr(obj, pk_column.key)] = obj
-    return existing
-
-
 def load_existing_branch_map(db, model, company_id: int, ids, id_column):
     existing = {}
     unique_ids = [item_id for item_id in dict.fromkeys(ids) if item_id is not None]
@@ -769,7 +760,7 @@ def _internal_staff_id(staff_map: dict[int, Staff], external_staff_id) -> int | 
 # 1. Сети и компании
 # ===================================================================
 
-def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int | None = None):
+def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int):
     print("\n── Сети и компании ──")
 
     groups = api.get_groups()
@@ -786,33 +777,29 @@ def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int | Non
             for company_data in (group_data.get('companies') or [])
             if company_data.get('id') is not None
         ]
-        if portal_account_id is None:
-            existing_groups = load_existing_map(db, Group, group_ids, Group.id)
-            existing_companies = load_existing_map(db, Company, company_ids, Company.id)
-        else:
-            existing_groups = {
-                group.external_id: group
-                for group in (
-                    db.query(Group)
-                    .filter(
-                        Group.portal_account_id == portal_account_id,
-                        Group.external_id.in_(group_ids),
-                    )
-                    .all()
+        existing_groups = {
+            group.external_id: group
+            for group in (
+                db.query(Group)
+                .filter(
+                    Group.portal_account_id == portal_account_id,
+                    Group.external_id.in_(group_ids),
                 )
-            }
-            existing_companies = {
-                company.external_id: company
-                for company in (
-                    db.query(Company)
-                    .filter(
-                        Company.portal_account_id == portal_account_id,
-                        Company.source_type == SOURCE_YCLIENTS,
-                        Company.external_id.in_(company_ids),
-                    )
-                    .all()
+                .all()
+            )
+        }
+        existing_companies = {
+            company.external_id: company
+            for company in (
+                db.query(Company)
+                .filter(
+                    Company.portal_account_id == portal_account_id,
+                    Company.source_type == SOURCE_YCLIENTS,
+                    Company.external_id.in_(company_ids),
                 )
-            }
+                .all()
+            )
+        }
 
         for group_data in groups:
             group_id = group_data.get('id')
@@ -821,7 +808,7 @@ def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int | Non
 
             group = existing_groups.get(group_id)
             if not group:
-                legacy_group = db.get(Group, group_id) if portal_account_id is not None else None
+                legacy_group = db.get(Group, group_id)
                 if legacy_group is not None and legacy_group.external_id is None and (
                     legacy_group.portal_account_id is None or legacy_group.portal_account_id == portal_account_id
                 ):
@@ -830,64 +817,57 @@ def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int | Non
                     group.portal_account_id = portal_account_id
                     group.external_id = group_id
                 else:
-                    group_kwargs = {
-                        'title': group_data.get('title', ''),
-                        'portal_account_id': portal_account_id,
-                        'external_id': group_id,
-                    }
-                    if portal_account_id is None:
-                        group_kwargs['id'] = group_id
-                    group = Group(**group_kwargs)
+                    group = Group(
+                        title=group_data.get('title', ''),
+                        portal_account_id=portal_account_id,
+                        external_id=group_id,
+                    )
                     db.add(group)
                     db.flush()
             else:
-                group.title = group_data.get('title', '')
+                group.title = group_data.get('title', '') or group.title
                 group.portal_account_id = group.portal_account_id or portal_account_id
                 group.external_id = group.external_id or group_id
 
-            if 'companies' in group_data and group_data['companies']:
-                for company_data in group_data['companies']:
-                    company_id = company_data.get('id')
-                    if company_id is None:
-                        continue
+            for company_data in group_data.get('companies') or []:
+                company_id = company_data.get('id')
+                if company_id is None:
+                    continue
 
-                    company = existing_companies.get(company_id)
-                    if not company:
-                        legacy_company = db.get(Company, company_id) if portal_account_id is not None else None
-                        if (
-                            legacy_company is not None
-                            and legacy_company.external_id is None
-                            and (
-                                legacy_company.portal_account_id is None
-                                or legacy_company.portal_account_id == portal_account_id
-                            )
-                        ):
-                            company = legacy_company
-                            company.title = company_data.get('title', '') or company.title
-                            company.group_id = group.id
-                            company.portal_account_id = portal_account_id
-                            company.external_id = company_id
-                            company.source_type = SOURCE_YCLIENTS
-                            company.timezone = _company_timezone(company_data, company.timezone)
-                        else:
-                            company_kwargs = {
-                                'title': company_data.get('title', ''),
-                                'group_id': group.id,
-                                'portal_account_id': portal_account_id,
-                                'external_id': company_id,
-                                'source_type': SOURCE_YCLIENTS,
-                                'timezone': _company_timezone(company_data),
-                            }
-                            if portal_account_id is None:
-                                company_kwargs['id'] = company_id
-                            company = Company(**company_kwargs)
-                            db.add(company)
-                    else:
-                        company.title = company_data.get('title', '')
+                company = existing_companies.get(company_id)
+                if not company:
+                    legacy_company = db.get(Company, company_id)
+                    if (
+                        legacy_company is not None
+                        and legacy_company.external_id is None
+                        and (
+                            legacy_company.portal_account_id is None
+                            or legacy_company.portal_account_id == portal_account_id
+                        )
+                    ):
+                        company = legacy_company
+                        company.title = company_data.get('title', '') or company.title
                         company.group_id = group.id
-                        company.portal_account_id = company.portal_account_id or portal_account_id
-                        company.external_id = company.external_id or company_id
+                        company.portal_account_id = portal_account_id
+                        company.external_id = company_id
+                        company.source_type = SOURCE_YCLIENTS
                         company.timezone = _company_timezone(company_data, company.timezone)
+                    else:
+                        db.add(Company(
+                            title=company_data.get('title', ''),
+                            group_id=group.id,
+                            portal_account_id=portal_account_id,
+                            external_id=company_id,
+                            source_type=SOURCE_YCLIENTS,
+                            timezone=_company_timezone(company_data),
+                        ))
+                else:
+                    # An answer without a title must not blank the stored one (materialize_branches does the same).
+                    company.title = company_data.get('title', '') or company.title
+                    company.group_id = group.id
+                    company.portal_account_id = company.portal_account_id or portal_account_id
+                    company.external_id = company.external_id or company_id
+                    company.timezone = _company_timezone(company_data, company.timezone)
 
         db.commit()
         print("  ✓ Сети и компании сохранены")
