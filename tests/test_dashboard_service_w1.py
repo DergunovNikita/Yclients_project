@@ -4,7 +4,7 @@ from datetime import date, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import insert, select
 
 import api
 import dashboard_routes
@@ -17,6 +17,8 @@ from models import (
     FinancialTransaction,
     Group,
     ManualFactMetric,
+    PortalAccount,
+    PortalMetricVisibility,
     PlanBranchSetting,
     ServiceCatalog,
     ServiceLabel,
@@ -256,3 +258,46 @@ async def test_duplicate_manual_fact_rows_are_refused(async_session):
             allowed_company_ids=[1], actor_user_id=None, portal_account_id=None,
         )
     assert (await async_session.execute(select(ManualFactMetric))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_first_concurrent_metric_visibility_save_answers_409_and_the_retry_wins(async_session, monkeypatch):
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime(2025, 1, 1)))
+    await async_session.commit()
+    ctx = AccessContext.from_user(user_id=5, role='owner', portal_account_id=1, company_ids=[1])
+    real_audit = dashboard_routes.log_portal_audit
+    rival = {'armed': True}
+
+    async def audit_after_a_rival_insert(db, **kwargs):
+        # The competing first save lands between our read (no row) and our commit.
+        if rival['armed']:
+            rival['armed'] = False
+            with db.sync_session.no_autoflush:
+                await db.execute(insert(PortalMetricVisibility).values(
+                    portal_account_id=1, role='manager', visible_codes=['revenue'], updated_at=datetime(2025, 1, 1)
+                ))
+        await real_audit(db, **kwargs)
+
+    monkeypatch.setattr(dashboard_routes, 'log_portal_audit', audit_after_a_rival_insert)
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return ctx
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            body = {'role': 'manager', 'visible_codes': ['avg_check']}
+            raced = await client.put('/dashboard/metric-visibility', json=body)
+            retried = await client.put('/dashboard/metric-visibility', json=body)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert raced.status_code == 409
+    assert raced.json()['detail'] == dashboard_routes.METRIC_VISIBILITY_CONFLICT_DETAIL
+    assert retried.status_code == 200
+    rows = (await async_session.execute(select(PortalMetricVisibility))).scalars().all()
+    assert [(row.role, row.visible_codes) for row in rows] == [('manager', ['avg_check'])]

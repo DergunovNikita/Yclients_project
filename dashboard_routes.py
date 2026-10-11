@@ -14,6 +14,7 @@ from typing import Annotated, Any, Callable
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, BeforeValidator, Field, model_validator
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_deps import forbid_demo, get_dashboard_access, is_demo_request
@@ -97,6 +98,8 @@ from sync_pipeline import transactional_state_key
 logger = logging.getLogger('yclients.dashboard')
 
 router = APIRouter()
+
+METRIC_VISIBILITY_CONFLICT_DETAIL = 'Visibility was changed by someone else; reload and try again'
 
 # Which Overview preset produced the window. It picks the baseline the deltas measure
 # against, so an unknown value is rejected rather than quietly falling back to another
@@ -1144,7 +1147,12 @@ async def dashboard_metric_visibility_save(
         target_id=payload.role,
         metadata={'visible_codes': visible_codes},
     )
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Two first saves of the same (tenant, role) both saw no row; the second one hits the unique index.
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=METRIC_VISIBILITY_CONFLICT_DETAIL) from None
     return {'success': True, 'data': {'role': payload.role, 'visible_codes': visible_codes}}
 
 

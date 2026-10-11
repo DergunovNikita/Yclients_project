@@ -82,7 +82,7 @@ from plan_config import (
     normalize_staff_category,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('yclients.dashboard')
 
 GOODS_SALE_TYPE_ID = 1
 SERVICE_SOLD_ITEM_TYPE = 'service'
