@@ -42,9 +42,8 @@ export function getLocale() {
  * Translate a dotted key for the active locale.
  * Falls back to Italian, then to the key itself.
  */
-export function t(key, paramsOrLocale = {}, maybeLocale) {
-  const params = typeof paramsOrLocale === 'string' ? {} : paramsOrLocale;
-  const locale = typeof paramsOrLocale === 'string' ? paramsOrLocale : (maybeLocale || getLocale());
+export function t(key, params = {}) {
+  const locale = getLocale();
   const value = lookup(messages[locale], key);
   const fallback = lookup(messages[DEFAULT_LOCALE], key);
   const template = value != null ? value : (fallback != null ? fallback : key);
@@ -52,6 +51,12 @@ export function t(key, paramsOrLocale = {}, maybeLocale) {
   return template.replace(/\{(\w+)\}/g, (match, name) => (
     params[name] === undefined || params[name] === null ? match : String(params[name])
   ));
+}
+
+/** Label of a portal role from the shared `roles.*` group; an unknown role is shown as it is. */
+export function roleLabel(role) {
+  const label = t(`roles.${role}`);
+  return label === `roles.${role}` ? String(role ?? '') : label;
 }
 
 export function applyTranslations(root = document) {

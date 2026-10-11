@@ -1,8 +1,6 @@
 import { reportFilterVisibility } from '../dashboardRequestState.js';
 import { intlLocale, t } from '../i18n.js';
 
-export { escapeHtml } from '../html.js';
-
 export function formatMoney(value) {
   if (value === null || value === undefined || value === '') return '—';
   return `${Math.round(Number(value || 0)).toLocaleString(intlLocale())} ₽`;

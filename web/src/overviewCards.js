@@ -167,7 +167,8 @@ export function staffBranchCards(summary) {
 export function revenueCards(summary) {
   if (!summary.revenue) return [];
   const revenue = summary.revenue;
-  const cards = [
+  const administratorSchedule = usesAdministratorSchedule(summary);
+  return [
     metricCard('ServiceRevenue', {
       value: formatMoney(revenue.service_revenue),
       change: revenue.service_revenue_change_pct,
@@ -176,12 +177,11 @@ export function revenueCards(summary) {
       value: formatMoney(revenue.goods_revenue),
       change: revenue.goods_revenue_change_pct,
     }),
-    metricCard('ExtraServiceRevenue', {
+    ...(administratorSchedule ? [] : [metricCard('ExtraServiceRevenue', {
       value: formatMoney(revenue.extra_service_revenue),
       change: revenue.extra_service_revenue_change_pct,
-    }),
+    })]),
   ];
-  return usesAdministratorSchedule(summary) ? cards.filter((_, index) => index !== 2) : cards;
 }
 
 /** Services section cards and the number of grid columns they need. */
@@ -259,7 +259,8 @@ export function servicesCards(summary) {
 
 export function visitCards(summary) {
   const visitMetrics = summary.visit_metrics || {};
-  const cards = [
+  const administratorSchedule = usesAdministratorSchedule(summary);
+  return [
     metricCard('OpzQty', {
       value: formatNumber(visitMetrics.opz_qty),
       change: visitMetrics.opz_qty_change_pct,
@@ -268,9 +269,8 @@ export function visitCards(summary) {
       value: formatMetricValue(visitMetrics.opz_pct, 'percent'),
       change: visitMetrics.opz_pct_change_pct,
     }),
-    extraServicesPerAppointmentCard(visitMetrics),
+    ...(administratorSchedule ? [] : [extraServicesPerAppointmentCard(visitMetrics)]),
   ];
-  return usesAdministratorSchedule(summary) ? cards.slice(0, 2) : cards;
 }
 
 /** `reportUrl(reportId)` builds the link of the cards that open a report. */
@@ -282,7 +282,8 @@ export function clientsCards(summary, reportUrl) {
   const fourPlusVisits = clientFrequency.four_plus_visits || {};
   const reportLink = { href: reportUrl('new_vs_returning_cross'), action: t('dash.openReport') };
   const frequencyNote = (bucket) => t('dash.ofClients', { value: formatMetricValue(bucket.pct, 'percent') });
-  const cards = [
+  const administratorSchedule = usesAdministratorSchedule(summary);
+  return [
     metricCard('UniqueClients', {
       value: formatNumber(visitMetrics.unique_clients),
       change: visitMetrics.unique_clients_change_pct,
@@ -291,7 +292,7 @@ export function clientsCards(summary, reportUrl) {
       value: formatDecimal(visitMetrics.visits_per_client),
       change: visitMetrics.visits_per_client_change_pct,
     }),
-    extraServiceClientsCard(visitMetrics),
+    ...(administratorSchedule ? [] : [extraServiceClientsCard(visitMetrics)]),
     metricCard('OneVisitClients', { value: formatNumber(oneVisit.count), note: frequencyNote(oneVisit) }),
     metricCard('TwoThreeVisitClients', {
       value: formatNumber(twoToThreeVisits.count),
@@ -322,7 +323,6 @@ export function clientsCards(summary, reportUrl) {
       ...reportLink,
     }),
   ];
-  return usesAdministratorSchedule(summary) ? cards.filter((_, index) => index !== 2) : cards;
 }
 
 /** Appointment cards plus the notice under them; `exact` is false when the numbers are an estimate or missing. */

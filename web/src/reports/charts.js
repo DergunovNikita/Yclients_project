@@ -75,7 +75,7 @@ const dataLabelsPlugin = {
   },
 };
 
-// Report specs render as bar, line, or doughnut (dashboard_reports.py's _chart() calls) — see
+// Report specs render as bar, line, or doughnut (report_payload.py's chart() calls) — see
 // main.js for the smaller bar/line-only registration its own hand-built charts need. Pie is
 // registered alongside doughnut: the arc-chart branches throughout this file and chartSpec.js
 // already treat the two as interchangeable, and ArcElement is shared by both.

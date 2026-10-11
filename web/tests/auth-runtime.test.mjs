@@ -264,7 +264,9 @@ test('admin CSV export quotes cells and prefixes spreadsheet formulas', () => {
 });
 
 test('portal tenant selection is tab-scoped and only platform admins send it', async (t) => {
-  const { auth, server } = await loadAuthModule({ localValues: { portal_account_id: 'legacy-tenant' } });
+  const { auth, server } = await loadAuthModule({
+    localValues: { portal_account_id: 'legacy-tenant', portal_access_token: 'legacy-token' },
+  });
   t.after(() => server.close());
 
   globalThis.fetch = async () => new Response(JSON.stringify({
@@ -273,7 +275,6 @@ test('portal tenant selection is tab-scoped and only platform admins send it', a
   }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   await auth.loadCurrentUser();
   auth.setSelectedPortalAccountId('42');
-  localStorage.setItem('portal_access_token', 'legacy-token');
   const headers = auth.authHeaders({ Accept: 'application/json' });
 
   assert.equal(headers.Accept, 'application/json');
@@ -666,6 +667,81 @@ test('requestWithReauth refreshes once and retries the original request', async 
     { path: '/dashboard/bundle', options: { method: 'POST', body: 'payload' } },
     { path: '/dashboard/bundle', options: { method: 'POST', body: 'payload', __retried: true } },
   ]);
+});
+
+test('a transient refresh failure is not an auth verdict: no password prompt, original error is not 401', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  for (const failure of [
+    () => new Response('{}', { status: 503 }),
+    () => { throw new TypeError('Failed to fetch'); },
+  ]) {
+    let reauthCalls = 0;
+    globalThis.fetch = async () => failure();
+    const requestFn = async () => new Response('{}', { status: 401 });
+    const reauthFn = async () => { reauthCalls += 1; };
+
+    for (const options of [{}, { __skipReauth: true }]) {
+      await assert.rejects(
+        auth.requestWithReauth('/dashboard/bundle', options, requestFn, reauthFn),
+        (error) => {
+          assert.equal(auth.isAuthFailure(error), false);
+          assert.equal(auth.requiresLogin(error), false);
+          return true;
+        },
+      );
+    }
+    assert.equal(reauthCalls, 0);
+  }
+});
+
+test('a 503 from refresh reaches the caller as a transient error with the 503 status', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  globalThis.fetch = async () => new Response('{}', { status: 503 });
+  const requestFn = async () => new Response('{}', { status: 401 });
+
+  await assert.rejects(
+    auth.requestWithReauth('/auth/me', { __skipReauth: true }, requestFn, async () => {}),
+    (error) => error.status === 503 && auth.isTransientAuthError(error),
+  );
+});
+
+test('a 401 from refresh still asks for the password', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  let reauthCalls = 0;
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: 'expired' }), {
+    status: 401,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  let authenticated = false;
+  const requestFn = async () => new Response('{}', { status: authenticated ? 200 : 401 });
+  const reauthFn = async () => { reauthCalls += 1; authenticated = true; };
+
+  const response = await auth.requestWithReauth('/dashboard/bundle', {}, requestFn, reauthFn);
+
+  assert.equal(response.status, 200);
+  assert.equal(reauthCalls, 1);
+});
+
+test('a proxy 404/405 with the bare phrase reads as "service unavailable", not as HTTP text', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  for (const [status, detail] of [[404, 'Not found'], [404, 'Not Found'], [405, 'Method not allowed']]) {
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: detail, detail }), { status });
+    await assert.rejects(auth.authFetch('/dashboard/branches'), (error) => {
+      assert.equal(error.status, status);
+      assert.match(error.message, /unavailable/i);
+      return true;
+    });
+  }
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: 'User not found' }), { status: 404 });
+  await assert.rejects(auth.authFetch('/dashboard/branches'), /User not found/);
 });
 
 test('two page runtimes coordinate refresh and rotate cookies only once', async (t) => {

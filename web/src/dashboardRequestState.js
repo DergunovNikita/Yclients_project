@@ -16,8 +16,14 @@ function payloadErrorMessage(payload, fallback) {
   return fallback;
 }
 
+// The bare phrases FastAPI and the Vercel proxy answer for a route the deployment does not serve:
+// English text that says nothing to the user, so the localized fallback is shown instead.
+const BARE_ROUTING_MESSAGES = new Set(['not found', 'method not allowed']);
+
 export function responseError(response, payload, fallback) {
-  const error = new Error(payloadErrorMessage(payload, fallback));
+  const message = payloadErrorMessage(payload, fallback);
+  const isRoutingPhrase = [404, 405].includes(response.status) && BARE_ROUTING_MESSAGES.has(String(message).toLowerCase());
+  const error = new Error(isRoutingPhrase ? fallback : message);
   error.status = response.status;
   error.apiStatus = apiStatusForHttpStatus(response.status);
   error.code = payload?.detail?.code || payload?.code || null;

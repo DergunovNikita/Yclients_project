@@ -5,23 +5,6 @@ import {
   responseError,
 } from './dashboardRequestState.js';
 
-export { createLatestRequestScope } from './dashboardRequestState.js';
-export { reportDataState } from './dashboardRequestState.js';
-export { reportDataCacheKey } from './dashboardRequestState.js';
-export { reportRefreshPresentation } from './dashboardRequestState.js';
-export { reportScopedFilterAllowsLoad } from './dashboardRequestState.js';
-export { reportSearchParams } from './dashboardRequestState.js';
-export { staffRefreshAllowsDataLoad } from './dashboardRequestState.js';
-export { filterServiceManagementResult } from './dashboardRequestState.js';
-export { latestServiceManagementTimestamp } from './dashboardRequestState.js';
-export { mergeServiceManagementResult } from './dashboardRequestState.js';
-export { serviceManagementChanges } from './dashboardRequestState.js';
-export { serviceManagementControls } from './dashboardRequestState.js';
-export { serviceManagementLoadAllowed } from './dashboardRequestState.js';
-export { serviceManagementNavigationAllowed } from './dashboardRequestState.js';
-export { runServiceManagementMutation } from './dashboardRequestState.js';
-export { settleServiceManagementLoad } from './dashboardRequestState.js';
-
 const REQUEST_TIMEOUT_MS = 190000;
 const SLOW_REQUEST_MS = 12000;
 

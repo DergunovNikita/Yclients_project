@@ -7,6 +7,7 @@ import {
   setSelectedPortalAccountId,
   wait,
 } from './auth.js';
+import { togglePasswordVisibility, withBusyButton } from './formHelpers.js';
 import { initPage, t } from './i18n.js';
 
 initPage({ titleKey: 'login.title' });
@@ -21,11 +22,7 @@ function loginDestination() {
   return safeReturnTo(new URLSearchParams(window.location.search).get('return_to'));
 }
 
-togglePasswordBtn?.addEventListener('click', () => {
-  const visible = passwordInput.type === 'text';
-  passwordInput.type = visible ? 'password' : 'text';
-  togglePasswordBtn.textContent = visible ? t('common.showPassword') : t('common.hidePassword');
-});
+togglePasswordBtn?.addEventListener('click', () => togglePasswordVisibility(passwordInput, togglePasswordBtn));
 
 async function loginWithRetry(email, password) {
   let lastError;
@@ -85,20 +82,17 @@ if (DEMO_AUTOLOGIN && !DEMO_ORIGIN) {
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   errorEl.hidden = true;
-  submitBtn.disabled = true;
-  submitBtn.classList.add('is-loading');
   try {
-    const email = document.getElementById('email').value.trim();
-    const password = document.getElementById('password').value;
-    const payload = await loginWithRetry(email, password);
-    const user = payload.data.user;
-    if (!(await ensureOnboardingComplete(user))) return;
-    window.location.href = loginDestination();
+    await withBusyButton(submitBtn, async () => {
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+      const payload = await loginWithRetry(email, password);
+      const user = payload.data.user;
+      if (!(await ensureOnboardingComplete(user))) return;
+      window.location.href = loginDestination();
+    });
   } catch (error) {
     errorEl.textContent = error.message;
     errorEl.hidden = false;
-  } finally {
-    submitBtn.disabled = false;
-    submitBtn.classList.remove('is-loading');
   }
 });

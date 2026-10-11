@@ -54,6 +54,14 @@ test('HTTP errors retain distinct dashboard states and retry metadata', () => {
   assert.equal(error.retryable, true);
 });
 
+test('a bare routing 404/405 phrase falls back to the localized message, a real one is kept', () => {
+  for (const [status, detail] of [[404, 'Not found'], [404, 'Not Found'], [405, 'Method not allowed']]) {
+    assert.equal(responseError({ status }, { error: detail, detail }, 'fallback').message, 'fallback');
+  }
+  assert.equal(responseError({ status: 404 }, { detail: 'Report not found' }, 'fallback').message, 'Report not found');
+  assert.equal(responseError({ status: 400 }, { detail: 'Not found' }, 'fallback').message, 'Not found');
+});
+
 test('report payload distinguishes partial, empty and ready states', () => {
   assert.equal(reportDataState({ source_status: 'partial', tables: [] }), 'partial');
   assert.equal(reportDataState({ source_status: 'ready', cards: [], charts: [], tables: [] }), 'empty');

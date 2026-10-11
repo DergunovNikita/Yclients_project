@@ -1,15 +1,7 @@
-import {
-  createLatestRequestScope,
-  fetchJson,
-  isSupersededRequest,
-  reportDataCacheKey,
-  reportDataState,
-  reportRefreshPresentation,
-  reportScopedFilterAllowsLoad,
-  staffRefreshAllowsDataLoad,
-} from '../dashboardApi.js';
+import { fetchJson, isSupersededRequest } from '../dashboardApi.js';
 import { ReportChartManager } from './charts.js';
-import { escapeHtml, formatDate, periodSubtitle } from './format.js';
+import { formatDate, periodSubtitle } from './format.js';
+import { escapeHtml } from '../html.js';
 import {
   comparePeriodOnLoad,
   defaultReportDates,
@@ -26,6 +18,12 @@ import { branchesForPeriod } from '../reportingWindow.js';
 import {
   DEFAULT_GRANULARITY,
   REPORT_FILTER_KEYS,
+  createLatestRequestScope,
+  reportDataCacheKey,
+  reportDataState,
+  reportRefreshPresentation,
+  reportScopedFilterAllowsLoad,
+  staffRefreshAllowsDataLoad,
   reportComparisonRequest,
   reportDataParams,
   reportFilterVisibility,
@@ -100,8 +98,6 @@ function reportPath(reportId = '', search = '') {
 }
 
 function reportIdFromLocation() {
-  const legacyReportId = new URLSearchParams(window.location.search).get('report');
-  if (legacyReportId) return legacyReportId;
   const path = window.location.pathname.replace(/\/+$/, '');
   if (path === '/reports') return '';
   if (!path.startsWith('/reports/')) return '';
@@ -168,6 +164,10 @@ export function initReports({
   const catalogRequests = createLatestRequestScope();
   const state = {
     loaded: false,
+    // The catalog and the branch list do not change within a session, so leaving the page
+    // keeps them (see clear); only the filters and what depends on the period are reset.
+    catalogFetched: false,
+    branchesFetched: false,
     branchesLoaded: false,
     staffLoaded: false,
     staffIds: [],
@@ -321,21 +321,27 @@ export function initReports({
     state.branchesLoaded = false;
     setDefaultDates();
     try {
-      const reportsPayload = await fetchJson('/dashboard/reports', {}, {
-        signal: catalogRequest.signal,
-      });
-      if (!catalogRequest.isCurrent()) return;
-      state.reports = reportsPayload.data || [];
-      migrateStoredFavorites(state.reports);
-      renderFilterOptions();
+      if (!state.catalogFetched) {
+        const reportsPayload = await fetchJson('/dashboard/reports', {}, {
+          signal: catalogRequest.signal,
+        });
+        if (!catalogRequest.isCurrent()) return;
+        state.reports = reportsPayload.data || [];
+        state.catalogFetched = true;
+        migrateStoredFavorites(state.reports);
+        renderFilterOptions();
+      }
       const branchRequest = branchRequests.start();
       try {
-        const branchesPayload = await fetchJson('/dashboard/branches', {}, {
-          signal: branchRequest.signal,
-          slowState: false,
-        });
-        if (!branchRequest.isCurrent() || !catalogRequest.isCurrent()) return;
-        state.branches = branchesPayload.data || [];
+        if (!state.branchesFetched) {
+          const branchesPayload = await fetchJson('/dashboard/branches', {}, {
+            signal: branchRequest.signal,
+            slowState: false,
+          });
+          if (!branchRequest.isCurrent() || !catalogRequest.isCurrent()) return;
+          state.branches = branchesPayload.data || [];
+          state.branchesFetched = true;
+        }
         renderBranches();
         state.branchesLoaded = true;
         clearFilterWarning();
@@ -782,12 +788,17 @@ export function initReports({
     showCatalog();
   });
   els.refresh.addEventListener('click', reloadActiveReport);
-  els.branch.addEventListener('change', async () => {
+  // The report is requested with the staff select as it stands, so the list for the new
+  // scope has to settle first: loadStaff may fall back to "all" for an employee absent from it.
+  async function reloadWithRefreshedStaff() {
     const expectedBranch = els.branch.value;
-    els.staff.value = '';
     const staffStatus = await loadStaff();
     if (!staffRefreshAllowsDataLoad(staffStatus, expectedBranch, els.branch.value)) return;
     reloadActiveReport();
+  }
+  els.branch.addEventListener('change', () => {
+    els.staff.value = '';
+    return reloadWithRefreshedStaff();
   });
   [els.start, els.end].forEach((input) => {
     input.addEventListener('change', () => {
@@ -795,8 +806,7 @@ export function initReports({
       syncCompareDefaults();
       syncMonthPicker();
       renderBranches();
-      loadStaff();
-      reloadActiveReport();
+      return reloadWithRefreshedStaff();
     });
   });
   els.month.addEventListener('change', () => {
@@ -809,8 +819,7 @@ export function initReports({
     state.periodPreset = 'month';
     syncCompareDefaults();
     renderBranches();
-    loadStaff();
-    reloadActiveReport();
+    return reloadWithRefreshedStaff();
   });
   // A half-written window asks for nothing until its other bound is typed in;
   // reportCompareParams is the only gate, so the checkbox is left as the user set it.
@@ -825,9 +834,15 @@ export function initReports({
 
   return {
     loadFromLocation,
-    clear: () => {
+    clear: ({ keepCatalog = false } = {}) => {
       charts.clear();
       state.loaded = false;
+      if (!keepCatalog) {
+        state.catalogFetched = false;
+        state.branchesFetched = false;
+        state.reports = [];
+        state.branches = [];
+      }
       state.branchesLoaded = false;
       state.staffLoaded = false;
       state.staffIds = [];

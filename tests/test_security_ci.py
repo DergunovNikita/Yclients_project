@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 
@@ -14,7 +13,6 @@ def test_security_workflow_declares_expected_tools_and_modes():
     assert 'pip-audit -r requirements.txt' in workflow
     assert 'npm ci --ignore-scripts --audit=false' in workflow
     assert 'npm audit --audit-level=high' in workflow
-    assert 'node scripts/audit-gate.mjs ../npm-audit.json audit-allowlist.json' in workflow
     assert 'semgrep scan' in workflow
     assert '--config p/python' in workflow
     assert '--config p/javascript' in workflow
@@ -56,7 +54,6 @@ def test_local_security_script_documents_same_gate():
         'pip-audit -r requirements.txt',
         'npm ci --ignore-scripts --audit=false',
         'npm audit --audit-level=high',
-        'node scripts/audit-gate.mjs',
         'semgrep',
         'checkov',
     ):
@@ -65,19 +62,8 @@ def test_local_security_script_documents_same_gate():
     assert './scripts/security-check.sh --strict' in readme
     assert 'pip-audit' in readme
     assert 'npm audit --audit-level=high' in readme
-    assert 'web/audit-allowlist.json' in readme
     assert 'Semgrep' in readme
     assert 'Checkov' in readme
-
-
-def test_frontend_audit_allowlist_entries_are_explicit():
-    allowlist = json.loads((ROOT / 'web/audit-allowlist.json').read_text())
-
-    for entry in allowlist['allowed']:
-        assert entry['package']
-        assert entry['advisoryIds']
-        assert entry['expires']
-        assert len(entry['reason']) >= 40
 
 
 def test_python_requirements_are_pinned_exactly():

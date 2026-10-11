@@ -11,8 +11,9 @@ import {
 } from './auth.js';
 import { createModalManager, tenantRequestGuard } from './adminPage.js';
 import { buildCsv } from './adminSecurity.js';
+import { withBusyButton } from './formHelpers.js';
 import { escapeHtml } from './html.js';
-import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher, roleLabel, t } from './i18n.js';
 import { formatBranchDateTime } from './timestamps.js';
 
 document.documentElement.lang = getLocale();
@@ -100,15 +101,6 @@ const createStaffAccountRoleDropdown = enhanceSelect(createStaffAccountRoleSelec
 const createStaffAccountBranchDropdown = enhanceSelect(createStaffAccountBranchSelect, { placeholder: t('admin.selectBranches') });
 const yclientsCredentialBranchDropdown = enhanceSelect(yclientsCredentialBranchSelect, { placeholder: t('admin.selectBranches') });
 
-const ROLE_LABELS = {
-  admin: t('admin.roleAdmin'),
-  barber: t('admin.roleBarber'),
-  manager: t('admin.roleManager'),
-  branch_admin: t('admin.roleBranchAdmin'),
-  owner: t('admin.roleOwner'),
-  platform_admin: t('admin.rolePlatformAdmin'),
-};
-
 // One level of access under two names. On this screen the account is provisioned from an
 // existing CRM staff row, so the label drives the badge and the per-role money override —
 // administrator status keeps coming from the YClients position, which the portal never
@@ -161,20 +153,6 @@ function showSuccess(message) {
   successEl.hidden = false;
 }
 
-// Busy state is identical everywhere a button drives one async action; error display is not
-// (each caller shows it in a different place), so that part stays in the caller's own try/catch
-// around this call.
-async function withBusyButton(button, action) {
-  button.disabled = true;
-  button.classList.add('is-loading');
-  try {
-    return await action();
-  } finally {
-    button.disabled = false;
-    button.classList.remove('is-loading');
-  }
-}
-
 function rolesForEdit(user) {
   const assignable = adminMeta?.assignable_roles || [];
   const roles = new Set(assignable);
@@ -192,7 +170,7 @@ function scopedBranches() {
 
 function renderRoleOptions(selectEl, dropdown, roles) {
   selectEl.innerHTML = roles
-    .map((role) => `<option value="${escapeHtml(role)}">${escapeHtml(ROLE_LABELS[role] || role)}</option>`)
+    .map((role) => `<option value="${escapeHtml(role)}">${escapeHtml(roleLabel(role))}</option>`)
     .join('');
   dropdown.refresh();
 }
@@ -305,7 +283,7 @@ function applyAdminMeta() {
   renderBranchOptions(createBranchSelect, createBranchDropdown);
 
   if (adminRoleLabel) {
-    adminRoleLabel.textContent = ROLE_LABELS[adminMeta?.role] || adminMeta?.role || 'admin';
+    adminRoleLabel.textContent = roleLabel(adminMeta?.role) || 'admin';
   }
   if (openCreateUserBtn) {
     openCreateUserBtn.hidden = !canManage;
@@ -568,7 +546,7 @@ function roleBadge(role) {
     barber: 'role-badge role-badge--staff',
   };
   const cls = classes[role] || 'role-badge';
-  return `<span class="${escapeHtml(cls)}">${escapeHtml(ROLE_LABELS[role] || role)}</span>`;
+  return `<span class="${escapeHtml(cls)}">${escapeHtml(roleLabel(role))}</span>`;
 }
 
 function branchTitles(companyIds) {
@@ -849,7 +827,7 @@ function renderMetricVisibility() {
         .join('');
       return (
         '<tr>' +
-        `<td>${escapeHtml(ROLE_LABELS[role] || role)}</td>` +
+        `<td>${escapeHtml(roleLabel(role))}</td>` +
         cells +
         `<td><button type="button" class="btn btn--primary" data-mv-save="${escapeHtml(role)}">${escapeHtml(t('admin.save'))}</button></td>` +
         '</tr>'

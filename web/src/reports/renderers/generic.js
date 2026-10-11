@@ -2,17 +2,15 @@ import { cellDelta, pairedRows } from '../comparison.js';
 import {
   deltaClass,
   deltaDigits,
-  escapeHtml,
   formatDate,
   formatDeltaPct,
   formatSignedValue,
   formatValue,
 } from '../format.js';
+import { escapeHtml } from '../../html.js';
 import { intlLocale, t } from '../../i18n.js';
 import { sourceLabel } from '../registry.js';
 import { rankingRowsForMetric, tableHasRows } from '../ranking.js';
-
-export { rankingRowsForMetric } from '../ranking.js';
 
 function renderCards(cards = []) {
   if (!cards.length) return '';

@@ -1,4 +1,5 @@
 import './reauth.css';
+import { togglePasswordVisibility } from './formHelpers.js';
 import { t } from './i18n.js';
 
 // Mirrors the backend's USER_ADMIN_ROLES (auth_hierarchy.py:26) — the only roles
@@ -321,7 +322,6 @@ export function setSelectedPortalAccountId(portalAccountId) {
 
 export function authHeaders(extra = {}) {
   const headers = { ...extra };
-  clearLegacyAccessToken();
   const portalAccountId = getSelectedPortalAccountId();
   if (portalAccountId && activeSessionUser?.role === 'platform_admin') {
     headers['X-Portal-Account-Id'] = portalAccountId;
@@ -380,7 +380,11 @@ function errorMessage(response, payload) {
     message = t('authErrors.accountDisabled');
   } else if ([502, 503, 504].includes(response.status)) {
     message = t('authErrors.temporaryUnavailable');
-  } else if (response.status === 404 && message === 'Not Found') {
+  } else if (
+    (response.status === 404 && String(message).toLowerCase() === 'not found')
+    || (response.status === 405 && String(message).toLowerCase() === 'method not allowed')
+  ) {
+    // The bare FastAPI/proxy phrases: a route the deployment does not serve, not a business answer.
     message = t('authErrors.serviceUnavailable');
   }
   return String(message);
@@ -465,7 +469,13 @@ async function refreshSession() {
   }
   const response = await refreshInFlight;
   if (!response.ok) {
-    throw new Error(t('authErrors.authenticationRequired'));
+    const error = new Error(
+      [401, 403].includes(response.status)
+        ? t('authErrors.authenticationRequired')
+        : errorMessage(response, await parsePayload(response)),
+    );
+    error.status = response.status;
+    throw error;
   }
   const payload = await parsePayload(response);
   rememberSessionPayload('/auth/refresh', payload);
@@ -544,11 +554,7 @@ async function promptReauth() {
       reject(new Error(t('authErrors.authenticationRequired')));
     };
 
-    const onTogglePassword = () => {
-      const visible = passwordInput.type === 'text';
-      passwordInput.type = visible ? 'password' : 'text';
-      togglePasswordBtn.textContent = visible ? t('common.showPassword') : t('common.hidePassword');
-    };
+    const onTogglePassword = () => togglePasswordVisibility(passwordInput, togglePasswordBtn);
 
     const onSubmit = async (event) => {
       event.preventDefault();
@@ -652,6 +658,9 @@ export async function requestWithReauth(path, options = {}, requestFn = doFetch,
         await refreshSession();
       } catch (error) {
         if (error?.name === 'SessionTransitionError') throw error;
+        // Only a 401/403 from the refresh itself says the session is dead; a 5xx or a network
+        // failure says nothing about it and must not pop the password modal or log the user out.
+        if (!isAuthFailure(error)) throw error;
         if (!coordinated) {
           const peerRetry = await requestFn(path, { ...options, __retried: true });
           if (peerRetry.status !== 401) return peerRetry;

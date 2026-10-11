@@ -127,6 +127,8 @@ export function createManualEntryEditor(config, host) {
       if (!refused) return;
     }
     editor.saving = true;
+    // A key typed while the request is out would be lost: the response re-renders the rows and takes a new baseline.
+    config.editorEl.inert = true;
     host.updateFloatingEditorSave();
     host.clearError();
     config.saveButton.disabled = true;
@@ -144,6 +146,7 @@ export function createManualEntryEditor(config, host) {
       else host.showError(error.message, { apiStatus: error.apiStatus, retry: () => editor.save() });
     } finally {
       editor.saving = false;
+      config.editorEl.inert = false;
       config.saveButton.textContent = t('dash.saveFact');
       editor.setDirty(editor.dirty);
     }
