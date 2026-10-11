@@ -141,7 +141,12 @@ async def create_email_token(db: AsyncSession, user_id: int, purpose: str, *, co
 
 
 async def consume_email_token(db: AsyncSession, raw_token: str, purpose: str) -> PortalUser | None:
-    """Spend a token exactly once; the conditional UPDATE is what makes concurrent replays lose."""
+    """Spend a token exactly once; the conditional UPDATE is what makes concurrent replays lose.
+
+    The caller commits, so the spend and what the token was for (new password, verified e-mail) land together:
+    a failure in between rolls the spend back instead of burning the link. A concurrent replay waits on the row
+    lock until then and finds the token used.
+    """
     now = utcnow()
     user_id = (
         await db.execute(
@@ -161,9 +166,7 @@ async def consume_email_token(db: AsyncSession, raw_token: str, purpose: str) ->
     if user_id is None:
         return None
 
-    user = (await db.execute(select(PortalUser).where(PortalUser.id == user_id))).scalar_one()
-    await db.commit()
-    return user
+    return (await db.execute(select(PortalUser).where(PortalUser.id == user_id))).scalar_one()
 
 
 async def load_user_branch_ids(db: AsyncSession, user_id: int) -> list[int]:
@@ -217,12 +220,6 @@ async def set_user_branches(db: AsyncSession, user_id: int, company_ids: list[in
     await db.execute(delete(PortalUserBranch).where(PortalUserBranch.user_id == user_id))
     for company_id in sorted(set(company_ids)):
         db.add(PortalUserBranch(user_id=user_id, company_id=company_id))
-
-
-def user_can_login(user: PortalUser) -> bool:
-    if not user.is_active:
-        return False
-    return True
 
 
 def _email_link(path: str, token: str) -> str:

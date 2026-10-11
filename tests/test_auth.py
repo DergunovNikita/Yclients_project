@@ -4265,6 +4265,17 @@ async def test_email_token_is_single_use(auth_db):
 
 
 @pytest.mark.asyncio
+async def test_a_failure_after_spending_the_token_does_not_burn_it(auth_db):
+    from auth_service import consume_email_token
+
+    raw = await create_email_token(auth_db, 1, TOKEN_PURPOSE_RESET)
+    assert await consume_email_token(auth_db, raw, TOKEN_PURPOSE_RESET) is not None
+    await auth_db.rollback()  # what closing the request session does when the follow-up write fails
+
+    assert await consume_email_token(auth_db, raw, TOKEN_PURPOSE_RESET) is not None
+
+
+@pytest.mark.asyncio
 async def test_email_token_purpose_expiry_and_inactive_user_are_refused(auth_db):
     from auth_service import consume_email_token
 
@@ -4821,3 +4832,111 @@ async def test_every_route_open_before_stays_open_and_nothing_else_opens(auth_db
         # `/auth/logout` stays open: a client with an expired session can still clear cookies.
         assert (await client.post('/auth/logout')).status_code == 200
     app.dependency_overrides.clear()
+
+
+# ---------- Admin lifecycle: deleting, demoting and re-addressing users ----------
+
+@pytest.mark.asyncio
+async def test_deleting_a_provisioned_user_releases_the_crm_staff_row(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(Staff(id=9003, name='Worker', position='master', company_id=1, fired=0, bookable=True))
+    await auth_db.commit()
+    headers = await _bearer(auth_db, 1, 'owner')
+    invite = {'role': 'barber', 'email': 'worker9003@example.com'}
+
+    async with _Api(auth_db) as client:
+        created = await client.post('/auth/admin/staff/9003/create-account', headers=headers, json=invite)
+        assert created.status_code == 200
+        assert (await client.delete('/auth/admin/users/9003', headers=headers)).status_code == 200
+        released = (await auth_db.execute(select(Staff.portal_user_id, Staff.fired).where(Staff.id == 9003))).one()
+        listed = await client.get('/auth/admin/users', headers=headers)
+        again = await client.post('/auth/admin/staff/9003/create-account', headers=headers, json=invite)
+
+    assert tuple(released) == (None, 0)
+    assert any(row.get('staff_id') == 9003 and not row['is_portal_user'] for row in listed.json()['data'])
+    assert again.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_demoting_an_owner_needs_explicit_branches(two_tenants, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    headers = await _bearer(two_tenants, 53, 'platform_admin')
+    async with _Api(two_tenants) as client:
+        bare = await client.patch('/auth/admin/users/1', headers=headers, json={'role': 'manager'})
+        assert (await two_tenants.scalar(select(PortalUser.role).where(PortalUser.id == 1))) == 'owner'
+        with_branches = await client.patch(
+            '/auth/admin/users/1', headers=headers, json={'role': 'manager', 'company_ids': [1]}
+        )
+
+    assert bare.status_code == 400
+    assert with_branches.status_code == 200
+    assert await two_tenants.scalar(select(PortalUserBranch.company_id).where(PortalUserBranch.user_id == 1)) == 1
+
+
+@pytest.mark.asyncio
+async def test_staff_outside_the_actors_branches_is_not_found_for_every_role(two_tenants, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    two_tenants.add_all([
+        Staff(id=9301, name='Elsewhere', position='master', company_id=2, fired=0, bookable=True),
+        Staff(id=9302, name='Other tenant', position='master', company_id=3, fired=0, bookable=True),
+    ])
+    await two_tenants.commit()
+    branch_admin = await _bearer(two_tenants, 3, 'branch_admin')  # branch 1 only
+    owner = await _bearer(two_tenants, 1, 'owner')  # branches 1 and 2
+    async with _Api(two_tenants) as client:
+        results = [
+            await client.delete('/auth/admin/staff/9301', headers=branch_admin),
+            await client.post('/auth/admin/staff/9301/create-account', headers=branch_admin, json={'role': 'barber'}),
+            await client.delete('/auth/admin/staff/9302', headers=owner),
+            await client.delete('/auth/admin/staff/9999', headers=owner),
+        ]
+
+    assert [response.status_code for response in results] == [404, 404, 404, 404]
+    assert len({response.json()['detail'] for response in results}) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', [{'email': 'new.manager@example.com'}, {'is_active': False}])
+async def test_changing_a_users_address_or_disabling_them_ends_their_sessions(auth_db, monkeypatch, change):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    old_token = await issue_access_token(auth_db, 2, 'manager')
+    reset_token = await create_email_token(auth_db, 2, TOKEN_PURPOSE_RESET)
+    async with _Api(auth_db) as client:
+        assert (await client.get('/auth/me', headers={'Authorization': f'Bearer {old_token}'})).status_code == 200
+        patched = await client.patch('/auth/admin/users/2', headers=await _bearer(auth_db, 1, 'owner'), json=change)
+        after = await client.get('/auth/me', headers={'Authorization': f'Bearer {old_token}'})
+
+    assert patched.status_code == 200
+    assert after.status_code == 401
+    assert await auth_db.scalar(select(PortalRefreshToken.id).where(PortalRefreshToken.user_id == 2)) is None
+    if 'email' in change:
+        from auth_service import consume_email_token
+        assert await consume_email_token(auth_db, reset_token, TOKEN_PURPOSE_RESET) is None
+
+
+@pytest.mark.asyncio
+async def test_a_role_or_branch_change_keeps_the_users_sessions(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    token = await issue_access_token(auth_db, 2, 'manager')
+    async with _Api(auth_db) as client:
+        patched = await client.patch(
+            '/auth/admin/users/2', headers=await _bearer(auth_db, 1, 'owner'), json={'company_ids': [1, 2]}
+        )
+        after = await client.get('/auth/me', headers={'Authorization': f'Bearer {token}'})
+
+    assert patched.status_code == 200
+    assert after.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_the_user_list_names_the_live_staff_row_of_a_user_with_several(auth_db):
+    from auth_routes import _load_staff_ids_by_portal_user
+
+    auth_db.add_all([
+        Staff(id=9400, name='Left', position='master', company_id=1, fired=1, portal_user_id=2),
+        Staff(id=9600, name='Second branch', position='master', company_id=2, fired=0, portal_user_id=2),
+        Staff(id=9500, name='First branch', position='master', company_id=1, fired=0, portal_user_id=2),
+    ])
+    await auth_db.commit()
+
+    assert await _load_staff_ids_by_portal_user(auth_db, [2]) == {2: 9500}
