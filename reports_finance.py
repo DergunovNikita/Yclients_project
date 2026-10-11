@@ -17,7 +17,6 @@ from dashboard_service import (
     SERVICE_SOLD_ITEM_TYPE,
     DateRange,
     ReportingWindow,
-    _appointment_company_ids,
     _appointment_factual_at_condition,
     _average_check_block,
     _business_financial_master_condition,
@@ -99,7 +98,6 @@ async def build_financial_overview(req: ReportRequest) -> dict[str, Any]:
         # A day with payments but no completed visits has no average check, not a zero one.
         row['average_check'] = row['revenue'] / row['appointments'] if row['appointments'] else None
 
-    base['average_check_source_status'] = avg['source_status']
     base['missing_sources'] = sorted(avg['missing_components'] or [])
     base['notes'].append({'kind': 'formula', 'title': 'Средний чек общий', 'text': 'income / completed_appointments'})
     base['cards'] = [
@@ -180,12 +178,6 @@ def _aggregate_daily(rows: list[dict[str, Any]], granularity: str) -> list[dict[
 # --- year_over_year ---------------------------------------------------------------------------------
 
 
-async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
-    return await _year_over_year_payload(
-        req.db, req.base, req.company_id, req.staff_id, req.allowed_company_ids, req.factual_at
-    )
-
-
 async def _year_over_year_activity_bounds(
     db: AsyncSession,
     company_id: int | None,
@@ -198,20 +190,10 @@ async def _year_over_year_activity_bounds(
     The first record includes every factual component used by Overview/plan-fact:
     completed visits, paid services, goods/top-up payments and goods movements.
     """
-    today = now.date()
     appointment_conditions = [
         Appointment.date.is_not(None),
         Appointment.attendance == COMPLETED_ATTENDANCE,
-        or_(
-            Appointment.date < today,
-            and_(
-                Appointment.date == today,
-                or_(
-                    Appointment.datetime.is_(None),
-                    Appointment.datetime <= now,
-                ),
-            ),
-        ),
+        _appointment_factual_at_condition(now),
         business_appointment_condition(),
         reporting_window_clause(Appointment.company_id, Appointment.date),
     ]
@@ -348,7 +330,7 @@ async def _year_over_year_activity_bounds(
     opz_facts = await fetch_opz_year_facts(
         db,
         activity_start,
-        today,
+        factual_branch_date(now),
         company_id,
         staff_id,
         allowed_company_ids,
@@ -504,11 +486,11 @@ def _year_row(
         'extra_service_count': float(annual.get('extra_service_count') or 0),
         'extra_service_revenue': float(annual.get('extra_service_revenue') or 0),
         'unique_clients': unique_clients,
-        # No completed visits means no average check; a zero would draw a real bar.
+        # No completed visits means no average check, visits per client or OPZ rate; a zero would draw a real bar.
         'avg_check': revenue / appointments if appointments else None,
-        'visits_per_client': appointments / unique_clients if unique_clients else 0.0,
+        'visits_per_client': (appointments / unique_clients if unique_clients else 0.0) if appointments else None,
         'opz_qty': opz_qty,
-        'opz_pct': 100.0 * opz_qty / appointments if appointments else 0.0,
+        'opz_pct': 100.0 * opz_qty / appointments if appointments else None,
         'source_status': 'ready',
         'missing_components': [],
         'is_partial_year': is_partial_year,
@@ -657,23 +639,13 @@ def _with_year_changes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-async def _year_over_year_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    report_now: datetime,
-) -> dict[str, Any]:
-    scope_company_ids = await _appointment_company_ids(
-        db, company_id, staff_id, allowed_company_ids
-    )
+async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
+    base = req.base
+    db = req.db
+    report_now = req.factual_at
+    scope_company_ids = req.allowed_company_ids
     activity_bounds = await _year_over_year_activity_bounds(
-        db,
-        company_id,
-        staff_id,
-        scope_company_ids,
-        report_now,
+        db, req.company_id, req.staff_id, scope_company_ids, report_now
     )
     if activity_bounds is None:
         base['source_status'] = 'partial'
@@ -687,7 +659,7 @@ async def _year_over_year_payload(
     activity_start, opz_facts = activity_bounds
     opz_by_year = opz_facts['counts']
     opz_dependencies_by_year = opz_facts['appointment_dependencies']
-    report_end = report_now.date()
+    report_end = factual_branch_date(report_now)
     periods = _year_periods(activity_start, report_end)
     state_by_key = await _year_over_year_source_states(db, scope_company_ids)
     reporting_windows = await fetch_reporting_windows(db, scope_company_ids)
@@ -695,8 +667,8 @@ async def _year_over_year_payload(
         db,
         activity_start,
         report_end,
-        company_id,
-        staff_id,
+        req.company_id,
+        req.staff_id,
         scope_company_ids,
         factual_at=report_now,
     )
@@ -815,7 +787,6 @@ async def _year_over_year_payload(
                     'label': str(year),
                     'data': [row['revenue'] for row in monthly_by_year[year]],
                     'format': MONEY_FORMAT,
-                    'fill': False,
                 }
                 for year in sorted(monthly_by_year)
             ],
@@ -837,7 +808,6 @@ async def _year_over_year_payload(
                     'label': str(year),
                     'data': [row['appointments'] for row in monthly_by_year[year]],
                     'format': NUMBER_FORMAT,
-                    'fill': False,
                 }
                 for year in sorted(monthly_by_year)
             ],
@@ -863,7 +833,6 @@ async def _year_over_year_payload(
                     'label': str(year),
                     'data': [row['avg_check'] for row in monthly_by_year[year]],
                     'format': MONEY_FORMAT,
-                    'fill': False,
                 }
                 for year in sorted(monthly_by_year)
             ],
@@ -885,7 +854,6 @@ async def _year_over_year_payload(
                     'label': str(year),
                     'data': [row['opz_qty'] for row in monthly_by_year[year]],
                     'format': NUMBER_FORMAT,
-                    'fill': False,
                 }
                 for year in sorted(monthly_by_year)
             ],
@@ -907,7 +875,6 @@ async def _year_over_year_payload(
                     'label': str(year),
                     'data': [row['opz_pct'] for row in monthly_by_year[year]],
                     'format': PERCENT_FORMAT,
-                    'fill': False,
                 }
                 for year in sorted(monthly_by_year)
             ],
@@ -968,25 +935,13 @@ async def _year_over_year_payload(
 
 
 async def build_payment_methods(req: ReportRequest) -> dict[str, Any]:
-    return await _payment_methods_payload(
-        req.db, req.base, req.start, req.end, req.allowed_company_ids, req.factual_at
-    )
-
-
-async def _payment_methods_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_ids: list[int],
-    factual_at: datetime,
-) -> dict[str, Any]:
-    breakdown = await fetch_payment_breakdown(db, start, end, company_ids, factual_at)
+    base = req.base
+    breakdown = await fetch_payment_breakdown(req.db, req.start, req.end, req.allowed_company_ids, req.factual_at)
     branches = breakdown['branches']
     multi = len(branches) > 1
     # Revenue includes top-ups, so the coverage verdict is the Overview's, not a new one.
     source_status, missing_components = await _source_coverage_status(
-        db, start, end, None, None, company_ids_override=company_ids
+        req.db, req.start, req.end, None, None, company_ids_override=req.allowed_company_ids
     )
     base['missing_sources'] = sorted(missing_components)
     if source_status == 'partial':
@@ -1091,7 +1046,6 @@ async def _payment_methods_payload(
                     'label': label,
                     'data': [share(row[key], row['revenue']) for row in monthly],
                     'format': PERCENT_FORMAT,
-                    'fill': False,
                 }
                 for key, label in forms
             ],
@@ -1142,7 +1096,7 @@ async def _payment_methods_payload(
                 'kind': 'warning',
                 'title': 'Яндекс Пэй не учтён',
                 'text': (
-                    f'{_unapplied_phrases(unapplied, branches, end)} '
+                    f'{_unapplied_phrases(unapplied, branches, req.end)} '
                     f'Безналичные показаны целиком, как в YClients.{trend_note}'
                 ),
             }
@@ -1164,7 +1118,7 @@ async def _payment_methods_payload(
             'title': 'Яндекс Пэй введён не за все месяцы',
             'text': '. '.join(phrases),
         })
-    partial_note = _data_through_note(branches, end, factual_branch_date(factual_at))
+    partial_note = _data_through_note(branches, req.end, factual_branch_date(req.factual_at))
     if partial_note:
         base['notes'].append(partial_note)
     excess = [branch for branch in branches if branch['cashless'] < 0]

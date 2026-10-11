@@ -204,7 +204,7 @@ async def test_dashboard_reports_registry_contract(async_session):
     for item in data:
         assert set(item) == {'id', 'title', 'description', 'group', 'themes', 'roles', 'filters', 'aliases'}
         assert item['description'] and item['description'] != 'Отчет строится на текущих данных YClients в PostgreSQL.'
-        assert set(item['filters']) == {'date_range', 'branch', 'staff', 'granularity', 'compare'}
+        assert set(item['filters']) == {'date_range', 'staff', 'granularity', 'compare'}
     assert by_id['financial_overview']['filters']['compare'] is True
     assert by_id['financial_overview']['filters']['granularity'] is True
     assert 'revenue_dynamics' in by_id['financial_overview']['aliases']
@@ -526,7 +526,6 @@ async def test_dashboard_report_data_ready_report_and_compare(async_session):
     assert r.status_code == 200
     data = r.json()['data']
     assert data['source_status'] == 'ready'
-    assert data['average_check_source_status'] == 'partial'
     assert data['report_id'] == 'financial_overview'
     assert data['cards'][0]['value'] == 1200.0
     assert data['comparison']['cards'][0]['value'] == 800.0

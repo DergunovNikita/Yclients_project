@@ -7,7 +7,6 @@ from typing import Any
 from sqlalchemy import and_, case, func, select
 
 from dashboard_service import (
-    _appointment_company_ids,
     _appt_revenue_filters,
     _service_group_key,
     _transaction_service_catalog_join,
@@ -207,9 +206,6 @@ async def build_service_staff_profit(req: ReportRequest) -> dict[str, Any]:
 
 
 async def build_service_combos(req: ReportRequest) -> dict[str, Any]:
-    allowed_company_ids = await _appointment_company_ids(
-        req.db, req.company_id, req.staff_id, req.allowed_company_ids
-    )
     title_expr = func.trim(func.coalesce(func.nullif(Transaction.service_title, ''), ServiceCatalog.title, ''))
     group_key = _service_group_key(title_expr, Transaction.service_id)
     # One row per (visit, service): the visit lines repeat a service, and a pair must count a visit once.
@@ -230,7 +226,7 @@ async def build_service_combos(req: ReportRequest) -> dict[str, Any]:
                 req.end,
                 req.company_id,
                 req.staff_id,
-                allowed_company_ids=allowed_company_ids,
+                allowed_company_ids=req.allowed_company_ids,
                 factual_at=req.factual_at,
             ),
             func.coalesce(Transaction.amount, 0) > 0,

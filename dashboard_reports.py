@@ -71,7 +71,6 @@ class ReportDefinition:
             'roles': list(self.roles),
             'filters': {
                 'date_range': self.date_range,
-                'branch': True,
                 'staff': self.staff_filter,
                 'granularity': self.granularity,
                 'compare': self.compare,

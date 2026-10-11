@@ -372,3 +372,18 @@ async def test_staff_efficiency_has_no_revenue_per_visit_without_completed_visit
     assert cards(data)['Выручка услуг / завершенная запись'] is None
     (row,) = table(data, 'staff')['rows']
     assert row['completed'] == 0 and row['avg_check'] is None
+
+
+@pytest.mark.asyncio
+async def test_staff_efficiency_shows_the_staff_rows_own_branch_and_none_for_an_orphan(async_session):
+    await seed(async_session, [
+        # Anna (id 1) belongs to Alpha; her visit is recorded under Beta.
+        visit(date(2026, 6, 1), company_id=2, staff_id=1),
+        visit(date(2026, 6, 2), company_id=2, staff_id=99),
+    ])
+
+    data = await report(async_session, 'staff_efficiency', allowed_company_ids=[1, 2])
+
+    by_id = {row['staff_id']: row for row in table(data, 'staff')['rows']}
+    assert by_id[1]['company_title'] == 'Alpha'
+    assert (by_id[99]['staff_name'], by_id[99]['company_title']) == ('Сотрудник 99', None)

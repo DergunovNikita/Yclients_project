@@ -28,9 +28,12 @@ def appointment_conditions(
     *,
     attended_only: bool = False,
     allowed_company_ids: list[int] | None = None,
-    factual_at: datetime | None = None,
+    factual_at: datetime,
 ) -> list[Any]:
-    """Shared appointment filters. A `start` of None opens the window to full history."""
+    """Shared appointment filters. A `start` of None opens the window to full history.
+
+    `factual_at` has no default: a caller that forgets it would count visits that have not happened yet.
+    """
     conditions = [
         Appointment.date <= end,
         business_appointment_condition(),
@@ -40,8 +43,7 @@ def appointment_conditions(
         conditions.append(Appointment.date >= start)
     if attended_only:
         conditions.append(Appointment.attendance == COMPLETED_ATTENDANCE)
-    if factual_at is not None:
-        conditions.append(_appointment_factual_at_condition(factual_at))
+    conditions.append(_appointment_factual_at_condition(factual_at))
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
         conditions.append(scope)

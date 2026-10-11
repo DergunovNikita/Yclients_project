@@ -12,9 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dashboard_service import (
     COMPLETED_ATTENDANCE,
-    _appointment_company_ids,
     _branch_timezone,
-    _company_scope_clause,
     _company_timezone_names,
     _local_moment,
     _physical_account_condition,
@@ -252,7 +250,7 @@ async def _local_visit_cells(req: ReportRequest) -> tuple[dict[tuple[int, int], 
     PostgreSQL converts and groups in SQL. Other dialects (the SQLite test database has no timezone())
     group by the stored minute instead and convert those few rows in Python.
     """
-    company_ids = await _appointment_company_ids(req.db, req.company_id, req.staff_id, req.allowed_company_ids)
+    company_ids = req.allowed_company_ids
     names = await _company_timezone_names(req.db, company_ids)
     companies_by_timezone: dict[str, list[int]] = defaultdict(list)
     for company_id in company_ids:
@@ -487,7 +485,7 @@ async def _staff_rows(
             func.count(func.distinct(Appointment.client_id)).label('clients'),
         )
         .outerjoin(Staff, Staff.id == Appointment.staff_id)
-        .outerjoin(Company, Company.id == Appointment.company_id)
+        .outerjoin(Company, Company.id == Staff.company_id)
         .where(and_(*appointment_conditions(
             start,
             end,
@@ -515,7 +513,7 @@ async def _staff_rows(
             ),
         )
         .outerjoin(Staff, Staff.id == Appointment.staff_id)
-        .outerjoin(Company, Company.id == Appointment.company_id)
+        .outerjoin(Company, Company.id == Staff.company_id)
         .where(
             _service_paid_filters(
                 start,
@@ -541,7 +539,6 @@ async def _staff_rows(
             'completed': completed,
             'clients': int(row.clients or 0),
             'revenue': 0.0,
-            'avg_check': 0.0,
         }
     for row in (await db.execute(rev_stmt)).all():
         item = rows_by_staff.setdefault(row.staff_id, {
@@ -552,13 +549,12 @@ async def _staff_rows(
             'completed': 0,
             'clients': 0,
             'revenue': 0.0,
-            'avg_check': 0.0,
         })
         item['revenue'] = float(row.revenue or 0)
-        item['avg_check'] = (
-            item['revenue'] / item['completed'] if item['completed'] else 0.0
-        )
     rows = list(rows_by_staff.values())
+    for item in rows:
+        # Same rule as the card: no completed visit, no average (a master with only no-shows has no "0 ₽").
+        item['avg_check'] = item['revenue'] / item['completed'] if item['completed'] else None
     # staff_id is a unique final tiebreaker: without it, staff tied on revenue and
     # completed count swap places whenever the query plan changes.
     rows.sort(
@@ -570,17 +566,6 @@ async def _staff_rows(
         reverse=True,
     )
     return rows
-
-
-async def _staff_branch_titles(req: ReportRequest) -> dict[int, str]:
-    """Each staff row's own branch, instead of the alphabetical minimum over the branches of their visits."""
-    stmt = select(Staff.id, Company.title).join(Company, Company.id == Staff.company_id)
-    scope = _company_scope_clause(Staff.company_id, req.company_id, req.allowed_company_ids)
-    if scope is not None:
-        stmt = stmt.where(scope)
-    if req.staff_id is not None:
-        stmt = stmt.where(Staff.id == req.staff_id)
-    return {int(row.id): row.title for row in (await req.db.execute(stmt)).all()}
 
 
 def _chart_labels(rows: list[dict[str, Any]]) -> list[str]:
@@ -599,16 +584,9 @@ async def build_staff_efficiency(req: ReportRequest) -> dict[str, Any]:
     rows = await _staff_rows(
         req.db, req.start, req.end, req.company_id, req.staff_id, req.allowed_company_ids, req.factual_at
     )
-    titles = await _staff_branch_titles(req)
     for row in rows:
         if row['staff_id'] is None:
             row['staff_name'] = NO_MASTER
-            row['company_title'] = None
-        else:
-            row['company_title'] = titles.get(int(row['staff_id']), row['company_title'])
-        if not row['completed']:
-            # Same rule as the card: no completed visit, no average (a master with only no-shows has no "0 ₽").
-            row['avg_check'] = None
     total_revenue = sum(row['revenue'] for row in rows)
     total_completed = sum(row['completed'] for row in rows)
     base['notes'].append({
