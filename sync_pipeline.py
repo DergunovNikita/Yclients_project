@@ -1252,6 +1252,8 @@ def sync_clients(api: YClientsAPI, db, company_id: str, db_company_id: int | Non
                     company_id=cid,
                 )
                 db.add(obj)
+                # A listing page boundary can repeat a client; the repeat must update this row, not insert a twin.
+                existing_clients[client_id] = obj
             else:
                 obj.name = c.get('name', '')
                 obj.phone = c.get('phone')

@@ -1188,6 +1188,25 @@ def test_sync_clients_scopes_external_id_by_internal_company():
         engine.dispose()
 
 
+def test_sync_clients_survives_a_client_repeated_in_the_listing():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__, Client.__table__])
+    db = sessionmaker(bind=engine)()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon 1', group_id=1))
+        db.commit()
+
+        payload = [{'id': 42, 'name': 'First'}, {'id': 7, 'name': 'Other'}, {'id': 42, 'name': 'Second'}]
+        assert sync_clients(FakeClientsAPI(payload), db, '1') is True
+
+        rows = {row.external_id: row.name for row in db.query(Client).all()}
+        assert rows == {42: 'Second', 7: 'Other'}
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_sync_staff_scopes_external_id_by_internal_company():
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__, Staff.__table__])
