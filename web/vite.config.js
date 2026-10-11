@@ -34,7 +34,6 @@ export default defineConfig(({ mode }) => {
           forgot: resolve(rootDir, 'forgot-password.html'),
           reset: resolve(rootDir, 'reset-password.html'),
           verify: resolve(rootDir, 'verify-email.html'),
-          profile: resolve(rootDir, 'profile.html'),
           admin: resolve(rootDir, 'admin.html'),
           onboarding: resolve(rootDir, 'onboarding.html'),
           settings: resolve(rootDir, 'settings.html'),
