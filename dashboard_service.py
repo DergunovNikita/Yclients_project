@@ -943,17 +943,6 @@ def _coerce_time(value: Any) -> time | None:
     return time.fromisoformat(text[:8])
 
 
-def _schedule_slot_covers_datetime(slot_from: Any, slot_to: Any, value: Any) -> bool:
-    appt_time = _coerce_time(value)
-    start_time = _coerce_time(slot_from)
-    end_time = _coerce_time(slot_to)
-    if appt_time is None or start_time is None or end_time is None:
-        return True
-    if start_time <= end_time:
-        return start_time <= appt_time < end_time
-    return appt_time >= start_time or appt_time < end_time
-
-
 def _appt_revenue_filters(
     start: date,
     end: date,
@@ -2226,9 +2215,8 @@ async def fetch_summary(
         db,
         start,
         end,
-        company_id,
         staff_id,
-        company_ids=appointment_company_ids,
+        appointment_company_ids,
         factual_at=factual_at,
     ) + await _manual_opz_scope_total(
         db,
@@ -2242,9 +2230,8 @@ async def fetch_summary(
         db,
         prev_dr.start,
         prev_dr.end,
-        company_id,
         staff_id,
-        company_ids=appointment_company_ids,
+        appointment_company_ids,
         factual_at=factual_at,
     ) + (
         0.0
@@ -4125,13 +4112,10 @@ async def _opz_count_scope(
     db: AsyncSession,
     start: date,
     end: date,
-    company_id: Optional[int],
     staff_id: Optional[int],
-    company_ids: Optional[list[int]] = None,
+    company_ids: list[int],
     factual_at: Optional[datetime] = None,
 ) -> float:
-    if company_ids is None:
-        company_ids = await _appointment_company_ids(db, company_id, staff_id)
     await _company_timezone_names(db, company_ids)
     total = 0.0
     for item_company_id in company_ids:
@@ -4336,19 +4320,13 @@ async def _admin_event_counts(
         scheduled_staff_ids = {
             int(schedule.staff_id)
             for schedule in candidate_schedules
-            if (
-                _schedule_slot_covers_local_moment(
-                    _coerce_date(schedule.date),
-                    schedule.slot_from,
-                    schedule.slot_to,
-                    local_moment,
-                )
-                if local_moment is not None
-                else _schedule_slot_covers_datetime(
-                    schedule.slot_from,
-                    schedule.slot_to,
-                    event.event_moment,
-                )
+            # Without a timestamp there is no slot to test: anyone scheduled that day qualifies.
+            if local_moment is None
+            or _schedule_slot_covers_local_moment(
+                _coerce_date(schedule.date),
+                schedule.slot_from,
+                schedule.slot_to,
+                local_moment,
             )
         }
         if creator_staff_id in scheduled_staff_ids:
@@ -4371,14 +4349,9 @@ def _branch_timezone(value: str | None) -> ZoneInfo:
         return ZoneInfo(DEFAULT_BRANCH_TIMEZONE)
 
 
-def _local_event_moment(value: Any, timezone: ZoneInfo) -> datetime | None:
+def _local_event_moment(value: Optional[datetime], timezone: ZoneInfo) -> datetime | None:
     if value is None:
         return None
-    if not isinstance(value, datetime):
-        try:
-            value = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-        except ValueError:
-            return None
     source = value.replace(tzinfo=UTC) if value.tzinfo is None else value
     return source.astimezone(timezone).replace(tzinfo=None)
 
@@ -4696,7 +4669,7 @@ async def _resolve_staff_role_periods(
                 candidates = metric_candidates or input_candidates
                 selected = max(
                     candidates,
-                    key=lambda row: row.updated_at or datetime.min,
+                    key=lambda row: row.updated_at,
                     default=None,
                 )
                 category = selected.staff_category if selected is not None else fallback
@@ -5468,17 +5441,10 @@ async def _fact_metric_components(
     goods_metrics = await _goods_sales_metrics(
         db, start, end, company_id, factual_at=factual_at
     )
-    clients_count = float(
-        await db.scalar(
-            select(func.count(func.distinct(Appointment.id))).where(
-                _appt_revenue_filters(start, end, company_id, factual_at=factual_at)
-            )
-        )
-        or 0
-    )
     values: dict[str, float] = {
         'revenue': float(average_check['numerator'] or 0),
-        'clients': clients_count,
+        # The block counts exactly the branch's completed visits that "clients" means here.
+        'clients': float(average_check['completed_appointments']),
         'avg_check_denominator': float(average_check['denominator'] or 0),
         'opz_qty': float(opz_override),
     }
@@ -8098,8 +8064,7 @@ async def _fetch_manual_facts(
         if info is None:
             continue
         items = stored.get((company, staff), [])
-        dated_items = [item for item in items if item.updated_at is not None]
-        latest = max(dated_items, key=lambda item: item.updated_at) if dated_items else None
+        latest = max(items, key=lambda item: item.updated_at, default=None)
         payload_rows.append({
             'company_id': company,
             'company_title': titles.get(company),
