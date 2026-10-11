@@ -19,7 +19,6 @@ from models import (
     FinancialTransaction,
     Group,
     PlanStaffInput,
-    Service,
     ServiceCatalog,
     ServiceLabel,
     Staff,
@@ -57,7 +56,6 @@ async def _seed_services(session):
         Company(id=1, title='Salon', group_id=1),
         Staff(id=1, name='Master', position='Барбер', company_id=1),
         AccountCatalog(company_id=1, account_id=1, title='Наличные', updated_at=datetime(2025, 1, 1)),
-        *(Service(id=sid, title=f'S{sid}', company_id=1) for sid in (10, 11, 12, 13)),
     ])
     await session.flush()
     session.add(Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 1, 10), attendance=1))
@@ -112,7 +110,6 @@ async def _seed_visits(session):
             source=dashboard_service.PERSONAL_ACCOUNT_SOURCE,
             period_start=date(2024, 1, 1),
             period_end=date(2025, 3, 1),
-            synced_at=NOW,
         ),
     ])
     await session.flush()

@@ -174,7 +174,7 @@ SYNC_AUTO_ENQUEUE_ENABLED = _get_bool('SYNC_AUTO_ENQUEUE_ENABLED', True)
 SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES = _get_int('SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
 # A 'running' job older than this is treated as orphaned (worker died mid-sync) and reaped.
 SYNC_STALE_JOB_MINUTES = _get_int('SYNC_STALE_JOB_MINUTES', 120)
-# Retention for the two bookkeeping pairs nothing else ever prunes: sync_runs + sync_step_runs
+# Retention for the two bookkeeping pairs nothing else ever prunes: sync_runs
 # (SyncControlService.purge_old_runs) and sync_jobs + sync_job_events
 # (SyncJobService.purge_old_jobs). 30 days is troubleshooting history and nothing more — the
 # status payloads only ever read the latest row, and that one is kept whatever its age. Both

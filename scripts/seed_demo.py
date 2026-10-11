@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import random
 import sys
-from datetime import datetime
 from pathlib import Path
 
 # Allow ``python scripts/seed_demo.py`` in addition to ``python -m scripts.seed_demo``.
@@ -21,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import select  # noqa: E402
 
+import clock  # noqa: E402
 from auth_service import generate_bootstrap_password, hash_password, normalize_email  # noqa: E402
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER  # noqa: E402
 from database import init_database  # noqa: E402
@@ -115,7 +115,7 @@ def get_or_create_demo_account(db) -> PortalAccount:
         .first()
     )
     if account is None:
-        account = PortalAccount(label=DEMO_ACCOUNT_LABEL, is_demo=True, created_at=datetime.utcnow())
+        account = PortalAccount(label=DEMO_ACCOUNT_LABEL, is_demo=True, created_at=clock.utcnow())
         db.add(account)
         db.flush()
     else:
@@ -148,7 +148,7 @@ def ensure_branches(db, account_id: int, company_ids: list[int]) -> None:
 
 def ensure_demo_user(db, account_id: int) -> PortalUser:
     email = normalize_email(DEMO_EMAIL)
-    now = datetime.utcnow()
+    now = clock.utcnow()
     user = db.execute(select(PortalUser).where(PortalUser.email == email)).scalar_one_or_none()
     if user is None:
         user = PortalUser(

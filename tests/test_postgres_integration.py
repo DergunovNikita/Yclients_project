@@ -25,7 +25,7 @@ from models import (
     PortalAuditEvent,
     PortalRefreshToken,
     PortalUser,
-    Service,
+    ServiceCatalog,
     ServiceLabel,
     Staff,
     StaffSchedule,
@@ -373,7 +373,7 @@ async def test_postgres_administrator_attribution_uses_local_shifts_and_role_per
                     visits_count=1,
                     last_visit_date=date(2025, 1, 31),
                 ),
-                Service(id=10, title='Extra', company_id=1),
+                ServiceCatalog(company_id=1, service_id=10, title='Extra', updated_at=datetime(2025, 1, 1)),
                 ServiceLabel(
                     service_id=10,
                     company_id=1,
@@ -438,7 +438,6 @@ async def test_postgres_administrator_attribution_uses_local_shifts_and_role_per
                     source=dashboard_service.STAFF_SCHEDULE_SOURCE,
                     period_start=date(2024, 12, 31),
                     period_end=date(2025, 12, 31),
-                    synced_at=datetime(2025, 12, 31),
                 ),
             ]:
                 db.add(row)

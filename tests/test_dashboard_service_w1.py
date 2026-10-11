@@ -194,18 +194,14 @@ async def test_service_management_refuses_a_branch_that_left_the_tenant(async_se
         await dashboard_service.save_service_management(
             async_session,
             row_changes=[{'company_id': 2, 'service_id': 10, 'is_extra': True}],
-            group_changes=[],
             allowed_company_ids=[1, 2],
-            portal_account_id=1,
         )
     assert (await async_session.execute(select(ServiceLabel))).scalars().all() == []
 
     saved = await dashboard_service.save_service_management(
         async_session,
         row_changes=[{'company_id': 1, 'service_id': 10, 'is_extra': True}],
-        group_changes=[],
         allowed_company_ids=[1, 2],
-        portal_account_id=1,
     )
     assert [row['company_id'] for row in saved['rows']] == [1]
 
@@ -344,3 +340,31 @@ async def test_account_and_expense_markers_ignore_the_case_of_cyrillic_titles(as
     # recognised from their expense titles, the rent is neither goods nor a top-up.
     assert block['goods_revenue'] == 100.0
     assert block['topup_revenue'] == 30.0
+
+
+def _title_contains_sql(dialect) -> str:
+    clause = dashboard_service._TitleContains(AccountCatalog.title, 'бонус')
+    return str(clause.compile(dialect=dialect, compile_kwargs={'literal_binds': True}))
+
+
+def test_title_marker_on_postgres_keeps_the_exact_spellings_as_a_floor_under_ilike():
+    from sqlalchemy.dialects.postgresql import asyncpg
+
+    sql = _title_contains_sql(asyncpg.dialect())  # the API's driver
+
+    # ILIKE only folds Cyrillic when the database ctype does; the LIKE pair is what the old code matched.
+    assert sql == (
+        "(account_catalog.title ILIKE '%бонус%' OR account_catalog.title LIKE '%бонус%'"
+        " OR account_catalog.title LIKE '%Бонус%')"
+    )
+
+
+def test_title_marker_on_sqlite_spells_out_the_three_cases():
+    from sqlalchemy.dialects import sqlite
+
+    sql = _title_contains_sql(sqlite.dialect())
+
+    assert sql == (
+        "(account_catalog.title LIKE '%бонус%' OR account_catalog.title LIKE '%Бонус%'"
+        " OR account_catalog.title LIKE '%БОНУС%')"
+    )

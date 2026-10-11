@@ -41,7 +41,7 @@ async def _accounts(session) -> int:
 
 @pytest.mark.asyncio
 async def test_an_api_key_must_name_the_tenant_of_a_settings_read(client, async_session):
-    response = await client.get('/dashboard/services')
+    response = await client.get('/dashboard/metric-visibility')
 
     assert response.status_code == 400
     assert response.json()['detail'] == 'X-Portal-Account-Id is required'
@@ -51,7 +51,7 @@ async def test_an_api_key_must_name_the_tenant_of_a_settings_read(client, async_
 
 @pytest.mark.asyncio
 async def test_an_api_key_cannot_name_a_tenant_that_does_not_exist(client, async_session):
-    response = await client.get('/dashboard/services', headers={'X-Portal-Account-Id': '9'})
+    response = await client.get('/dashboard/metric-visibility', headers={'X-Portal-Account-Id': '9'})
 
     assert response.status_code == 400
     assert response.json()['detail'] == 'unknown X-Portal-Account-Id'
@@ -73,8 +73,15 @@ async def test_an_api_key_write_lands_on_the_tenant_it_names_not_on_the_lowest_i
     assert saved.status_code == 200
     rows = (await async_session.execute(select(PortalMetricVisibility))).scalars().all()
     assert [(row.portal_account_id, row.role) for row in rows] == [(2, 'manager')]
-    listed = await client.get('/dashboard/services', headers={'X-Portal-Account-Id': '2'})
+    listed = await client.get('/dashboard/metric-visibility', headers={'X-Portal-Account-Id': '2'})
     assert listed.status_code == 200
+    assert listed.json()['data']['roles']['manager'] == ['revenue']
+
+
+@pytest.mark.asyncio
+async def test_the_service_catalog_is_not_tenant_scoped_so_an_api_key_needs_no_tenant(client):
+    assert (await client.get('/dashboard/services')).status_code == 200
+    assert (await client.patch('/dashboard/services', json={'row_changes': []})).status_code == 200
 
 
 def test_a_value_error_becomes_a_400_and_other_exceptions_pass_through():

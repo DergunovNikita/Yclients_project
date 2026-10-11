@@ -43,10 +43,7 @@ from models import (
     PlanBranchSetting,
     PlanMetric,
     PlanStaffInput,
-    Service,
     ServiceCatalog,
-    ServiceKpiAssignment,
-    ServiceKpiGroup,
     ServiceLabel,
     Staff,
     StaffSchedule,
@@ -455,7 +452,6 @@ async def test_dashboard_report_data_ready_report_and_compare(async_session):
     async_session.add(Company(id=1, title='Salon', group_id=1))
     async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
     async_session.add(Client(id=1, name='Client', phone='+100', company_id=1))
-    async_session.add(Service(id=10, title='Cut', company_id=1))
     await async_session.flush()
     async_session.add_all([
         Appointment(
@@ -842,21 +838,18 @@ async def test_dashboard_year_over_year_uses_actual_history_and_overview_formula
                 source='appointments_detail',
                 period_start=date(2023, 1, 1),
                 period_end=date(2026, 12, 31),
-                synced_at=datetime(2026, 8, 1),
             ),
             SyncSourceState(
                 company_id=1,
                 source='financial_transactions_detail',
                 period_start=date(2023, 1, 1),
                 period_end=date(2026, 12, 31),
-                synced_at=datetime(2026, 8, 1),
             ),
             SyncSourceState(
                 company_id=1,
                 source='goods_transactions_detail',
                 period_start=date(2023, 1, 1),
                 period_end=date(2026, 12, 31),
-                synced_at=datetime(2026, 8, 1),
             ),
         ]
     )
@@ -1032,21 +1025,18 @@ async def test_year_over_year_charts_render_values_after_full_historical_sync(
                 source='appointments_detail',
                 period_start=sync_start,
                 period_end=schedule_end,
-                synced_at=report_now,
             ),
             SyncSourceState(
                 company_id=1,
                 source='financial_transactions_detail',
                 period_start=sync_start,
                 period_end=sync_end,
-                synced_at=report_now,
             ),
             SyncSourceState(
                 company_id=1,
                 source='goods_transactions_detail',
                 period_start=sync_start,
                 period_end=sync_end,
-                synced_at=report_now,
             ),
         ]
     )
@@ -1191,7 +1181,6 @@ async def test_year_over_year_current_december_31_remains_partial(
             source=source,
             period_start=date(2025, 1, 1),
             period_end=date(2026, 12, 31),
-            synced_at=datetime(2026, 12, 31, 12),
         ))
     await async_session.commit()
 
@@ -1235,14 +1224,13 @@ async def test_dashboard_year_over_year_empty_scope_returns_empty_actual_history
     assert data['tables'] == []
 
 
-def _yoy_source_states(company_id: int, period_start: date, period_end: date, synced_at: datetime):
+def _yoy_source_states(company_id: int, period_start: date, period_end: date):
     return [
         SyncSourceState(
             company_id=company_id,
             source=source,
             period_start=period_start,
             period_end=period_end,
-            synced_at=synced_at,
         )
         for source in (
             'appointments_detail',
@@ -1297,7 +1285,7 @@ async def test_reporting_start_keeps_overview_and_year_over_year_in_agreement(
             ),
         ]
     )
-    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now))
+    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date()))
     await async_session.commit()
 
     summary = await dashboard_service.fetch_summary(
@@ -1449,7 +1437,7 @@ async def test_reporting_start_cuts_service_revenue_paid_across_the_boundary(
             ),
         ]
     )
-    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now))
+    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date()))
     await async_session.commit()
 
     summary = await dashboard_service.fetch_summary(
@@ -1523,7 +1511,6 @@ async def test_reporting_start_keeps_coverage_status_consistent_across_reports(
         source=dashboard_service.PERSONAL_ACCOUNT_SOURCE,
         period_start=date(2025, 5, 1),
         period_end=report_now.date(),
-        synced_at=report_now,
     ))
     await async_session.commit()
 
@@ -1638,7 +1625,7 @@ async def test_reporting_start_keeps_pre_opening_direct_revenue_out_of_years_and
     )
     for company_id in (1, 2):
         async_session.add_all(
-            _yoy_source_states(company_id, date(2023, 1, 1), report_now.date(), report_now)
+            _yoy_source_states(company_id, date(2023, 1, 1), report_now.date())
         )
     await async_session.commit()
 
@@ -1707,7 +1694,7 @@ async def test_reporting_start_certifies_the_opening_year_of_a_branch_synced_fro
     )
     # Synced from the opening date only — never from the start of 2025.
     async_session.add_all(
-        _yoy_source_states(1, date(2025, 5, 1), report_now.date(), report_now)
+        _yoy_source_states(1, date(2025, 5, 1), report_now.date())
     )
     await async_session.commit()
 
@@ -1785,9 +1772,9 @@ async def test_reporting_start_clamps_coverage_for_a_branch_opened_mid_year(
             ),
         ]
     )
-    async_session.add_all(_yoy_source_states(1, date(2025, 1, 1), report_now.date(), report_now))
+    async_session.add_all(_yoy_source_states(1, date(2025, 1, 1), report_now.date()))
     # Branch 2 synced from its opening, which is inside the reported year.
-    async_session.add_all(_yoy_source_states(2, date(2025, 6, 1), report_now.date(), report_now))
+    async_session.add_all(_yoy_source_states(2, date(2025, 6, 1), report_now.date()))
     await async_session.commit()
 
     report = await dashboard_reports.fetch_report_data(
@@ -2093,7 +2080,7 @@ async def test_reporting_start_excludes_pre_opening_goods_and_opz(
             ),
         ]
     )
-    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now))
+    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date()))
     await async_session.commit()
 
     goods_facts = await dashboard_service.fetch_year_over_year_facts(
@@ -2175,7 +2162,7 @@ async def test_reporting_start_does_not_blank_years_a_branch_predates(
             ),
         ]
     )
-    async_session.add_all(_yoy_source_states(1, date(2024, 1, 1), report_now.date(), report_now))
+    async_session.add_all(_yoy_source_states(1, date(2024, 1, 1), report_now.date()))
     # Branch 2 opened in 2025 and is deliberately left with no sync state at all: a year
     # the branch did not exist for must not be read as missing coverage.
     await async_session.commit()
@@ -2250,7 +2237,7 @@ async def test_year_over_year_reporting_start_trims_pre_opening_history(
             ),
         ]
     )
-    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now))
+    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date()))
     await async_session.commit()
 
     report = await dashboard_reports.fetch_report_data(
@@ -2332,7 +2319,7 @@ async def test_year_over_year_reporting_start_cuts_each_branch_separately(
     )
     for company_id in (1, 2):
         async_session.add_all(
-            _yoy_source_states(company_id, date(2024, 1, 1), report_now.date(), report_now)
+            _yoy_source_states(company_id, date(2024, 1, 1), report_now.date())
         )
     await async_session.commit()
 
@@ -2380,7 +2367,7 @@ async def test_year_over_year_without_reporting_start_keeps_full_history(
         company_id=1,
     ))
     async_session.add_all(
-        _yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now)
+        _yoy_source_states(1, date(2023, 1, 1), report_now.date())
     )
     await async_session.commit()
 
@@ -2449,7 +2436,7 @@ async def test_reporting_end_keeps_history_and_drops_facts_after_the_handover(
             ),
         ]
     )
-    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now))
+    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date()))
     await async_session.commit()
 
     summary = await dashboard_service.fetch_summary(
@@ -2553,7 +2540,7 @@ async def test_reporting_end_cuts_service_revenue_paid_across_the_boundary(
             ),
         ]
     )
-    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date(), report_now))
+    async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date()))
     await async_session.commit()
 
     summary = await dashboard_service.fetch_summary(
@@ -2724,7 +2711,7 @@ async def test_reporting_end_takes_the_branch_out_of_the_staff_and_service_lists
         async_session, start=date(2025, 9, 1), end=date(2025, 9, 30)
     )
     unscoped = await dashboard_service.fetch_staff(async_session)
-    services = await dashboard_service.fetch_dashboard_services(async_session, portal_account_id=1)
+    services = await dashboard_service.fetch_dashboard_services(async_session)
 
     assert {row['name'] for row in august} == {'Stays Barber', 'Left Barber'}
     assert {row['name'] for row in september} == {'Stays Barber'}
@@ -2755,7 +2742,6 @@ async def test_reporting_end_does_not_demand_sync_coverage_past_the_handover(asy
         source=dashboard_service.PERSONAL_ACCOUNT_SOURCE,
         period_start=date(2025, 1, 1),
         period_end=date(2025, 8, 31),
-        synced_at=datetime(2025, 9, 1, 3, 0),
     ))
     await async_session.commit()
 
@@ -2814,7 +2800,6 @@ async def test_year_over_year_history_can_start_with_direct_revenue_only(
             source=source,
             period_start=fact_day,
             period_end=date(2026, 8, 1),
-            synced_at=datetime(2021, 4, 5, 13),
         ))
     await async_session.commit()
 
@@ -2872,7 +2857,6 @@ async def test_year_over_year_history_includes_payment_before_completed_visit(
         source='appointments_detail',
         period_start=date(2023, 12, 30),
         period_end=date(2023, 12, 31),
-        synced_at=datetime(2024, 1, 2, 13),
     )
     async_session.add(appointment_state)
     for source in ('financial_transactions_detail', 'goods_transactions_detail'):
@@ -2881,7 +2865,6 @@ async def test_year_over_year_history_includes_payment_before_completed_visit(
             source=source,
             period_start=date(2023, 12, 30),
             period_end=date(2026, 8, 1),
-            synced_at=datetime(2024, 1, 2, 13),
         ))
     await async_session.commit()
 
@@ -2964,14 +2947,12 @@ async def test_year_over_year_masks_linked_direct_revenue_without_appointment_co
             source='financial_transactions_detail',
             period_start=date(2024, 1, 10),
             period_end=date(2024, 1, 10),
-            synced_at=datetime(2024, 1, 10, 14),
         ),
         SyncSourceState(
             company_id=1,
             source='goods_transactions_detail',
             period_start=date(2024, 1, 10),
             period_end=date(2024, 1, 10),
-            synced_at=datetime(2024, 1, 10, 14),
         ),
     ])
     await async_session.commit()
@@ -3083,7 +3064,6 @@ async def test_factual_cutoff_is_shared_by_overview_plan_fact_daily_and_years(
             source=source,
             period_start=date(2025, 1, 1),
             period_end=date(2026, 12, 31),
-            synced_at=factual_at,
         ))
     await async_session.commit()
 
@@ -3220,7 +3200,6 @@ async def test_year_over_year_uses_configured_branch_scope_when_access_is_unrest
             source=source,
             period_start=date(2024, 1, 1),
             period_end=date(2024, 12, 31),
-            synced_at=datetime(2025, 1, 1),
         ))
     await async_session.commit()
 
@@ -3326,42 +3305,36 @@ async def test_dashboard_year_over_year_keeps_partial_multi_company_year(
                 source='appointments_detail',
                 period_start=date(2023, 1, 1),
                 period_end=date(2024, 12, 31),
-                synced_at=datetime(2025, 1, 1),
             ),
             SyncSourceState(
                 company_id=1,
                 source='financial_transactions_detail',
                 period_start=date(2023, 1, 1),
                 period_end=date(2024, 12, 31),
-                synced_at=datetime(2025, 1, 1),
             ),
             SyncSourceState(
                 company_id=2,
                 source='appointments_detail',
                 period_start=date(2023, 1, 1),
                 period_end=date(2024, 12, 31),
-                synced_at=datetime(2025, 1, 1),
             ),
             SyncSourceState(
                 company_id=2,
                 source='financial_transactions_detail',
                 period_start=date(2023, 1, 1),
                 period_end=date(2023, 12, 31),
-                synced_at=datetime(2025, 1, 1),
             ),
             SyncSourceState(
                 company_id=1,
                 source='goods_transactions_detail',
                 period_start=date(2023, 1, 1),
                 period_end=date(2024, 12, 31),
-                synced_at=datetime(2025, 1, 1),
             ),
             SyncSourceState(
                 company_id=2,
                 source='goods_transactions_detail',
                 period_start=date(2023, 1, 1),
                 period_end=date(2024, 12, 31),
-                synced_at=datetime(2025, 1, 1),
             ),
         ]
     )
@@ -3463,7 +3436,6 @@ async def test_year_over_year_query_count_does_not_grow_with_history_years(
                 source=source,
                 period_start=date(2015, 1, 1),
                 period_end=date(2026, 12, 31),
-                synced_at=datetime(2026, 8, 1),
             ))
     await async_session.commit()
 
@@ -3548,21 +3520,18 @@ async def test_year_over_year_opz_deduplicates_repeated_client_per_year(
             source='appointments_detail',
             period_start=date(2024, 1, 1),
             period_end=date(2025, 12, 31),
-            synced_at=datetime(2026, 8, 1),
         ),
         SyncSourceState(
             company_id=1,
             source='financial_transactions_detail',
             period_start=date(2024, 1, 1),
             period_end=date(2025, 12, 31),
-            synced_at=datetime(2026, 8, 1),
         ),
         SyncSourceState(
             company_id=1,
             source='goods_transactions_detail',
             period_start=date(2024, 1, 1),
             period_end=date(2025, 12, 31),
-            synced_at=datetime(2026, 8, 1),
         ),
     ])
     await async_session.commit()
@@ -3638,7 +3607,6 @@ async def test_year_over_year_opz_fact_advances_latest_year(
             source=source,
             period_start=date(2024, 1, 1),
             period_end=date(2025, 12, 31),
-            synced_at=datetime(2026, 8, 1),
         ))
     await async_session.commit()
 
@@ -3705,7 +3673,6 @@ async def test_year_over_year_masks_opz_when_dependent_appointments_are_uncovere
         source='appointments_detail',
         period_start=date(2025, 1, 1),
         period_end=date(2025, 12, 31),
-        synced_at=factual_at,
     )
     async_session.add(appointment_state)
     for source in ('financial_transactions_detail', 'goods_transactions_detail'):
@@ -3714,7 +3681,6 @@ async def test_year_over_year_masks_opz_when_dependent_appointments_are_uncovere
             source=source,
             period_start=date(2025, 1, 1),
             period_end=date(2025, 12, 31),
-            synced_at=factual_at,
         ))
     await async_session.commit()
 
@@ -3802,7 +3768,7 @@ async def _seed_opz_history(async_session):
     await async_session.flush()
     async_session.add_all([
         *_opz_appointments(),
-        *_yoy_source_states(1, date(2024, 1, 1), date(2025, 12, 31), REPORT_NOW_2026),
+        *_yoy_source_states(1, date(2024, 1, 1), date(2025, 12, 31)),
     ])
     await async_session.commit()
 
@@ -3939,7 +3905,6 @@ async def test_year_over_year_masks_monthly_opz_without_hiding_revenue_and_visit
         source='appointments_detail',
         period_start=date(2025, 1, 1),
         period_end=date(2025, 12, 31),
-        synced_at=REPORT_NOW_2026,
     )
     async_session.add(appointment_state)
     for source in ('financial_transactions_detail', 'goods_transactions_detail'):
@@ -3948,7 +3913,6 @@ async def test_year_over_year_masks_monthly_opz_without_hiding_revenue_and_visit
             source=source,
             period_start=date(2025, 1, 1),
             period_end=date(2025, 12, 31),
-            synced_at=REPORT_NOW_2026,
         ))
     await async_session.commit()
 
@@ -4197,14 +4161,12 @@ async def test_year_over_year_goods_source_controls_count_and_latest_year(
             source='appointments_detail',
             period_start=date(2024, 1, 1),
             period_end=date(2026, 12, 31),
-            synced_at=datetime(2026, 8, 1),
         ),
         SyncSourceState(
             company_id=1,
             source='financial_transactions_detail',
             period_start=date(2024, 1, 1),
             period_end=date(2026, 12, 31),
-            synced_at=datetime(2026, 8, 1),
         ),
     ])
     await async_session.commit()
@@ -4233,7 +4195,6 @@ async def test_year_over_year_goods_source_controls_count_and_latest_year(
         source='goods_transactions_detail',
         period_start=date(2024, 1, 1),
         period_end=date(2026, 12, 31),
-        synced_at=datetime(2026, 8, 1),
     ))
     await async_session.commit()
     ready_goods = await dashboard_reports.fetch_report_data(
@@ -4313,7 +4274,6 @@ async def test_year_over_year_nonfactual_visits_do_not_advance_latest_year(
             source=source,
             period_start=date(2024, 1, 1),
             period_end=date(2026, 12, 31),
-            synced_at=datetime(2026, 8, 1),
         ))
     await async_session.commit()
 
@@ -4696,7 +4656,6 @@ async def test_service_breakdowns_use_the_overview_physical_account_filter(async
         Group(id=1, title='G1'),
         Company(id=1, title='Salon', group_id=1),
         Staff(id=1, name='Master', position='Барбер', company_id=1),
-        Service(id=10, title='Воск', company_id=1),
         AccountCatalog(
             company_id=1,
             account_id=1,
@@ -4878,7 +4837,6 @@ async def test_dashboard_staff_leaderboard_returns_partial_with_null_optional_su
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
     async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1, fired=0))
-    async_session.add(Service(id=10, title='воск', company_id=1))
     async_session.add(
         ServiceLabel(
             service_id=10,
@@ -5493,7 +5451,7 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
         )
         manager_service_batch = await client.patch(
             '/dashboard/services',
-            json={'row_changes': [], 'group_changes': []},
+            json={'row_changes': []},
             headers={'Authorization': f'Bearer {manager_token}'},
         )
         manager_review_facts = await client.get(
@@ -5946,8 +5904,6 @@ async def test_dashboard_summary_split_revenue_and_average_checks(async_session)
     async_session.add_all([
         Client(id=1, name='Client 1', company_id=1, visits_count=1, last_visit_date=date(2025, 1, 10)),
         Client(id=2, name='Client 2', company_id=1, visits_count=1, last_visit_date=date(2025, 1, 11)),
-        Service(id=10, title='Стрижка', company_id=1),
-        Service(id=11, title='Воск', company_id=1),
     ])
     await async_session.flush()
     async_session.add_all([
@@ -6748,7 +6704,6 @@ async def test_average_check_uses_cash_income_and_business_denominator(async_ses
                 source='financial_transactions_detail',
                 period_start=date(2025, 1, 1),
                 period_end=date(2025, 1, 31),
-                synced_at=datetime(2025, 2, 1),
             )
         )
         await async_session.commit()
@@ -6893,11 +6848,6 @@ async def test_dashboard_top_services_merges_same_service_name_across_branches(a
     async_session.add(Client(id=1, name='Client 1', company_id=1, visits_count=1, last_visit_date=date(2025, 1, 10)))
     async_session.add(Client(id=2, name='Client 2', company_id=2, visits_count=1, last_visit_date=date(2025, 1, 11)))
     async_session.add_all([
-        Service(id=10, title='Black Mask', company_id=1),
-        Service(id=20, title='Black Mask', company_id=2),
-        Service(id=30, title='Комплексное мытьё головы', company_id=1),
-        Service(id=40, title='Комплексное мытье головы', company_id=2),
-        Service(id=50, title='Стрижка', company_id=1),
     ])
     await async_session.flush()
     async_session.add_all([
@@ -7109,7 +7059,6 @@ async def test_dashboard_bundle_returns_all_extra_services_without_default_limit
     )
     for index in range(55):
         service_id = 1000 + index
-        async_session.add(Service(id=service_id, title=f'Extra {index}', category_title='Уход', company_id=1))
         async_session.add(
             ServiceLabel(
                 service_id=service_id,
@@ -7171,7 +7120,6 @@ async def test_extra_service_labels_are_scoped_to_branch_in_calculations(async_s
     async_session.add(Staff(id=2, name='Master 2', position='Барбер', company_id=2))
     async_session.add(Client(id=1, name='Client 1', company_id=1, visits_count=1, last_visit_date=date(2025, 1, 10)))
     async_session.add(Client(id=2, name='Client 2', company_id=2, visits_count=1, last_visit_date=date(2025, 1, 11)))
-    async_session.add(Service(id=10, title='Branch-only extra', category_title='Уход', company_id=1))
     await async_session.flush()
     async_session.add_all([
         Appointment(
@@ -7846,8 +7794,6 @@ async def test_dashboard_plan_fact_uses_plan_and_fact_formulas(async_session):
     async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
     async_session.add(Client(id=1, name='Client', company_id=1, visits_count=1, last_visit_date=date(2025, 1, 10)))
     async_session.add_all([
-        Service(id=10, title='воск', company_id=1),
-        Service(id=11, title='камуфляж', company_id=1),
         ServiceLabel(
             service_id=10,
             company_id=1,
@@ -8200,10 +8146,6 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
         Staff(id=4, name='Delta Admin', position='Администратор', company_id=1, fired=0, user_id=900),
     ])
     async_session.add_all([
-        Service(id=10, title='воск', company_id=1),
-        Service(id=11, title='камуфляж', company_id=1),
-        Service(id=12, title='Black Mask', company_id=1),
-        Service(id=13, title='уход за головой', company_id=2),
         *[
             ServiceLabel(
                 service_id=service_id,
@@ -12627,7 +12569,6 @@ async def test_admin_extra_services_use_moscow_shifts_and_credit_overlaps(async_
         Staff(id=2, name='Admin A', position='Администратор', company_id=1),
         Staff(id=3, name='Admin B', position='Администратор', company_id=1),
         Staff(id=4, name='Admin without shift', position='Администратор', company_id=1),
-        Service(id=10, title='Care', company_id=1),
         ServiceLabel(
             service_id=10,
             company_id=1,
@@ -12689,7 +12630,6 @@ async def test_admin_extra_services_use_moscow_shifts_and_credit_overlaps(async_
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
             period_start=date(2024, 12, 31),
             period_end=date(2025, 1, 31),
-            synced_at=datetime(2025, 1, 31),
         ),
     ])
     await async_session.commit()
@@ -12730,7 +12670,6 @@ async def test_admin_extra_services_include_early_moscow_visit_before_utc_day_ro
         ),
         Staff(id=1, name='Barber', position='Барбер', company_id=1),
         Staff(id=2, name='Admin', position='Администратор', company_id=1),
-        Service(id=10, title='Care', company_id=1),
         ServiceLabel(
             service_id=10,
             company_id=1,
@@ -12750,7 +12689,6 @@ async def test_admin_extra_services_include_early_moscow_visit_before_utc_day_ro
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
             period_start=date(2025, 1, 1),
             period_end=date(2025, 1, 2),
-            synced_at=datetime(2025, 1, 2),
         ),
     ])
     await async_session.flush()
@@ -12807,8 +12745,6 @@ async def test_administrator_service_scope_is_explicitly_separated_from_personal
         ),
         Staff(id=1, name='Barber', position='Барбер', company_id=1),
         Staff(id=2, name='Admin', position='Администратор', company_id=1),
-        Service(id=10, title='Extra', company_id=1),
-        Service(id=11, title='Regular', company_id=1),
         ServiceLabel(
             service_id=10,
             company_id=1,
@@ -12828,7 +12764,6 @@ async def test_administrator_service_scope_is_explicitly_separated_from_personal
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
             period_start=date(2024, 12, 31),
             period_end=date(2025, 1, 31),
-            synced_at=datetime(2025, 1, 31),
         ),
     ])
     await async_session.flush()
@@ -12987,7 +12922,6 @@ async def test_administrator_service_scope_fails_closed_without_schedule_coverag
         ),
         Staff(id=1, name='Barber', position='Барбер', company_id=1),
         Staff(id=2, name='Admin', position='Администратор', company_id=1),
-        Service(id=10, title='Extra', company_id=1),
         ServiceLabel(
             service_id=10,
             company_id=1,
@@ -13091,7 +13025,6 @@ async def test_administrator_service_scope_follows_monthly_role_transitions(
         ),
         Staff(id=1, name='Other barber', position='Барбер', company_id=1),
         Staff(id=2, name='Role transition', position=current_position, company_id=1),
-        Service(id=10, title='Extra', company_id=1),
         ServiceLabel(
             service_id=10,
             company_id=1,
@@ -13134,7 +13067,6 @@ async def test_administrator_service_scope_follows_monthly_role_transitions(
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
             period_start=date(2024, 12, 31),
             period_end=date(2025, 2, 28),
-            synced_at=datetime(2025, 2, 28),
         ),
     ])
     await async_session.flush()
@@ -13267,7 +13199,6 @@ async def test_opz_uses_branch_local_date_for_year_and_role_transition(async_ses
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
             period_start=date(2024, 11, 30),
             period_end=date(2025, 1, 31),
-            synced_at=datetime(2025, 1, 31),
         ),
     ])
     await async_session.commit()
@@ -13330,7 +13261,6 @@ async def test_schedule_coverage_uses_the_callers_factual_snapshot(async_session
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
             period_start=date(2024, 12, 31),
             period_end=date(2025, 1, 31),
-            synced_at=datetime(2025, 1, 31),
         ),
     ])
     await async_session.commit()
@@ -13381,7 +13311,6 @@ async def test_administrator_service_scope_fails_closed_without_appointment_time
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
             period_start=date(2024, 12, 31),
             period_end=date(2025, 1, 31),
-            synced_at=datetime(2025, 1, 31),
         ),
     ])
     await async_session.commit()
@@ -13469,7 +13398,6 @@ async def test_schedule_coverage_uses_first_appointment_when_reporting_start_is_
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
             period_start=date(2025, 1, 9),
             period_end=date(2025, 1, 31),
-            synced_at=datetime(2025, 1, 31),
         ),
     ])
     await async_session.commit()
@@ -13989,7 +13917,6 @@ async def test_plan_fact_admin_barber_clients_check_passes_when_creators_match(a
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
             period_start=date(2024, 12, 31),
             period_end=date(2025, 1, 31),
-            synced_at=now,
         ),
     ])
     await async_session.commit()
@@ -14086,7 +14013,6 @@ async def test_plan_fact_reports_admin_barber_clients_mismatch_diagnostics(async
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
             period_start=date(2024, 12, 31),
             period_end=date(2025, 1, 31),
-            synced_at=now,
         ),
     ])
     await async_session.commit()
@@ -14199,7 +14125,6 @@ async def test_plan_fact_admin_clients_do_not_duplicate_overlapping_shifts(async
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
             period_start=date(2024, 12, 31),
             period_end=date(2025, 1, 31),
-            synced_at=now,
         ),
     ])
     await async_session.commit()
@@ -14315,7 +14240,6 @@ async def test_plan_fact_includes_fired_admin_with_period_schedule(async_session
         Company(id=1, title='Salon', group_id=1),
         Staff(id=1, name='Barber', position='Барбер', company_id=1, fired=0),
         Staff(id=2, name='Former admin', position='Администратор', company_id=1, fired=1),
-        Service(id=10, title='Care', company_id=1),
         ServiceLabel(
             service_id=10,
             company_id=1,
@@ -14335,7 +14259,6 @@ async def test_plan_fact_includes_fired_admin_with_period_schedule(async_session
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
             period_start=date(2024, 12, 31),
             period_end=date(2025, 1, 31),
-            synced_at=datetime(2025, 1, 31),
         ),
         ManualFactMetric(
             period_start=date(2025, 1, 1),
@@ -14721,92 +14644,10 @@ async def test_dashboard_services_api_updates_extra_label_and_metrics(async_sess
 
 
 @pytest.mark.asyncio
-async def test_dashboard_service_kpi_groups_and_single_assignment(async_session):
-    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime(2025, 1, 1)))
-    async_session.add(Group(id=1, title='G1'))
-    async_session.add(Company(id=1, title='Salon', group_id=1))
-    async_session.add(Staff(id=1, name='Master', position='Барбер', company_id=1))
-    async_session.add(Client(id=1, name='Client', company_id=1))
-    async_session.add(
-        ServiceCatalog(
-            company_id=1,
-            service_id=10,
-            title='Black Mask',
-            category_title='Care',
-            updated_at=datetime(2025, 1, 1, 0, 0, 0),
-        )
-    )
-    async_session.add(
-        Appointment(
-            id=1,
-            company_id=1,
-            staff_id=1,
-            client_id=1,
-            date=date(2025, 1, 10),
-            datetime=datetime(2025, 1, 10, 12, 0, 0),
-            attendance=1,
-        )
-    )
-    async_session.add(
-        Transaction(id=1, appointment_id=1, company_id=1, service_id=10, service_title='Black Mask', amount=1)
-    )
-    await async_session.commit()
-
-    async def override_db():
-        yield async_session
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(
-        transport=transport, base_url='http://test', headers={'X-Portal-Account-Id': '1'}
-    ) as client:
-        first = await client.post('/dashboard/services/kpi_groups', json={'title': 'Уход лицо', 'code': 'face_care'})
-        assert first.status_code == 200
-        first_group = first.json()['data']
-
-        second = await client.post('/dashboard/services/kpi_groups', json={'title': 'Уход голова', 'code': 'head_care'})
-        assert second.status_code == 200
-        second_group = second.json()['data']
-
-        assigned = await client.patch('/dashboard/services', json={
-            'row_changes': [{'company_id': 1, 'service_id': 10, 'kpi_group_id': first_group['id']}],
-        })
-        assert assigned.status_code == 200
-        listed = await client.get('/dashboard/services', params={'company_id': 1, 'kpi_group_id': first_group['id']})
-        assert [row['service_id'] for row in listed.json()['data']['rows']] == [10]
-
-        reassigned = await client.patch('/dashboard/services', json={
-            'row_changes': [{'company_id': 1, 'service_id': 10, 'kpi_group_id': second_group['id']}],
-        })
-        assert reassigned.status_code == 200
-        assignments = (await async_session.execute(select(ServiceKpiAssignment))).scalars().all()
-        assert [(row.company_id, row.service_id, row.group_id) for row in assignments] == [(1, 10, second_group['id'])]
-
-        archived = await client.patch('/dashboard/services', json={
-            'group_changes': [{'id': first_group['id'], 'is_active': False}],
-        })
-        assert archived.status_code == 200
-        assert [group['is_active'] for group in archived.json()['data']['groups']] == [False]
-
-    app.dependency_overrides.clear()
-
-
-@pytest.mark.asyncio
 async def test_dashboard_service_batch_update_is_atomic_and_normalized(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
     async_session.add_all([
-        PortalAccount(id=1, label='Tenant', created_at=datetime(2025, 1, 1)),
-        ServiceKpiGroup(
-            id=1,
-            portal_account_id=1,
-            code='care',
-            title='Care',
-            is_active=True,
-            sort_order=0,
-            created_at=datetime(2025, 1, 1),
-            updated_at=datetime(2025, 1, 1),
-        ),
         ServiceCatalog(
             company_id=1,
             service_id=10,
@@ -14829,78 +14670,42 @@ async def test_dashboard_service_batch_update_is_atomic_and_normalized(async_ses
 
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
-    async with AsyncClient(
-        transport=transport, base_url='http://test', headers={'X-Portal-Account-Id': '1'}
-    ) as client:
-        group_id = 1
-
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
         updated = await client.patch('/dashboard/services', json={
-            'row_changes': [
-                {'company_id': 1, 'service_id': 10, 'is_extra': True, 'kpi_group_id': group_id},
-            ],
-            'group_changes': [
-                {'id': group_id, 'title': 'Face Care', 'description': None, 'sort_order': 5},
-            ],
+            'row_changes': [{'company_id': 1, 'service_id': 10, 'is_extra': True}],
         })
-
-        unassigned = await client.patch('/dashboard/services', json={
-            'row_changes': [{'company_id': 1, 'service_id': 10, 'kpi_group_id': None}],
-            'group_changes': [],
+        unlabelled = await client.patch('/dashboard/services', json={
+            'row_changes': [{'company_id': 1, 'service_id': 10, 'is_extra': False}],
         })
-        no_op = await client.patch('/dashboard/services', json={'row_changes': [], 'group_changes': []})
+        no_op = await client.patch('/dashboard/services', json={'row_changes': []})
 
         rolled_back = await client.patch('/dashboard/services', json={
             'row_changes': [
                 {'company_id': 1, 'service_id': 20, 'is_extra': True},
                 {'company_id': 1, 'service_id': 999, 'is_extra': True},
             ],
-            'group_changes': [],
         })
 
     app.dependency_overrides.clear()
 
     assert updated.status_code == 200, updated.text
     normalized_row = updated.json()['data']['rows'][0]
-    assert {key: normalized_row[key] for key in (
-        'company_id', 'service_id', 'is_extra', 'kpi_group_id'
-    )} == {
+    assert {key: normalized_row[key] for key in ('company_id', 'service_id', 'is_extra')} == {
         'company_id': 1,
         'service_id': 10,
         'is_extra': True,
-        'kpi_group_id': group_id,
     }
     assert normalized_row['label_updated_at']
-    assert normalized_row['kpi_assignment_updated_at']
     assert normalized_row['mutation_updated_at']
-    normalized_group = updated.json()['data']['groups'][0]
-    assert normalized_group['portal_account_id'] is not None
-    assert {key: normalized_group[key] for key in (
-        'id', 'code', 'title', 'description', 'is_active', 'sort_order'
-    )} == {
-        'id': group_id,
-        'code': 'care',
-        'title': 'Face Care',
-        'description': '',
-        'is_active': True,
-        'sort_order': 5,
-    }
-    assert normalized_group['created_at']
-    assert normalized_group['updated_at']
-    assert unassigned.status_code == 200
-    assert unassigned.json()['data']['rows'][0]['kpi_group_id'] is None
-    assert unassigned.json()['data']['rows'][0]['kpi_assignment_updated_at'] is None
-    assert unassigned.json()['data']['rows'][0]['mutation_updated_at']
+    assert unlabelled.status_code == 200
+    assert unlabelled.json()['data']['rows'][0]['is_extra'] is False
     assert no_op.status_code == 200
-    assert no_op.json()['data'] == {'rows': [], 'groups': []}
+    assert no_op.json()['data'] == {'rows': []}
     assert rolled_back.status_code == 400
     assert rolled_back.json()['detail'] == 'unknown service for company'
 
     labels = (await async_session.execute(select(ServiceLabel))).scalars().all()
-    assignments = (await async_session.execute(select(ServiceKpiAssignment))).scalars().all()
-    group = await async_session.get(ServiceKpiGroup, group_id)
-    assert [(row.company_id, row.service_id, row.is_extra) for row in labels] == [(1, 10, True)]
-    assert assignments == []
-    assert group.title == 'Face Care'
+    assert labels == []
 
 
 @pytest.mark.asyncio
@@ -14908,17 +14713,6 @@ async def test_dashboard_service_batch_rolls_back_after_partial_apply(async_sess
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
     async_session.add_all([
-        PortalAccount(id=1, label='Tenant', created_at=datetime(2025, 1, 1)),
-        ServiceKpiGroup(
-            id=1,
-            portal_account_id=1,
-            code='care',
-            title='Care',
-            is_active=True,
-            sort_order=0,
-            created_at=datetime(2025, 1, 1),
-            updated_at=datetime(2025, 1, 1),
-        ),
         ServiceCatalog(
             company_id=1,
             service_id=10,
@@ -14953,18 +14747,12 @@ async def test_dashboard_service_batch_rolls_back_after_partial_apply(async_sess
                 {'company_id': 1, 'service_id': 10, 'is_extra': True},
                 {'company_id': 1, 'service_id': 20, 'is_extra': True},
             ],
-            group_changes=[{'id': 1, 'title': 'Changed'}],
             allowed_company_ids=[1],
-            portal_account_id=1,
         )
 
     labels = (await async_session.execute(select(ServiceLabel))).scalars().all()
-    legacy_services = (await async_session.execute(select(Service))).scalars().all()
-    group = await async_session.get(ServiceKpiGroup, 1)
     assert applied_labels == 2
     assert labels == []
-    assert legacy_services == []
-    assert group.title == 'Care'
 
 
 @pytest.mark.asyncio
@@ -14976,26 +14764,6 @@ async def test_dashboard_service_batch_validates_changes_and_branch_scope(async_
         PortalAccount(id=1, label='Tenant', created_at=datetime(2025, 1, 1)),
         PortalAccount(id=2, label='Other tenant', created_at=datetime(2025, 1, 1)),
         PortalBranch(portal_account_id=1, company_id=1),
-        ServiceKpiGroup(
-            id=1,
-            portal_account_id=1,
-            code='care',
-            title='Care',
-            is_active=True,
-            sort_order=0,
-            created_at=datetime(2025, 1, 1),
-            updated_at=datetime(2025, 1, 1),
-        ),
-        ServiceKpiGroup(
-            id=99,
-            portal_account_id=2,
-            code='foreign',
-            title='Foreign',
-            is_active=True,
-            sort_order=0,
-            created_at=datetime(2025, 1, 1),
-            updated_at=datetime(2025, 1, 1),
-        ),
         ServiceCatalog(company_id=1, service_id=10, title='Allowed', updated_at=datetime(2025, 1, 1)),
         ServiceCatalog(company_id=2, service_id=20, title='Foreign', updated_at=datetime(2025, 1, 1)),
     ])
@@ -15018,67 +14786,27 @@ async def test_dashboard_service_batch_validates_changes_and_branch_scope(async_
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         foreign = await client.patch('/dashboard/services', json={
             'row_changes': [{'company_id': 2, 'service_id': 20, 'is_extra': True}],
-            'group_changes': [],
-        })
-        foreign_group = await client.patch('/dashboard/services', json={
-            'row_changes': [{'company_id': 1, 'service_id': 10, 'kpi_group_id': 99}],
-            'group_changes': [],
-        })
-        foreign_group_change = await client.patch('/dashboard/services', json={
-            'row_changes': [],
-            'group_changes': [{'id': 99, 'title': 'Changed'}],
         })
         empty_row = await client.patch('/dashboard/services', json={
             'row_changes': [{'company_id': 1, 'service_id': 10}],
-            'group_changes': [],
         })
         duplicate_rows = await client.patch('/dashboard/services', json={
             'row_changes': [
                 {'company_id': 1, 'service_id': 10, 'is_extra': True},
-                {'company_id': 1, 'service_id': 10, 'kpi_group_id': None},
+                {'company_id': 1, 'service_id': 10, 'is_extra': False},
             ],
-            'group_changes': [],
         })
         null_label = await client.patch('/dashboard/services', json={
             'row_changes': [{'company_id': 1, 'service_id': 10, 'is_extra': None}],
-            'group_changes': [],
-        })
-        empty_group = await client.patch('/dashboard/services', json={
-            'row_changes': [],
-            'group_changes': [{'id': 1}],
-        })
-        null_group_state = await client.patch('/dashboard/services', json={
-            'row_changes': [],
-            'group_changes': [{'id': 1, 'is_active': None}],
-        })
-        duplicate_groups = await client.patch('/dashboard/services', json={
-            'row_changes': [],
-            'group_changes': [
-                {'id': 1, 'title': 'One'},
-                {'id': 1, 'title': 'Two'},
-            ],
-        })
-        inactive_assignment = await client.patch('/dashboard/services', json={
-            'row_changes': [{'company_id': 1, 'service_id': 10, 'kpi_group_id': 1}],
-            'group_changes': [{'id': 1, 'is_active': False}],
         })
 
     app.dependency_overrides.clear()
 
     assert foreign.status_code == 400
     assert foreign.json()['detail'] == 'company is not allowed'
-    assert foreign_group.status_code == 400
-    assert foreign_group.json()['detail'] == 'unknown KPI group'
-    assert foreign_group_change.status_code == 400
-    assert foreign_group_change.json()['detail'] == 'unknown KPI group'
     assert empty_row.status_code == 422
     assert duplicate_rows.status_code == 422
     assert null_label.status_code == 422
-    assert empty_group.status_code == 422
-    assert null_group_state.status_code == 422
-    assert duplicate_groups.status_code == 422
-    assert inactive_assignment.status_code == 400
-    assert inactive_assignment.json()['detail'] == 'unknown active KPI group'
 
 
 @pytest.mark.asyncio
@@ -15552,14 +15280,12 @@ async def test_yoy_changes_remain_available_for_metrics_with_complete_sources(
             source='appointments_detail',
             period_start=date(2024, 1, 1),
             period_end=date(2025, 12, 31),
-            synced_at=datetime(2026, 1, 1),
         ),
         SyncSourceState(
             company_id=1,
             source='financial_transactions_detail',
             period_start=date(2024, 1, 1),
             period_end=date(2025, 12, 31),
-            synced_at=datetime(2026, 1, 1),
         ),
     ])
     await async_session.commit()
@@ -15623,7 +15349,6 @@ async def test_linked_masterless_topup_reconciles_staff_overview_plan_fact_and_y
             source=source,
             period_start=date(2024, 1, 1),
             period_end=date(2025, 12, 31),
-            synced_at=factual_at,
         ))
     await async_session.commit()
 
@@ -15720,7 +15445,6 @@ async def test_yoy_keeps_uncovered_current_year_unknown_after_last_fact(
             source=source,
             period_start=date(2025, 1, 1),
             period_end=date(2025, 12, 31),
-            synced_at=datetime(2026, 1, 1),
         ))
     await async_session.commit()
 
@@ -15832,7 +15556,6 @@ async def test_yoy_admin_scope_matches_personal_overview_and_plan_fact(
             source=source,
             period_start=date(2025, 1, 1),
             period_end=date(2026, 12, 31),
-            synced_at=factual_at,
         ))
     await async_session.commit()
 
@@ -15985,6 +15708,7 @@ async def test_removed_dashboard_routes_stay_removed(async_session):
             for name in ('summary', 'revenue_daily', 'top_services', 'extra_services')
         ]
         gone.append(await client.get('/dashboard/services/kpi_groups'))
+        gone.append(await client.post('/dashboard/services/kpi_groups', json={'title': 'x'}))
         gone.append(await client.patch('/dashboard/services/kpi_groups/1', json={'title': 'x'}))
         gone.append(await client.delete('/dashboard/services/kpi_groups/1'))
         gone.append(await client.patch('/dashboard/services/1/10/labels', json={'is_extra': True}))
@@ -15992,7 +15716,7 @@ async def test_removed_dashboard_routes_stay_removed(async_session):
         kept = await client.get('/dashboard/bundle', params=params)
     app.dependency_overrides.clear()
 
-    assert [response.status_code for response in gone] == [404, 404, 404, 404, 405, 404, 404, 404, 404]
+    assert [response.status_code for response in gone] == [404] * 10
     assert kept.status_code == 200
 
 

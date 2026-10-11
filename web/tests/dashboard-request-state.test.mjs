@@ -171,29 +171,20 @@ test('branch data loads after staff success or failure, but not after stale refr
   assert.equal(staffRefreshAllowsDataLoad('ready', '1', '2'), false);
 });
 
-test('service management sends only changed fields in one batch', () => {
+test('service management sends only the rows whose label changed in one batch', () => {
   const saved = {
     rows: [
-      { company_id: 1, service_id: 10, is_extra: false, kpi_group_id: null },
-      { company_id: 1, service_id: 20, is_extra: false, kpi_group_id: 2 },
-    ],
-    groups: [
-      { id: 2, title: 'Care', code: 'care', description: '', sort_order: 0, is_active: true },
+      { company_id: 1, service_id: 10, is_extra: false },
+      { company_id: 1, service_id: 20, is_extra: true },
     ],
   };
   const current = structuredClone(saved);
   current.rows[0].is_extra = true;
-  current.rows[1].kpi_group_id = null;
-  current.groups[0].title = 'Face Care';
 
   assert.deepEqual(serviceManagementChanges(current, saved), {
-    row_changes: [
-      { company_id: 1, service_id: 10, is_extra: true },
-      { company_id: 1, service_id: 20, kpi_group_id: null },
-    ],
-    group_changes: [{ id: 2, title: 'Face Care' }],
+    row_changes: [{ company_id: 1, service_id: 10, is_extra: true }],
   });
-  assert.deepEqual(serviceManagementChanges(saved, saved), { row_changes: [], group_changes: [] });
+  assert.deepEqual(serviceManagementChanges(saved, saved), { row_changes: [] });
 });
 
 test('service management controls reflect dirty and loading state', () => {
@@ -203,7 +194,6 @@ test('service management controls reflect dirty and loading state', () => {
     refreshDisabled: false,
     saveDisabled: true,
     resetDisabled: true,
-    addGroupDisabled: false,
   });
   assert.deepEqual(serviceManagementControls({ loading: false, hasData: true, dirty: true }), {
     filtersDisabled: true,
@@ -211,7 +201,6 @@ test('service management controls reflect dirty and loading state', () => {
     refreshDisabled: true,
     saveDisabled: false,
     resetDisabled: false,
-    addGroupDisabled: true,
   });
   assert.deepEqual(serviceManagementControls({ loading: true, hasData: true, dirty: true }), {
     filtersDisabled: true,
@@ -219,7 +208,6 @@ test('service management controls reflect dirty and loading state', () => {
     refreshDisabled: true,
     saveDisabled: true,
     resetDisabled: true,
-    addGroupDisabled: true,
   });
   assert.equal(serviceManagementLoadAllowed({ loading: false, dirty: false }), true);
   assert.equal(serviceManagementLoadAllowed({ loading: false, dirty: true }), false);
@@ -299,28 +287,23 @@ test('service management displays the latest catalog mutation timestamp', () => 
   assert.equal(latestServiceManagementTimestamp(null, null), null);
 });
 
-test('service management removes saved rows that no longer match active filters', () => {
+test('service management removes saved rows that no longer match the extra-only filter', () => {
   const data = {
     rows: [
-      { company_id: 1, service_id: 10, is_extra: false, kpi_group_id: 2 },
-      { company_id: 1, service_id: 20, is_extra: true, kpi_group_id: 3 },
-      { company_id: 1, service_id: 30, is_extra: true, kpi_group_id: 2 },
+      { company_id: 1, service_id: 10, is_extra: false },
+      { company_id: 1, service_id: 20, is_extra: true },
+      { company_id: 1, service_id: 30, is_extra: true },
     ],
-    groups: [{ id: 2 }, { id: 3 }],
     total: 3,
   };
 
   const extraOnly = filterServiceManagementResult(data, { is_extra: true });
   assert.deepEqual(extraOnly.rows.map((row) => row.service_id), [20, 30]);
   assert.equal(extraOnly.total, 2);
-
-  const selectedGroup = filterServiceManagementResult(data, { kpi_group_id: '2' });
-  assert.deepEqual(selectedGroup.rows.map((row) => row.service_id), [10, 30]);
-  assert.equal(selectedGroup.total, 2);
-  assert.equal(selectedGroup.groups, data.groups);
+  assert.equal(filterServiceManagementResult(data, {}).total, 3);
 });
 
-test('service management merges normalized batch and created group results', () => {
+test('service management merges the normalized batch result into the loaded rows', () => {
   const data = {
     rows: [{
       company_id: 1,
@@ -328,10 +311,7 @@ test('service management merges normalized batch and created group results', () 
       title: 'Mask',
       is_extra: false,
       label_updated_at: '2026-07-01T10:00:00',
-      kpi_group_id: null,
-      kpi_assignment_updated_at: null,
     }],
-    groups: [{ id: 1, title: 'Old', code: 'old', is_active: true }],
     categories: ['Care'],
   };
   const merged = mergeServiceManagementResult(data, {
@@ -340,14 +320,8 @@ test('service management merges normalized batch and created group results', () 
       service_id: 10,
       is_extra: true,
       label_updated_at: '2026-07-18T10:00:00',
-      kpi_group_id: 2,
-      kpi_assignment_updated_at: '2026-07-18T10:00:00',
       mutation_updated_at: '2026-07-18T10:00:00',
     }],
-    groups: [
-      { id: 1, title: 'Renamed', code: 'old', is_active: true },
-      { id: 2, title: 'New', code: 'new', is_active: true },
-    ],
   });
 
   assert.deepEqual(merged.rows, [
@@ -357,14 +331,8 @@ test('service management merges normalized batch and created group results', () 
       title: 'Mask',
       is_extra: true,
       label_updated_at: '2026-07-18T10:00:00',
-      kpi_group_id: 2,
-      kpi_assignment_updated_at: '2026-07-18T10:00:00',
       mutation_updated_at: '2026-07-18T10:00:00',
     },
-  ]);
-  assert.deepEqual(merged.groups, [
-    { id: 1, title: 'Renamed', code: 'old', is_active: true },
-    { id: 2, title: 'New', code: 'new', is_active: true },
   ]);
   assert.deepEqual(merged.categories, ['Care']);
 });

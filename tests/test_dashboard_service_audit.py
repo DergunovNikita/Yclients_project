@@ -1,5 +1,5 @@
 """Regression tests for the dashboard_service audit fixes (plan window cut, manual-fact write cut,
-plan save conflicts and audit, KPI group races, tenant-required filters, local rollbacks)."""
+plan save conflicts and audit, tenant-required filters, local rollbacks)."""
 
 from datetime import date, datetime
 
@@ -17,9 +17,7 @@ from models import (
     ManualFactMetric,
     PlanBranchSetting,
     PlanStaffInput,
-    PortalAccount,
     PortalAuditEvent,
-    ServiceKpiGroup,
     Staff,
 )
 
@@ -166,52 +164,6 @@ async def test_plan_settings_route_maps_a_conflict_to_409(async_session, monkeyp
 
     assert response.status_code == 409
     assert response.json()['detail'] == dashboard_service.PLAN_SETTINGS_CONFLICT_DETAIL
-
-
-@pytest.mark.asyncio
-async def test_kpi_group_create_retries_with_the_next_suffix_when_the_code_was_taken(async_session, monkeypatch):
-    """Two concurrent creates of one title: the loser's insert hits the unique index and moves on."""
-    async_session.add(PortalAccount(id=1, label='t', created_at=datetime(2025, 1, 1)))
-    await async_session.flush()
-    first = await dashboard_service.create_service_kpi_group(async_session, portal_account_id=1, title='Wax')
-    assert first['code'] == 'wax'
-
-    real_unique_code = dashboard_service._unique_service_group_code
-    calls = []
-
-    async def stale_first_read(db, raw_code, **kwargs):
-        calls.append(raw_code)
-        if len(calls) == 1:
-            return 'wax'  # the read the concurrent request made before the winner committed
-        return await real_unique_code(db, raw_code, **kwargs)
-
-    monkeypatch.setattr(dashboard_service, '_unique_service_group_code', stale_first_read)
-    second = await dashboard_service.create_service_kpi_group(async_session, portal_account_id=1, title='Wax')
-
-    assert len(calls) == 2
-    assert second['code'] == 'wax_2'
-    codes = (await async_session.execute(select(ServiceKpiGroup.code))).scalars().all()
-    assert sorted(codes) == ['wax', 'wax_2']
-
-
-@pytest.mark.asyncio
-async def test_kpi_group_functions_require_a_tenant(async_session):
-    with pytest.raises(TypeError):
-        await dashboard_service.fetch_service_kpi_groups(async_session)
-    with pytest.raises(TypeError):
-        await dashboard_service._editable_service_kpi_group(async_session, 1)
-
-    async_session.add(PortalAccount(id=1, label='a', created_at=datetime(2025, 1, 1)))
-    async_session.add(PortalAccount(id=2, label='b', created_at=datetime(2025, 1, 1)))
-    await async_session.flush()
-    group = await dashboard_service.create_service_kpi_group(async_session, portal_account_id=1, title='Wax')
-
-    assert [
-        row['id'] for row in await dashboard_service.fetch_service_kpi_groups(async_session, portal_account_id=1)
-    ] == [group['id']]
-    assert await dashboard_service.fetch_service_kpi_groups(async_session, portal_account_id=2) == []
-    with pytest.raises(ValueError, match='unknown KPI group'):
-        await dashboard_service._editable_service_kpi_group(async_session, group['id'], portal_account_id=2)
 
 
 @pytest.mark.asyncio

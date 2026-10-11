@@ -60,11 +60,6 @@ def test_downgrade_recreates_and_upgrade_drops_the_legacy_objects(migration):
     _run(engine, migration.upgrade)
 
 
-def test_legacy_services_table_stays_for_the_service_label_foreign_key(migration):
-    assert 'services' not in migration.LEGACY_TABLES
-    assert models.ServiceLabel.__table__.c.service_id.foreign_keys.pop().column.table.name == 'services'
-
-
 def test_models_no_longer_carry_what_the_migration_drops(migration):
     tables = models.Base.metadata.tables
     assert not set(migration.LEGACY_TABLES) & set(tables)

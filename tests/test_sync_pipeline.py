@@ -14,7 +14,6 @@ from models import (
     FinancialTransaction,
     GoodTransaction,
     Group,
-    Service,
     ServiceCatalog,
     ServiceCategoryCatalog,
     Staff,
@@ -241,7 +240,6 @@ def test_company_window_uses_scoped_checkpoint_first(monkeypatch):
                 source=source,
                 period_start=date(2026, 1, 1),
                 period_end=date(2026, 6, 20),
-                synced_at=datetime(2026, 6, 20),
             ))
         db.commit()
 
@@ -269,7 +267,6 @@ def test_company_window_falls_back_to_global_for_existing_transactional_company(
                 source=source,
                 period_start=date(2026, 1, 1),
                 period_end=date(2026, 6, 20),
-                synced_at=datetime(2026, 6, 20),
             ))
         db.commit()
 
@@ -336,7 +333,6 @@ def test_limited_window_marker_cannot_certify_complete_history(monkeypatch):
                 source=source,
                 period_start=date(2026, 6, 1),
                 period_end=date(2026, 6, 30),
-                synced_at=datetime(2026, 6, 30),
             ))
         db.commit()
 
@@ -368,7 +364,6 @@ def test_missing_historical_source_interval_invalidates_existing_marker(monkeypa
                 source=source,
                 period_start=date(2022, 1, 1),
                 period_end=date(2026, 6, 30),
-                synced_at=datetime(2026, 6, 30),
             ))
         db.commit()
 
@@ -399,7 +394,6 @@ def _certified_company(db, reporting_start=None):
             source=source,
             period_start=reporting_start or date(2022, 1, 1),
             period_end=date(2026, 6, 30),
-            synced_at=datetime(2026, 6, 30),
         ))
     db.commit()
 
@@ -478,7 +472,6 @@ def test_refresh_purge_keeps_history_when_appointments_run_past_the_window():
             source=sync_pipeline.APPOINTMENTS_SOURCE,
             period_start=date(2022, 1, 1),
             period_end=date(2026, 11, 1),
-            synced_at=datetime(2026, 9, 2),
         ))
         db.commit()
 
@@ -817,7 +810,6 @@ def test_execute_sync_forces_one_time_history_backfill_for_legacy_checkpoint(mon
                 source=source,
                 period_start=date(2026, 6, 26),
                 period_end=date(2026, 6, 30),
-                synced_at=datetime(2026, 6, 30),
             ))
         db.commit()
 
@@ -1733,21 +1725,18 @@ def test_full_refresh_purge_invalidates_coverage_until_each_source_succeeds():
                 source=sync_pipeline.APPOINTMENTS_SOURCE,
                 period_start=date(2025, 1, 1),
                 period_end=date(2025, 1, 31),
-                synced_at=datetime(2025, 2, 1),
             ),
             SyncSourceState(
                 company_id=1,
                 source=sync_pipeline.PERSONAL_ACCOUNT_SOURCE,
                 period_start=date(2025, 1, 1),
                 period_end=date(2025, 1, 31),
-                synced_at=datetime(2025, 2, 1),
             ),
             SyncSourceState(
                 company_id=1,
                 source=sync_pipeline.GOODS_TRANSACTIONS_SOURCE,
                 period_start=date(2025, 1, 1),
                 period_end=date(2025, 1, 31),
-                synced_at=datetime(2025, 2, 1),
             ),
             SyncState(
                 key=transactional_state_key(1),
@@ -2143,7 +2132,6 @@ def test_sync_services_writes_shared_ids_to_branch_scoped_catalog():
         [
             Group.__table__,
             Company.__table__,
-            Service.__table__,
             ServiceCatalog.__table__,
         ]
     ) as db:
@@ -2163,8 +2151,6 @@ def test_sync_services_writes_shared_ids_to_branch_scoped_catalog():
         assert sync_services(FakeServicesAPI(service_payload), db, '1') is True
         assert sync_services(FakeServicesAPI(service_payload), db, '2') is True
 
-        # The legacy `services` table is only the label FK's target and is no longer filled by the sync.
-        assert db.query(Service).count() == 0
         rows = (
             db.query(ServiceCatalog)
             .filter(ServiceCatalog.service_id == 10)
@@ -2182,7 +2168,6 @@ def test_sync_services_fills_category_from_category_filtered_services():
         [
             Group.__table__,
             Company.__table__,
-            Service.__table__,
             ServiceCatalog.__table__,
             ServiceCategoryCatalog.__table__,
         ]
@@ -2212,14 +2197,12 @@ def test_sync_services_preserves_catalog_when_snapshot_is_incomplete():
         [
             Group.__table__,
             Company.__table__,
-            Service.__table__,
             ServiceCatalog.__table__,
             ServiceCategoryCatalog.__table__,
         ]
     ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
-        db.add(Service(id=10, title='Care', company_id=1))
         db.add(ServiceCategoryCatalog(
             company_id=1,
             category_id=100,
@@ -2257,15 +2240,12 @@ def test_sync_services_marks_only_current_yclients_catalog_rows_active():
         [
             Group.__table__,
             Company.__table__,
-            Service.__table__,
             ServiceCatalog.__table__,
         ]
     ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon 1', group_id=1))
         db.add_all([
-            Service(id=10, title='Old title', company_id=1),
-            Service(id=20, title='Archived', company_id=1),
             ServiceCatalog(
                 company_id=1,
                 service_id=10,

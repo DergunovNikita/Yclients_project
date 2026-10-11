@@ -500,10 +500,6 @@ test('catch-all proxy enforces dashboard and auth route allowlists', () => {
     assert.equal(serviceBatch.ok, true);
     assert.equal(serviceBatch.target.href, 'https://vm.example.test/dashboard/services');
 
-    const serviceGroup = buildWebProxyTarget(requestStub('POST', {}, '/api/dashboard/services/kpi_groups'));
-    assert.equal(serviceGroup.ok, true);
-    assert.equal(serviceGroup.target.href, 'https://vm.example.test/dashboard/services/kpi_groups');
-
     // Routes the SPA no longer calls are not proxied: the bulk PATCH /services replaced them.
     for (const [method, path] of [
       ['PATCH', '/api/dashboard/services/1/10/labels'],
@@ -511,6 +507,7 @@ test('catch-all proxy enforces dashboard and auth route allowlists', () => {
       ['PATCH', '/api/dashboard/services/kpi_groups/3'],
       ['DELETE', '/api/dashboard/services/kpi_groups/3'],
       ['GET', '/api/dashboard/services/kpi_groups'],
+      ['POST', '/api/dashboard/services/kpi_groups'],
       ['GET', '/api/dashboard/widget/summary'],
       ['GET', '/api/dashboard/widget/revenue_daily'],
       ['GET', '/api/dashboard/widget/top_services'],
@@ -598,9 +595,7 @@ test('catch-all proxy handler delegates service mutations to the shared target',
   try {
     const cases = [
       [rootProxyHandler, 'PATCH', '/api/dashboard/services'],
-      [rootProxyHandler, 'POST', '/api/dashboard/services/kpi_groups'],
       [webProxyHandler, 'PATCH', '/api/dashboard/services'],
-      [webProxyHandler, 'POST', '/api/dashboard/services/kpi_groups'],
     ];
 
     for (const [handler, method, url] of cases) {

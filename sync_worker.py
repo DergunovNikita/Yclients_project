@@ -204,7 +204,7 @@ def main():
                 # the sync cadence entirely, because every tick afterwards finds nothing queued
                 # and lands right back in this branch. These two sweeps only delete old
                 # bookkeeping rows -- losing a sweep is a cost worth paying to never lose sync.
-                # Three sweeps, independent throttles: runs+step_runs, jobs+job_events, report usage
+                # Three sweeps, independent throttles: runs, jobs+job_events, report usage
                 # events. None is another's cascade. All sit inside
                 # the idle branch, so they never run under --once and never on a tick that
                 # claimed a job: a permanently backlogged worker simply never prunes. That

@@ -273,24 +273,11 @@ export function serviceManagementChanges(current = {}, saved = {}) {
   const rowChanges = [];
   for (const row of current.rows || []) {
     const previous = savedRows.get(`${row.company_id}:${row.service_id}`);
-    const change = { company_id: row.company_id, service_id: row.service_id };
-    if (!previous || previous.is_extra !== row.is_extra) change.is_extra = row.is_extra;
-    if (!previous || previous.kpi_group_id !== row.kpi_group_id) change.kpi_group_id = row.kpi_group_id;
-    if (Object.keys(change).length > 2) rowChanges.push(change);
+    if (!previous || previous.is_extra !== row.is_extra) {
+      rowChanges.push({ company_id: row.company_id, service_id: row.service_id, is_extra: row.is_extra });
+    }
   }
-
-  const savedGroups = new Map((saved.groups || []).map((group) => [group.id, group]));
-  const groupChanges = [];
-  const mutableGroupFields = ['title', 'code', 'description', 'sort_order', 'is_active'];
-  for (const group of current.groups || []) {
-    const previous = savedGroups.get(group.id);
-    const change = { id: group.id };
-    mutableGroupFields.forEach((field) => {
-      if (!previous || previous[field] !== group[field]) change[field] = group[field];
-    });
-    if (Object.keys(change).length > 1) groupChanges.push(change);
-  }
-  return { row_changes: rowChanges, group_changes: groupChanges };
+  return { row_changes: rowChanges };
 }
 
 export function serviceManagementControls({ loading, hasData, dirty }) {
@@ -300,7 +287,6 @@ export function serviceManagementControls({ loading, hasData, dirty }) {
     refreshDisabled: Boolean(loading || dirty),
     saveDisabled: Boolean(loading || !hasData || !dirty),
     resetDisabled: Boolean(loading || !hasData || !dirty),
-    addGroupDisabled: Boolean(loading || !hasData || dirty),
   };
 }
 
@@ -323,16 +309,10 @@ export function latestServiceManagementTimestamp(...values) {
   }, null);
 }
 
-export function filterServiceManagementResult(data = {}, {
-  is_extra: isExtra,
-  kpi_group_id: kpiGroupId,
-} = {}) {
-  const hasGroupFilter = kpiGroupId !== undefined && kpiGroupId !== null && kpiGroupId !== '';
-  const rows = (data.rows || []).filter((row) => {
-    if (typeof isExtra === 'boolean' && Boolean(row.is_extra) !== isExtra) return false;
-    if (hasGroupFilter && String(row.kpi_group_id ?? '') !== String(kpiGroupId)) return false;
-    return true;
-  });
+export function filterServiceManagementResult(data = {}, { is_extra: isExtra } = {}) {
+  const rows = (data.rows || []).filter((row) => (
+    typeof isExtra !== 'boolean' || Boolean(row.is_extra) === isExtra
+  ));
   return { ...data, rows, total: rows.length };
 }
 
@@ -372,19 +352,7 @@ export function mergeServiceManagementResult(data = {}, result = {}) {
       rows[index] = { ...rows[index], ...row };
     }
   }
-
-  const groups = [...(data.groups || [])];
-  const groupIndexes = new Map(groups.map((group, index) => [group.id, index]));
-  for (const group of result.groups || []) {
-    const index = groupIndexes.get(group.id);
-    if (index === undefined) {
-      groupIndexes.set(group.id, groups.length);
-      groups.push({ ...group });
-    } else {
-      groups[index] = { ...groups[index], ...group };
-    }
-  }
-  return { ...data, rows, groups };
+  return { ...data, rows };
 }
 
 export function createLatestRequestScope() {

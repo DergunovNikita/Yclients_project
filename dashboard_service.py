@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-import re
 from bisect import bisect_right
 from calendar import monthrange
 from collections import defaultdict
@@ -59,9 +58,6 @@ from models import (
     PortalBranch,
     PortalUser,
     ServiceCatalog,
-    Service,
-    ServiceKpiAssignment,
-    ServiceKpiGroup,
     ServiceLabel,
     Staff,
     StaffSchedule,
@@ -996,9 +992,11 @@ def _goods_revenue_filters(
 class _TitleContains(FunctionElement):
     """`text` contains the lower-case `marker`, whatever the case of the Cyrillic letters.
 
-    PostgreSQL folds case itself (`ILIKE`), SQLite's `LIKE` only does for ASCII, so there the
-    lower-case, Capitalized and UPPER spellings are spelled out. Compiled per dialect; the
-    markers are module constants, which is why they are rendered into the SQL text.
+    PostgreSQL gets `ILIKE`, but whether it folds Cyrillic depends on the database ctype (musl
+    builds of the image may not), so the lower-case and Capitalized spellings the old `LIKE` pair
+    matched stay as a floor: the result is never narrower than before. SQLite's `LIKE` only folds
+    ASCII, so there the lower-case, Capitalized and UPPER spellings are spelled out. Compiled per
+    dialect; the markers are module constants, which is why they are rendered into the SQL text.
     """
 
     type = Boolean()
@@ -1018,7 +1016,13 @@ def _render_pattern(compiler, text: str) -> str:
 @compiles(_TitleContains)
 def _compile_title_contains(element, compiler, **kw):
     (text,) = element.clauses
-    return f'({compiler.process(text, **kw)} ILIKE {_render_pattern(compiler, element.marker)})'
+    column = compiler.process(text, **kw)
+    marker = element.marker
+    return (
+        f'({column} ILIKE {_render_pattern(compiler, marker)}'
+        f' OR {column} LIKE {_render_pattern(compiler, marker)}'
+        f' OR {column} LIKE {_render_pattern(compiler, marker.capitalize())})'
+    )
 
 
 @compiles(_TitleContains, 'sqlite')
@@ -1898,20 +1902,6 @@ def _round_metric_value(value: Optional[float], fmt: str) -> Optional[float]:
 
 def _iso_datetime(value: Any) -> str | None:
     return value.isoformat() if value is not None else None
-
-
-def _service_kpi_group_payload(group: ServiceKpiGroup) -> dict[str, Any]:
-    return {
-        'id': group.id,
-        'portal_account_id': group.portal_account_id,
-        'code': group.code,
-        'title': group.title,
-        'description': group.description or '',
-        'is_active': bool(group.is_active),
-        'sort_order': int(group.sort_order or 0),
-        'created_at': _iso_datetime(group.created_at),
-        'updated_at': _iso_datetime(group.updated_at),
-    }
 
 
 def _service_display_category(category_title: Any, service_title: Any) -> str:
@@ -2915,61 +2905,12 @@ async def fetch_revenue_daily(
     return rows
 
 
-def _normalize_service_group_code(value: Any) -> str:
-    text = str(value or '').strip().lower()
-    text = re.sub(r'[^a-z0-9_]+', '_', text)
-    text = re.sub(r'_+', '_', text).strip('_')
-    return text[:80]
-
-
-async def _unique_service_group_code(
-    db: AsyncSession,
-    raw_code: Any,
-    *,
-    portal_account_id: int,
-    ignore_group_id: int | None = None,
-) -> str:
-    base = _normalize_service_group_code(raw_code) or 'kpi_group'
-    candidate = base
-    suffix = 2
-    while True:
-        stmt = select(ServiceKpiGroup.id).where(
-            ServiceKpiGroup.portal_account_id == portal_account_id,
-            ServiceKpiGroup.code == candidate,
-        )
-        if ignore_group_id is not None:
-            stmt = stmt.where(ServiceKpiGroup.id != ignore_group_id)
-        existing = await db.scalar(stmt.limit(1))
-        if existing is None:
-            return candidate
-        candidate = f'{base}_{suffix}'
-        suffix += 1
-
-
 async def _service_catalog_row(
     db: AsyncSession,
     company_id: int,
     service_id: int,
 ) -> ServiceCatalog | None:
     return await db.get(ServiceCatalog, {'company_id': company_id, 'service_id': service_id})
-
-
-async def fetch_service_kpi_groups(
-    db: AsyncSession,
-    *,
-    portal_account_id: int,
-    include_inactive: bool = True,
-) -> list[dict[str, Any]]:
-    stmt = select(ServiceKpiGroup).where(ServiceKpiGroup.portal_account_id == portal_account_id)
-    if not include_inactive:
-        stmt = stmt.where(ServiceKpiGroup.is_active.is_(True))
-    stmt = stmt.order_by(
-        ServiceKpiGroup.is_active.desc(),
-        ServiceKpiGroup.sort_order.asc(),
-        ServiceKpiGroup.title.asc(),
-        ServiceKpiGroup.id.asc(),
-    )
-    return [_service_kpi_group_payload(group) for group in (await db.execute(stmt)).scalars().all()]
 
 
 async def fetch_dashboard_services(
@@ -2979,17 +2920,11 @@ async def fetch_dashboard_services(
     q: str | None = None,
     category: str | None = None,
     is_extra: bool | None = None,
-    kpi_group_id: int | None = None,
     allowed_company_ids: list[int] | None = None,
-    portal_account_id: int,
 ) -> dict[str, Any]:
     label_join = and_(
         ServiceLabel.company_id == ServiceCatalog.company_id,
         ServiceLabel.service_id == ServiceCatalog.service_id,
-    )
-    assignment_join = and_(
-        ServiceKpiAssignment.company_id == ServiceCatalog.company_id,
-        ServiceKpiAssignment.service_id == ServiceCatalog.service_id,
     )
     stmt = (
         select(
@@ -3006,17 +2941,10 @@ async def fetch_dashboard_services(
             ServiceLabel.is_extra,
             ServiceLabel.source.label('label_source'),
             ServiceLabel.updated_at.label('label_updated_at'),
-            ServiceKpiAssignment.group_id,
-            ServiceKpiAssignment.updated_at.label('assignment_updated_at'),
-            ServiceKpiGroup.code.label('group_code'),
-            ServiceKpiGroup.title.label('group_title'),
-            ServiceKpiGroup.is_active.label('group_is_active'),
         )
         .select_from(ServiceCatalog)
         .join(Company, Company.id == ServiceCatalog.company_id)
         .outerjoin(ServiceLabel, label_join)
-        .outerjoin(ServiceKpiAssignment, assignment_join)
-        .outerjoin(ServiceKpiGroup, ServiceKpiGroup.id == ServiceKpiAssignment.group_id)
     )
     # The catalogue is a setting, not a report, so there is no period to cut against: the
     # question is whether the branch is the tenant's today. A branch that has left keeps its
@@ -3042,8 +2970,6 @@ async def fetch_dashboard_services(
         filters.append(ServiceLabel.is_extra.is_(True))
     elif is_extra is False:
         filters.append(or_(ServiceLabel.service_id.is_(None), ServiceLabel.is_extra.is_(False)))
-    if kpi_group_id is not None:
-        filters.append(ServiceKpiAssignment.group_id == kpi_group_id)
     if filters:
         stmt = stmt.where(*filters)
     # company_id/service_id (the table's own primary key) as the final tiebreaker: two
@@ -3073,11 +2999,6 @@ async def fetch_dashboard_services(
                 'is_extra': bool(row.is_extra) if row.is_extra is not None else False,
                 'label_source': row.label_source,
                 'label_updated_at': _iso_datetime(row.label_updated_at),
-                'kpi_group_id': row.group_id,
-                'kpi_group_code': row.group_code,
-                'kpi_group_title': row.group_title,
-                'kpi_group_is_active': bool(row.group_is_active) if row.group_is_active is not None else None,
-                'kpi_assignment_updated_at': _iso_datetime(row.assignment_updated_at),
             }
             for row in rows
     ]
@@ -3087,11 +3008,6 @@ async def fetch_dashboard_services(
 
     return {
         'rows': out_rows,
-        'groups': await fetch_service_kpi_groups(
-            db,
-            portal_account_id=portal_account_id,
-            include_inactive=True,
-        ),
         'categories': categories,
         'total': len(out_rows),
     }
@@ -3127,20 +3043,6 @@ async def _apply_service_label(
     company_id = int(catalog.company_id)
     service_id = int(catalog.service_id)
     if is_extra:
-        legacy_service = await db.get(Service, service_id)
-        if legacy_service is None:
-            db.add(
-                Service(
-                    id=service_id,
-                    title=catalog.title,
-                    price_min=catalog.price_min,
-                    duration=catalog.duration,
-                    category_title=catalog.category_title,
-                    company_id=company_id,
-                )
-            )
-            await db.flush()
-
         label = await db.get(ServiceLabel, {'company_id': company_id, 'service_id': service_id})
         if label is None:
             db.add(
@@ -3165,121 +3067,6 @@ async def _apply_service_label(
         )
 
 
-async def create_service_kpi_group(
-    db: AsyncSession,
-    *,
-    portal_account_id: int,
-    title: str,
-    code: str | None = None,
-    description: str | None = None,
-    sort_order: int | None = None,
-    is_active: bool = True,
-) -> dict[str, Any]:
-    clean_title = str(title or '').strip()
-    if not clean_title:
-        raise ValueError('title is required')
-    now = factual_now()
-    # The code is picked by a read, so a concurrent create of the same title can take it first and
-    # the unique index refuses ours; the second pass reads that row and moves on to the next suffix.
-    for attempt in range(2):
-        group = ServiceKpiGroup(
-            portal_account_id=portal_account_id,
-            code=await _unique_service_group_code(db, code or clean_title, portal_account_id=portal_account_id),
-            title=clean_title,
-            description=str(description or '').strip() or None,
-            sort_order=int(sort_order or 0),
-            is_active=bool(is_active),
-            created_at=now,
-            updated_at=now,
-        )
-        db.add(group)
-        try:
-            await db.commit()
-        except IntegrityError:
-            await db.rollback()
-            if attempt:
-                raise
-            continue
-        break
-    await db.refresh(group)
-    return _service_kpi_group_payload(group)
-
-
-async def _editable_service_kpi_group(
-    db: AsyncSession,
-    group_id: int,
-    *,
-    portal_account_id: int,
-) -> ServiceKpiGroup:
-    group = await db.get(ServiceKpiGroup, group_id)
-    if group is None or group.portal_account_id != portal_account_id:
-        raise ValueError('unknown KPI group')
-    return group
-
-
-async def _apply_service_kpi_group_change(
-    db: AsyncSession,
-    group: ServiceKpiGroup,
-    *,
-    fields: dict[str, Any],
-    now: datetime,
-) -> None:
-    if 'title' in fields:
-        title = fields['title']
-        clean_title = str(title or '').strip()
-        if not clean_title:
-            raise ValueError('title is required')
-        group.title = clean_title
-    if 'code' in fields:
-        group.code = await _unique_service_group_code(
-            db,
-            fields['code'],
-            portal_account_id=group.portal_account_id,
-            ignore_group_id=group.id,
-        )
-    if 'description' in fields:
-        group.description = str(fields['description'] or '').strip() or None
-    if 'sort_order' in fields:
-        group.sort_order = int(fields['sort_order'] or 0)
-    if 'is_active' in fields:
-        group.is_active = bool(fields['is_active'])
-    group.updated_at = now
-
-
-async def _apply_service_kpi_assignment(
-    db: AsyncSession,
-    catalog: ServiceCatalog,
-    *,
-    group_id: int | None,
-    now: datetime,
-) -> None:
-    company_id = int(catalog.company_id)
-    service_id = int(catalog.service_id)
-    if group_id is None:
-        await db.execute(
-            delete(ServiceKpiAssignment).where(
-                ServiceKpiAssignment.company_id == company_id,
-                ServiceKpiAssignment.service_id == service_id,
-            )
-        )
-        return
-    assignment = await db.get(ServiceKpiAssignment, {'company_id': company_id, 'service_id': service_id})
-    if assignment is None:
-        db.add(
-            ServiceKpiAssignment(
-                company_id=company_id,
-                service_id=service_id,
-                group_id=group_id,
-                source='dashboard',
-                updated_at=now,
-            )
-        )
-    else:
-        assignment.group_id = group_id
-        assignment.source = 'dashboard'
-        assignment.updated_at = now
-
-
 async def _rows_by_service_key(db: AsyncSession, model, keys: list[tuple[int, int]]) -> dict[tuple[int, int], Any]:
     """Load company_id/service_id-keyed rows for the given keys in one query."""
     if not keys:
@@ -3294,21 +3081,14 @@ async def save_service_management(
     db: AsyncSession,
     *,
     row_changes: list[dict[str, Any]],
-    group_changes: list[dict[str, Any]],
     allowed_company_ids: list[int] | None,
-    portal_account_id: int,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Validate and persist a service-management batch in one transaction."""
-    if not row_changes and not group_changes:
-        return {'rows': [], 'groups': []}
+    """Validate and persist a service-label batch in one transaction."""
+    if not row_changes:
+        return {'rows': []}
 
-    catalogs: dict[tuple[int, int], ServiceCatalog] = {}
-    groups: dict[int, ServiceKpiGroup] = {}
-    group_fields = {
-        int(change['id']): {key: value for key, value in change.items() if key != 'id'}
-        for change in group_changes
-    }
     try:
+        catalogs: dict[tuple[int, int], ServiceCatalog] = {}
         for change in row_changes:
             key = (int(change['company_id']), int(change['service_id']))
             catalogs[key] = await _editable_service_catalog(
@@ -3317,69 +3097,27 @@ async def save_service_management(
                 allowed_company_ids=allowed_company_ids,
             )
 
-        for group_id in group_fields:
-            groups[group_id] = await _editable_service_kpi_group(
-                db,
-                group_id,
-                portal_account_id=portal_account_id,
-            )
-
-        for change in row_changes:
-            if 'kpi_group_id' not in change or change['kpi_group_id'] is None:
-                continue
-            group_id = int(change['kpi_group_id'])
-            group = groups.get(group_id)
-            if group is None:
-                group = await _editable_service_kpi_group(
-                    db,
-                    group_id,
-                    portal_account_id=portal_account_id,
-                )
-                groups[group_id] = group
-            final_active = group_fields.get(group_id, {}).get('is_active', group.is_active)
-            if not final_active:
-                raise ValueError('unknown active KPI group')
-
         now = factual_now()
-        for group_id, fields in group_fields.items():
-            await _apply_service_kpi_group_change(db, groups[group_id], fields=fields, now=now)
-
         for change in row_changes:
             key = (int(change['company_id']), int(change['service_id']))
-            catalog = catalogs[key]
-            if 'is_extra' in change:
-                await _apply_service_label(db, catalog, is_extra=bool(change['is_extra']), now=now)
-            if 'kpi_group_id' in change:
-                await _apply_service_kpi_assignment(
-                    db,
-                    catalog,
-                    group_id=change['kpi_group_id'],
-                    now=now,
-                )
+            await _apply_service_label(db, catalogs[key], is_extra=bool(change['is_extra']), now=now)
 
         await db.flush()
         keys = list(catalogs)
         labels = await _rows_by_service_key(db, ServiceLabel, keys)
-        assignments = await _rows_by_service_key(db, ServiceKpiAssignment, keys)
         normalized_rows = []
         for company_id, service_id in keys:
             label = labels.get((company_id, service_id))
-            assignment = assignments.get((company_id, service_id))
             normalized_rows.append({
                 'company_id': company_id,
                 'service_id': service_id,
                 'is_extra': bool(label.is_extra) if label is not None else False,
                 'label_updated_at': _iso_datetime(label.updated_at) if label is not None else None,
-                'kpi_group_id': assignment.group_id if assignment is not None else None,
-                'kpi_assignment_updated_at': (
-                    _iso_datetime(assignment.updated_at) if assignment is not None else None
-                ),
                 'mutation_updated_at': _iso_datetime(now),
             })
 
-        normalized_groups = [_service_kpi_group_payload(groups[int(change['id'])]) for change in group_changes]
         await db.commit()
-        return {'rows': normalized_rows, 'groups': normalized_groups}
+        return {'rows': normalized_rows}
     except Exception:
         await db.rollback()
         raise
