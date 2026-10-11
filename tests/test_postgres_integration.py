@@ -21,14 +21,20 @@ from models import (
     Company,
     Group,
     PlanStaffInput,
+    PortalAccount,
+    PortalAuditEvent,
+    PortalRefreshToken,
+    PortalUser,
     Service,
     ServiceLabel,
     Staff,
     StaffSchedule,
     SyncJob,
+    SyncJobEvent,
     SyncRun,
     SyncSourceState,
     Transaction,
+    YClientsCredential,
 )
 
 
@@ -559,3 +565,56 @@ async def test_postgres_administrator_attribution_uses_local_shifts_and_role_per
             ]
     finally:
         await engine.dispose()
+
+
+def _tenant_with_user_and_credential(session):
+    """One tenant whose user wrote an audit event and whose credential is referenced by a sync job and its event."""
+    now = datetime(2026, 1, 1)
+    session.add(PortalAccount(id=1, label='Tenant', created_at=now))
+    session.flush()
+    session.add_all([
+        PortalUser(
+            id=1, portal_account_id=1, email='owner@example.com', password_hash='x', role='owner', created_at=now
+        ),
+        YClientsCredential(
+            id=1, portal_account_id=1, title='Cred', partner_token_encrypted='x', login_encrypted='x',
+            password_encrypted='x', created_at=now, updated_at=now,
+        ),
+    ])
+    session.flush()
+    session.add_all([
+        PortalAuditEvent(id=1, actor_user_id=1, portal_account_id=1, action='plan_settings.updated', created_at=now),
+        PortalRefreshToken(id=1, user_id=1, token_hash='h' * 64, expires_at=now, created_at=now),
+        SyncJob(id=1, mode='incremental', status='success', portal_account_id=1, credential_id=1, requested_at=now),
+    ])
+    session.flush()
+    session.add(SyncJobEvent(id=1, job_id=1, portal_account_id=1, credential_id=1, status='success', created_at=now))
+    session.commit()
+
+
+def test_deleting_a_user_who_wrote_audit_events_keeps_the_events(pg_session_factory):
+    session = pg_session_factory()
+    try:
+        _tenant_with_user_and_credential(session)
+
+        session.execute(text('DELETE FROM system.portal_users WHERE id = 1'))
+        session.commit()
+
+        assert session.execute(select(PortalAuditEvent.actor_user_id)).scalar_one() is None
+        assert session.execute(select(PortalRefreshToken.id)).first() is None
+    finally:
+        session.close()
+
+
+def test_deleting_a_credential_referenced_by_sync_jobs_keeps_the_history(pg_session_factory):
+    session = pg_session_factory()
+    try:
+        _tenant_with_user_and_credential(session)
+
+        session.execute(text('DELETE FROM system.yclients_credentials WHERE id = 1'))
+        session.commit()
+
+        assert session.execute(select(SyncJob.credential_id)).scalar_one() is None
+        assert session.execute(select(SyncJobEvent.credential_id)).scalar_one() is None
+    finally:
+        session.close()
