@@ -25,8 +25,10 @@ Two mechanisms exist, and the repository shows only one of them running:
 
 - **Worker auto-enqueue** (`sync_worker.py`, `SYNC_AUTO_ENQUEUE_ENABLED`, default on; every
   `SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES`, default 240) is started by `docker compose up -d api worker`,
-  which the auto-deploy script runs. It enqueues only `incremental` jobs, one per active tenant
-  credential, and skips a tenant that has a recent job.
+  which the auto-deploy script runs. It enqueues only `incremental` jobs, one per tenant that has
+  an active credential (a tenant with two credentials gets one job that syncs both), and skips a tenant that has a
+  recent job. The whole pass is also skipped for one interval after a successful *unscoped* run (CLI/timer),
+  which leaves no job row; a successful run limited to one tenant does not count.
 - **The timers in this directory** are the only thing in the repository that schedules `refresh` and
   `full`. Nothing in the deploy script or workflows installs them (no `systemctl enable` anywhere), so
   they exist on a host only if someone installed them by hand. Without them nothing re-reads the

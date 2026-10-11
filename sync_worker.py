@@ -15,9 +15,10 @@ from config import (
 )
 from database import Database, init_database
 from models import SyncJob, YClientsCredential
-from sync_control import SyncControlService
+from sync_control import UNSCOPED_SUCCESS_STATE_KEY, SyncControlService
 from sync_jobs import SyncJobService
 from sync_orchestrator import run_sync_job
+from sync_parsing import parse_datetime
 
 
 AUTO_SYNC_INITIATOR = 'auto-worker'
@@ -27,15 +28,6 @@ def parse_args():
     parser = argparse.ArgumentParser(description='YClients BI sync worker')
     parser.add_argument('--once', action='store_true', help='Обработать максимум одну задачу и завершиться')
     return parser.parse_args()
-
-
-def _parse_state_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
 
 
 def _job_activity_at(job: SyncJob) -> datetime | None:
@@ -53,10 +45,12 @@ def enqueue_auto_sync_jobs_if_due(db, now: datetime | None = None) -> dict:
     control = SyncControlService()
     if control.get_running_run(db) is not None:
         return {'status': 'ok', 'enqueued': 0, 'skipped': 1, 'reason': 'sync_running'}
-    last_successful_sync_at = _parse_state_datetime(
-        control.get_state_values(db, ['last_successful_sync_at']).get('last_successful_sync_at')
+    # Only an unscoped run arms this gate: CLI/systemd runs create no job row, so the per-tenant cooldown below
+    # cannot see them, while a tenant-scoped run is already visible there and says nothing about other tenants.
+    last_unscoped_sync_at = parse_datetime(
+        control.get_state_values(db, [UNSCOPED_SUCCESS_STATE_KEY]).get(UNSCOPED_SUCCESS_STATE_KEY)
     )
-    if last_successful_sync_at is not None and last_successful_sync_at > due_before:
+    if last_unscoped_sync_at is not None and last_unscoped_sync_at > due_before:
         return {'status': 'ok', 'enqueued': 0, 'skipped': 1, 'reason': 'recent_global_sync'}
 
     jobs = SyncJobService()
@@ -136,6 +130,11 @@ def process_next_job(database: Database | None = None) -> bool:
     db = database.get_db()
     jobs = SyncJobService()
     try:
+        # Claiming only to hand the job back would flip it queued <-> running every poll tick for as long as another
+        # sync holds the lock. run_sync_job's lock stays the authority; this is a cheap pre-check (a stale
+        # 'running' row only delays the claim until the idle branch's reaper closes it).
+        if SyncControlService().get_running_run(db) is not None:
+            return False
         job = jobs.claim_next_job(db)
         if job is None:
             return False

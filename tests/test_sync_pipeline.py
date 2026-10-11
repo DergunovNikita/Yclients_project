@@ -1188,6 +1188,65 @@ def test_sync_clients_scopes_external_id_by_internal_company():
         engine.dispose()
 
 
+def test_sync_clients_survives_a_client_repeated_in_the_listing():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__, Client.__table__])
+    db = sessionmaker(bind=engine)()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon 1', group_id=1))
+        db.commit()
+
+        payload = [{'id': 42, 'name': 'First'}, {'id': 7, 'name': 'Other'}, {'id': 42, 'name': 'Second'}]
+        assert sync_clients(FakeClientsAPI(payload), db, '1') is True
+
+        rows = {row.external_id: row.name for row in db.query(Client).all()}
+        assert rows == {42: 'Second', 7: 'Other'}
+    finally:
+        db.close()
+        engine.dispose()
+
+
+class FakeGroupsAPI:
+    def __init__(self, groups):
+        self._groups = groups
+
+    def get_groups(self):
+        return self._groups
+
+
+def test_sync_groups_and_companies_creates_adopts_and_keeps_titles():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__])
+    db = sessionmaker(bind=engine)()
+    try:
+        # A pre-tenant row (external_id IS NULL, id == YClients id) is adopted instead of duplicated.
+        db.add(Group(id=10, title='Legacy group'))
+        db.add(Company(id=500, title='Legacy salon', group_id=10))
+        db.commit()
+        groups = [{'id': 10, 'title': 'Net', 'companies': [
+            {'id': 500, 'title': 'Salon', 'timezone': 'Europe/Moscow'},
+            {'id': 501, 'title': 'New salon'},
+        ]}]
+
+        assert sync_pipeline.sync_groups_and_companies(FakeGroupsAPI(groups), db, 7) is True
+
+        assert [(g.id, g.external_id, g.portal_account_id, g.title) for g in db.query(Group)] == [(10, 10, 7, 'Net')]
+        rows = {c.external_id: c for c in db.query(Company)}
+        assert (rows[500].id, rows[500].portal_account_id, rows[500].title) == (500, 7, 'Salon')
+        assert (rows[501].group_id, rows[501].source_type, rows[501].title) == (10, 'yclients', 'New salon')
+
+        # A later answer that omits titles keeps what is stored, for groups and companies alike.
+        untitled = [{'id': 10, 'companies': [{'id': 500}, {'id': 501, 'title': ''}]}]
+        assert sync_pipeline.sync_groups_and_companies(FakeGroupsAPI(untitled), db, 7) is True
+        assert [g.title for g in db.query(Group)] == ['Net']
+        assert sorted(c.title for c in db.query(Company)) == ['New salon', 'Salon']
+        assert db.query(Company).count() == 2
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_sync_staff_scopes_external_id_by_internal_company():
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__, Staff.__table__])
@@ -1987,7 +2046,7 @@ def test_sync_staff_schedules_uses_internal_staff_id_for_tenant_scoped_staff():
         engine.dispose()
 
 
-def test_sync_staff_schedules_deduplicates_slots_and_clears_empty_window():
+def test_sync_staff_schedules_deduplicates_slots_and_keeps_past_days_on_empty_answer():
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(
         engine,
@@ -2031,7 +2090,7 @@ def test_sync_staff_schedules_deduplicates_slots_and_clears_empty_window():
             start_date='2025-01-01',
             end_date='2025-01-31',
         ) is True
-        assert db.query(StaffSchedule).count() == 0
+        assert db.query(StaffSchedule).count() == 1
         coverage = db.get(
             SyncSourceState,
             {'company_id': 1, 'source': sync_pipeline.STAFF_SCHEDULE_SOURCE},
@@ -2040,6 +2099,53 @@ def test_sync_staff_schedules_deduplicates_slots_and_clears_empty_window():
             date(2025, 1, 1),
             date(2025, 1, 31),
         )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_staff_schedules_empty_answer_clears_only_days_from_branch_today():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Staff.__table__,
+            StaffSchedule.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    db = sessionmaker(bind=engine)()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add(Staff(id=100, external_id=7, source_type='yclients', name='Admin', company_id=1))
+        db.commit()
+        today = sync_pipeline._branch_today(db, 1)
+        days = [today - timedelta(days=3), today, today + timedelta(days=2)]
+        for day in days:
+            db.add(StaffSchedule(staff_id=100, date=day, slot_from=time(9), slot_to=time(18), company_id=1))
+        db.commit()
+
+        assert sync_pipeline.sync_staff_schedules(
+            FakeSchedulesAPI([]),
+            db,
+            '1',
+            start_date=(today - timedelta(days=5)).isoformat(),
+            end_date=(today + timedelta(days=5)).isoformat(),
+        ) is True
+        assert [row.date for row in db.query(StaffSchedule).order_by(StaffSchedule.date)] == days[:1]
+
+        assert sync_pipeline.sync_staff_schedules(
+            FakeSchedulesAPI([{'staff_id': 7, 'date': today.isoformat(), 'slots': []}]),
+            db,
+            '1',
+            start_date=(today - timedelta(days=5)).isoformat(),
+            end_date=(today + timedelta(days=5)).isoformat(),
+        ) is True
+        # A non-empty answer is an authoritative statement about the whole window.
+        assert db.query(StaffSchedule).count() == 0
     finally:
         db.close()
         engine.dispose()

@@ -26,6 +26,31 @@ def build_log_path(log_dir: str, mode: str, trigger_type: str) -> str:
     return str(path)
 
 
+def remove_run_logs(log_dir: str, log_paths) -> int:
+    """Best-effort delete of run log files; returns how many were removed.
+
+    The paths come from sync_runs rows, so only `sync_*.log` files that resolve inside `log_dir` are touched.
+    Nothing here may fail the caller: housekeeping of a log must not undo or block the sweep that pruned its run.
+    """
+    removed = 0
+    try:
+        root = Path(log_dir).resolve()
+    except OSError:
+        return 0
+    for raw in log_paths:
+        if not raw:
+            continue
+        try:
+            path = Path(raw).resolve()
+            if path.parent != root or not (path.name.startswith('sync_') and path.suffix == '.log'):
+                continue
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 @contextmanager
 def stream_run_output(log_path: str):
     path = Path(log_path)

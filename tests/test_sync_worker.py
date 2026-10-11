@@ -2,6 +2,8 @@
 import types
 from contextlib import contextmanager
 
+import pytest
+
 import sync_worker
 
 
@@ -106,6 +108,7 @@ def test_process_next_job_builds_its_own_database_when_called_standalone(monkeyp
     _FakeDatabase.instances = 0
     monkeypatch.setattr(sync_worker, 'init_database', lambda *a, **k: _FakeDatabase())
     monkeypatch.setattr(sync_worker, 'SyncJobService', _FakeJobs)
+    monkeypatch.setattr(sync_worker, 'SyncControlService', _FakeControl)
 
     processed = sync_worker.process_next_job()
 
@@ -357,7 +360,28 @@ def test_process_next_job_hands_its_database_to_run_sync_job(monkeypatch):
         return {'status': 'success'}
 
     monkeypatch.setattr(sync_worker, 'SyncJobService', ClaimingJobs)
+    monkeypatch.setattr(sync_worker, 'SyncControlService', _FakeControl)
     monkeypatch.setattr(sync_worker, 'run_sync_job', fake_run_sync_job)
 
     assert sync_worker.process_next_job(database) is True
     assert seen['database'] is database
+
+
+def test_process_next_job_leaves_the_queue_alone_while_a_sync_is_running(monkeypatch):
+    claimed = []
+
+    class QueuedJobs(_FakeJobs):
+        def claim_next_job(self, db):
+            claimed.append(db)
+            return types.SimpleNamespace(id=1)
+
+    class BusyControl(_FakeControl):
+        def get_running_run(self, db):
+            return object()
+
+    monkeypatch.setattr(sync_worker, 'SyncJobService', QueuedJobs)
+    monkeypatch.setattr(sync_worker, 'SyncControlService', BusyControl)
+    monkeypatch.setattr(sync_worker, 'run_sync_job', lambda **kwargs: pytest.fail('a job was started'))
+
+    assert sync_worker.process_next_job(_FakeDatabase()) is False
+    assert claimed == []

@@ -4,7 +4,7 @@ import pytest
 
 import sync_worker
 from models import SyncJob, SyncJobEvent, SyncRun, SyncState, SyncStepRun, YClientsCredential
-from sync_control import SyncControlService
+from sync_control import UNSCOPED_SUCCESS_STATE_KEY, SyncControlService
 from sync_jobs import SyncJobService
 from helpers import FakeConnection, FakeDatabase, FakeEngine, FakeSession
 from helpers import sqlite_session_with_system as _sqlite_session
@@ -76,6 +76,57 @@ def test_purge_old_runs_deletes_old_finished_runs_and_their_step_runs():
         assert session.get(SyncRun, 1) is None
         assert session.query(SyncStepRun).filter(SyncStepRun.run_id == 1).count() == 0
         assert session.get(SyncRun, 2) is not None
+
+
+def test_purge_old_runs_removes_log_files_of_purged_runs_only_inside_the_log_dir(tmp_path, monkeypatch):
+    import sync_control
+
+    log_dir = tmp_path / 'logs'
+    log_dir.mkdir()
+    outside = tmp_path / 'sync_elsewhere.log'
+    files = {name: log_dir / name for name in ('sync_old.log', 'sync_recent.log', 'sync_latest.log', 'notes.txt')}
+    for path in (*files.values(), outside):
+        path.write_text('x')
+    monkeypatch.setattr(sync_control, 'SYNC_LOG_DIR', str(log_dir))
+
+    with _retention_session() as session:
+        old, recent = datetime(2026, 1, 1), datetime(2026, 5, 25)
+        runs = [
+            _run(1, 'success', old, old), _run(2, 'success', old, old), _run(3, 'success', old, old),
+            _run(4, 'success', old, old), _run(5, 'success', recent, recent),
+        ]
+        log_paths = (files['sync_old.log'], outside, files['notes.txt'], None, files['sync_latest.log'])
+        for run, path in zip(runs, log_paths):
+            run.log_path = str(path) if path else None
+        session.add_all(runs)
+        session.add(_run(6, 'success', recent, recent))
+        runs[-1].log_path = str(files['sync_recent.log'])
+        session.commit()
+
+        assert SyncControlService().purge_old_runs(session, retention_days=30, now=datetime(2026, 6, 1)) == 4
+
+    assert not files['sync_old.log'].exists()
+    assert outside.exists(), 'a path outside SYNC_LOG_DIR must never be touched'
+    assert files['notes.txt'].exists(), 'only sync_*.log files are removed'
+    assert files['sync_latest.log'].exists() and files['sync_recent.log'].exists()
+
+
+def test_purge_old_runs_survives_log_files_that_cannot_be_removed(tmp_path, monkeypatch):
+    import sync_control
+
+    monkeypatch.setattr(sync_control, 'SYNC_LOG_DIR', str(tmp_path))
+    (tmp_path / 'sync_dir.log').mkdir()  # unlink() fails on a directory
+
+    with _retention_session() as session:
+        old = datetime(2026, 1, 1)
+        stale = _run(1, 'success', old, old)
+        stale.log_path = str(tmp_path / 'sync_dir.log')
+        gone = _run(2, 'success', old, old)
+        gone.log_path = str(tmp_path / 'sync_missing.log')
+        session.add_all([stale, gone, _run(3, 'success', datetime(2026, 5, 25))])
+        session.commit()
+
+        assert SyncControlService().purge_old_runs(session, retention_days=30, now=datetime(2026, 6, 1)) == 2
 
 
 def test_purge_old_runs_never_deletes_a_running_run_regardless_of_age():
@@ -342,7 +393,7 @@ def test_auto_sync_skips_after_recent_global_sync(monkeypatch):
 
     with _auto_sync_session() as session:
         session.add(_credential(7))
-        SyncControlService().set_state(session, 'last_successful_sync_at', now - timedelta(minutes=30))
+        SyncControlService().set_state(session, UNSCOPED_SUCCESS_STATE_KEY, now - timedelta(minutes=30))
 
         result = sync_worker.enqueue_auto_sync_jobs_if_due(session, now)
 
@@ -353,6 +404,33 @@ def test_auto_sync_skips_after_recent_global_sync(monkeypatch):
             'reason': 'recent_global_sync',
         }
         assert session.query(SyncJob).count() == 0
+
+
+def test_only_an_unscoped_success_arms_the_auto_sync_gate(monkeypatch):
+    monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_ENABLED', True)
+    monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
+    control = SyncControlService()
+    gate_keys = ['last_successful_sync_at', UNSCOPED_SUCCESS_STATE_KEY]
+
+    with _sqlite_session([
+        YClientsCredential.__table__, SyncJob.__table__, SyncRun.__table__, SyncState.__table__, SyncStepRun.__table__,
+    ]) as session:
+        session.add(_credential(7))
+        scoped_run = control.create_run(session, 'incremental', 'queued', 'tenant', 'a.log')
+        control.finish_run(session, scoped_run, 'success', 'ok', [], scoped=True)
+        state = control.get_state_values(session, gate_keys)
+        assert state['last_successful_sync_at'] is not None
+        assert state[UNSCOPED_SUCCESS_STATE_KEY] is None
+        assert sync_worker.enqueue_auto_sync_jobs_if_due(session)['enqueued'] == 1
+
+        failed_run = control.create_run(session, 'incremental', 'cli', 'cli', 'b.log')
+        control.finish_run(session, failed_run, 'failed', 'boom', [])
+        assert control.get_state_values(session, gate_keys)[UNSCOPED_SUCCESS_STATE_KEY] is None
+
+        unscoped_run = control.create_run(session, 'incremental', 'cli', 'cli', 'c.log')
+        control.finish_run(session, unscoped_run, 'success', 'ok', [])
+        assert control.get_state_values(session, gate_keys)[UNSCOPED_SUCCESS_STATE_KEY] is not None
+        assert sync_worker.enqueue_auto_sync_jobs_if_due(session)['reason'] == 'recent_global_sync'
 
 
 def test_run_sync_job_locks_on_a_connection_no_pooled_session_can_take(monkeypatch, tmp_path):
@@ -438,6 +516,34 @@ def test_run_sync_job_locks_on_a_connection_no_pooled_session_can_take(monkeypat
     )
     assert isinstance(lock_calls['acquire'], FakeConnection)
     assert lock_calls['acquire'].closed, 'the dedicated lock connection was never closed'
+
+
+@pytest.mark.parametrize(
+    ('limits', 'expected_scoped'),
+    [({}, False), ({'portal_account_id': 3}, True), ({'credential_id': 5}, True), ({'company_ids': [9]}, True)],
+)
+def test_run_sync_job_reports_whether_the_run_was_scoped(monkeypatch, tmp_path, limits, expected_scoped):
+    import sync_orchestrator
+
+    finished = {}
+    database = FakeDatabase()
+    monkeypatch.setattr(sync_orchestrator, 'init_database', lambda *a, **k: database)
+    monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
+    control_cls = sync_orchestrator.SyncControlService
+    monkeypatch.setattr(control_cls, 'acquire_lock', lambda self, db: True)
+    monkeypatch.setattr(control_cls, 'release_lock', lambda self, db: None)
+    monkeypatch.setattr(control_cls, 'cleanup_stale_runs', lambda self, db: None)
+    monkeypatch.setattr(control_cls, 'create_run', lambda self, db, *a, **k: SyncRun(id=1, started_at=datetime.now()))
+    monkeypatch.setattr(control_cls, 'finish_run', lambda self, *a, **k: finished.update(k))
+    monkeypatch.setattr(sync_orchestrator.SyncJobService, 'record_event', lambda *a, **k: None)
+    monkeypatch.setattr(sync_orchestrator.SyncJobService, 'update_progress', lambda *a, **k: None)
+    monkeypatch.setattr(sync_orchestrator, 'execute_sync', lambda **kwargs: {'success': True, 'step_results': []})
+    monkeypatch.setattr(sync_orchestrator.TelegramNotifier, 'send', lambda self, message: None)
+    monkeypatch.setattr(sync_orchestrator, 'build_log_path', lambda *a, **k: str(tmp_path / 'x.log'))
+
+    sync_orchestrator.run_sync_job(mode='incremental', trigger_type='manual', initiator='pytest', **limits)
+
+    assert finished == {'scoped': expected_scoped}
 
 
 def test_run_sync_job_releases_lock_when_create_run_raises(monkeypatch, tmp_path):

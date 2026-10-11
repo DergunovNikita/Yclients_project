@@ -20,10 +20,15 @@ from pathlib import Path
 
 LOG_DIR = Path(os.environ.get('SYNC_LOG_DIR', 'logs'))
 
-STEP_RE = re.compile(r'^\s*\[(OK|WARN|ERR|ERROR|FAIL)\]\s+(.*?)\s+(\d[\d.: ]*(?:мин|сек|s|m|ms)[\d\s мин сек]*)\s*$')
+STEP_RE = re.compile(
+    r'^\s*\[(OK|WARN|ERR|ERROR|FAIL)\]\s+(.*?)\s+(\d[\d.: ]*(?:ч|мин|сек|s|m|ms)[\d\s ч мин сек]*)\s*$'
+)
 BRANCH_RE = re.compile(r'^Филиал:\s+(?P<name>.+?)\s*$')
 ERROR_MARKERS = ('✗', 'Ошибк', 'Traceback', 'ERROR', 'ERR ', '[ERR]', '[FAIL]')
-DONE_MARKERS = ('Sync run finished', '✓ Успешно', 'done')
+# The pipeline prints [WARN] for a step that returned False (often benign, e.g. an empty catalog) and
+# this line only for a step that raised, which is what counts as a failure here.
+ABORTED_STEP_MARKER = 'Шаг прерван'
+DONE_MARKERS = ('Синхронизация завершена',)
 
 
 @dataclass
@@ -56,8 +61,11 @@ class LogSummary:
 def _parse_seconds(raw: str) -> float:
     raw = raw.strip().lower().replace(',', '.')
     total = 0.0
+    hours_match = re.search(r'(\d+(?:\.\d+)?)\s*ч', raw)
     minutes_match = re.search(r'(\d+(?:\.\d+)?)\s*мин', raw)
     seconds_match = re.search(r'(\d+(?:\.\d+)?)\s*сек', raw)
+    if hours_match:
+        total += float(hours_match.group(1)) * 3600
     if minutes_match:
         total += float(minutes_match.group(1)) * 60
     if seconds_match:
@@ -111,6 +119,7 @@ def _summarize_lines(lines: list[str]) -> LogSummary:
     steps = list(_iter_steps(lines))
     status_counts = Counter(step.status for _, step in steps)
     fail = sum(status_counts.get(k, 0) for k in ('ERR', 'ERROR', 'FAIL'))
+    fail += sum(ABORTED_STEP_MARKER in line for line in lines)
     return LogSummary(
         steps=steps,
         branches={line.strip() for line in lines if BRANCH_RE.match(line.strip())},

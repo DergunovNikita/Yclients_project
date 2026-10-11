@@ -7,14 +7,17 @@ from sqlalchemy import text
 from config import (
     REPORT_USAGE_RETENTION_DAYS,
     SYNC_LOCK_ID,
+    SYNC_LOG_DIR,
     SYNC_RUN_RETENTION_DAYS,
     SYNC_RUN_RETENTION_INTERVAL_HOURS,
 )
 from models import ReportUsageEvent, SyncJob, SyncRun, SyncState, SyncStepRun
+from sync_logging import remove_run_logs
 from sync_parsing import parse_datetime, serialize_dt
 
 _RETENTION_STATE_KEY = 'last_run_retention_at'
 _REPORT_USAGE_RETENTION_STATE_KEY = 'last_report_usage_retention_at'
+UNSCOPED_SUCCESS_STATE_KEY = 'last_unscoped_sync_at'
 
 
 class SyncControlService:
@@ -89,6 +92,8 @@ class SyncControlService:
         sync_job_events are untouched; it just stops naming a run_id that is about to stop
         existing.
 
+        The log files of the deleted runs go too (best-effort, only inside SYNC_LOG_DIR).
+
         Why that matters is NOT "most runs are referenced" — measured on a copy of production,
         969 sync_runs, 778 of them stale, and exactly ONE referenced by a job (4 sync_jobs
         exist in total, 3 of those with run_id already NULL). Most runs never went through the
@@ -120,12 +125,17 @@ class SyncControlService:
             stale = stale.filter(SyncRun.id != latest_id)
         stale_select = stale.scalar_subquery()
 
+        stale_log_paths = [path for (path,) in db.query(SyncRun.log_path).filter(SyncRun.id.in_(stale_select))]
+
         db.query(SyncJob).filter(SyncJob.run_id.in_(stale_select)).update(
             {SyncJob.run_id: None}, synchronize_session=False
         )
         db.query(SyncStepRun).filter(SyncStepRun.run_id.in_(stale_select)).delete(synchronize_session=False)
         deleted = db.query(SyncRun).filter(SyncRun.id.in_(stale_select)).delete(synchronize_session=False)
         db.commit()
+        # After the commit: the run rows are the only index of these files, and a file that outlives its row is
+        # harmless while a row without its file is not.
+        remove_run_logs(SYNC_LOG_DIR, stale_log_paths)
         if deleted:
             print(f'✓ Purged {deleted} sync run(s) older than {retention_days}d')
         return deleted
@@ -144,16 +154,13 @@ class SyncControlService:
         (a few seconds) — without this check the retention query would run far more often than
         the cheap, infrequent maintenance task it is meant to be. Returns None when skipped.
         """
-        now = now or datetime.now()
-        last_at = parse_datetime(self.get_state_values(db, [_RETENTION_STATE_KEY]).get(_RETENTION_STATE_KEY))
-        if last_at is not None and now - last_at < timedelta(hours=interval_hours):
-            return None
-        # The attempt is recorded (and committed) before the delete, not after: a sweep that
-        # fails deterministically would otherwise never write the key and so retry its bulk
-        # DELETE on every poll tick — every few seconds, forever. Backing off to the normal
-        # interval is the right answer for best-effort maintenance; the caller logs the failure.
-        self.set_state(db, _RETENTION_STATE_KEY, now)
-        return self.purge_old_runs(db, retention_days=retention_days, now=now)
+        return self.run_if_due(
+            db,
+            _RETENTION_STATE_KEY,
+            interval_hours,
+            now,
+            lambda moment: self.purge_old_runs(db, retention_days=retention_days, now=moment),
+        )
 
     def purge_old_report_usage(
         self,
@@ -184,14 +191,28 @@ class SyncControlService:
     ) -> int | None:
         """Throttled purge_old_report_usage(), on the same schedule and with the same attempt-first throttle
         as purge_old_runs_if_due. Returns None when skipped."""
-        now = now or datetime.now()
-        last_at = parse_datetime(
-            self.get_state_values(db, [_REPORT_USAGE_RETENTION_STATE_KEY]).get(_REPORT_USAGE_RETENTION_STATE_KEY)
+        return self.run_if_due(
+            db,
+            _REPORT_USAGE_RETENTION_STATE_KEY,
+            interval_hours,
+            now,
+            lambda moment: self.purge_old_report_usage(db, retention_days=retention_days, now=moment),
         )
+
+    def run_if_due(self, db, state_key: str, interval_hours: int, now: datetime | None, sweep) -> Any | None:
+        """Run `sweep(now)` unless the state key says it ran less than interval_hours ago; None when skipped.
+
+        The attempt is recorded (and committed) before the sweep, not after: a sweep that fails
+        deterministically would otherwise never write the key and retry its bulk DELETE on every
+        poll tick, every few seconds, forever. Backing off to the normal interval is the right
+        answer for best-effort maintenance; the caller logs the failure.
+        """
+        now = now or datetime.now()
+        last_at = parse_datetime(self.get_state_values(db, [state_key]).get(state_key))
         if last_at is not None and now - last_at < timedelta(hours=interval_hours):
             return None
-        self.set_state(db, _REPORT_USAGE_RETENTION_STATE_KEY, now)
-        return self.purge_old_report_usage(db, retention_days=retention_days, now=now)
+        self.set_state(db, state_key, now)
+        return sweep(now)
 
     def create_run(self, db, mode: str, trigger_type: str, initiator: str, log_path: str) -> SyncRun:
         now = datetime.now()
@@ -221,7 +242,13 @@ class SyncControlService:
         status: str,
         message: str,
         step_results: list[dict[str, Any]],
+        *,
+        scoped: bool = False,
     ) -> SyncRun:
+        """Close the run; `scoped` marks one limited to a tenant, credential or branches.
+
+        Only an unscoped success arms the auto-enqueue gate: a run for one tenant says nothing about the others.
+        """
         now = datetime.now()
         run.status = status
         run.finished_at = now
@@ -234,6 +261,8 @@ class SyncControlService:
         if status == 'success':
             self.set_state(db, 'last_successful_run_id', str(run.id))
             self.set_state(db, 'last_successful_sync_at', now)
+            if not scoped:
+                self.set_state(db, UNSCOPED_SUCCESS_STATE_KEY, now)
         return run
 
     def _replace_step_results(self, db, run_id: int, step_results: list[dict[str, Any]]) -> None:
