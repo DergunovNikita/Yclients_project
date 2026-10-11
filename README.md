@@ -206,10 +206,9 @@ Security checks для CI и ручного triage:
 severity доступна не всегда, поэтому high/critical threshold применяется явно
 только к `npm audit`.
 
-Frontend audit проходит через `web/scripts/audit-gate.mjs`: новые high/critical
-findings блокируют CI, а временные suppressions должны быть явно описаны в
-`web/audit-allowlist.json` с package, advisory id, expiry и reason. Сейчас
-allowlist пустой; новые suppressions добавлять только после явного risk review.
+Frontend audit — штатный `npm audit --audit-level=high`: любой high/critical в зависимостях
+(включая dev) блокирует CI. Allowlist исключений не ведётся; если понадобится первая suppression,
+добавлять её отдельным решением после risk review.
 
 Локальный `./scripts/security-check.sh --strict` делает Semgrep/Checkov blocking намеренно:
 это режим для ручной подготовки к ужесточению CI после triage.
