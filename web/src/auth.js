@@ -465,7 +465,13 @@ async function refreshSession() {
   }
   const response = await refreshInFlight;
   if (!response.ok) {
-    throw new Error(t('authErrors.authenticationRequired'));
+    const error = new Error(
+      [401, 403].includes(response.status)
+        ? t('authErrors.authenticationRequired')
+        : errorMessage(response, await parsePayload(response)),
+    );
+    error.status = response.status;
+    throw error;
   }
   const payload = await parsePayload(response);
   rememberSessionPayload('/auth/refresh', payload);
@@ -652,6 +658,9 @@ export async function requestWithReauth(path, options = {}, requestFn = doFetch,
         await refreshSession();
       } catch (error) {
         if (error?.name === 'SessionTransitionError') throw error;
+        // Only a 401/403 from the refresh itself says the session is dead; a 5xx or a network
+        // failure says nothing about it and must not pop the password modal or log the user out.
+        if (!isAuthFailure(error)) throw error;
         if (!coordinated) {
           const peerRetry = await requestFn(path, { ...options, __retried: true });
           if (peerRetry.status !== 401) return peerRetry;
