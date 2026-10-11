@@ -1169,33 +1169,6 @@ def _personal_account_condition():
     )
 
 
-def _topup_revenue_filters(
-    start: date,
-    end: date,
-    company_id: Optional[int],
-    staff_id: Optional[int] = None,
-    allowed_company_ids: Optional[list[int]] = None,
-    factual_at: Optional[datetime] = None,
-):
-    """Mirrors `_goods_paid_filters`: personal-account top-ups instead of goods sales."""
-    parts = [
-        FinancialTransaction.amount > 0,
-        *day_window(FinancialTransaction.date, start, end),
-        _physical_account_condition(),
-        _business_financial_master_condition(factual_at),
-        _personal_account_condition(),
-        reporting_window_clause(FinancialTransaction.company_id, FinancialTransaction.date),
-    ]
-    scope = _company_scope_clause(FinancialTransaction.company_id, company_id, allowed_company_ids)
-    if scope is not None:
-        parts.append(scope)
-    if staff_id is not None:
-        parts.append(_financial_staff_attribution_condition(staff_id))
-    if factual_at is not None:
-        parts.append(FinancialTransaction.date <= factual_at)
-    return and_(*parts)
-
-
 async def _personal_account_coverage(
     db: AsyncSession, company_ids: list[int]
 ) -> dict[int, tuple[Optional[date], Optional[date]]]:
@@ -1327,6 +1300,19 @@ def _direct_payment_filters(
     return filters
 
 
+def _direct_revenue_classifiers(staff_id: Optional[int] = None) -> tuple[Any, Any]:
+    """Goods and top-up classifiers over the `_direct_payment_filters` rows, attributed to `staff_id` if given.
+
+    Not asserted mutually exclusive: a row matching both is counted in both buckets everywhere.
+    """
+    goods = FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE
+    topup = _personal_account_condition()
+    if staff_id is not None:
+        attributed = _financial_staff_attribution_condition(staff_id)
+        goods, topup = and_(goods, attributed), and_(topup, attributed)
+    return goods, topup
+
+
 async def _average_check_block(
     db: AsyncSession,
     dr: DateRange,
@@ -1375,15 +1361,7 @@ async def _average_check_block(
     # more classifying condition layered on direct_payment_filters.
     direct_payment_filters = _direct_payment_filters(dr, company_id, company_ids, factual_at)
 
-    goods_condition = FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE
-    # _topup_revenue_filters is self-contained (it builds its own day window and scope), but
-    # its classifying half is exactly _personal_account_condition() layered on the same
-    # direct_payment_filters base as goods/unclassified — see the docstring there.
-    topup_condition = _personal_account_condition()
-    if staff_id is not None:
-        staff_condition = _financial_staff_attribution_condition(staff_id)
-        goods_condition = and_(goods_condition, staff_condition)
-        topup_condition = and_(topup_condition, staff_condition)
+    goods_condition, topup_condition = _direct_revenue_classifiers(staff_id)
 
     classification_row = (
         await db.execute(
@@ -1502,8 +1480,7 @@ async def fetch_revenue_by_account_type(
     for row in service_rows.all():
         add(row, row.amount)
 
-    # Same pair of classifiers as `_average_check_block`: goods and top-ups are not asserted
-    # mutually exclusive there, and a row matching both is counted twice by the Overview too.
+    goods_condition, topup_condition = _direct_revenue_classifiers()
     direct_rows = await db.execute(
         select(
             FinancialTransaction.company_id.label('company_id'),
@@ -1512,15 +1489,12 @@ async def fetch_revenue_by_account_type(
             (
                 func.coalesce(
                     func.sum(
-                        case(
-                            (FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE, FinancialTransaction.amount),
-                            else_=0.0,
-                        )
+                        case((goods_condition, FinancialTransaction.amount), else_=0.0)
                     ),
                     0.0,
                 )
                 + func.coalesce(
-                    func.sum(case((_personal_account_condition(), FinancialTransaction.amount), else_=0.0)),
+                    func.sum(case((topup_condition, FinancialTransaction.amount), else_=0.0)),
                     0.0,
                 )
             ).label('amount'),
@@ -2644,29 +2618,14 @@ async def fetch_year_over_year_facts(
         annual[year]['extra_service_revenue'] += extra_service_revenue
         monthly[year][month]['service_revenue'] = service_revenue
 
-    direct_component = FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE
-    if staff_id is not None:
-        direct_component = or_(
-            and_(direct_component, _financial_staff_attribution_condition(staff_id)),
-            and_(
-                _personal_account_condition(),
-                _financial_staff_attribution_condition(staff_id),
-            ),
-        )
-    else:
-        direct_component = or_(direct_component, _personal_account_condition())
+    goods_condition, topup_condition = _direct_revenue_classifiers(staff_id)
+    direct_component = or_(goods_condition, topup_condition)
     direct_filters = [
         *_direct_payment_filters(DateRange(start, end), company_id, allowed_company_ids, factual_at),
         direct_component,
     ]
-    goods_amount = case(
-        (FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE, FinancialTransaction.amount),
-        else_=0.0,
-    )
-    topup_amount = case(
-        (_personal_account_condition(), FinancialTransaction.amount),
-        else_=0.0,
-    )
+    goods_amount = case((goods_condition, FinancialTransaction.amount), else_=0.0)
+    topup_amount = case((topup_condition, FinancialTransaction.amount), else_=0.0)
     direct_rows = (
         await db.execute(
             select(
@@ -2897,43 +2856,30 @@ async def fetch_revenue_daily(
             )
             .group_by(svc_branches.c.d)
         )
-        goods_stmt = (
+        goods_condition, topup_condition = _direct_revenue_classifiers(staff_id)
+        direct_stmt = (
             select(
                 payment_day.label('d'),
-                func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
+                func.coalesce(func.sum(case((goods_condition, FinancialTransaction.amount), else_=0.0)), 0.0).label(
+                    'goods_revenue'
+                ),
+                func.coalesce(func.sum(case((topup_condition, FinancialTransaction.amount), else_=0.0)), 0.0).label(
+                    'topup_revenue'
+                ),
             )
             .select_from(FinancialTransaction)
             .outerjoin(AccountCatalog, _financial_account_join())
             .where(
-                _goods_paid_filters(
-                    start,
-                    end,
-                    company_id,
-                    staff_id,
-                    allowed_company_ids,
-                    factual_at,
-                ),
-                _physical_account_condition(),
+                *_direct_payment_filters(DateRange(start, end), company_id, allowed_company_ids, factual_at),
+                or_(goods_condition, topup_condition),
             )
-            .group_by(payment_day)
-        )
-        topup_stmt = (
-            select(
-                payment_day.label('d'),
-                func.coalesce(func.sum(FinancialTransaction.amount), 0.0).label('revenue'),
-            )
-            .select_from(FinancialTransaction)
-            .outerjoin(AccountCatalog, _financial_account_join())
-            .where(_topup_revenue_filters(start, end, company_id, staff_id, allowed_company_ids, factual_at))
             .group_by(payment_day)
         )
         svc_rows = (await db.execute(svc_stmt)).all()
-        goods_rows = (await db.execute(goods_stmt)).all()
-        topup_rows = (await db.execute(topup_stmt)).all()
+        direct_rows = (await db.execute(direct_stmt)).all()
     else:
         svc_rows = []
-        goods_rows = []
-        topup_rows = []
+        direct_rows = []
 
     appt_rows = (await db.execute(appt_stmt)).all()
     opz_by_date: dict[date, int] = {}
@@ -2957,10 +2903,9 @@ async def fetch_revenue_daily(
         by_date[_coerce_date(r.d)]['service_revenue'] = float(r.revenue or 0)
     for r in appt_rows:
         by_date[_coerce_date(r.d)]['appointments'] = int(r.appointments or 0)
-    for r in goods_rows:
-        by_date[_coerce_date(r.d)]['goods_revenue'] = float(r.revenue or 0)
-    for r in topup_rows:
-        by_date[_coerce_date(r.d)]['topup_revenue'] = float(r.revenue or 0)
+    for r in direct_rows:
+        by_date[_coerce_date(r.d)]['goods_revenue'] = float(r.goods_revenue or 0)
+        by_date[_coerce_date(r.d)]['topup_revenue'] = float(r.topup_revenue or 0)
     for day, opz_qty in opz_by_date.items():
         by_date[day]['opz_qty'] = opz_qty
 
@@ -5605,22 +5550,13 @@ async def _staff_fact_components_by_branch(
         if row.staff_id is not None:
             appointments_by_staff[int(row.staff_id)] += float(row.appointments or 0)
 
-    service_branches = _financial_appointment_branches_union(
-        lambda join_condition: (
-            select(
-                Appointment.staff_id.label('staff_id'),
-                FinancialTransaction.amount.label('amount'),
-            )
-            .select_from(FinancialTransaction)
-            .join(Appointment, join_condition)
-            .outerjoin(AccountCatalog, _financial_account_join())
-            .where(
-                _service_paid_filters(
-                    start, end, company_id, factual_at=factual_at
-                ),
-                _physical_account_condition(),
-            )
-        )
+    service_branches = _service_revenue_union(
+        DateRange(start, end),
+        company_id,
+        None,
+        None,
+        factual_at,
+        extra_columns=(Appointment.staff_id.label('staff_id'),),
     )
     service_rows = (
         await db.execute(
@@ -5637,38 +5573,25 @@ async def _staff_fact_components_by_branch(
             service_revenue_by_staff[int(row.staff_id)] += float(row.revenue or 0.0)
 
     attributed_staff_id = _financial_attributed_staff_id()
+    goods_condition, topup_condition = _direct_revenue_classifiers()
     direct_rows = (
         await db.execute(
             select(
                 attributed_staff_id.label('attributed_staff_id'),
                 func.coalesce(
-                    func.sum(
-                        case(
-                            (FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE, FinancialTransaction.amount),
-                            else_=0.0,
-                        )
-                    ),
+                    func.sum(case((goods_condition, FinancialTransaction.amount), else_=0.0)),
                     0.0,
                 ).label('goods_revenue'),
                 func.coalesce(
-                    func.sum(case((_personal_account_condition(), FinancialTransaction.amount), else_=0.0)),
+                    func.sum(case((topup_condition, FinancialTransaction.amount), else_=0.0)),
                     0.0,
                 ).label('topup_revenue'),
             )
             .select_from(FinancialTransaction)
             .outerjoin(AccountCatalog, _financial_account_join())
             .where(
-                FinancialTransaction.amount > 0,
-                *day_window(FinancialTransaction.date, start, end),
-                FinancialTransaction.company_id == company_id,
-                _physical_account_condition(),
-                _business_financial_master_condition(factual_at),
-                reporting_window_clause(FinancialTransaction.company_id, FinancialTransaction.date),
-                or_(
-                    FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
-                    _personal_account_condition(),
-                ),
-                FinancialTransaction.date <= factual_at,
+                *_direct_payment_filters(DateRange(start, end), company_id, None, factual_at),
+                or_(goods_condition, topup_condition),
             )
             .group_by(attributed_staff_id)
         )
