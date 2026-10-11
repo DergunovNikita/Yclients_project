@@ -5,7 +5,8 @@ parent without an ON DELETE rule, so PostgreSQL refused to delete a portal user 
 or a YClients credential that any sync job still referenced (a 500). The columns are nullable and the rows are
 history, so the link now goes to NULL.
 
-`portal_refresh_tokens.revoked_at` was never written (sessions are deleted, not revoked) and
+`portal_refresh_tokens.revoked_at` is no longer written (sessions are deleted, not revoked; rows an older release
+revoked are deleted first so they cannot come back to life) and
 `yclients_credentials.credential_fingerprint` was written but never read; both go, and the refresh-token
 index loses its dead column.
 
@@ -46,6 +47,9 @@ def _recreate_foreign_keys(ondelete: str | None) -> None:
 def upgrade() -> None:
     _recreate_foreign_keys('SET NULL')
 
+    # Current code never sets the column, but older releases did: with the column gone a still-unexpired
+    # revoked session would read as live again.
+    op.execute('DELETE FROM system.portal_refresh_tokens WHERE revoked_at IS NOT NULL')
     op.drop_index(REFRESH_INDEX, table_name='portal_refresh_tokens', schema='system')
     op.drop_column('portal_refresh_tokens', 'revoked_at', schema='system')
     op.create_index(REFRESH_INDEX, 'portal_refresh_tokens', ['user_id', 'last_used_at'], schema='system')

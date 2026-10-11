@@ -42,6 +42,9 @@ def test_upgrade_nulls_the_links_and_drops_the_dead_columns(migration):
         'CREATE INDEX ix_portal_refresh_tokens_user_state ON system.portal_refresh_tokens (user_id, last_used_at)'
     ) in statements
     assert 'ALTER TABLE system.yclients_credentials DROP COLUMN credential_fingerprint' in statements
+    # Revoked sessions are deleted first, or dropping the column would bring them back to life.
+    revoked_delete = statements.index('DELETE FROM system.portal_refresh_tokens WHERE revoked_at IS NOT NULL')
+    assert revoked_delete < statements.index('ALTER TABLE system.portal_refresh_tokens DROP COLUMN revoked_at')
     # The index goes before the column that holds it, and the rebuilt one comes after the column is gone.
     index_drop = statements.index('DROP INDEX system.ix_portal_refresh_tokens_user_state')
     assert index_drop < statements.index('ALTER TABLE system.portal_refresh_tokens DROP COLUMN revoked_at')

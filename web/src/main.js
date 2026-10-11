@@ -2620,7 +2620,7 @@ async function init() {
   els.planSettingsMonth.value = currentMonthValue();
   renderServicesTable([]);
   renderExtraServicesTable([]);
-  renderServiceManagement({ rows: [], groups: [], categories: [] });
+  renderServiceManagement({ rows: [], categories: [] });
   await startSession();
 }
 
