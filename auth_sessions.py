@@ -284,7 +284,7 @@ async def _maintain_user_sessions(
                 select(PortalRefreshToken.id)
                 .where(
                     PortalRefreshToken.user_id == user_id,
-                            PortalRefreshToken.expires_at > now,
+                    PortalRefreshToken.expires_at > now,
                 )
                 .order_by(
                     PortalRefreshToken.last_used_at.desc().nullslast(),
