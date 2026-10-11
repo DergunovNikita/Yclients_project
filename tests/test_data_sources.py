@@ -83,6 +83,20 @@ def test_yclients_adapter_handles_empty_groups():
     assert adapter.list_branches() == []
 
 
+def test_a_failed_group_request_is_not_an_empty_network():
+    class FailingAPI(FakeYClientsAPI):
+        def get_groups(self):
+            return None
+
+    adapter = YClientsDataSourceAdapter('partner', 'login', 'password', api_factory=FailingAPI)
+
+    with pytest.raises(HTTPException) as caught:
+        adapter.list_branches()
+
+    assert caught.value.status_code == 400
+    assert caught.value.detail == 'Data source authentication failed'
+
+
 @pytest.mark.asyncio
 async def test_yclients_materialize_branches_scopes_external_ids_by_tenant(async_session):
     async_session.add_all([

@@ -104,12 +104,13 @@ class YClientsAPI:
             except ValueError:
                 print("✗ Ошибка авторизации: ответ не в формате JSON")
                 return False
-            if data.get('success'):
-                self.user_token = data.get('data', {}).get('user_token')
+            payload = data.get('data') if isinstance(data, dict) else None
+            user_token = payload.get('user_token') if isinstance(payload, dict) else None
+            if isinstance(data, dict) and data.get('success') and user_token:
+                self.user_token = user_token
                 return True
-            else:
-                print(f"✗ Авторизация не удалась: {data}")
-                return False
+            print(f"✗ Авторизация не удалась: {data}")
+            return False
         else:
             print(f"✗ Ошибка авторизации: {response.status_code}")
             print(f"Ответ: {response.text}")

@@ -2067,6 +2067,34 @@ async def test_create_yclients_credential_failures_are_sanitized_and_audited(
 
 
 @pytest.mark.asyncio
+async def test_create_credential_does_not_save_one_when_the_group_listing_fails(auth_db, monkeypatch):
+    from data_sources import YClientsDataSourceAdapter
+
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+
+    class GroupListingFails:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_groups(self):
+            return None
+
+    adapter = YClientsDataSourceAdapter('partner', 'login', 'password', api_factory=GroupListingFails)
+    monkeypatch.setattr(yclients_credential_routes, '_authenticated_adapter', lambda *_args, **_kwargs: adapter)
+
+    async with _Api(auth_db) as client:
+        response = await client.post(
+            '/auth/admin/yclients-credentials',
+            headers=await _bearer(auth_db, 1, 'owner'),
+            json={'title': 'No listing', 'partner_token': 'p', 'login': 'l', 'password': 'w', 'company_ids': []},
+        )
+
+    assert response.status_code == 400
+    assert response.json()['detail'] == 'Data source authentication failed'
+    assert await auth_db.scalar(select(func.count()).select_from(YClientsCredential)) == 0
+
+
+@pytest.mark.asyncio
 async def test_owner_manages_yclients_credentials(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
