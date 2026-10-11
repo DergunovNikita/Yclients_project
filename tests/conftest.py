@@ -1,6 +1,6 @@
 import os
 import secrets
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 # Before anything imports config: APP_ENV now fails CLOSED, so any value outside
 # NON_PRODUCTION_ENV_NAMES — including unset — is treated as production and
@@ -15,6 +15,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from clock import utcnow
 from models import (
     Appointment,
     Client,
@@ -146,7 +147,7 @@ async def async_session() -> AsyncGenerator[AsyncSession, None]:
 
 def new_session_row(user_id: int, *, session_id: int | None = None) -> PortalRefreshToken:
     """A live refresh-session row; access tokens are only valid while their session row is."""
-    now = datetime.utcnow()
+    now = utcnow()
     return PortalRefreshToken(
         id=session_id,
         user_id=user_id,

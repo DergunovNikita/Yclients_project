@@ -8,7 +8,7 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from datetime import date, datetime
+from datetime import date
 from typing import Annotated, Any, Callable
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -32,6 +32,7 @@ from auth_scope import (
     user_branch_ids,
 )
 import dashboard_service
+from clock import utcnow
 from dashboard_service import (
     MANUAL_FACT_CONFLICT_DETAIL,
     ManualFactConflict,
@@ -1126,12 +1127,12 @@ async def dashboard_metric_visibility_save(
             portal_account_id=portal_account_id,
             role=payload.role,
             visible_codes=visible_codes,
-            updated_at=datetime.utcnow(),
+            updated_at=utcnow(),
         )
         db.add(row)
     else:
         row.visible_codes = visible_codes
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
     await log_portal_audit(
         db,
         actor_user_id=ctx.user_id,

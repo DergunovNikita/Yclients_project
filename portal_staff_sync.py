@@ -123,11 +123,21 @@ async def sync_portal_user_staff(
     return changed
 
 
-async def deactivate_portal_user_staff(db: AsyncSession, portal_user_id: int) -> None:
+async def detach_portal_user_staff(db: AsyncSession, portal_user_id: int) -> None:
+    """Before a portal user is deleted: fire the rows the portal made and release the CRM row.
+
+    The CRM row (staff.id == portal_user.id) belongs to YClients, so it stays, but its link must go:
+    left pointing at a dead id it would be hidden from the unlinked list and refuse a new account.
+    """
     await db.execute(
         update(Staff)
         .where(_portal_owned_staff_clause(portal_user_id))
         .values(fired=1)
+    )
+    await db.execute(
+        update(Staff)
+        .where(Staff.id == portal_user_id, Staff.portal_user_id == portal_user_id)
+        .values(portal_user_id=None)
     )
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
-from datetime import datetime
+from clock import utcnow
 
 from sqlalchemy import delete, select
 
@@ -50,7 +50,7 @@ def main() -> int:
             return 1
 
         user.password_hash = hash_password(password)
-        user.password_changed_at = datetime.utcnow()
+        user.password_changed_at = utcnow()
         bump_user_token_version(user)
         db.execute(delete(PortalRefreshToken).where(PortalRefreshToken.user_id == user.id))
         db.commit()

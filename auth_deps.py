@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from clock import utcnow
 
 from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy import select
@@ -47,8 +47,7 @@ async def _user_from_token(
         .where(
             PortalUser.id == user_id,
             PortalRefreshToken.id == session_id,
-            PortalRefreshToken.revoked_at.is_(None),
-            PortalRefreshToken.expires_at > datetime.utcnow(),
+            PortalRefreshToken.expires_at > utcnow(),
         )
     )
     user = (await db.execute(user_stmt)).scalar_one_or_none()

@@ -68,9 +68,7 @@ def can_list_user(
     """List users with the same rank or lower, scoped by branches when needed."""
     if not rank_at_or_below(actor_role, target_role):
         return False
-    if actor_role == PLATFORM_ADMIN_ROLE:
-        return True
-    if actor_role == TENANT_OWNER_ROLE:
+    if actor_role in (PLATFORM_ADMIN_ROLE, TENANT_OWNER_ROLE):
         return True
     if same_rank(actor_role, target_role):
         if not actor_branch_ids:
@@ -123,11 +121,7 @@ def can_manage_staff(
 ) -> bool:
     if actor_role not in USER_ADMIN_ROLES:
         return False
-    if actor_role == PLATFORM_ADMIN_ROLE:
-        return True
-    if actor_role == TENANT_OWNER_ROLE:
-        return staff_company_id in actor_branch_ids
-    return staff_company_id in actor_branch_ids
+    return actor_role == PLATFORM_ADMIN_ROLE or staff_company_id in actor_branch_ids
 
 
 def assert_can_manage_staff(

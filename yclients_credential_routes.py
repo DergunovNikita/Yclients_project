@@ -18,7 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth_deps import forbid_demo, require_roles
 from auth_hierarchy import CREDENTIAL_ADMIN_ROLES
 from auth_service import load_portal_account_branch_ids
-from data_sources import SOURCE_YCLIENTS, authenticated_adapter_from_payload, normalize_source_type
+from data_sources import (
+    DATA_SOURCE_FAILED_DETAIL,
+    SOURCE_YCLIENTS,
+    authenticated_adapter_from_payload,
+    normalize_source_type,
+)
 from database import get_async_db
 from models import PortalAccount, PortalUser, YClientsCredential
 from portal_audit import log_portal_audit
@@ -36,7 +41,7 @@ from yclients_credentials import (
 
 router = APIRouter()
 CREDENTIAL_PAYLOAD_INVALID_DETAIL = 'Invalid credential request'
-CREDENTIAL_TEST_FAILED_DETAIL = 'Data source authentication failed'
+CREDENTIAL_TEST_FAILED_DETAIL = DATA_SOURCE_FAILED_DETAIL
 CREDENTIAL_DECRYPT_FAILED_DETAIL = 'Stored credentials could not be decrypted'
 CREDENTIAL_SOURCE_UNSUPPORTED_DETAIL = 'Unsupported credential source type'
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime
+from clock import utcnow
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
@@ -46,7 +46,6 @@ from auth_service import (
     is_deliverable_portal_email,
     send_verification_email,
     set_user_branches,
-    user_can_login,
     verify_password,
 )
 from auth_sessions import (
@@ -69,7 +68,7 @@ from models import Company, PortalAccount, PortalBranch, PortalUser, PortalUserB
 from portal_audit import log_portal_audit
 from portal_account_provision import provision_all_unlinked_staff, provision_staff_account, role_for_staff
 from portal_staff_sync import (
-    deactivate_portal_user_staff,
+    detach_portal_user_staff,
     list_unlinked_staff,
     sync_all_portal_users_staff,
     sync_portal_user_staff,
@@ -244,9 +243,9 @@ async def _load_manageable_staff(
     ).scalar_one_or_none()
     if staff is None:
         raise HTTPException(status_code=404, detail='Staff member not found')
-    if actor.role == 'platform_admin' and staff.company_id not in actor_branch_ids:
+    if staff.company_id not in actor_branch_ids:
+        # 404 for every role: "exists in a branch you cannot reach" must look like "does not exist".
         raise HTTPException(status_code=404, detail='Staff member not found')
-    assert_can_manage_staff(actor.role, actor_branch_ids, staff.company_id)
     return staff
 
 
@@ -261,7 +260,7 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     if existing is not None:
         raise HTTPException(status_code=409, detail='Email already registered')
 
-    now = datetime.utcnow()
+    now = utcnow()
     user = PortalUser(
         portal_account_id=None,
         email=email,
@@ -329,12 +328,12 @@ async def login(
     if user is None or not password_matches:
         logger.warning('login failed user_id=%s', user.id if user is not None else None)
         raise HTTPException(status_code=401, detail='Invalid email or password')
-    if not user_can_login(user):
+    if not user.is_active:
         raise HTTPException(status_code=403, detail='Account disabled')
     if AUTH_EMAIL_VERIFY_REQUIRED and user.email_verified_at is None:
         raise HTTPException(status_code=403, detail='Email verification required')
 
-    user.last_login_at = datetime.utcnow()
+    user.last_login_at = utcnow()
     session = await issue_session(db, user, request, access_token_fn=_access_token_for)
     return await _finalize_session_response(db, response, user, session)
 
@@ -452,7 +451,7 @@ async def demo_login(
     if user is None:
         raise HTTPException(status_code=503, detail='Demo mode is not available')
 
-    user.last_login_at = datetime.utcnow()
+    user.last_login_at = utcnow()
     session = await issue_session(db, user, request, access_token_fn=_access_token_for)
     return await _finalize_session_response(db, response, user, session)
 
@@ -599,7 +598,7 @@ async def verify_email(body: TokenRequest, db: AsyncSession = Depends(get_async_
     user = await consume_email_token(db, body.token, TOKEN_PURPOSE_VERIFY)
     if user is None:
         raise HTTPException(status_code=400, detail='Invalid or expired token')
-    user.email_verified_at = datetime.utcnow()
+    user.email_verified_at = utcnow()
     await db.commit()
     return {'success': True, 'message': 'Email подтверждён. Теперь можно войти в кабинет.'}
 
@@ -688,7 +687,7 @@ async def reset_password(
     if user is None:
         raise HTTPException(status_code=400, detail='Invalid or expired token')
     user.password_hash = await asyncio.to_thread(hash_password, body.password)
-    user.password_changed_at = datetime.utcnow()
+    user.password_changed_at = utcnow()
     bump_user_token_version(user)
     await revoke_user_sessions(db, user.id)
     await invalidate_email_tokens(db, user.id, TOKEN_PURPOSE_RESET)
@@ -708,16 +707,12 @@ async def change_password(
         raise HTTPException(status_code=400, detail='Новый пароль должен отличаться от текущего')
 
     user.password_hash = await asyncio.to_thread(hash_password, body.new_password)
-    user.password_changed_at = datetime.utcnow()
+    user.password_changed_at = utcnow()
     bump_user_token_version(user)
     await revoke_user_sessions(db, user.id)
     await invalidate_email_tokens(db, user.id, TOKEN_PURPOSE_RESET)
     await db.commit()
     return {'success': True, 'message': 'Пароль успешно изменён. Войдите снова.'}
-
-
-async def _actor_branch_ids(db: AsyncSession, user: PortalUser) -> list[int]:
-    return await load_user_access_branch_ids(db, user)
 
 
 async def _active_admin_portal_account_id(
@@ -743,13 +738,13 @@ async def _active_admin_branch_ids(
     if actor.role == 'platform_admin':
         portal_account_id = await _active_admin_portal_account_id(db, actor, x_portal_account_id)
         return await load_portal_account_branch_ids(db, portal_account_id)
-    return await _actor_branch_ids(db, actor)
+    return await load_user_access_branch_ids(db, actor)
 
 
-def _same_tenant(actor: PortalUser, target: PortalUser, active_portal_account_id: int | None = None) -> bool:
-    """A platform_admin sees every tenant unless one is currently selected, others only their own."""
+def _same_tenant(actor: PortalUser, target: PortalUser) -> bool:
+    """A platform_admin reaches every tenant, others only their own."""
     if actor.role == 'platform_admin':
-        return active_portal_account_id is None or target.portal_account_id == active_portal_account_id
+        return True
     return actor.portal_account_id is not None and actor.portal_account_id == target.portal_account_id
 
 
@@ -807,7 +802,7 @@ async def admin_meta(
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
-    branch_ids = await _actor_branch_ids(db, actor)
+    branch_ids = await load_user_access_branch_ids(db, actor)
     return {
         'success': True,
         'data': {
@@ -858,7 +853,9 @@ async def _load_staff_ids_by_portal_user(db: AsyncSession, portal_user_ids: list
         return {}
     rows = (
         await db.execute(
-            select(Staff.id, Staff.portal_user_id).where(Staff.portal_user_id.in_(portal_user_ids))
+            select(Staff.id, Staff.portal_user_id)
+            .where(Staff.portal_user_id.in_(portal_user_ids), Staff.fired == 0)
+            .order_by(Staff.id.asc())
         )
     ).all()
     mapping: dict[int, int] = {}
@@ -916,8 +913,6 @@ async def admin_list_users(
     staff_ids_by_user = await _load_staff_ids_by_portal_user(db, [user.id for user in users])
     branch_ids_by_user = await _load_access_branch_ids_by_user(db, users)
     for user in users:
-        if not _same_tenant(actor, user, active_portal_account_id):
-            continue
         branch_ids = branch_ids_by_user[user.id]
         if can_list_user(actor.role, actor_branch_ids, user.role, branch_ids):
             manageable = user.id != actor.id and can_manage_user(
@@ -945,7 +940,7 @@ async def admin_create_user(
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
-    actor_branch_ids = await _actor_branch_ids(db, actor)
+    actor_branch_ids = await load_user_access_branch_ids(db, actor)
     assert_can_assign_role(actor.role, body.role)
     validate_company_ids_for_role(actor.role, actor_branch_ids, body.role, body.company_ids)
 
@@ -960,7 +955,7 @@ async def admin_create_user(
             else:
                 account = PortalAccount(
                     label=(body.full_name or body.email).strip(),
-                    created_at=datetime.utcnow(),
+                    created_at=utcnow(),
                 )
                 db.add(account)
                 await db.flush()
@@ -990,8 +985,8 @@ async def admin_create_user(
         full_name=body.full_name,
         role=body.role,
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     db.add(user)
     await db.flush()
@@ -1034,7 +1029,7 @@ async def admin_update_user(
         # status for "exists in another tenant" vs "does not exist" is an id-enumeration oracle.
         raise HTTPException(status_code=404, detail='User not found')
 
-    actor_branch_ids = await _actor_branch_ids(db, actor)
+    actor_branch_ids = await load_user_access_branch_ids(db, actor)
     current_branch_ids = await load_user_access_branch_ids(db, user)
     assert_can_manage_user(actor.role, actor_branch_ids, user.role, current_branch_ids)
 
@@ -1043,13 +1038,18 @@ async def admin_update_user(
 
     if body.role is not None and body.role != user.role:
         assert_can_assign_role(actor.role, body.role)
+        if user.role == 'owner' and body.company_ids is None:
+            # An owner's branches are the whole tenant and are not stored per user, so they cannot carry over.
+            raise HTTPException(status_code=400, detail='company_ids are required when an owner is given another role')
     if body.role is not None or body.company_ids is not None:
         validate_company_ids_for_role(actor.role, actor_branch_ids, next_role, next_company_ids)
 
     if body.role is not None:
         user.role = body.role
+    sessions_must_end = False
     if body.is_active is not None:
         user.is_active = body.is_active
+        sessions_must_end = not body.is_active
     if body.full_name is not None:
         user.full_name = body.full_name
     if body.email is not None:
@@ -1063,7 +1063,15 @@ async def admin_update_user(
             if existing is not None:
                 raise HTTPException(status_code=409, detail='Email already registered')
             user.email = email
-            user.email_verified_at = datetime.utcnow()
+            user.email_verified_at = utcnow()
+            sessions_must_end = True
+            # A reset link mailed to the old address must not outlive the address.
+            await invalidate_email_tokens(db, user.id, TOKEN_PURPOSE_RESET)
+
+    if sessions_must_end:
+        # Same as a password reset: whoever held the old address or the disabled account loses every live session.
+        bump_user_token_version(user)
+        await revoke_user_sessions(db, user.id)
 
     if user.role == 'platform_admin':
         user.portal_account_id = None
@@ -1103,14 +1111,14 @@ async def admin_delete_user(
     if user.id == actor.id:
         raise HTTPException(status_code=403, detail='Cannot delete your own account')
 
-    actor_branch_ids = await _actor_branch_ids(db, actor)
+    actor_branch_ids = await load_user_access_branch_ids(db, actor)
     if not _same_tenant(actor, user):
         # 404, not 403: see the matching comment in admin_update_user.
         raise HTTPException(status_code=404, detail='User not found')
     branch_ids = await load_user_access_branch_ids(db, user)
     assert_can_manage_user(actor.role, actor_branch_ids, user.role, branch_ids)
 
-    await deactivate_portal_user_staff(db, user.id)
+    await detach_portal_user_staff(db, user.id)
     await log_portal_audit(
         db,
         actor_user_id=actor.id,
@@ -1254,8 +1262,6 @@ async def admin_list_initial_passwords(
 
     payload = []
     for user in users:
-        if not _same_tenant(actor, user, active_portal_account_id):
-            continue
         branch_ids = branch_ids_by_user[user.id]
         if not can_manage_user(actor.role, actor_branch_ids, user.role, branch_ids):
             continue
@@ -1286,8 +1292,7 @@ async def admin_distribute_credentials(
     actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
     unique_ids = sorted(set(body.user_ids))
     # Scoped to the active tenant, same as admin_list_users/admin_list_initial_passwords: a
-    # cross-tenant id must never even reach `users_by_id`, or its email leaks into `errors`
-    # below before the _same_tenant check further down gets a chance to reject it.
+    # cross-tenant id must never even reach `users_by_id`, or its email leaks into `errors`.
     users = await _tenant_scoped_users(db, active_portal_account_id, PortalUser.id.in_(unique_ids))
     users_by_id = {user.id: user for user in users}
     branch_ids_by_user = await _load_access_branch_ids_by_user(db, users)
@@ -1306,9 +1311,6 @@ async def admin_distribute_credentials(
         user_role = user.role
         user_object_id = user.id
 
-        if not _same_tenant(actor, user, active_portal_account_id):
-            errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Access denied'})
-            continue
         branch_ids = branch_ids_by_user[user.id]
         if not can_manage_user(actor.role, actor_branch_ids, user_role, branch_ids):
             errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Access denied'})

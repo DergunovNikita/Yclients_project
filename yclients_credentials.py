@@ -17,10 +17,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
+from clock import utcnow
 from config import IS_PRODUCTION, PORTAL_CREDENTIALS_ENCRYPTION_KEY, PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD
 from models import Company, YClientsCredential, YClientsCredentialCompany
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('yclients.credentials')
 
 
 class CredentialsConfigError(RuntimeError):
@@ -120,11 +121,6 @@ def decrypt_secret(value: str) -> str:
     return decrypted
 
 
-def credential_fingerprint(partner_token: str, login: str) -> str:
-    raw = f'{partner_token.strip()}\0{login.strip()}'
-    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
-
-
 def credential_payload(
     credential: YClientsCredential,
     company_ids: Iterable[int],
@@ -159,10 +155,7 @@ def decrypted_credential(
         credential.partner_token_encrypted = encrypt_secret(partner_token)
         credential.login_encrypted = encrypt_secret(login)
         credential.password_encrypted = encrypt_secret(password)
-        credential.updated_at = datetime.utcnow()
-    fingerprint = credential_fingerprint(partner_token, login)
-    if credential.credential_fingerprint != fingerprint:
-        credential.credential_fingerprint = fingerprint
+        credential.updated_at = utcnow()
     return YClientsCredentialValue(
         id=credential.id,
         title=credential.title,
@@ -176,9 +169,9 @@ def decrypted_credential(
 
 def _record_decrypt_failure(credential: YClientsCredential, exc: Exception) -> None:
     credential.needs_reauth = True
-    credential.last_error_at = datetime.utcnow()
+    credential.last_error_at = utcnow()
     credential.last_error = f'Decrypt failed: {exc.__class__.__name__}'
-    credential.updated_at = datetime.utcnow()
+    credential.updated_at = utcnow()
 
 
 def load_active_credentials_sync(
@@ -243,7 +236,7 @@ async def load_credentials_for_companies_async(
         except Exception as exc:
             _record_decrypt_failure(credential, exc)
     # decrypted_credential()/_record_decrypt_failure() stage in-place bookkeeping (rotated-key
-    # re-encryption, credential_fingerprint, needs_reauth) that is otherwise silently discarded:
+    # re-encryption, needs_reauth) that is otherwise silently discarded:
     # this is a request-scoped AsyncSession (get_async_db() only closes it, never commits), and
     # its one caller chain (yclients_analytics.fetch_record_stats <- dashboard_service's
     # appointments-breakdown/summary read path) never writes anything else on it, so committing
@@ -358,7 +351,7 @@ async def list_credential_payloads(
             select(
                 YClientsCredentialCompany.credential_id,
                 YClientsCredentialCompany.company_id,
-            )
+            ).where(YClientsCredentialCompany.credential_id.in_([credential.id for credential in credentials]))
         )
     ).all()
     companies_by_credential: dict[int, list[int]] = {}
@@ -378,7 +371,7 @@ def new_credential(
     password: str,
     is_active: bool = True,
 ) -> YClientsCredential:
-    now = datetime.utcnow()
+    now = utcnow()
     return YClientsCredential(
         portal_account_id=portal_account_id,
         title=title.strip(),
@@ -386,7 +379,6 @@ def new_credential(
         login_encrypted=encrypt_secret(login.strip()),
         password_encrypted=encrypt_secret(password),
         is_active=is_active,
-        credential_fingerprint=credential_fingerprint(partner_token, login),
         created_at=now,
         updated_at=now,
     )
@@ -411,22 +403,11 @@ def update_credential_secrets(
         credential.password_encrypted = encrypt_secret(password)
     if is_active is not None:
         credential.is_active = bool(is_active)
-    if partner_token is not None or login is not None:
-        try:
-            partner_value = (
-                partner_token.strip()
-                if partner_token is not None
-                else decrypt_secret(credential.partner_token_encrypted)
-            )
-            login_value = login.strip() if login is not None else decrypt_secret(credential.login_encrypted)
-            credential.credential_fingerprint = credential_fingerprint(partner_value, login_value)
-        except Exception:
-            credential.credential_fingerprint = None
     if partner_token is not None or login is not None or password is not None:
         credential.needs_reauth = False
         credential.last_error = None
         credential.last_error_at = None
-    credential.updated_at = datetime.utcnow()
+    credential.updated_at = utcnow()
 
 
 def _mark_credential_success(
@@ -463,8 +444,8 @@ def mark_credential_success_sync(db: Session, credential_id: int | None) -> None
         return
     _mark_credential_success(
         credential,
-        last_used_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        last_used_at=utcnow(),
+        updated_at=utcnow(),
     )
     db.commit()
 
@@ -478,8 +459,8 @@ def mark_credential_failure_sync(db: Session, credential_id: int | None, error: 
     _mark_credential_failure(
         credential,
         error,
-        last_error_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        last_error_at=utcnow(),
+        updated_at=utcnow(),
     )
     db.commit()
 
@@ -492,8 +473,8 @@ async def mark_credential_success_async(db: AsyncSession, credential_id: int | N
         return
     _mark_credential_success(
         credential,
-        last_used_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        last_used_at=utcnow(),
+        updated_at=utcnow(),
     )
 
 
@@ -506,6 +487,6 @@ async def mark_credential_failure_async(db: AsyncSession, credential_id: int | N
     _mark_credential_failure(
         credential,
         error,
-        last_error_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        last_error_at=utcnow(),
+        updated_at=utcnow(),
     )

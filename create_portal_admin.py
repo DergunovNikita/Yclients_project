@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from datetime import datetime
+from clock import utcnow
 
 from sqlalchemy import select
 
@@ -61,8 +61,8 @@ def main() -> int:
                 full_name=args.full_name,
                 role='platform_admin',
                 is_active=True,
-                email_verified_at=datetime.utcnow(),
-                created_at=datetime.utcnow(),
+                email_verified_at=utcnow(),
+                created_at=utcnow(),
             )
             db.add(user)
             db.commit()
@@ -75,7 +75,7 @@ def main() -> int:
             user.role = 'platform_admin'
             user.portal_account_id = None
             user.is_active = True
-            user.email_verified_at = user.email_verified_at or datetime.utcnow()
+            user.email_verified_at = user.email_verified_at or utcnow()
             user.full_name = args.full_name
             db.commit()
             print(f'Reset platform_admin user id={user.id} email={email}')

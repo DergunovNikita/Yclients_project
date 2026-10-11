@@ -14,6 +14,7 @@ import jwt
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clock import utcnow
 from config import (
     APP_PUBLIC_URL,
     AUTH_CONSOLE_EMAIL,
@@ -81,8 +82,8 @@ def create_access_token(
         'sub': str(user_id),
         'role': role,
         'tv': int(token_version or 0),
-        'exp': datetime.utcnow() + timedelta(minutes=AUTH_JWT_EXPIRE_MINUTES),
-        'iat': datetime.utcnow(),
+        'exp': utcnow() + timedelta(minutes=AUTH_JWT_EXPIRE_MINUTES),
+        'iat': utcnow(),
         'sid': int(session_id),
     }
     return jwt.encode(payload, AUTH_JWT_SECRET, algorithm='HS256')
@@ -91,7 +92,7 @@ def create_access_token(
 def email_cooldown_active(sent_at: datetime | None) -> bool:
     if sent_at is None or AUTH_EMAIL_RESEND_COOLDOWN_SECONDS <= 0:
         return False
-    return datetime.utcnow() - sent_at < timedelta(seconds=AUTH_EMAIL_RESEND_COOLDOWN_SECONDS)
+    return utcnow() - sent_at < timedelta(seconds=AUTH_EMAIL_RESEND_COOLDOWN_SECONDS)
 
 
 def decode_access_token(token: str) -> dict:
@@ -115,7 +116,7 @@ async def invalidate_email_tokens(db: AsyncSession, user_id: int, purpose: str, 
             PortalEmailToken.purpose == purpose,
             PortalEmailToken.used_at.is_(None),
         )
-        .values(used_at=now or datetime.utcnow())
+        .values(used_at=now or utcnow())
         .execution_options(synchronize_session=False)
     )
 
@@ -123,7 +124,7 @@ async def invalidate_email_tokens(db: AsyncSession, user_id: int, purpose: str, 
 async def create_email_token(db: AsyncSession, user_id: int, purpose: str, *, commit: bool = True) -> str:
     raw = secrets.token_urlsafe(32)
     ttl = TOKEN_TTL_HOURS[purpose]
-    now = datetime.utcnow()
+    now = utcnow()
     await invalidate_email_tokens(db, user_id, purpose, now=now)
     db.add(
         PortalEmailToken(
@@ -140,8 +141,13 @@ async def create_email_token(db: AsyncSession, user_id: int, purpose: str, *, co
 
 
 async def consume_email_token(db: AsyncSession, raw_token: str, purpose: str) -> PortalUser | None:
-    """Spend a token exactly once; the conditional UPDATE is what makes concurrent replays lose."""
-    now = datetime.utcnow()
+    """Spend a token exactly once; the conditional UPDATE is what makes concurrent replays lose.
+
+    The caller commits, so the spend and what the token was for (new password, verified e-mail) land together:
+    a failure in between rolls the spend back instead of burning the link. A concurrent replay waits on the row
+    lock until then and finds the token used.
+    """
+    now = utcnow()
     user_id = (
         await db.execute(
             update(PortalEmailToken)
@@ -160,9 +166,7 @@ async def consume_email_token(db: AsyncSession, raw_token: str, purpose: str) ->
     if user_id is None:
         return None
 
-    user = (await db.execute(select(PortalUser).where(PortalUser.id == user_id))).scalar_one()
-    await db.commit()
-    return user
+    return (await db.execute(select(PortalUser).where(PortalUser.id == user_id))).scalar_one()
 
 
 async def load_user_branch_ids(db: AsyncSession, user_id: int) -> list[int]:
@@ -218,12 +222,6 @@ async def set_user_branches(db: AsyncSession, user_id: int, company_ids: list[in
         db.add(PortalUserBranch(user_id=user_id, company_id=company_id))
 
 
-def user_can_login(user: PortalUser) -> bool:
-    if not user.is_active:
-        return False
-    return True
-
-
 def _email_link(path: str, token: str) -> str:
     base = APP_PUBLIC_URL.rstrip('/')
     return f'{base}{path}?token={token}'
@@ -266,7 +264,7 @@ def send_auth_email(to_email: str, subject: str, body: str) -> None:
 
 async def send_verification_email(db: AsyncSession, user: PortalUser) -> None:
     token = await create_email_token(db, user.id, TOKEN_PURPOSE_VERIFY, commit=False)
-    user.email_verification_sent_at = datetime.utcnow()
+    user.email_verification_sent_at = utcnow()
     link = _email_link('/verify-email.html', token)
     name = (user.full_name or user.email).strip()
     try:
@@ -289,7 +287,7 @@ async def send_verification_email(db: AsyncSession, user: PortalUser) -> None:
 
 async def send_password_reset_email(db: AsyncSession, user: PortalUser) -> None:
     token = await create_email_token(db, user.id, TOKEN_PURPOSE_RESET, commit=False)
-    user.password_reset_sent_at = datetime.utcnow()
+    user.password_reset_sent_at = utcnow()
     link = _email_link('/reset-password.html', token)
     name = (user.full_name or user.email).strip()
     try:
@@ -312,7 +310,7 @@ async def send_password_reset_email(db: AsyncSession, user: PortalUser) -> None:
 
 async def send_account_invite_email(db: AsyncSession, user: PortalUser) -> None:
     token = await create_email_token(db, user.id, TOKEN_PURPOSE_RESET, commit=False)
-    user.password_reset_sent_at = datetime.utcnow()
+    user.password_reset_sent_at = utcnow()
     link = _email_link('/reset-password.html', token)
     name = (user.full_name or user.email).strip()
     try:

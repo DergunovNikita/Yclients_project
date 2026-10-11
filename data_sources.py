@@ -18,6 +18,7 @@ from yclients_credentials import decrypt_secret
 
 SOURCE_YCLIENTS = 'yclients'
 SUPPORTED_SOURCE_TYPES = (SOURCE_YCLIENTS,)
+DATA_SOURCE_FAILED_DETAIL = 'Data source authentication failed'
 
 
 async def companies_claimed_elsewhere(
@@ -164,7 +165,10 @@ class YClientsDataSourceAdapter(DataSourceAdapter):
         return bool(self.build_sync_client().authenticate())
 
     def list_branches(self) -> list[DataSourceBranch]:
-        groups = self.build_sync_client().get_groups() or []
+        groups = self.build_sync_client().get_groups()
+        if groups is None:
+            # A failed request is not an empty network: callers would save a credential with no branches.
+            raise HTTPException(status_code=400, detail=DATA_SOURCE_FAILED_DETAIL)
         items: list[DataSourceBranch] = []
         for group_data in groups:
             group_id = group_data.get('id')
@@ -327,7 +331,7 @@ def authenticated_adapter_from_payload(
         **api_kwargs,
     )
     if not adapter.authenticate():
-        raise HTTPException(status_code=400, detail='Data source authentication failed')
+        raise HTTPException(status_code=400, detail=DATA_SOURCE_FAILED_DETAIL)
     return adapter
 
 

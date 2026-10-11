@@ -547,3 +547,34 @@ def test_undated_pagination_tolerates_a_short_last_page_that_overlaps_the_previo
     api._get = lambda _url, params: {'success': True, 'data': pages[params['page']]}
 
     assert len(api._get_all_pages('https://api.example.test/clients/1')) == api.MAX_PER_PAGE + 1
+
+
+class _AuthResponse:
+    status_code = 200
+
+    def __init__(self, body):
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+@pytest.mark.parametrize(
+    ('body', 'authenticated'),
+    [
+        ({'success': True, 'data': {'user_token': 'abc'}}, True),
+        ({'success': True, 'data': {}}, False),
+        ({'success': True, 'data': {'user_token': None}}, False),
+        ({'success': True, 'data': None}, False),
+        ({'success': True, 'data': []}, False),
+        ({'success': True}, False),
+        ({'success': False, 'data': {'user_token': 'abc'}}, False),
+        (['not', 'a', 'dict'], False),
+    ],
+)
+def test_authenticate_succeeds_only_with_a_user_token(body, authenticated):
+    api = YClientsAPI('token', 'login', 'password')
+    api.session.post = lambda *args, **kwargs: _AuthResponse(body)
+
+    assert api.authenticate() is authenticated
+    assert api.user_token == ('abc' if authenticated else None)

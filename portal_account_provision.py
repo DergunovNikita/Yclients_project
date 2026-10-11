@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from clock import utcnow
 
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
@@ -114,7 +114,7 @@ async def _provision(
     # A generated password is never shown to anyone, so it needs no hash of its own: the shared
     # never-revealed hash costs login the same bcrypt round and spares ~250 ms per account.
     password_hash = await asyncio.to_thread(hash_password, password) if password else DUMMY_PASSWORD_HASH
-    now = datetime.utcnow()
+    now = utcnow()
 
     user = PortalUser(
         id=staff.id,
