@@ -450,6 +450,14 @@ test('auth proxy allows only expected paths and methods', () => {
     const aliasBlocked = buildAuthProxyTarget(requestStub('GET', {}, '/api/auth-proxy?path=admin/portal-accounts'));
     assert.equal(aliasBlocked.ok, false);
     assert.equal(aliasBlocked.statusCode, 404);
+
+    // Synced staff rows are read-only in the portal: only account creation is proxied.
+    assert.equal(buildAuthProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=admin/staff/7/create-account')).ok, true);
+    for (const method of ['PATCH', 'DELETE']) {
+      const staffBlocked = buildAuthProxyTarget(requestStub(method, {}, '/api/auth-proxy?path=admin/staff/7'));
+      assert.equal(staffBlocked.ok, false, method);
+      assert.equal(staffBlocked.statusCode, 404, method);
+    }
   } finally {
     if (originalOrigin === undefined) {
       delete process.env.VM_API_ORIGIN;
