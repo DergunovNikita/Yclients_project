@@ -321,7 +321,6 @@ export function setSelectedPortalAccountId(portalAccountId) {
 
 export function authHeaders(extra = {}) {
   const headers = { ...extra };
-  clearLegacyAccessToken();
   const portalAccountId = getSelectedPortalAccountId();
   if (portalAccountId && activeSessionUser?.role === 'platform_admin') {
     headers['X-Portal-Account-Id'] = portalAccountId;

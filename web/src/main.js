@@ -73,12 +73,9 @@ import {
 } from './planMetricVisibility.js';
 import { branchToday, inputDateValue, monthOfRange, monthRange, monthValue } from './period.js';
 import { branchesForPeriod } from './reportingWindow.js';
-// i18n's formatDate parses a date-only string as UTC midnight, which renders a day early
-// for any viewer west of UTC. This one pins it to local midnight.
-// formatMoney/formatNumber/formatDecimal used to be defined locally here without a null
-// guard, so a financials_hidden field (e.g. revenue.service_revenue for the manager default,
-// see AGENTS.md) rendered as a misleading "0 ₽" instead of admitting it isn't shown. These
-// versions render "—" for null/undefined, same as Reports already did — see format.test.mjs.
+// Shared with Reports: a financials_hidden field (e.g. revenue.service_revenue for the manager
+// default, see AGENTS.md) renders as "—" instead of a misleading "0 ₽", and formatDate pins a
+// date-only string to local midnight so it does not render a day early west of UTC.
 import {
   formatDate,
   formatMoney,
@@ -2465,7 +2462,7 @@ function setActiveView(view) {
   });
   // An aborted load never reaches its own finally, which would leave Save disabled for good.
   if (view !== 'planSettings' && planSettingsLoading && !planSettingsSaving) setPlanSettingsLoading(false);
-  if (previousView === 'reports' && view !== 'reports') reportsController?.clear();
+  if (previousView === 'reports' && view !== 'reports') reportsController?.clear({ keepCatalog: true });
   activeView = view;
   els.overviewView.classList.toggle('active', view === 'overview');
   els.planView.classList.toggle('active', view === 'plan');

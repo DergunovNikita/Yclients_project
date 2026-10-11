@@ -9,7 +9,8 @@ import {
   staffRefreshAllowsDataLoad,
 } from '../dashboardApi.js';
 import { ReportChartManager } from './charts.js';
-import { escapeHtml, formatDate, periodSubtitle } from './format.js';
+import { formatDate, periodSubtitle } from './format.js';
+import { escapeHtml } from '../html.js';
 import {
   comparePeriodOnLoad,
   defaultReportDates,
@@ -100,8 +101,6 @@ function reportPath(reportId = '', search = '') {
 }
 
 function reportIdFromLocation() {
-  const legacyReportId = new URLSearchParams(window.location.search).get('report');
-  if (legacyReportId) return legacyReportId;
   const path = window.location.pathname.replace(/\/+$/, '');
   if (path === '/reports') return '';
   if (!path.startsWith('/reports/')) return '';
@@ -168,6 +167,10 @@ export function initReports({
   const catalogRequests = createLatestRequestScope();
   const state = {
     loaded: false,
+    // The catalog and the branch list do not change within a session, so leaving the page
+    // keeps them (see clear); only the filters and what depends on the period are reset.
+    catalogFetched: false,
+    branchesFetched: false,
     branchesLoaded: false,
     staffLoaded: false,
     staffIds: [],
@@ -321,21 +324,27 @@ export function initReports({
     state.branchesLoaded = false;
     setDefaultDates();
     try {
-      const reportsPayload = await fetchJson('/dashboard/reports', {}, {
-        signal: catalogRequest.signal,
-      });
-      if (!catalogRequest.isCurrent()) return;
-      state.reports = reportsPayload.data || [];
-      migrateStoredFavorites(state.reports);
-      renderFilterOptions();
+      if (!state.catalogFetched) {
+        const reportsPayload = await fetchJson('/dashboard/reports', {}, {
+          signal: catalogRequest.signal,
+        });
+        if (!catalogRequest.isCurrent()) return;
+        state.reports = reportsPayload.data || [];
+        state.catalogFetched = true;
+        migrateStoredFavorites(state.reports);
+        renderFilterOptions();
+      }
       const branchRequest = branchRequests.start();
       try {
-        const branchesPayload = await fetchJson('/dashboard/branches', {}, {
-          signal: branchRequest.signal,
-          slowState: false,
-        });
-        if (!branchRequest.isCurrent() || !catalogRequest.isCurrent()) return;
-        state.branches = branchesPayload.data || [];
+        if (!state.branchesFetched) {
+          const branchesPayload = await fetchJson('/dashboard/branches', {}, {
+            signal: branchRequest.signal,
+            slowState: false,
+          });
+          if (!branchRequest.isCurrent() || !catalogRequest.isCurrent()) return;
+          state.branches = branchesPayload.data || [];
+          state.branchesFetched = true;
+        }
         renderBranches();
         state.branchesLoaded = true;
         clearFilterWarning();
@@ -828,9 +837,15 @@ export function initReports({
 
   return {
     loadFromLocation,
-    clear: () => {
+    clear: ({ keepCatalog = false } = {}) => {
       charts.clear();
       state.loaded = false;
+      if (!keepCatalog) {
+        state.catalogFetched = false;
+        state.branchesFetched = false;
+        state.reports = [];
+        state.branches = [];
+      }
       state.branchesLoaded = false;
       state.staffLoaded = false;
       state.staffIds = [];

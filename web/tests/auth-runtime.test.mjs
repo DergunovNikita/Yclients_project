@@ -264,7 +264,9 @@ test('admin CSV export quotes cells and prefixes spreadsheet formulas', () => {
 });
 
 test('portal tenant selection is tab-scoped and only platform admins send it', async (t) => {
-  const { auth, server } = await loadAuthModule({ localValues: { portal_account_id: 'legacy-tenant' } });
+  const { auth, server } = await loadAuthModule({
+    localValues: { portal_account_id: 'legacy-tenant', portal_access_token: 'legacy-token' },
+  });
   t.after(() => server.close());
 
   globalThis.fetch = async () => new Response(JSON.stringify({
@@ -273,7 +275,6 @@ test('portal tenant selection is tab-scoped and only platform admins send it', a
   }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   await auth.loadCurrentUser();
   auth.setSelectedPortalAccountId('42');
-  localStorage.setItem('portal_access_token', 'legacy-token');
   const headers = auth.authHeaders({ Accept: 'application/json' });
 
   assert.equal(headers.Accept, 'application/json');
