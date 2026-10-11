@@ -7,10 +7,12 @@ from sqlalchemy import text
 from config import (
     REPORT_USAGE_RETENTION_DAYS,
     SYNC_LOCK_ID,
+    SYNC_LOG_DIR,
     SYNC_RUN_RETENTION_DAYS,
     SYNC_RUN_RETENTION_INTERVAL_HOURS,
 )
 from models import ReportUsageEvent, SyncJob, SyncRun, SyncState, SyncStepRun
+from sync_logging import remove_run_logs
 from sync_parsing import parse_datetime, serialize_dt
 
 _RETENTION_STATE_KEY = 'last_run_retention_at'
@@ -90,6 +92,8 @@ class SyncControlService:
         sync_job_events are untouched; it just stops naming a run_id that is about to stop
         existing.
 
+        The log files of the deleted runs go too (best-effort, only inside SYNC_LOG_DIR).
+
         Why that matters is NOT "most runs are referenced" — measured on a copy of production,
         969 sync_runs, 778 of them stale, and exactly ONE referenced by a job (4 sync_jobs
         exist in total, 3 of those with run_id already NULL). Most runs never went through the
@@ -121,12 +125,17 @@ class SyncControlService:
             stale = stale.filter(SyncRun.id != latest_id)
         stale_select = stale.scalar_subquery()
 
+        stale_log_paths = [path for (path,) in db.query(SyncRun.log_path).filter(SyncRun.id.in_(stale_select))]
+
         db.query(SyncJob).filter(SyncJob.run_id.in_(stale_select)).update(
             {SyncJob.run_id: None}, synchronize_session=False
         )
         db.query(SyncStepRun).filter(SyncStepRun.run_id.in_(stale_select)).delete(synchronize_session=False)
         deleted = db.query(SyncRun).filter(SyncRun.id.in_(stale_select)).delete(synchronize_session=False)
         db.commit()
+        # After the commit: the run rows are the only index of these files, and a file that outlives its row is
+        # harmless while a row without its file is not.
+        remove_run_logs(SYNC_LOG_DIR, stale_log_paths)
         if deleted:
             print(f'✓ Purged {deleted} sync run(s) older than {retention_days}d')
         return deleted

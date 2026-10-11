@@ -78,6 +78,57 @@ def test_purge_old_runs_deletes_old_finished_runs_and_their_step_runs():
         assert session.get(SyncRun, 2) is not None
 
 
+def test_purge_old_runs_removes_log_files_of_purged_runs_only_inside_the_log_dir(tmp_path, monkeypatch):
+    import sync_control
+
+    log_dir = tmp_path / 'logs'
+    log_dir.mkdir()
+    outside = tmp_path / 'sync_elsewhere.log'
+    files = {name: log_dir / name for name in ('sync_old.log', 'sync_recent.log', 'sync_latest.log', 'notes.txt')}
+    for path in (*files.values(), outside):
+        path.write_text('x')
+    monkeypatch.setattr(sync_control, 'SYNC_LOG_DIR', str(log_dir))
+
+    with _retention_session() as session:
+        old, recent = datetime(2026, 1, 1), datetime(2026, 5, 25)
+        runs = [
+            _run(1, 'success', old, old), _run(2, 'success', old, old), _run(3, 'success', old, old),
+            _run(4, 'success', old, old), _run(5, 'success', recent, recent),
+        ]
+        log_paths = (files['sync_old.log'], outside, files['notes.txt'], None, files['sync_latest.log'])
+        for run, path in zip(runs, log_paths):
+            run.log_path = str(path) if path else None
+        session.add_all(runs)
+        session.add(_run(6, 'success', recent, recent))
+        runs[-1].log_path = str(files['sync_recent.log'])
+        session.commit()
+
+        assert SyncControlService().purge_old_runs(session, retention_days=30, now=datetime(2026, 6, 1)) == 4
+
+    assert not files['sync_old.log'].exists()
+    assert outside.exists(), 'a path outside SYNC_LOG_DIR must never be touched'
+    assert files['notes.txt'].exists(), 'only sync_*.log files are removed'
+    assert files['sync_latest.log'].exists() and files['sync_recent.log'].exists()
+
+
+def test_purge_old_runs_survives_log_files_that_cannot_be_removed(tmp_path, monkeypatch):
+    import sync_control
+
+    monkeypatch.setattr(sync_control, 'SYNC_LOG_DIR', str(tmp_path))
+    (tmp_path / 'sync_dir.log').mkdir()  # unlink() fails on a directory
+
+    with _retention_session() as session:
+        old = datetime(2026, 1, 1)
+        stale = _run(1, 'success', old, old)
+        stale.log_path = str(tmp_path / 'sync_dir.log')
+        gone = _run(2, 'success', old, old)
+        gone.log_path = str(tmp_path / 'sync_missing.log')
+        session.add_all([stale, gone, _run(3, 'success', datetime(2026, 5, 25))])
+        session.commit()
+
+        assert SyncControlService().purge_old_runs(session, retention_days=30, now=datetime(2026, 6, 1)) == 2
+
+
 def test_purge_old_runs_never_deletes_a_running_run_regardless_of_age():
     with _retention_session() as session:
         # A newer finished run makes id=1 clearly not "the latest run", isolating the
