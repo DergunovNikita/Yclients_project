@@ -681,7 +681,6 @@ async def test_dashboard_client_reports_revenue_uses_paid_service_rows(async_ses
         date(2025, 1, 1),
         date(2025, 1, 31),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     plan_fact = await dashboard_service._fact_metric_components(
         async_session,
@@ -933,7 +932,6 @@ async def test_dashboard_year_over_year_uses_actual_history_and_overview_formula
         date(2025, 1, 1),
         date(2025, 12, 31),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     plan_fact_components = await dashboard_service._fact_metric_components(
         async_session,
@@ -1293,7 +1291,6 @@ async def test_reporting_start_keeps_overview_and_year_over_year_in_agreement(
         date(2025, 1, 1),
         date(2025, 12, 31),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     report = await dashboard_reports.fetch_report_data(
         async_session,
@@ -1366,7 +1363,6 @@ async def test_reporting_start_keeps_topup_kpi_and_trend_chart_in_agreement(
         date(2025, 1, 1),
         date(2025, 12, 31),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     daily = await dashboard_service.fetch_revenue_daily(
         async_session,
@@ -1445,7 +1441,6 @@ async def test_reporting_start_cuts_service_revenue_paid_across_the_boundary(
         date(2025, 1, 1),
         date(2025, 12, 31),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     daily = await dashboard_service.fetch_revenue_daily(
         async_session,
@@ -1519,7 +1514,6 @@ async def test_reporting_start_keeps_coverage_status_consistent_across_reports(
         date(2025, 1, 1),
         date(2025, 12, 31),
         company_id=1,
-        include_appointments_breakdown=False,
     )
 
     assert summary['average_check']['source_status'] == 'ready'
@@ -1915,7 +1909,6 @@ async def test_reporting_start_trims_breakdown_cards_client_blocks_and_staff_fac
         date(2025, 1, 1),
         date(2025, 12, 31),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     assert summary['visit_metrics']['unique_clients'] == 1
     assert summary['revenue']['topup_revenue'] == 300.0
@@ -2444,14 +2437,12 @@ async def test_reporting_end_keeps_history_and_drops_facts_after_the_handover(
         date(2025, 1, 1),
         date(2025, 12, 31),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     history = await dashboard_service.fetch_summary(
         async_session,
         date(2025, 6, 1),
         date(2025, 6, 30),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     report = await dashboard_reports.fetch_report_data(
         async_session,
@@ -2548,7 +2539,6 @@ async def test_reporting_end_cuts_service_revenue_paid_across_the_boundary(
         date(2025, 1, 1),
         date(2025, 12, 31),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     daily = await dashboard_service.fetch_revenue_daily(
         async_session,
@@ -2610,7 +2600,6 @@ async def test_reporting_end_cuts_each_branch_separately(async_session):
         date(2025, 9, 1),
         date(2025, 9, 30),
         allowed_company_ids=[1, 2],
-        include_appointments_breakdown=False,
     )
 
     assert network['revenue']['total'] == 700.0
@@ -3072,7 +3061,6 @@ async def test_factual_cutoff_is_shared_by_overview_plan_fact_daily_and_years(
         date(2026, 1, 1),
         date(2026, 12, 31),
         company_id=1,
-        include_appointments_breakdown=False,
         factual_at=factual_at,
     )
     daily = await dashboard_service.fetch_revenue_daily(
@@ -3220,7 +3208,6 @@ async def test_year_over_year_uses_configured_branch_scope_when_access_is_unrest
         async_session,
         date(2024, 1, 1),
         date(2025, 12, 31),
-        include_appointments_breakdown=False,
     )
     daily = await dashboard_service.fetch_revenue_daily(
         async_session,
@@ -3549,14 +3536,12 @@ async def test_year_over_year_opz_deduplicates_repeated_client_per_year(
         date(2024, 1, 10),
         date(2024, 12, 31),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     overview_2025 = await dashboard_service.fetch_summary(
         async_session,
         date(2025, 1, 1),
         date(2025, 2, 1),
         company_id=1,
-        include_appointments_breakdown=False,
     )
 
     assert years[2024]['opz_qty'] == overview_2024['visit_metrics']['opz_qty'] == 1.0
@@ -3623,7 +3608,6 @@ async def test_year_over_year_opz_fact_advances_latest_year(
         date(2025, 1, 1),
         date(2025, 1, 1),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     plan_fact = await dashboard_service._fact_metric_components(
         async_session,
@@ -3814,7 +3798,6 @@ async def test_year_over_year_monthly_opz_counts_a_client_once_per_month(
             first_day,
             last_day,
             company_id=1,
-            include_appointments_breakdown=False,
         )
         assert months[(year, month)]['opz_qty'] == overview['visit_metrics']['opz_qty']
         assert months[(year, month)]['opz_pct'] == overview['visit_metrics']['opz_pct']
@@ -3986,7 +3969,6 @@ async def test_year_over_year_monthly_opz_carries_manual_top_up_except_under_sta
     assert years[2025]['opz_qty'] == 5.0
     overview = await dashboard_service.fetch_summary(
         async_session, date(2025, 2, 1), date(2025, 2, 28), company_id=1,
-        include_appointments_breakdown=False,
     )
     assert months[(2025, 2)]['opz_qty'] == overview['visit_metrics']['opz_qty']
 
@@ -4210,7 +4192,6 @@ async def test_year_over_year_goods_source_controls_count_and_latest_year(
         date(2026, 1, 1),
         date(2026, 7, 20),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     assert ready_2026['source_status'] == 'ready'
     assert ready_2026['goods_count'] == overview['revenue']['goods_count'] == 2.0
@@ -4542,7 +4523,6 @@ async def test_dashboard_staff_efficiency_revenue_uses_paid_service_rows(async_s
         date(2025, 1, 1),
         date(2025, 1, 31),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     plan_fact = await dashboard_service._fact_metric_components(
         async_session,
@@ -4645,7 +4625,6 @@ async def test_goods_report_revenue_matches_paid_overview_component(async_sessio
         date(2025, 1, 1),
         date(2025, 1, 31),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     assert cards['Выручка товаров'] == overview['revenue']['goods_revenue']
 
@@ -6359,7 +6338,6 @@ async def test_dashboard_summary_compares_month_to_date_with_the_same_dates_a_mo
         date(2026, 9, 1),
         date(2026, 9, 5),
         company_id=1,
-        include_appointments_breakdown=False,
         factual_at=datetime(2026, 9, 5, 12),
         period_preset='month',
     )
@@ -6597,7 +6575,6 @@ async def test_dashboard_summary_client_visit_frequency_counts_branch_history(as
         date(2025, 3, 1),
         date(2025, 3, 31),
         company_id=1,
-        include_appointments_breakdown=False,
     )
     frequency = summary['visit_metrics']['client_visit_frequency']
     assert frequency['total_clients'] == 3
@@ -12849,7 +12826,6 @@ async def test_administrator_service_scope_is_explicitly_separated_from_personal
         date(2025, 1, 10),
         company_id=1,
         staff_id=2,
-        include_appointments_breakdown=False,
         factual_at=factual_at,
     )
     service_report = await dashboard_reports.fetch_report_data(
@@ -12957,7 +12933,6 @@ async def test_administrator_service_scope_fails_closed_without_schedule_coverag
         date(2025, 1, 31),
         company_id=1,
         staff_id=2,
-        include_appointments_breakdown=False,
         factual_at=factual_at,
     )
     report = await dashboard_reports.fetch_report_data(
@@ -13321,7 +13296,6 @@ async def test_administrator_service_scope_fails_closed_without_appointment_time
         date(2025, 1, 31),
         company_id=1,
         staff_id=2,
-        include_appointments_breakdown=False,
         factual_at=datetime(2025, 2, 1),
     )
     plan_fact = await fetch_plan_fact(
@@ -13841,7 +13815,6 @@ async def test_admin_fact_keeps_personal_revenue_separate_from_responsibility_me
         date(2025, 1, 31),
         company_id=1,
         staff_id=2,
-        include_appointments_breakdown=False,
     )
     admin_group = next(g for g in r.json()['data']['groups'] if g['category'] == 'administrator')
     admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
@@ -14874,7 +14847,6 @@ async def test_service_report_cards_use_complete_overview_totals_beyond_top_25(
         date(2026, 8, 1),
         date(2026, 8, 1),
         company_id=1,
-        include_appointments_breakdown=False,
         factual_at=factual_at,
     )
     complete_detail = await dashboard_service.fetch_top_services(
@@ -14963,7 +14935,6 @@ async def test_goods_report_uses_shared_factual_cutoff_for_units_and_revenue(
         date(2026, 8, 1),
         date(2026, 8, 1),
         company_id=1,
-        include_appointments_breakdown=False,
         factual_at=factual_at,
     )
     cards = {card['label']: card['value'] for card in report['cards']}
@@ -15177,7 +15148,6 @@ async def test_client_report_exposes_anonymous_residual_and_reconciles_totals(
         date(2026, 7, 1),
         date(2026, 7, 1),
         company_id=1,
-        include_appointments_breakdown=False,
         factual_at=factual_at,
     )
     cards = {card['label']: card['value'] for card in report['cards']}
@@ -15357,7 +15327,6 @@ async def test_linked_masterless_topup_reconciles_staff_overview_plan_fact_and_y
         date(2025, 1, 1),
         date(2025, 12, 31),
         company_id=1,
-        include_appointments_breakdown=False,
         factual_at=factual_at,
     )
     staff_overview = await dashboard_service.fetch_summary(
@@ -15366,7 +15335,6 @@ async def test_linked_masterless_topup_reconciles_staff_overview_plan_fact_and_y
         date(2025, 12, 31),
         company_id=1,
         staff_id=1,
-        include_appointments_breakdown=False,
         factual_at=factual_at,
     )
     plan_fact = await fetch_plan_fact(
@@ -15585,7 +15553,6 @@ async def test_yoy_admin_scope_matches_personal_overview_and_plan_fact(
         date(2025, 12, 31),
         company_id=1,
         staff_id=2,
-        include_appointments_breakdown=False,
         factual_at=factual_at,
     )
     leaderboard = await dashboard_reports.fetch_report_data(

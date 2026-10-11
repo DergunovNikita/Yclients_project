@@ -127,7 +127,7 @@ async def test_financial_cards_equal_the_overview(async_session):
 
     report = await _report(async_session, 'financial_overview', (JAN[0], date(2025, 2, 28)), granularity='month')
     overview = await dashboard_service.fetch_summary(
-        async_session, JAN[0], date(2025, 2, 28), allowed_company_ids=[1, 2], include_appointments_breakdown=False
+        async_session, JAN[0], date(2025, 2, 28), allowed_company_ids=[1, 2]
     )
 
     cards = _cards(report)
@@ -244,7 +244,7 @@ async def test_goods_cards_reconcile_with_the_overview(async_session):
 
     report = await _report(async_session, 'goods_dynamics')
     overview = await dashboard_service.fetch_summary(
-        async_session, *JAN, allowed_company_ids=[1, 2], include_appointments_breakdown=False
+        async_session, *JAN, allowed_company_ids=[1, 2]
     )
 
     cards = _cards(report)

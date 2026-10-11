@@ -2161,7 +2161,6 @@ async def fetch_summary(
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     *,
-    include_appointments_breakdown: bool = True,
     factual_at: Optional[datetime] = None,
     period_preset: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -2298,17 +2297,14 @@ async def fetch_summary(
     # (measured 657ms attributed here vs 31ms run alone). The test suite runs on aiosqlite,
     # which serialises internally, so no Python test can catch a regression here.
     # Genuine overlap would need a second session/connection, not a task on this one.
-    if include_appointments_breakdown:
-        appointments_breakdown = await _fetch_appointments_breakdown(
-            db,
-            appointment_company_ids,
-            start,
-            end,
-            staff_id,
-            factual_at,
-        )
-    else:
-        appointments_breakdown = None
+    appointments_breakdown = await _fetch_appointments_breakdown(
+        db,
+        appointment_company_ids,
+        start,
+        end,
+        staff_id,
+        factual_at,
+    )
 
     cur_rev = cur['revenue']
     prev_rev = prev['revenue']

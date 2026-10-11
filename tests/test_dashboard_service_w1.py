@@ -129,7 +129,7 @@ async def test_client_mix_metrics_match_the_overview_without_its_other_paths(asy
     window = (date(2025, 1, 1), date(2025, 1, 31))
 
     summary = await dashboard_service.fetch_summary(
-        async_session, *window, 1, factual_at=NOW, period_preset=preset, include_appointments_breakdown=False
+        async_session, *window, 1, factual_at=NOW, period_preset=preset
     )
     async_session.info.clear()
     with _Statements(async_session) as statements:
@@ -141,22 +141,6 @@ async def test_client_mix_metrics_match_the_overview_without_its_other_paths(asy
     assert mix['unique_clients'] == 2 and mix['new_clients'] == 1
     for untouched in ('financial_transactions', 'transactions', 'sync_source_states', 'staff_schedules'):
         assert statements.matching(f'from {untouched}') == [], untouched
-
-
-@pytest.mark.asyncio
-async def test_summary_without_the_breakdown_runs_no_breakdown_query(async_session):
-    from test_dashboard_service_w3 import NOW, _seed_visits, _Statements
-
-    await _seed_visits(async_session)
-
-    with _Statements(async_session) as statements:
-        summary = await dashboard_service.fetch_summary(
-            async_session, date(2025, 1, 1), date(2025, 1, 31), 1, factual_at=NOW,
-            include_appointments_breakdown=False,
-        )
-
-    assert summary['appointments_breakdown'] is None
-    assert statements.matching('as cancelled') == []
 
 
 @pytest.mark.asyncio

@@ -419,10 +419,10 @@ async def _validated_widget_scope(
     return scope, scoped_staff_id
 
 
-async def _require_kpi_portal_account_id(
+async def _require_visibility_portal_account_id(
     db: AsyncSession, ctx: AccessContext, x_portal_account_id: int | None
 ) -> int:
-    """Tenant of a settings route. An API key has none of its own, so it has to name one."""
+    """Tenant of a metric-visibility route. An API key has none of its own, so it has to name one."""
     portal_account_id = ctx.portal_account_id
     if portal_account_id is None and ctx.full_access and x_portal_account_id is not None:
         if await db.get(PortalAccount, x_portal_account_id) is None:
@@ -1007,7 +1007,7 @@ async def dashboard_metric_visibility(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     _require_visibility_admin(ctx)
-    portal_account_id = await _require_kpi_portal_account_id(db, ctx, x_portal_account_id)
+    portal_account_id = await _require_visibility_portal_account_id(db, ctx, x_portal_account_id)
     stored = {
         row.role: [code for code in (row.visible_codes or []) if code in ALL_MONEY_CODES]
         for row in (
@@ -1040,7 +1040,7 @@ async def dashboard_metric_visibility_save(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     _require_visibility_admin(ctx)
-    portal_account_id = await _require_kpi_portal_account_id(db, ctx, x_portal_account_id)
+    portal_account_id = await _require_visibility_portal_account_id(db, ctx, x_portal_account_id)
     if payload.role not in CONFIGURABLE_MONEY_ROLES:
         raise HTTPException(status_code=400, detail='Role visibility is not configurable')
     unknown = sorted(set(payload.visible_codes) - ALL_MONEY_CODES)

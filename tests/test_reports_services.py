@@ -191,7 +191,7 @@ async def test_payment_titled_only_by_visit_line_lands_on_that_title(seeded):
 @pytest.mark.asyncio
 async def test_services_reconcile_with_the_overview(seeded):
     overview = await dashboard_service.fetch_summary(
-        seeded, *WINDOW, company_id=1, include_appointments_breakdown=False, factual_at=NOW
+        seeded, *WINDOW, company_id=1, factual_at=NOW
     )
     for report_id, revenue_card in (
         ('avg_check_by_service', 'Выручка услуг'),

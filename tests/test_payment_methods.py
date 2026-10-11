@@ -241,7 +241,7 @@ async def test_buckets_add_up_to_the_overview_revenue(seeded):
     for company_id, expected in EXPECTED.items():
         buckets = breakdown[company_id]
         summary = await dashboard_service.fetch_summary(
-            seeded, *AUGUST, company_id=company_id, include_appointments_breakdown=False, factual_at=FROZEN_NOW
+            seeded, *AUGUST, company_id=company_id, factual_at=FROZEN_NOW
         )
         assert sum(buckets.values()) == pytest.approx(summary['revenue']['total'])
         assert summary['revenue']['total'] == pytest.approx(expected['revenue'])
@@ -253,7 +253,6 @@ async def test_buckets_add_up_to_the_overview_revenue(seeded):
         seeded,
         *AUGUST,
         allowed_company_ids=[1, 2, 3, 4, 6],
-        include_appointments_breakdown=False,
         factual_at=FROZEN_NOW,
     )
     assert network == pytest.approx(network_summary['revenue']['total'])
@@ -271,7 +270,7 @@ async def test_report_matches_overview_per_branch_and_for_the_network(client, se
         for key, value in expected.items():
             assert branches[company_id][key] == pytest.approx(value)
         summary = await dashboard_service.fetch_summary(
-            seeded, *AUGUST, company_id=company_id, include_appointments_breakdown=False, factual_at=FROZEN_NOW
+            seeded, *AUGUST, company_id=company_id, factual_at=FROZEN_NOW
         )
         assert branches[company_id]['revenue'] == pytest.approx(summary['revenue']['total'])
     assert branches[3]['revenue'] == 0.0
@@ -280,7 +279,6 @@ async def test_report_matches_overview_per_branch_and_for_the_network(client, se
         seeded,
         *AUGUST,
         allowed_company_ids=[1, 2, 3, 4, 6],
-        include_appointments_breakdown=False,
         factual_at=FROZEN_NOW,
     )
     assert payload['cards'][0] == {
@@ -1123,7 +1121,7 @@ async def test_monthly_buckets_add_up_to_the_period_buckets(seeded):
     assert monthly[(1, AUGUST_START)] == pytest.approx({'cash': 1100.0, 'cashless': 2650.0, 'other': 350.0})
     assert sum(sum(buckets.values()) for buckets in monthly.values()) == pytest.approx(
         (await dashboard_service.fetch_summary(
-            seeded, *JULY_AUGUST, allowed_company_ids=ids, include_appointments_breakdown=False, factual_at=FROZEN_NOW
+            seeded, *JULY_AUGUST, allowed_company_ids=ids, factual_at=FROZEN_NOW
         ))['revenue']['total']
     )
 

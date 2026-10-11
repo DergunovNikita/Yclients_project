@@ -127,15 +127,15 @@ export function createManualEntryEditor(config, host) {
       if (!refused) return;
     }
     editor.saving = true;
-    // A key typed while the request is out would be lost: the response re-renders the rows and takes a new baseline.
-    config.editorEl.inert = true;
-    host.updateFloatingEditorSave();
-    host.clearError();
-    config.saveButton.disabled = true;
-    config.saveButton.textContent = t('common.saving');
-    host.setApiState(t('dash.apiSaving'), 'warn');
-
     try {
+      // A key typed while the request is out would be lost: the response re-renders the rows and takes a new baseline.
+      config.editorEl.inert = true;
+      host.updateFloatingEditorSave();
+      host.clearError();
+      config.saveButton.disabled = true;
+      config.saveButton.textContent = t('common.saving');
+      host.setApiState(t('dash.apiSaving'), 'warn');
+
       // The saved response belongs to the scope the rows were loaded for, whatever the pickers show now.
       const { body, filters } = refused || config.request();
       const payload = await host.postJson(config.path, body);

@@ -133,7 +133,7 @@ async def test_summary_counts_visits_once_and_reads_coverage_once(async_session)
     with _Statements(async_session) as statements:
         summary = await dashboard_service.fetch_summary(
             async_session, date(2025, 1, 1), date(2025, 1, 31), 1,
-            factual_at=NOW, include_appointments_breakdown=False,
+            factual_at=NOW,
         )
 
     revenue = summary['revenue']

@@ -272,7 +272,10 @@ def test_deploy_reads_env_keys_without_executing_the_file(tmp_path):
 
 
 def test_deploy_reads_a_quoted_value_from_a_crlf_env_file(tmp_path):
-    env_file = 'PORTAL_ADMIN_PASSWORD="s3cret"\r\nPORTAL_ADMIN_NAME="Ann # Lee"\r\nPORTAL_ADMIN_EMAIL=admin@example.com\r\n'
+    env_file = (
+        'PORTAL_ADMIN_PASSWORD="s3cret"\r\nPORTAL_ADMIN_NAME="Ann # Lee"\r\n'
+        'PORTAL_ADMIN_EMAIL=admin@example.com\r\n'
+    )
     result, log = run_deploy(tmp_path, env_file=env_file)
 
     assert result.returncode == 0, result.stderr
