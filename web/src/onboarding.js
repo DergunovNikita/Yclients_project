@@ -1,6 +1,7 @@
 import './auth.css';
 import './onboarding.css';
 import { authFetch, loadCurrentUser, requireAuthRedirect } from './auth.js';
+import { clearAlert, showError } from './formHelpers.js';
 import { escapeHtml } from './html.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
 
@@ -50,18 +51,6 @@ function showStep(step) {
 const STEP_ORDER = ['pending_credentials', 'pending_branches', 'done'];
 function isStepBefore(a, b) {
   return STEP_ORDER.indexOf(a) < STEP_ORDER.indexOf(b);
-}
-
-function showError(el, message) {
-  if (!el) return;
-  el.textContent = message;
-  el.hidden = false;
-}
-
-function clearAlert(el) {
-  if (!el) return;
-  el.textContent = '';
-  el.hidden = true;
 }
 
 function renderBranches(companies) {

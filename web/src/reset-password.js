@@ -1,5 +1,6 @@
 import './auth.css';
 import { authFetch } from './auth.js';
+import { withBusyButton } from './formHelpers.js';
 import { initPage, t } from './i18n.js';
 
 initPage({ titleKey: 'reset.title' });
@@ -21,24 +22,21 @@ form.addEventListener('submit', async (event) => {
   event.preventDefault();
   errorEl.hidden = true;
   successEl.hidden = true;
-  submitBtn.disabled = true;
-  submitBtn.classList.add('is-loading');
   try {
-    const password = document.getElementById('password').value;
-    await authFetch('/auth/reset-password', {
-      method: 'POST',
-      body: JSON.stringify({ token, password }),
+    await withBusyButton(submitBtn, async () => {
+      const password = document.getElementById('password').value;
+      await authFetch('/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify({ token, password }),
+      });
+      successEl.textContent = `${t('reset.success')} ${t('reset.redirecting')}`;
+      successEl.hidden = false;
+      setTimeout(() => {
+        window.location.href = '/login.html';
+      }, 1500);
     });
-    successEl.textContent = `${t('reset.success')} ${t('reset.redirecting')}`;
-    successEl.hidden = false;
-    setTimeout(() => {
-      window.location.href = '/login.html';
-    }, 1500);
   } catch (error) {
     errorEl.textContent = error.message;
     errorEl.hidden = false;
-  } finally {
-    submitBtn.disabled = false;
-    submitBtn.classList.remove('is-loading');
   }
 });

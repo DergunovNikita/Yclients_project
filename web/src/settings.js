@@ -1,6 +1,7 @@
 import './auth.css';
 import './settings.css';
 import { authFetch, loadCurrentUser, logout, requireAuthRedirect, clearLocalSession, USER_ADMIN_ROLES } from './auth.js';
+import { clearAlert, showError } from './formHelpers.js';
 import { escapeHtml } from './html.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, roleLabel, t } from './i18n.js';
 import { formatBranchDateTime } from './timestamps.js';
@@ -35,18 +36,6 @@ const els = {
 
 
 let currentUser = null;
-
-function showError(el, message) {
-  if (!el) return;
-  el.textContent = message;
-  el.hidden = false;
-}
-
-function clearAlert(el) {
-  if (!el) return;
-  el.textContent = '';
-  el.hidden = true;
-}
 
 function selectTab(name) {
   els.tabs.forEach((tab) => tab.classList.toggle('is-active', tab.dataset.tab === name));

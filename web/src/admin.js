@@ -11,6 +11,7 @@ import {
 } from './auth.js';
 import { createModalManager, tenantRequestGuard } from './adminPage.js';
 import { buildCsv } from './adminSecurity.js';
+import { withBusyButton } from './formHelpers.js';
 import { escapeHtml } from './html.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, roleLabel, t } from './i18n.js';
 import { formatBranchDateTime } from './timestamps.js';
@@ -150,20 +151,6 @@ function showSuccess(message) {
   hideAlerts();
   successEl.textContent = message;
   successEl.hidden = false;
-}
-
-// Busy state is identical everywhere a button drives one async action; error display is not
-// (each caller shows it in a different place), so that part stays in the caller's own try/catch
-// around this call.
-async function withBusyButton(button, action) {
-  button.disabled = true;
-  button.classList.add('is-loading');
-  try {
-    return await action();
-  } finally {
-    button.disabled = false;
-    button.classList.remove('is-loading');
-  }
 }
 
 function rolesForEdit(user) {

@@ -1,5 +1,6 @@
 import './auth.css';
 import { authFetch } from './auth.js';
+import { withBusyButton } from './formHelpers.js';
 import { initPage, t } from './i18n.js';
 
 initPage({ titleKey: 'forgot.title' });
@@ -13,21 +14,18 @@ form.addEventListener('submit', async (event) => {
   event.preventDefault();
   errorEl.hidden = true;
   successEl.hidden = true;
-  submitBtn.disabled = true;
-  submitBtn.classList.add('is-loading');
   try {
-    const email = document.getElementById('email').value.trim();
-    await authFetch('/auth/forgot-password', {
-      method: 'POST',
-      body: JSON.stringify({ email }),
+    await withBusyButton(submitBtn, async () => {
+      const email = document.getElementById('email').value.trim();
+      await authFetch('/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      });
+      successEl.textContent = t('forgot.success');
+      successEl.hidden = false;
     });
-    successEl.textContent = t('forgot.success');
-    successEl.hidden = false;
   } catch (error) {
     errorEl.textContent = error.message;
     errorEl.hidden = false;
-  } finally {
-    submitBtn.disabled = false;
-    submitBtn.classList.remove('is-loading');
   }
 });

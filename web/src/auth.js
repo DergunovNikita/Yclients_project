@@ -1,4 +1,5 @@
 import './reauth.css';
+import { togglePasswordVisibility } from './formHelpers.js';
 import { t } from './i18n.js';
 
 // Mirrors the backend's USER_ADMIN_ROLES (auth_hierarchy.py:26) — the only roles
@@ -553,11 +554,7 @@ async function promptReauth() {
       reject(new Error(t('authErrors.authenticationRequired')));
     };
 
-    const onTogglePassword = () => {
-      const visible = passwordInput.type === 'text';
-      passwordInput.type = visible ? 'password' : 'text';
-      togglePasswordBtn.textContent = visible ? t('common.showPassword') : t('common.hidePassword');
-    };
+    const onTogglePassword = () => togglePasswordVisibility(passwordInput, togglePasswordBtn);
 
     const onSubmit = async (event) => {
       event.preventDefault();
