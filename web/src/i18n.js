@@ -53,6 +53,12 @@ export function t(key, params = {}) {
   ));
 }
 
+/** Label of a portal role from the shared `roles.*` group; an unknown role is shown as it is. */
+export function roleLabel(role) {
+  const label = t(`roles.${role}`);
+  return label === `roles.${role}` ? String(role ?? '') : label;
+}
+
 export function applyTranslations(root = document) {
   root.querySelectorAll('[data-i18n]').forEach((el) => {
     el.textContent = t(el.dataset.i18n);

@@ -2,7 +2,7 @@ import './auth.css';
 import './settings.css';
 import { authFetch, loadCurrentUser, logout, requireAuthRedirect, clearLocalSession, USER_ADMIN_ROLES } from './auth.js';
 import { escapeHtml } from './html.js';
-import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher, roleLabel, t } from './i18n.js';
 import { formatBranchDateTime } from './timestamps.js';
 
 document.documentElement.lang = getLocale();
@@ -33,7 +33,6 @@ const els = {
   addCredSuccess: document.getElementById('add-cred-success'),
 };
 
-const roleLabel = (role) => t(`roles.${role}`);
 
 let currentUser = null;
 
@@ -74,7 +73,7 @@ async function loadProfile() {
     currentUser = me.data;
     els.profileName.textContent = currentUser.full_name || '—';
     els.profileEmail.textContent = currentUser.email || '—';
-    els.profileRole.textContent = roleLabel(currentUser.role) || currentUser.role;
+    els.profileRole.textContent = roleLabel(currentUser.role);
     els.profileTenant.textContent = currentUser.portal_account_id ? `#${currentUser.portal_account_id}` : '—';
     const branches = (currentUser.company_ids || []).join(', ');
     els.profileBranches.textContent = branches || '—';

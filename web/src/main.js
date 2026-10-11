@@ -89,7 +89,7 @@ import { formatInputNumber } from './manualFactInput.js';
 import { createManualEditors } from './manualEditors.js';
 import { formatBranchDateTime } from './timestamps.js';
 import { initReports } from './reports/index.js';
-import { applyTranslations, getLocale, mountLanguageSwitcher, t } from './i18n.js';
+import { applyTranslations, getLocale, mountLanguageSwitcher, roleLabel, t } from './i18n.js';
 import {
   createUnsavedChangesGuard,
   editEventChecksDraft,
@@ -2575,15 +2575,6 @@ async function loadCurrentView() {
   }
 }
 
-const ROLE_LABELS = {
-  platform_admin: t('dash.rolePlatformAdmin'),
-  owner: t('dash.roleOwner'),
-  branch_admin: t('dash.roleBranchAdmin'),
-  manager: t('dash.roleManager'),
-  admin: t('dash.roleAdmin'),
-  barber: t('dash.roleBarber'),
-};
-
 function accountDisplayName(user) {
   const fullName = user?.full_name?.trim();
   if (fullName) return fullName;
@@ -2711,7 +2702,7 @@ async function startSession() {
       profileName.textContent = accountDisplayName(me.data);
     }
     if (profileRole) {
-      profileRole.textContent = ROLE_LABELS[me.data.role] || me.data.role;
+      profileRole.textContent = roleLabel(me.data.role);
     }
     applyDashboardPermissions();
 
