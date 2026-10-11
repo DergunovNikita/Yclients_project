@@ -615,7 +615,6 @@ async def build_revenue_at_risk(req: ReportRequest) -> dict[str, Any]:
         DateRange(_lookback_start(req.start), min(req.end, today)),
         req.company_id,
         None,
-        None,
         req.allowed_company_ids,
         req.factual_at,
         extra_columns=(

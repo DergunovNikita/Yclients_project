@@ -959,7 +959,6 @@ def _appt_revenue_filters(
     end: date,
     company_id: Optional[int],
     staff_id: Optional[int] = None,
-    created_user_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ):
@@ -973,9 +972,7 @@ def _appt_revenue_filters(
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
         parts.append(scope)
-    if created_user_id is not None:
-        parts.append(Appointment.created_user_id == created_user_id)
-    elif staff_id is not None:
+    if staff_id is not None:
         parts.append(Appointment.staff_id == staff_id)
     if factual_at is not None:
         parts.append(_appointment_factual_at_condition(factual_at))
@@ -1057,7 +1054,6 @@ def _service_paid_filters(
     end: date,
     company_id: Optional[int],
     staff_id: Optional[int] = None,
-    created_user_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ):
@@ -1078,9 +1074,7 @@ def _service_paid_filters(
     scope = _company_scope_clause(Appointment.company_id, company_id, allowed_company_ids)
     if scope is not None:
         parts.append(scope)
-    if created_user_id is not None:
-        parts.append(Appointment.created_user_id == created_user_id)
-    elif staff_id is not None:
+    if staff_id is not None:
         parts.append(Appointment.staff_id == staff_id)
     if factual_at is not None:
         parts.extend((
@@ -1277,7 +1271,6 @@ def _service_revenue_union(
     dr: DateRange,
     company_id: Optional[int],
     staff_id: Optional[int],
-    created_user_id: Optional[int],
     company_ids: Optional[list[int]],
     factual_at: Optional[datetime],
     extra_columns: tuple = (),
@@ -1303,7 +1296,6 @@ def _service_revenue_union(
                     dr.end,
                     company_id,
                     staff_id,
-                    created_user_id=created_user_id,
                     allowed_company_ids=company_ids,
                     factual_at=factual_at,
                 ),
@@ -1340,7 +1332,6 @@ async def _average_check_block(
     dr: DateRange,
     company_id: Optional[int],
     staff_id: Optional[int] = None,
-    created_user_id: Optional[int] = None,
     company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
     covered_ranges: Optional[dict[int, tuple[Optional[date], Optional[date]]]] = None,
@@ -1350,7 +1341,6 @@ async def _average_check_block(
         dr.end,
         company_id,
         staff_id,
-        created_user_id=created_user_id,
         allowed_company_ids=company_ids,
         factual_at=factual_at,
     )
@@ -1364,9 +1354,7 @@ async def _average_check_block(
         )
     ).one()
 
-    service_revenue_branches = _service_revenue_union(
-        dr, company_id, staff_id, created_user_id, company_ids, factual_at
-    )
+    service_revenue_branches = _service_revenue_union(dr, company_id, staff_id, company_ids, factual_at)
     service_revenue = float(
         await db.scalar(
             select(func.coalesce(func.sum(service_revenue_branches.c.amount), 0.0))
@@ -1387,13 +1375,12 @@ async def _average_check_block(
     # more classifying condition layered on direct_payment_filters.
     direct_payment_filters = _direct_payment_filters(dr, company_id, company_ids, factual_at)
 
-    staff_attribution_active = staff_id is not None and created_user_id is None
     goods_condition = FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE
     # _topup_revenue_filters is self-contained (it builds its own day window and scope), but
     # its classifying half is exactly _personal_account_condition() layered on the same
     # direct_payment_filters base as goods/unclassified — see the docstring there.
     topup_condition = _personal_account_condition()
-    if staff_attribution_active:
+    if staff_id is not None:
         staff_condition = _financial_staff_attribution_condition(staff_id)
         goods_condition = and_(goods_condition, staff_condition)
         topup_condition = and_(topup_condition, staff_condition)
@@ -1492,7 +1479,6 @@ async def fetch_revenue_by_account_type(
 
     service_union = _service_revenue_union(
         dr,
-        None,
         None,
         None,
         company_ids,
@@ -1973,7 +1959,6 @@ async def _revenue_block(
     dr: DateRange,
     company_id: Optional[int],
     staff_id: Optional[int] = None,
-    created_user_id: Optional[int] = None,
     include_goods: bool = True,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
@@ -1994,7 +1979,6 @@ async def _revenue_block(
         dr.end,
         company_id,
         staff_id,
-        created_user_id=created_user_id,
         allowed_company_ids=allowed_company_ids,
         factual_at=factual_at,
     )
@@ -2055,7 +2039,6 @@ async def _revenue_block(
                     dr.end,
                     company_id,
                     staff_id,
-                    created_user_id=created_user_id,
                     allowed_company_ids=allowed_company_ids,
                     factual_at=factual_at,
                 ),
@@ -2903,7 +2886,6 @@ async def fetch_revenue_daily(
             DateRange(start, end),
             company_id,
             staff_id,
-            None,
             allowed_company_ids,
             factual_at,
             extra_columns=(payment_day.label('d'),),
@@ -3987,7 +3969,6 @@ async def _opz_events(
     start: date,
     end: date,
     company_id: int,
-    created_user_id: Optional[int] = None,
     *,
     deduplicate_by: Literal['period', 'year', 'month'] = 'period',
     factual_at: Optional[datetime] = None,
@@ -4010,7 +3991,6 @@ async def _opz_events(
         int(company_id),
         start,
         end,
-        created_user_id,
         deduplicate_by,
         factual_at,
         timezone.key,
@@ -4036,8 +4016,6 @@ async def _opz_events(
         Appointment.create_date >= create_start,
         Appointment.create_date < create_end,
     ]
-    if created_user_id is not None:
-        candidate_filters.append(Appointment.created_user_id == created_user_id)
     if factual_at is not None:
         candidate_filters.append(Appointment.create_date <= factual_at)
     # Almost every appointment is a candidate, but only a few percent have a completed visit of
@@ -4210,17 +4188,9 @@ async def _opz_count(
     end: date,
     company_id: int,
     staff_id: Optional[int] = None,
-    created_user_id: Optional[int] = None,
     factual_at: Optional[datetime] = None,
 ) -> float:
-    events = await _opz_events(
-        db,
-        start,
-        end,
-        company_id,
-        created_user_id=created_user_id,
-        factual_at=factual_at,
-    )
+    events = await _opz_events(db, start, end, company_id, factual_at=factual_at)
     if staff_id is not None:
         events = [event for event in events if event.barber_staff_id == staff_id]
     return float(len(events))
@@ -4274,7 +4244,6 @@ async def fetch_opz_year_facts(
     staff_id: Optional[int],
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
-    created_user_id: Optional[int] = None,
 ) -> dict[str, Any]:
     """Load OPZ once per branch, returning annual and monthly counts.
 
@@ -4314,16 +4283,7 @@ async def fetch_opz_year_facts(
             year_key = (event.client_id, event.event_date.year)
             first_in_year = year_key not in seen_in_year
             seen_in_year.add(year_key)
-            if (
-                created_user_id is not None
-                and event.created_user_id != created_user_id
-            ):
-                continue
-            if (
-                created_user_id is None
-                and staff_id is not None
-                and event.barber_staff_id != staff_id
-            ):
+            if staff_id is not None and event.barber_staff_id != staff_id:
                 continue
             event_year = event.event_date.year
             event_month = event.event_date.month
@@ -4333,10 +4293,9 @@ async def fetch_opz_year_facts(
                 continue
             counts[event_year] += 1.0
             _widen_dependency(appointment_dependencies[event_year], item_company_id, event)
-    # Any staff-level filter counts events by one attribution — the barber of the visit for
-    # `staff_id`, the creator for `created_user_id` — and a top-up owned by an administrator
-    # would reconcile with neither. The branch and network scopes carry it.
-    if staff_id is None and created_user_id is None:
+    # A staff filter counts events by one attribution, the barber of the visit, and a top-up
+    # owned by an administrator would not reconcile with it. The branch and network scopes carry it.
+    if staff_id is None:
         manual_months = await _manual_opz_by_month(db, start, end, company_ids, factual_at)
         for month_start, manual_value in manual_months.items():
             counts[month_start.year] += manual_value
