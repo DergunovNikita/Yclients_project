@@ -38,7 +38,7 @@ def test_summarize_prints_normal_summary_and_ok_exit(tmp_path):
         Филиал: Main
         [OK] Fetch clients 1.5 сек
         [WARN] Refresh views 1 мин 2 сек
-        Sync run finished
+        Синхронизация завершена!
         """,
     )
 
@@ -48,7 +48,7 @@ def test_summarize_prints_normal_summary_and_ok_exit(tmp_path):
     assert output == (
         '== sync_20250101.log ==\n'
         'header: started\n'
-        'tail:   Sync run finished\n'
+        'tail:   Синхронизация завершена!\n'
         'branches seen: 1\n'
         'steps: OK=1  WARN=1  FAIL=0  total=2\n'
         'total step-time: 1m03.5s\n'
@@ -68,7 +68,7 @@ def test_main_last_prints_brief_summaries(tmp_path, monkeypatch):
         """
         run one
         [OK] First step 2 сек
-        done
+        Синхронизация завершена!
         """,
     )
     write_log(
@@ -76,7 +76,7 @@ def test_main_last_prints_brief_summaries(tmp_path, monkeypatch):
         """
         run two
         [FAIL] Broken step 1 сек
-        done
+        Синхронизация завершена!
         """,
     )
     monkeypatch.setattr(module, 'LOG_DIR', tmp_path)
@@ -97,7 +97,7 @@ def test_errors_only_without_errors_prints_no_markers(tmp_path):
         """
         clean run
         [OK] Step 100ms
-        done
+        Синхронизация завершена!
         """,
     )
 
@@ -117,7 +117,7 @@ def test_failure_step_prints_errors_and_issues_exit(tmp_path):
         about to fail
         [ERR] Bad step 2 сек
         Traceback: boom
-        done
+        Синхронизация завершена!
         """,
     )
 
@@ -146,3 +146,39 @@ def test_unfinished_run_has_issues_verdict(tmp_path):
 
     assert result == 1
     assert output.endswith('\nexit: issues\n')
+
+
+def test_summary_reads_what_the_pipeline_really_prints(tmp_path):
+    module = load_module()
+    pipeline = importlib.import_module('sync_pipeline')
+    results = [
+        {'name': 'Записи [Salon]', 'success': True, 'elapsed': 3723},
+        {'name': 'Клиенты [Salon]', 'success': False, 'elapsed': 1.5},
+    ]
+    _, printed = capture_stdout(pipeline.print_sync_summary, results)
+    path = write_log(tmp_path / 'sync_real.log', f'Филиал: Salon\n{printed}\n  Синхронизация завершена!')
+
+    summary = module._summarize_lines(path.read_text().splitlines())
+
+    assert summary.finished
+    assert (summary.ok, summary.warn, summary.fail) == (1, 1, 0)
+    assert summary.total_seconds == 3723 + 1.5
+    assert summary.verdict == 'ok'
+
+
+def test_a_step_that_raised_counts_as_a_failure(tmp_path):
+    module = load_module()
+    path = write_log(
+        tmp_path / 'sync_aborted.log',
+        """
+        started
+          ✗ Шаг прерван: Комментарии [Salon]
+          [WARN] Комментарии [Salon]: 0.10 сек
+        Синхронизация завершена!
+        """,
+    )
+
+    result, output = capture_stdout(module.summarize, path)
+
+    assert result == 1
+    assert 'steps: OK=0  WARN=1  FAIL=1  total=1\n' in output
