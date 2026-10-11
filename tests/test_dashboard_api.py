@@ -18,10 +18,10 @@ import reports_finance
 import reports_team
 import sync_pipeline
 from auth_scope import AccessContext
-from auth_service import hash_password
 from conftest import issue_access_token
 from dashboard_service import _staff_leaderboards_payload, fetch_plan_fact
 from report_helpers import get_summary, table_rows
+from helpers import cached_password_hash
 from api import app
 from models import (
     AccountCatalog,
@@ -5254,7 +5254,7 @@ async def test_platform_admin_dashboard_bundle_requires_selected_tenant(async_se
             id=900,
             portal_account_id=None,
             email='platform.dashboard@example.com',
-            password_hash=hash_password('Platform12345!'),
+            password_hash=cached_password_hash('Platform12345!'),
             full_name='Platform Admin',
             role='platform_admin',
             is_active=True,
@@ -5317,7 +5317,7 @@ async def test_dashboard_widgets_reject_foreign_staff_scope(async_session, monke
             id=910,
             portal_account_id=1,
             email='owner-dashboard-scope@example.com',
-            password_hash=hash_password('Owner12345!'),
+            password_hash=cached_password_hash('Owner12345!'),
             role='owner',
             is_active=True,
             email_verified_at=datetime.utcnow(),
@@ -5363,7 +5363,7 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             id=100,
             portal_account_id=1,
             email='viewer@example.com',
-            password_hash=hash_password('Viewer12345!'),
+            password_hash=cached_password_hash('Viewer12345!'),
             role='barber',
             is_active=True,
             email_verified_at=datetime.utcnow(),
@@ -5373,7 +5373,7 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             id=101,
             portal_account_id=1,
             email='manager@example.com',
-            password_hash=hash_password('Manager12345!'),
+            password_hash=cached_password_hash('Manager12345!'),
             role='manager',
             is_active=True,
             email_verified_at=datetime.utcnow(),
@@ -5383,7 +5383,7 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             id=102,
             portal_account_id=1,
             email='owner@example.com',
-            password_hash=hash_password('Owner12345!'),
+            password_hash=cached_password_hash('Owner12345!'),
             role='owner',
             is_active=True,
             email_verified_at=datetime.utcnow(),
@@ -5393,7 +5393,7 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             id=103,
             portal_account_id=1,
             email='branch-admin@example.com',
-            password_hash=hash_password('BranchAdmin12345!'),
+            password_hash=cached_password_hash('BranchAdmin12345!'),
             role='branch_admin',
             is_active=True,
             email_verified_at=datetime.utcnow(),
@@ -5591,7 +5591,7 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
             id=200,
             portal_account_id=1,
             email='owner-mv@example.com',
-            password_hash=hash_password('Owner12345!'),
+            password_hash=cached_password_hash('Owner12345!'),
             role='owner',
             is_active=True,
             email_verified_at=datetime.utcnow(),
@@ -5601,7 +5601,7 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
             id=201,
             portal_account_id=1,
             email='manager-mv@example.com',
-            password_hash=hash_password('Manager12345!'),
+            password_hash=cached_password_hash('Manager12345!'),
             role='manager',
             is_active=True,
             email_verified_at=datetime.utcnow(),
@@ -7345,7 +7345,7 @@ async def test_dashboard_branch_scope_applies_to_plan_settings_write(async_sessi
             id=700,
             portal_account_id=1,
             email='owner-scope@example.com',
-            password_hash=hash_password('OwnerScope123!'),
+            password_hash=cached_password_hash('OwnerScope123!'),
             role='owner',
             is_active=True,
             email_verified_at=now,

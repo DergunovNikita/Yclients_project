@@ -19,8 +19,9 @@ import portal_account_provision
 import portal_staff_sync
 import yclients_credentials
 from api import app
-from auth_service import DUMMY_PASSWORD_HASH, hash_password, verify_password
+from auth_service import DUMMY_PASSWORD_HASH, verify_password
 from conftest import issue_access_token
+from helpers import cached_password_hash
 from data_sources import YClientsDataSourceAdapter, companies_claimed_elsewhere
 from models import (
     Company,
@@ -41,7 +42,7 @@ def _user(user_id, role, email=None, tenant=1, **fields):
         id=user_id,
         portal_account_id=tenant,
         email=email or f'user{user_id}@example.com',
-        password_hash=hash_password('Password12345!'),
+        password_hash=cached_password_hash('Password12345!'),
         full_name=f'User {user_id}',
         role=role,
         is_active=True,

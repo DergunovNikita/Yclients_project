@@ -19,6 +19,7 @@ from api import app
 from auth_sessions import ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME
 from auth_service import TOKEN_PURPOSE_RESET, create_access_token, create_email_token, hash_password
 from conftest import issue_access_token
+from helpers import cached_password_hash
 from config import AUTH_CSRF_COOKIE_NAME
 from report_helpers import get_summary
 from yclients_credentials import new_credential
@@ -57,7 +58,7 @@ async def auth_db(async_session, monkeypatch):
         id=1,
         portal_account_id=1,
         email='admin@example.com',
-        password_hash=hash_password('Admin12345!'),
+        password_hash=cached_password_hash('Admin12345!'),
         full_name='Admin',
         role='owner',
         is_active=True,
@@ -68,7 +69,7 @@ async def auth_db(async_session, monkeypatch):
         id=2,
         portal_account_id=1,
         email='manager@example.com',
-        password_hash=hash_password('Manager12345!'),
+        password_hash=cached_password_hash('Manager12345!'),
         full_name='Manager',
         role='manager',
         is_active=True,
@@ -81,7 +82,7 @@ async def auth_db(async_session, monkeypatch):
         id=3,
         portal_account_id=1,
         email='branch@example.com',
-        password_hash=hash_password('Branch12345!'),
+        password_hash=cached_password_hash('Branch12345!'),
         full_name='Branch Admin',
         role='branch_admin',
         is_active=True,
