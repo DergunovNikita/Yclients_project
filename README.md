@@ -21,7 +21,7 @@
 
 ## Что входит в проект
 
-- `api.py` - FastAPI API для чтения данных, постановки sync в очередь и просмотра статуса
+- `api.py` - FastAPI-приложение: подключает роутеры портала и дашборда, health-пробы, постановка sync в очередь и статус
 - `auth_*.py` - аутентификация, сессии, роли и скоуп доступа по филиалам
 - `onboarding_routes.py` / `yclients_credentials.py` - онбординг и зашифрованные credentials YClients
 - `sync_pipeline.py` - ETL pipeline YClients -> PostgreSQL
