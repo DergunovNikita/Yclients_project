@@ -199,7 +199,6 @@ const els = {
   floatingEditorSaveButton: document.getElementById('floating-editor-save-button'),
   serviceFilterBranch: document.getElementById('service-filter-branch'),
   serviceFilterCategory: document.getElementById('service-filter-category'),
-  serviceFilterGroup: document.getElementById('service-filter-group'),
   serviceFilterQuery: document.getElementById('service-filter-query'),
   serviceFilterExtra: document.getElementById('service-filter-extra'),
   serviceFilterLoad: document.getElementById('service-filter-load'),
@@ -208,12 +207,6 @@ const els = {
   serviceManagementDirty: document.getElementById('service-management-dirty'),
   serviceManagementReset: document.getElementById('service-management-reset'),
   serviceManagementSave: document.getElementById('service-management-save'),
-  serviceKpiGroupsMeta: document.getElementById('service-kpi-groups-meta'),
-  serviceKpiGroupsTable: document.getElementById('service-kpi-groups-table'),
-  serviceGroupTitle: document.getElementById('service-group-title'),
-  serviceGroupCode: document.getElementById('service-group-code'),
-  serviceGroupDescription: document.getElementById('service-group-description'),
-  serviceGroupAdd: document.getElementById('service-group-add'),
   tenantSwitcher: document.getElementById('tenant-switcher'),
   tenantSelect: document.getElementById('tenant-select'),
   tenantMeta: document.getElementById('tenant-meta'),
@@ -298,7 +291,7 @@ let planSettingsDirty = false;
 let planSettingsLoadedMonth = '';
 let planSettingsSaving = false;
 let planSettingsLoading = false;
-let serviceManagementData = { rows: [], groups: [], categories: [] };
+let serviceManagementData = { rows: [], categories: [] };
 let serviceManagementSavedData = null;
 let serviceManagementSavedSnapshot = '';
 let serviceManagementDirty = false;
@@ -1886,31 +1879,6 @@ function renderServiceFilterOptions(data) {
     els.serviceFilterCategory.appendChild(option);
   });
   els.serviceFilterCategory.value = (data.categories || []).includes(selectedCategory) ? selectedCategory : '';
-
-  const selectedGroup = els.serviceFilterGroup.value;
-  els.serviceFilterGroup.innerHTML = `<option value="">${t('dash.allGroups')}</option>`;
-  (data.groups || []).forEach((group) => {
-    const option = document.createElement('option');
-    option.value = group.id;
-    option.textContent = group.is_active ? group.title : t('dash.archivedName', { name: group.title });
-    els.serviceFilterGroup.appendChild(option);
-  });
-  els.serviceFilterGroup.value = (data.groups || []).some((group) => String(group.id) === selectedGroup) ? selectedGroup : '';
-}
-
-function serviceGroupOptionsHtml(selectedGroupId) {
-  const groups = serviceManagementData.groups || [];
-  const selected = selectedGroupId === null || selectedGroupId === undefined ? '' : String(selectedGroupId);
-  const assignedInactive = groups.find((group) => String(group.id) === selected && !group.is_active);
-  const activeGroups = groups.filter((group) => group.is_active);
-  const options = [`<option value="">${t('dash.noGroup')}</option>`];
-  activeGroups.forEach((group) => {
-    options.push(`<option value="${escapeHtml(group.id)}" ${String(group.id) === selected ? 'selected' : ''}>${escapeHtml(group.title)}</option>`);
-  });
-  if (assignedInactive) {
-    options.push(`<option value="${escapeHtml(assignedInactive.id)}" selected disabled>${escapeHtml(t('dash.archivedName', { name: assignedInactive.title }))}</option>`);
-  }
-  return options.join('');
 }
 
 function renderServiceCatalog(rows) {
@@ -1929,7 +1897,6 @@ function renderServiceCatalog(rows) {
             <th class="number">ID</th>
             <th>${t('dash.name')}</th>
             <th>${t('dash.extraService')}</th>
-            <th>${t('dash.kpiGroup')}</th>
             <th>${t('dash.updated')}</th>
           </tr>
         </thead>
@@ -1949,19 +1916,9 @@ function renderServiceCatalog(rows) {
                   ${row.is_extra ? 'checked' : ''}
                 />
               </td>
-              <td>
-                <select
-                  class="service-group-select"
-                  data-company-id="${escapeHtml(row.company_id)}"
-                  data-service-id="${escapeHtml(row.service_id)}"
-                >
-                  ${serviceGroupOptionsHtml(row.kpi_group_id)}
-                </select>
-              </td>
               <td>${escapeHtml(formatBranchDateTime(latestServiceManagementTimestamp(
                 row.updated_at,
                 row.label_updated_at,
-                row.kpi_assignment_updated_at,
                 row.mutation_updated_at,
               )) || '')}</td>
             </tr>
@@ -1972,70 +1929,13 @@ function renderServiceCatalog(rows) {
   `;
 }
 
-function renderServiceKpiGroups(groups) {
-  els.serviceKpiGroupsMeta.textContent = t('dash.groupsCount', { count: groups.length });
-  if (!groups.length) {
-    els.serviceKpiGroupsTable.innerHTML = `<div class="empty compact">${t('dash.noKpiGroups')}</div>`;
-    return;
-  }
-  els.serviceKpiGroupsTable.innerHTML = `
-    <div class="table-scroll">
-      <table class="service-group-table">
-        <thead>
-          <tr>
-            <th>${t('dash.name')}</th>
-            <th>${t('dash.code')}</th>
-            <th>${t('dash.description')}</th>
-            <th class="number">${t('dash.sortOrder')}</th>
-            <th>${t('dash.active')}</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          ${groups.map((group) => `
-            <tr data-service-group-row data-group-id="${escapeHtml(group.id)}">
-              <td><input type="text" data-group-field="title" value="${escapeHtml(group.title)}" /></td>
-              <td><input type="text" data-group-field="code" value="${escapeHtml(group.code)}" /></td>
-              <td><input type="text" data-group-field="description" value="${escapeHtml(group.description || '')}" /></td>
-              <td class="number"><input type="number" data-group-field="sort_order" value="${escapeHtml(group.sort_order || 0)}" /></td>
-              <td><input class="service-group-active" type="checkbox" data-group-field="is_active" ${group.is_active ? 'checked' : ''} /></td>
-              <td class="number"><button type="button" class="secondary" data-service-group-archive>${t('dash.archive')}</button></td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    </div>
-  `;
-}
-
 function collectServiceManagementPayload() {
-  const groupSelects = new Map(
-    [...els.serviceCatalogTable.querySelectorAll('.service-group-select')].map((select) => [
-      `${select.dataset.companyId}:${select.dataset.serviceId}`,
-      select.value ? Number(select.value) : null,
-    ]),
-  );
-  const rows = [...els.serviceCatalogTable.querySelectorAll('.service-extra-input')].map((input) => {
-    const key = `${input.dataset.companyId}:${input.dataset.serviceId}`;
-    return {
-      company_id: Number(input.dataset.companyId),
-      service_id: Number(input.dataset.serviceId),
-      is_extra: input.checked,
-      kpi_group_id: groupSelects.get(key) ?? null,
-    };
-  });
-  const groups = [...els.serviceKpiGroupsTable.querySelectorAll('[data-service-group-row]')].map((row) => {
-    const value = (field) => row.querySelector(`[data-group-field="${field}"]`);
-    return {
-      id: Number(row.dataset.groupId),
-      title: value('title')?.value.trim() || '',
-      code: value('code')?.value.trim() || '',
-      description: value('description')?.value.trim() || '',
-      sort_order: Number(value('sort_order')?.value || 0),
-      is_active: Boolean(value('is_active')?.checked),
-    };
-  });
-  return { rows, groups };
+  const rows = [...els.serviceCatalogTable.querySelectorAll('.service-extra-input')].map((input) => ({
+    company_id: Number(input.dataset.companyId),
+    service_id: Number(input.dataset.serviceId),
+    is_extra: input.checked,
+  }));
+  return { rows };
 }
 
 function setServiceManagementDirty(isDirty) {
@@ -2049,10 +1949,9 @@ function updateServiceManagementDirtyFromForm() {
 }
 
 function renderServiceManagement(data, { updateSnapshot = true } = {}) {
-  serviceManagementData = data || { rows: [], groups: [], categories: [] };
+  serviceManagementData = data || { rows: [], categories: [] };
   renderServiceFilterOptions(serviceManagementData);
   renderServiceCatalog(serviceManagementData.rows || []);
-  renderServiceKpiGroups(serviceManagementData.groups || []);
   if (updateSnapshot) {
     serviceManagementSavedData = JSON.parse(JSON.stringify(serviceManagementData));
     serviceManagementSavedSnapshot = JSON.stringify(collectServiceManagementPayload());
@@ -2066,7 +1965,6 @@ function serviceManagementParams() {
   return {
     company_id: els.serviceFilterBranch.value,
     category: els.serviceFilterCategory.value,
-    kpi_group_id: els.serviceFilterGroup.value,
     q: els.serviceFilterQuery.value.trim(),
     is_extra: els.serviceFilterExtra.checked ? true : undefined,
   };
@@ -2094,24 +1992,16 @@ function updateServiceManagementControls() {
   [
     els.serviceFilterBranch,
     els.serviceFilterCategory,
-    els.serviceFilterGroup,
     els.serviceFilterExtra,
     els.serviceFilterQuery,
   ].forEach((filter) => {
     filter.disabled = controls.filtersDisabled;
   });
-  [
-    els.serviceGroupTitle,
-    els.serviceGroupCode,
-    els.serviceGroupDescription,
-    ...els.serviceCatalogTable.querySelectorAll('input, select, button'),
-    ...els.serviceKpiGroupsTable.querySelectorAll('input, select, button'),
-  ].forEach((editor) => {
+  els.serviceCatalogTable.querySelectorAll('input, select, button').forEach((editor) => {
     editor.disabled = controls.editorDisabled;
   });
   els.serviceManagementSave.disabled = controls.saveDisabled;
   els.serviceManagementReset.disabled = controls.resetDisabled;
-  els.serviceGroupAdd.disabled = controls.addGroupDisabled;
 }
 
 async function loadServiceManagement() {
@@ -2132,7 +2022,7 @@ async function loadServiceManagement() {
     viewsWithData.add('serviceManagement');
     clearError();
     setLoadedApiState(payload.data, {
-      empty: !(payload.data?.rows?.length || payload.data?.groups?.length),
+      empty: !payload.data?.rows?.length,
     });
     void loadSyncStatus();
   } catch (error) {
@@ -2147,9 +2037,9 @@ async function saveServiceManagement() {
   if (serviceManagementLoading || !serviceManagementDirty) return;
   clearError();
   const current = collectServiceManagementPayload();
-  const saved = serviceManagementSavedSnapshot ? JSON.parse(serviceManagementSavedSnapshot) : { rows: [], groups: [] };
+  const saved = serviceManagementSavedSnapshot ? JSON.parse(serviceManagementSavedSnapshot) : { rows: [] };
   const changes = serviceManagementChanges(current, saved);
-  if (!changes.row_changes.length && !changes.group_changes.length) {
+  if (!changes.row_changes.length) {
     setServiceManagementDirty(false);
     return;
   }
@@ -2167,39 +2057,6 @@ async function saveServiceManagement() {
       onError: (error) => {
         showError(error.message, { apiStatus: error.apiStatus, retry: () => saveServiceManagement() });
       },
-    },
-  );
-}
-
-async function addServiceKpiGroup() {
-  if (serviceManagementLoading || serviceManagementDirty) return;
-  clearError();
-  const title = els.serviceGroupTitle.value.trim();
-  if (!title) {
-    showError(t('dash.kpiGroupTitleRequired'));
-    return;
-  }
-  setApiState(t('dash.apiSaving'), 'warn');
-  await runServiceManagementMutation(
-    () => postJson('/dashboard/services/kpi_groups', {
-      title,
-      code: els.serviceGroupCode.value.trim() || null,
-      description: els.serviceGroupDescription.value.trim() || null,
-      is_active: true,
-    }),
-    {
-      setLoading: setServiceManagementMutationLoading,
-      onSuccess: (payload) => {
-        renderServiceManagement(mergeServiceManagementResult(serviceManagementData, {
-          rows: [],
-          groups: [payload.data],
-        }));
-        els.serviceGroupTitle.value = '';
-        els.serviceGroupCode.value = '';
-        els.serviceGroupDescription.value = '';
-        setApiState(t('dash.apiConnected'), 'ok');
-      },
-      onError: (error) => showError(error.message),
     },
   );
 }
@@ -2872,33 +2729,19 @@ els.planSettingsStaff.addEventListener('input', () => updatePlanSettingsDirtyFro
 els.serviceFilterLoad.addEventListener('click', () => loadServiceManagement());
 els.serviceFilterBranch.addEventListener('change', () => loadServiceManagement());
 els.serviceFilterCategory.addEventListener('change', () => loadServiceManagement());
-els.serviceFilterGroup.addEventListener('change', () => loadServiceManagement());
 els.serviceFilterExtra.addEventListener('change', () => loadServiceManagement());
 els.serviceFilterQuery.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') loadServiceManagement();
 });
-[els.serviceCatalogTable, els.serviceKpiGroupsTable].forEach((table) => {
-  ['input', 'change'].forEach((type) => table.addEventListener(type, (event) => {
-    if (editEventChecksDraft(event)) updateServiceManagementDirtyFromForm();
-  }));
-});
-els.serviceKpiGroupsTable.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-service-group-archive]');
-  if (!button) return;
-  const row = button.closest('[data-service-group-row]');
-  const active = row?.querySelector('[data-group-field="is_active"]');
-  if (active) {
-    active.checked = false;
-    updateServiceManagementDirtyFromForm();
-  }
-});
+['input', 'change'].forEach((type) => els.serviceCatalogTable.addEventListener(type, (event) => {
+  if (editEventChecksDraft(event)) updateServiceManagementDirtyFromForm();
+}));
 els.serviceManagementSave.addEventListener('click', () => saveServiceManagement());
 els.serviceManagementReset.addEventListener('click', () => {
   if (serviceManagementSavedData) {
     renderServiceManagement(JSON.parse(JSON.stringify(serviceManagementSavedData)));
   }
 });
-els.serviceGroupAdd.addEventListener('click', () => addServiceKpiGroup());
 
 function closeCardHints(except = null) {
   document.querySelectorAll('[data-card-hint].is-open').forEach((button) => {
