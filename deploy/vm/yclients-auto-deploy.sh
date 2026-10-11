@@ -24,7 +24,8 @@ fi
 env_value() {
   [ -f .env ] || return 0
   local value
-  value="$(sed -n "s/^$1=//p" .env | tail -n 1)"
+  # tr: a CRLF file would leave `\r` after a closing quote, and the quoted branch below would no longer match.
+  value="$(sed -n "s/^$1=//p" .env | tail -n 1 | tr -d '\r')"
   case "$value" in
     \"*\") value="${value#\"}"; value="${value%\"}" ;;
     \'*\') value="${value#\'}"; value="${value%\'}" ;;

@@ -271,6 +271,14 @@ def test_deploy_reads_env_keys_without_executing_the_file(tmp_path):
     assert 'http://127.0.0.1:8123/health/ready' in log
 
 
+def test_deploy_reads_a_quoted_value_from_a_crlf_env_file(tmp_path):
+    env_file = 'PORTAL_ADMIN_PASSWORD="s3cret"\r\nPORTAL_ADMIN_NAME="Ann # Lee"\r\nPORTAL_ADMIN_EMAIL=admin@example.com\r\n'
+    result, log = run_deploy(tmp_path, env_file=env_file)
+
+    assert result.returncode == 0, result.stderr
+    assert '--email admin@example.com --full-name Ann # Lee' in log
+
+
 def test_failed_migration_puts_the_previous_image_tag_back(tmp_path):
     result, log = run_deploy(tmp_path, MIGRATE_EXIT='1')
 
