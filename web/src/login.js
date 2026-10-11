@@ -8,7 +8,7 @@ import {
   wait,
 } from './auth.js';
 import { togglePasswordVisibility, withBusyButton } from './formHelpers.js';
-import { initPage, t } from './i18n.js';
+import { initPage } from './i18n.js';
 
 initPage({ titleKey: 'login.title' });
 

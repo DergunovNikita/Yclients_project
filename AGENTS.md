@@ -1189,8 +1189,8 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
 - **Жизненный цикл учёток**: время в БД — наивный UTC из `clock.utcnow()`, не `datetime.utcnow()`. Удаление пользователя
   или кредов не блокируется историей: `portal_audit_events.actor_user_id`, `sync_jobs.credential_id` и
   `sync_job_events.credential_id` — `ON DELETE SET NULL` (миграция `0055`). Удаление пользователя, заведённого из CRM,
-  отвязывает его строку `staff` (`detach_portal_user_staff`). Смена email и отключение через админку сбрасывают сессии и
-  неиспользованные reset-токены; смена роли и филиалов — нет. `consume_email_token` не коммитит: трата токена и то, ради
+  отвязывает его строку `staff` (`detach_portal_user_staff`). Смена email и отключение через админку сбрасывают сессии, а
+  неиспользованные reset-токены — только при смене email (письмо ушло на старый адрес); смена роли и филиалов не трогает ни то, ни другое. `consume_email_token` не коммитит: трата токена и то, ради
   чего он выдан, попадают в одну транзакцию. `list_branches` при сбое `get_groups()` — ошибка, не пустой список (иначе
   сохранился бы ключ без филиалов); `authenticate()` успешна только с `user_token`.
 - **Контекст запроса грузится один раз**: `require_auth` кладёт `PortalUser` в `request.state.portal_user`, а

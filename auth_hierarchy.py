@@ -24,7 +24,6 @@ if set(ROLE_LEVEL) != set(PORTAL_ROLES):  # a role added in one place and not th
 PLATFORM_ADMIN_ROLE = 'platform_admin'
 TENANT_OWNER_ROLE = 'owner'
 USER_ADMIN_ROLES = (PLATFORM_ADMIN_ROLE, TENANT_OWNER_ROLE, 'branch_admin')
-USER_MANAGER_ROLES = (*USER_ADMIN_ROLES, 'manager')
 # Narrower than USER_ADMIN_ROLES: YClients credentials are tenant-level secrets, so a
 # branch_admin (scoped to a subset of branches) may not administer them.
 CREDENTIAL_ADMIN_ROLES = (PLATFORM_ADMIN_ROLE, TENANT_OWNER_ROLE)
