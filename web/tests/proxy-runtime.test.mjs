@@ -353,6 +353,55 @@ test('proxyToVm answers a failing upstream body with the structured 503 and keep
   }
 });
 
+test('proxy rejections carry `detail`, the key the SPA reads', async () => {
+  for (const proxy of [webProxy, rootProxy]) {
+    const res = new ResponseRecorder();
+    proxy.rejectProxyRequest(res, { statusCode: 404, error: 'Not found' });
+
+    assert.equal(res.statusCode, 404);
+    assert.deepEqual(JSON.parse(res.body), { error: 'Not found', detail: 'Not found' });
+
+    const blocked = new ResponseRecorder();
+    proxy.rejectProxyRequest(blocked, { statusCode: 405, error: 'Method not allowed', allowedMethods: ['GET'] });
+    assert.equal(blocked.headers.get('allow'), 'GET');
+    assert.equal(JSON.parse(blocked.body).detail, 'Method not allowed');
+  }
+});
+
+test('proxyToVm does not forward the upstream content-encoding or content-length', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    status: 200,
+    headers: new Headers({
+      'content-type': 'application/json',
+      'content-encoding': 'gzip',
+      'content-length': '999',
+    }),
+    async arrayBuffer() {
+      return new TextEncoder().encode('{"success":true}').buffer;
+    },
+  });
+
+  try {
+    for (const proxy of [webProxy, rootProxy]) {
+      const res = new ResponseRecorder();
+      await proxy.proxyToVm(requestStub(), res, new URL('https://vm.example.test/dashboard/auth/me'));
+
+      assert.equal(res.headers.get('content-type'), 'application/json');
+      assert.equal(res.headers.has('content-encoding'), false);
+      assert.equal(res.headers.has('content-length'), false);
+      assert.equal(Buffer.from(res.body).toString('utf8'), '{"success":true}');
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('both proxy entry points read one scope table', () => {
+  assert.deepEqual(webProxy.SCOPE_TARGET_PREFIX, rootProxy.SCOPE_TARGET_PREFIX);
+  assert.deepEqual(Object.keys(webProxy.SCOPE_TARGET_PREFIX), ['auth', 'dashboard', 'onboarding']);
+});
+
 test('handlers answer a build failure with a fixed 500 that does not echo the error', async () => {
   const originalOrigin = process.env.VM_API_ORIGIN;
   const originalConsoleError = console.error;
@@ -365,7 +414,7 @@ test('handlers answer a build failure with a fixed 500 that does not echo the er
       await handler(requestStub('GET', {}, '/api/health'), res);
 
       assert.equal(res.statusCode, 500);
-      assert.equal(res.body, '{"error":"Internal error"}');
+      assert.equal(res.body, '{"error":"Internal error","detail":"Internal error"}');
     }
   } finally {
     console.error = originalConsoleError;
@@ -396,6 +445,12 @@ test('auth proxy allows only expected paths and methods', () => {
     const unknownBlocked = buildAuthProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=admin/shell'));
     assert.equal(unknownBlocked.ok, false);
     assert.equal(unknownBlocked.statusCode, 404);
+
+    // The SPA calls /auth/portal-accounts; the admin/ alias is not proxied.
+    assert.equal(buildAuthProxyTarget(requestStub('GET', {}, '/api/auth-proxy?path=portal-accounts')).ok, true);
+    const aliasBlocked = buildAuthProxyTarget(requestStub('GET', {}, '/api/auth-proxy?path=admin/portal-accounts'));
+    assert.equal(aliasBlocked.ok, false);
+    assert.equal(aliasBlocked.statusCode, 404);
   } finally {
     if (originalOrigin === undefined) {
       delete process.env.VM_API_ORIGIN;
@@ -582,7 +637,7 @@ test('direct admin credential handlers delegate through the proxy allowlist', as
     assert.equal(fetchCalled, false);
     assert.equal(res.statusCode, 405);
     assert.equal(res.headers.get('allow'), 'DELETE, PATCH');
-    assert.equal(Buffer.from(res.body).toString('utf8'), '{"error":"Method not allowed"}');
+    assert.equal(Buffer.from(res.body).toString('utf8'), '{"error":"Method not allowed","detail":"Method not allowed"}');
   } finally {
     globalThis.fetch = originalFetch;
     if (originalOrigin === undefined) {

@@ -1,5 +1,9 @@
+// content-encoding and content-length describe the upstream's wire bytes, but fetch() hands us the
+// decoded body: forwarding them would label plain bytes as compressed (Node sets the length itself).
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
+  'content-encoding',
+  'content-length',
   'keep-alive',
   'proxy-authenticate',
   'proxy-authorization',
@@ -23,7 +27,7 @@ const REQUEST_HEADER_ALLOWLIST = new Set([
 
 const AUTH_ROUTE_RULES = [
   { methods: ['POST'], pattern: /^(login|demo-login|register|refresh|logout|logout-all|logout-others|verify-email|forgot-password|resend-verification|reset-password|change-password)$/ },
-  { methods: ['GET'], pattern: /^(me|sessions|portal-accounts|admin\/portal-accounts|admin\/meta|admin\/users|admin\/yclients-credentials|admin\/initial-passwords)$/ },
+  { methods: ['GET'], pattern: /^(me|sessions|portal-accounts|admin\/meta|admin\/users|admin\/yclients-credentials|admin\/initial-passwords)$/ },
   { methods: ['DELETE'], pattern: /^sessions\/[^/]+$/ },
   { methods: ['POST'], pattern: /^(admin\/users|admin\/provision-accounts|admin\/distribute-credentials|admin\/yclients-credentials|admin\/yclients-credentials\/test)$/ },
   { methods: ['PATCH', 'DELETE'], pattern: /^admin\/users\/[^/]+$/ },
@@ -187,13 +191,18 @@ export function validateProxyRequest(req, scope, rawPath) {
   return { ok: true, path, allowedMethods };
 }
 
+// `detail` is what the SPA reads out of an error body (FastAPI's key); `error` stays for older readers.
+function sendJsonError(res, statusCode, message) {
+  res.statusCode = statusCode;
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify({ error: message, detail: message }));
+}
+
 export function rejectProxyRequest(res, validation) {
-  res.statusCode = validation.statusCode || 404;
   if (validation.allowedMethods?.length) {
     res.setHeader('Allow', validation.allowedMethods.join(', '));
   }
-  res.setHeader('Content-Type', 'application/json');
-  res.end(JSON.stringify({ error: validation.error || 'Not found' }));
+  sendJsonError(res, validation.statusCode || 404, validation.error || 'Not found');
 }
 
 export function readBody(req) {
@@ -264,9 +273,7 @@ export function responseSetCookies(headers) {
 
 export async function proxyToVm(req, res, target) {
   if (!target) {
-    res.statusCode = 404;
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ error: 'Not found' }));
+    sendJsonError(res, 404, 'Not found');
     return;
   }
 
@@ -322,4 +329,32 @@ export function vmOrigin() {
     throw new Error('VM_API_ORIGIN is not configured');
   }
   return origin.replace(/\/$/, '');
+}
+
+// Where each proxy scope lives on the VM. Both entry points (api/[...path].js and api/auth-proxy.js) read it.
+export const SCOPE_TARGET_PREFIX = {
+  auth: 'dashboard/auth/',
+  dashboard: 'dashboard/',
+  onboarding: 'dashboard/onboarding/',
+};
+
+// `buildTargetUrl(req)` returns `{ ok: true, target }` or a rejection from validateProxyRequest.
+export function createProxyHandler(buildTargetUrl) {
+  return async function handler(req, res) {
+    let result;
+    try {
+      result = buildTargetUrl(req);
+    } catch (error) {
+      // The message can name a missing env var; it goes to the function log, not to the caller.
+      console.error('proxy target build failed:', error);
+      sendJsonError(res, 500, 'Internal error');
+      return;
+    }
+    if (!result.ok) {
+      rejectProxyRequest(res, result);
+      return;
+    }
+
+    await proxyToVm(req, res, result.target);
+  };
 }

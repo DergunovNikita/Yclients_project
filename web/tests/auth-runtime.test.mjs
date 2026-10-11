@@ -728,6 +728,22 @@ test('a 401 from refresh still asks for the password', async (t) => {
   assert.equal(reauthCalls, 1);
 });
 
+test('a proxy 404/405 with the bare phrase reads as "service unavailable", not as HTTP text', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  for (const [status, detail] of [[404, 'Not found'], [404, 'Not Found'], [405, 'Method not allowed']]) {
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: detail, detail }), { status });
+    await assert.rejects(auth.authFetch('/dashboard/branches'), (error) => {
+      assert.equal(error.status, status);
+      assert.match(error.message, /unavailable/i);
+      return true;
+    });
+  }
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: 'User not found' }), { status: 404 });
+  await assert.rejects(auth.authFetch('/dashboard/branches'), /User not found/);
+});
+
 test('two page runtimes coordinate refresh and rotate cookies only once', async (t) => {
   const locks = new MemoryLockManager();
   const firstModule = await loadAuthModule({ locks });

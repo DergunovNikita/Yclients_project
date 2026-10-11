@@ -379,7 +379,11 @@ function errorMessage(response, payload) {
     message = t('authErrors.accountDisabled');
   } else if ([502, 503, 504].includes(response.status)) {
     message = t('authErrors.temporaryUnavailable');
-  } else if (response.status === 404 && message === 'Not Found') {
+  } else if (
+    (response.status === 404 && String(message).toLowerCase() === 'not found')
+    || (response.status === 405 && String(message).toLowerCase() === 'method not allowed')
+  ) {
+    // The bare FastAPI/proxy phrases: a route the deployment does not serve, not a business answer.
     message = t('authErrors.serviceUnavailable');
   }
   return String(message);

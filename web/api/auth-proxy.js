@@ -1,14 +1,8 @@
-import { proxyToVm, rejectProxyRequest, validateProxyRequest, vmOrigin } from './_proxy.js';
+import { SCOPE_TARGET_PREFIX, createProxyHandler, validateProxyRequest, vmOrigin } from './_proxy.js';
 
 // Vercel's Hobby plan caps a deployment at 12 functions, and every nested path prefix would
 // otherwise need a function file of its own (a catch-all answers one segment only). vercel.json
-// rewrites such paths here instead, with the scope and the path in the query string. Same
-// VM targets as api/[...path].js.
-const SCOPE_TARGET_PREFIX = {
-  auth: 'dashboard/auth/',
-  dashboard: 'dashboard/',
-  onboarding: 'dashboard/onboarding/',
-};
+// rewrites such paths here instead, with the scope and the path in the query string.
 
 export function buildTargetUrl(req) {
   const incoming = new URL(req.url, `https://${req.headers.host}`);
@@ -36,22 +30,4 @@ export function buildTargetUrl(req) {
   return { ok: true, target };
 }
 
-export default async function handler(req, res) {
-  let result;
-  try {
-    result = buildTargetUrl(req);
-  } catch (error) {
-    // The message can name a missing env var; it goes to the function log, not to the caller.
-    console.error('proxy target build failed:', error);
-    res.statusCode = 500;
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ error: 'Internal error' }));
-    return;
-  }
-  if (!result.ok) {
-    rejectProxyRequest(res, result);
-    return;
-  }
-
-  await proxyToVm(req, res, result.target);
-}
+export default createProxyHandler(buildTargetUrl);
