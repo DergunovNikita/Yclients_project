@@ -1811,9 +1811,16 @@ async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom 
   }
 }
 
+function setPlanSettingsInputsLocked(locked) {
+  els.planSettingsBranches.inert = locked;
+  els.planSettingsStaff.inert = locked;
+}
+
 async function savePlanSettings() {
   if (planSettingsSaving || planSettingsLoading || !planSettingsData) return;
   planSettingsSaving = true;
+  // A key typed while the request is out would be lost: the response re-renders the tables and takes a new baseline.
+  setPlanSettingsInputsLocked(true);
   updateFloatingEditorSave();
   clearError();
   setPlanSettingsLoading(true);
@@ -1835,6 +1842,7 @@ async function savePlanSettings() {
     }
   } finally {
     planSettingsSaving = false;
+    setPlanSettingsInputsLocked(false);
     setPlanSettingsLoading(false);
     updateFloatingEditorSave();
   }

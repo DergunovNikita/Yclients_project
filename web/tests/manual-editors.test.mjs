@@ -98,3 +98,23 @@ test('a month change whose refilter was superseded does not load', async () => {
   await env.filterEls.opzFacts.month.dispatch('change');
   assert.equal(env.log.some((entry) => entry[0] === 'fetchJson'), false);
 });
+
+test('the editor takes no input while its save is in flight and takes it again afterwards', async () => {
+  const env = makeEnv();
+  const impl = createImpl(env);
+  impl.setActiveView('reviewFacts');
+  const rows = { data: { rows: [{ company_id: 1, staff_id: 10, staff_name: 'Ann', value: 1 }] } };
+  env.script('GET /dashboard/plan/reviews_fact', { ok: rows });
+  await env.filterEls.reviewFacts.load.dispatch('click');
+  env.els.reviewFactEditor.parsed.inputs[0].value = '2';
+  await env.els.reviewFactEditor.dispatch('input', { target: env.els.reviewFactEditor.parsed.inputs[0] });
+
+  env.script('POST /dashboard/plan/reviews_fact', { hold: true });
+  const saving = env.els.reviewFactSave.dispatch('click');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(env.els.reviewFactEditor.inert, true);
+
+  env.release('POST /dashboard/plan/reviews_fact', { ok: rows });
+  await saving;
+  assert.equal(env.els.reviewFactEditor.inert, false);
+});
