@@ -14,12 +14,14 @@ from typing import Annotated, Any, Callable
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, BeforeValidator, Field, model_validator
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_deps import forbid_demo, get_dashboard_access, is_demo_request
 from auth_hierarchy import USER_ADMIN_ROLES
 from auth_scope import (
     AccessContext,
+    BRANCH_SCOPE_ROLES,
     can_view_branch_payments,
     can_view_financials,
     can_view_report_usage,
@@ -97,6 +99,8 @@ from sync_pipeline import transactional_state_key
 logger = logging.getLogger('yclients.dashboard')
 
 router = APIRouter()
+
+METRIC_VISIBILITY_CONFLICT_DETAIL = 'Visibility was changed by someone else; reload and try again'
 
 # Which Overview preset produced the window. It picks the baseline the deltas measure
 # against, so an unknown value is rejected rather than quietly falling back to another
@@ -811,6 +815,8 @@ async def dashboard_widget_plan_fact(
         staff_id,
         allowed_company_ids=branch_ids,
         force_allowed=force_allowed,
+        # `effective_staff_id` clamped a personal role to its own row: whole-branch totals are not its to read.
+        include_branch_row=ctx.full_access or ctx.role in BRANCH_SCOPE_ROLES,
     )
     hidden = hidden_money_codes(ctx)
     if hidden:
@@ -1142,7 +1148,12 @@ async def dashboard_metric_visibility_save(
         target_id=payload.role,
         metadata={'visible_codes': visible_codes},
     )
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Two first saves of the same (tenant, role) both saw no row; the second one hits the unique index.
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=METRIC_VISIBILITY_CONFLICT_DETAIL) from None
     return {'success': True, 'data': {'role': payload.role, 'visible_codes': visible_codes}}
 
 

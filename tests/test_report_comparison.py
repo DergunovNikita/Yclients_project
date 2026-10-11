@@ -5,7 +5,7 @@ from datetime import date
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError, ProgrammingError
 
 import api
 import dashboard_reports
@@ -252,6 +252,32 @@ async def test_leaderboard_retries_only_database_failures(async_session, monkeyp
     monkeypatch.setattr(reports_team, 'fetch_plan_fact', failing_with(ValueError('broken row')))
     with pytest.raises(ValueError, match='broken row'):
         await fetch_report_data(async_session, 'staff_leaderboard', *window, company_id=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('error', 'retryable'),
+    [
+        (DBAPIError('SELECT 1', {}, Exception('connection is closed'), connection_invalidated=True), True),
+        (InterfaceError('SELECT 1', {}, Exception('connection lost')), True),
+        (OSError('network unreachable'), True),
+        # asyncpg's QueryCanceledError (statement_timeout) arrives as a plain DBAPIError: it would
+        # time out again on the same window, and a programming error is a defect.
+        (DBAPIError('SELECT 1', {}, Exception('canceling statement due to statement timeout')), False),
+        (ProgrammingError('SELECT 1', {}, Exception('relation does not exist')), False),
+    ],
+)
+async def test_leaderboard_retries_only_connection_level_failures(async_session, monkeypatch, error, retryable):
+    async def fetch_plan_fact(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(reports_team, 'fetch_plan_fact', fetch_plan_fact)
+    expected = ReportCalculationError if retryable else type(error)
+
+    with pytest.raises(expected) as raised:
+        await fetch_report_data(async_session, 'staff_leaderboard', date(2026, 9, 1), date(2026, 9, 30), company_id=1)
+
+    assert isinstance(raised.value, ReportCalculationError) is retryable
 
 
 @pytest.mark.asyncio

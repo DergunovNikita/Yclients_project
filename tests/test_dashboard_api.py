@@ -3108,7 +3108,7 @@ async def test_factual_cutoff_is_shared_by_overview_plan_fact_daily_and_years(
         date(2026, 1, 1),
         date(2026, 12, 31),
         company_id=1,
-        include_all_staff_in_leaderboards=True,
+        for_ratings=True,
         factual_at=factual_at,
     )
     network_plan_fact = await fetch_plan_fact(
@@ -3116,7 +3116,7 @@ async def test_factual_cutoff_is_shared_by_overview_plan_fact_daily_and_years(
         date(2026, 1, 1),
         date(2026, 12, 31),
         allowed_company_ids=[1, 2],
-        include_all_staff_in_leaderboards=True,
+        for_ratings=True,
         factual_at=factual_at,
     )
     year_report = await dashboard_reports.fetch_report_data(
@@ -5142,7 +5142,7 @@ async def test_plan_fact_staff_query_count_does_not_grow_with_staff_count(async_
             async_session,
             date(2025, 1, 1),
             date(2025, 1, 31),
-            include_all_staff_in_leaderboards=True,
+            for_ratings=True,
         )
         small_count = len(statements)
 
@@ -5157,7 +5157,7 @@ async def test_plan_fact_staff_query_count_does_not_grow_with_staff_count(async_
             async_session,
             date(2025, 1, 1),
             date(2025, 1, 31),
-            include_all_staff_in_leaderboards=True,
+            for_ratings=True,
         )
         large_count = len(statements)
     finally:
@@ -7827,7 +7827,7 @@ async def test_goods_revenue_uses_stock_operation_seller_not_appointment_master(
         date(2025, 1, 1),
         date(2025, 1, 31),
         company_id=1,
-        include_all_staff_in_leaderboards=True,
+        for_ratings=True,
     )
     seller_group = next(group for group in plan_fact['groups'] if group['staff_id'] == 2)
     seller_metrics = {cell['code']: cell for cell in seller_group['metrics']}
@@ -8372,7 +8372,7 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
     # The widget leaves the leaderboards to the ratings report; the board builder is asked for them explicitly.
     assert 'staff_leaderboards' not in network_data
     network_boards = (await fetch_plan_fact(
-        async_session, date(2025, 1, 1), date(2025, 1, 31), include_staff_leaderboards=True
+        async_session, date(2025, 1, 1), date(2025, 1, 31), for_ratings=True
     ))['staff_leaderboards']
     assert [row['staff'] for row in network_boards['revenue_barber']] == [
         'Bravo',
@@ -8382,14 +8382,14 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
     assert [row['staff'] for row in network_boards['revenue_admin']] == ['Delta Admin']
     assert network_boards['revenue_admin'][0]['value'] == 4000.0
     assert network_boards['cosmo_admin_rankings']['sum'][0]['pct'] == 25.0
-    # Without `include_extra_service_revenue` the revenue query is skipped (report-only): qty is present, sum is 0.
+    # The rating pass itself reads the extra-service quantities.
     extra_top = network_boards['extra_services_barber_rankings']['qty']
     assert [(row['staff'], row['qty']) for row in extra_top] == [
         ('Charlie', 4.0),
         ('Alpha', 3.0),
         ('Bravo', 3.0),
     ]
-    # The ratings report enables the revenue query, so the money column is populated.
+    # The report goes through the same pass and also fills the money column.
     assert report_response.status_code == 200
     report_data = report_response.json()['data']
     report_revenue_barber = next(table for table in report_data['tables'] if table['id'] == 'revenue_barber')
@@ -8429,7 +8429,7 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
     branch_data = branch_response.json()['data']
     assert 'staff_leaderboards' not in branch_data
     branch_boards = (await fetch_plan_fact(
-        async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1, include_staff_leaderboards=True
+        async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1, for_ratings=True
     ))['staff_leaderboards']
     assert [row['staff'] for row in branch_boards['revenue_barber']] == ['Bravo', 'Alpha']
     assert [row['staff'] for row in branch_boards['revenue_admin']] == ['Delta Admin']
@@ -13180,7 +13180,7 @@ async def test_administrator_service_scope_follows_monthly_role_transitions(
         date(2025, 2, 28),
         company_id=1,
         factual_at=datetime(2025, 3, 1),
-        include_staff_leaderboards=True,
+        for_ratings=True,
     )
 
     assert rows[0]['sold'] == expected_qty
@@ -13292,7 +13292,7 @@ async def test_opz_uses_branch_local_date_for_year_and_role_transition(async_ses
         date(2024, 12, 1),
         date(2025, 1, 31),
         company_id=1,
-        include_all_staff_in_leaderboards=True,
+        for_ratings=True,
         factual_at=datetime(2025, 2, 1),
     )
 
@@ -13434,7 +13434,7 @@ async def test_admin_extra_services_are_unavailable_without_schedule_coverage(as
         date(2025, 1, 1),
         date(2025, 1, 31),
         company_id=1,
-        include_staff_leaderboards=True,
+        for_ratings=True,
     )
 
     admin = next(group for group in result['groups'] if group['staff_id'] == 2)
@@ -13679,7 +13679,7 @@ async def test_admin_without_user_id_preserves_staff_attribution_in_batch(async_
         date(2025, 1, 1),
         date(2025, 1, 31),
         company_id=1,
-        include_all_staff_in_leaderboards=True,
+        for_ratings=True,
     )
 
     admin_group = next(group for group in result['groups'] if group['staff_id'] == 2)
@@ -13737,7 +13737,7 @@ async def test_unmatched_goods_payment_is_not_attributed_to_appointment_master(a
         date(2025, 1, 1),
         date(2025, 1, 31),
         company_id=1,
-        include_all_staff_in_leaderboards=True,
+        for_ratings=True,
     )
 
     parent_cells = {cell['code']: cell for cell in result['parent_group']['metrics']}
@@ -13809,8 +13809,7 @@ async def test_staff_scoped_plan_fact_omits_branch_average_check_leaderboard(asy
         date(2025, 1, 31),
         company_id=1,
         staff_id=1,
-        include_all_staff_in_leaderboards=True,
-        include_staff_leaderboards=True,
+        for_ratings=True,
     )
 
     boards = result['staff_leaderboards']
@@ -15650,7 +15649,7 @@ async def test_linked_masterless_topup_reconciles_staff_overview_plan_fact_and_y
         date(2025, 1, 1),
         date(2025, 12, 31),
         company_id=1,
-        include_all_staff_in_leaderboards=True,
+        for_ratings=True,
     )
     yoy = await dashboard_reports.fetch_report_data(
         async_session,
@@ -15842,7 +15841,7 @@ async def test_yoy_admin_scope_matches_personal_overview_and_plan_fact(
         date(2025, 1, 1),
         date(2025, 12, 31),
         company_id=1,
-        include_all_staff_in_leaderboards=True,
+        for_ratings=True,
         factual_at=factual_at,
     )
     yoy = await dashboard_reports.fetch_report_data(
@@ -16010,7 +16009,7 @@ async def test_plan_fact_builds_staff_leaderboards_only_when_asked(async_session
     for company_id in (None, 1):
         plain = await fetch_plan_fact(async_session, *window, company_id=company_id)
         asked = await fetch_plan_fact(
-            async_session, *window, company_id=company_id, include_staff_leaderboards=True
+            async_session, *window, company_id=company_id, for_ratings=True
         )
         assert 'staff_leaderboards' not in plain
         assert 'goods_kpi_execution' in plain
