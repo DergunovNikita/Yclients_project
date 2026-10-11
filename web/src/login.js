@@ -41,6 +41,11 @@ async function loginWithRetry(email, password) {
   throw lastError;
 }
 
+// Production runs with public registration off, so the link is a dead end unless the build opts in.
+if (import.meta.env.VITE_PUBLIC_REGISTRATION === 'true') {
+  document.getElementById('register-link').hidden = false;
+}
+
 const DEMO_ORIGIN = import.meta.env.VITE_DEMO_ORIGIN;
 const DEMO_AUTOLOGIN = import.meta.env.VITE_DEMO_AUTOLOGIN;
 const demoBtn = document.getElementById('demo-login');

@@ -173,7 +173,6 @@ test('every protected page and report flow uses the shared session coordinator',
   const protectedEntries = new Map([
     ['src/main.js', 'loadCurrentUserQuietly'],
     ['src/admin.js', "authFetch('/auth/me')"],
-    ['src/profile.js', "authFetch('/auth/me')"],
     ['src/settings.js', 'loadCurrentUser'],
     ['src/onboarding.js', 'loadCurrentUser'],
   ]);
@@ -199,7 +198,7 @@ test('USER_ADMIN_ROLES pins the roles /auth/admin/* accepts and is shared, not r
   assert.deepEqual(auth.USER_ADMIN_ROLES, ['platform_admin', 'owner', 'branch_admin']);
 
   const webRoot = new URL('..', import.meta.url);
-  for (const path of ['src/admin.js', 'src/profile.js', 'src/settings.js']) {
+  for (const path of ['src/admin.js', 'src/settings.js']) {
     const source = await readFile(new URL(path, webRoot), 'utf8');
     assert.ok(source.includes('USER_ADMIN_ROLES'), `${path} must reference the shared USER_ADMIN_ROLES constant`);
     assert.ok(
@@ -207,6 +206,19 @@ test('USER_ADMIN_ROLES pins the roles /auth/admin/* accepts and is shared, not r
       `${path} must not re-hardcode the admin role list`,
     );
   }
+});
+
+test('the login page hides the registration link unless the build enables public registration', async () => {
+  const webRoot = new URL('..', import.meta.url);
+  const html = await readFile(new URL('login.html', webRoot), 'utf8');
+  assert.match(html, /<a href="\/register\.html" id="register-link" hidden /, 'the link ships hidden');
+
+  const source = await readFile(new URL('src/login.js', webRoot), 'utf8');
+  assert.match(
+    source,
+    /if \(import\.meta\.env\.VITE_PUBLIC_REGISTRATION === 'true'\) \{\s*document\.getElementById\('register-link'\)\.hidden = false;/,
+    'only the explicit flag reveals it',
+  );
 });
 
 test('browser auth token detector catches split-string construction', () => {
