@@ -782,12 +782,17 @@ export function initReports({
     showCatalog();
   });
   els.refresh.addEventListener('click', reloadActiveReport);
-  els.branch.addEventListener('change', async () => {
+  // The report is requested with the staff select as it stands, so the list for the new
+  // scope has to settle first: loadStaff may fall back to "all" for an employee absent from it.
+  async function reloadWithRefreshedStaff() {
     const expectedBranch = els.branch.value;
-    els.staff.value = '';
     const staffStatus = await loadStaff();
     if (!staffRefreshAllowsDataLoad(staffStatus, expectedBranch, els.branch.value)) return;
     reloadActiveReport();
+  }
+  els.branch.addEventListener('change', () => {
+    els.staff.value = '';
+    return reloadWithRefreshedStaff();
   });
   [els.start, els.end].forEach((input) => {
     input.addEventListener('change', () => {
@@ -795,8 +800,7 @@ export function initReports({
       syncCompareDefaults();
       syncMonthPicker();
       renderBranches();
-      loadStaff();
-      reloadActiveReport();
+      return reloadWithRefreshedStaff();
     });
   });
   els.month.addEventListener('change', () => {
@@ -809,8 +813,7 @@ export function initReports({
     state.periodPreset = 'month';
     syncCompareDefaults();
     renderBranches();
-    loadStaff();
-    reloadActiveReport();
+    return reloadWithRefreshedStaff();
   });
   // A half-written window asks for nothing until its other bound is typed in;
   // reportCompareParams is the only gate, so the checkbox is left as the user set it.
