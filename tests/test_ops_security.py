@@ -1,6 +1,9 @@
 """Ops hardening: console mail, admin bootstrap, API statement timeout."""
 import contextlib
 import io
+import os
+import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -185,3 +188,102 @@ def test_bootstrap_skips_an_existing_user_whatever_the_environment_password(monk
 
     with contextlib.redirect_stdout(io.StringIO()):
         assert run_bootstrap(monkeypatch, '--email', 'admin@example.com') == 0
+
+
+# --- deploy/vm/yclients-auto-deploy.sh, run against stubbed git/docker/curl ---
+
+DEPLOY_SCRIPT = Path(__file__).resolve().parents[1] / 'deploy' / 'vm' / 'yclients-auto-deploy.sh'
+STUBS = {
+    'flock': 'exit 0',
+    'sleep': 'exit 0',
+    'git': (
+        'case "$1" in\n'
+        '  rev-parse) if [ "$2" = HEAD ]; then echo "${LOCAL_REV:-rev-new}"; else echo rev-new; fi ;;\n'
+        'esac'
+    ),
+    'curl': 'echo "$@" >> "$STUB_LOG"; exit "${CURL_EXIT:-0}"',
+    'docker': (
+        'echo "docker $*" >> "$STUB_LOG"\n'
+        'case "$*" in\n'
+        '  "compose exec -T api cat /app/REVISION") echo "${DEPLOYED_REV:-rev-old}" ;;\n'
+        '  "image inspect"*) echo sha256:old-image ;;\n'
+        '  "compose run --rm migrate") exit "${MIGRATE_EXIT:-0}" ;;\n'
+        'esac'
+    ),
+}
+
+
+def run_deploy(tmp_path, env_file='', **env):
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    for name, body in STUBS.items():
+        stub = bin_dir / name
+        stub.write_text(f'#!/usr/bin/env bash\n{body}\n')
+        stub.chmod(0o755)
+    app_dir = tmp_path / 'app'
+    (app_dir / '.git').mkdir(parents=True)
+    (app_dir / '.env').write_text(env_file)
+    log = tmp_path / 'stub.log'
+    log.touch()
+    result = subprocess.run(
+        ['bash', str(DEPLOY_SCRIPT)],
+        env={
+            'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+            'APP_DIR': str(app_dir),
+            'LOCK_FILE': str(tmp_path / 'lock'),
+            'STUB_LOG': str(log),
+            'HEALTH_RETRIES': '2',
+            **env,
+        },
+        capture_output=True,
+        text=True,
+    )
+    return result, log.read_text()
+
+
+def test_deploy_script_is_valid_bash():
+    assert subprocess.run(['bash', '-n', str(DEPLOY_SCRIPT)]).returncode == 0
+
+
+def test_deploy_fails_when_the_served_revision_is_already_current_but_unhealthy(tmp_path):
+    """A timer tick that deployed first and failed the probe must not read as a green "nothing to deploy"."""
+    result, log = run_deploy(tmp_path, DEPLOYED_REV='rev-new', CURL_EXIT='22')
+
+    assert result.returncode == 1
+    assert 'did not become healthy' in result.stderr
+    assert 'compose build' not in log
+
+
+def test_deploy_is_a_no_op_when_the_served_revision_is_current_and_healthy(tmp_path):
+    result, log = run_deploy(tmp_path, DEPLOYED_REV='rev-new')
+
+    assert result.returncode == 0
+    assert 'Nothing to deploy' in result.stdout
+    assert 'compose build' not in log
+
+
+def test_deploy_reads_env_keys_without_executing_the_file(tmp_path):
+    """Compose's dotenv accepts `SMTP_FROM=Portal <no-reply@x.com>`; a shell would take it as a redirection."""
+    env_file = 'SMTP_FROM=Portal <no-reply@x.com>\nSOME KEY=a b\nAPI_PORT=8123 # host port\n'
+    result, log = run_deploy(tmp_path, env_file=env_file, DEPLOYED_REV='rev-new')
+
+    assert result.returncode == 0, result.stderr
+    assert 'http://127.0.0.1:8123/health/ready' in log
+
+
+def test_failed_migration_puts_the_previous_image_tag_back(tmp_path):
+    result, log = run_deploy(tmp_path, MIGRATE_EXIT='1')
+
+    assert result.returncode == 1
+    assert 'docker tag sha256:old-image yclients_bi_system-app:local' in log
+    assert 'compose up -d' not in log
+
+
+def test_successful_deploy_keeps_the_new_image_and_bootstraps_the_admin(tmp_path):
+    env_file = 'PORTAL_ADMIN_PASSWORD="s3cret"\nPORTAL_ADMIN_EMAIL=admin@example.com\n'
+    result, log = run_deploy(tmp_path, env_file=env_file)
+
+    assert result.returncode == 0, result.stderr
+    assert 'docker tag' not in log
+    assert 'create_portal_admin.py --email admin@example.com --full-name Portal Admin' in log
+    assert 's3cret' not in log

@@ -18,6 +18,45 @@ if [ ! -d .git ]; then
   exit 1
 fi
 
+# `.env` is written for docker compose's dotenv parser, which accepts values the shell does not
+# (`SMTP_FROM=Portal <no-reply@x.com>`, unquoted spaces, `$word`). Sourcing it here would abort a
+# deploy after the containers were already recreated, so the few keys needed are read one by one.
+env_value() {
+  [ -f .env ] || return 0
+  local value
+  value="$(sed -n "s/^$1=//p" .env | tail -n 1)"
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    *) value="${value%%[[:space:]]#*}"; value="${value%"${value##*[![:space:]]}"}" ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+# Readiness, not liveness: the async engine is lazy, so /health answers 200 even when
+# the database is unreachable and every dashboard route returns 500.
+wait_for_api_ready() {
+  local api_port="${API_PORT:-$(env_value API_PORT)}"
+  local health_url="http://127.0.0.1:${api_port:-8000}/health/ready"
+  local health_retries="${HEALTH_RETRIES:-$(env_value HEALTH_RETRIES)}"
+  local health_interval_seconds="${HEALTH_INTERVAL_SECONDS:-$(env_value HEALTH_INTERVAL_SECONDS)}"
+  health_retries="${health_retries:-30}"
+  health_interval_seconds="${health_interval_seconds:-2}"
+
+  for attempt in $(seq 1 "$health_retries"); do
+    if curl -fsS "$health_url" >/dev/null; then
+      echo "API health check passed"
+      return 0
+    fi
+    if [ "$attempt" -eq "$health_retries" ]; then
+      echo "API did not become healthy after $health_retries attempts: $health_url" >&2
+      return 1
+    fi
+    echo "Waiting for API health ($attempt/$health_retries): $health_url"
+    sleep "$health_interval_seconds"
+  done
+}
+
 git fetch --quiet origin "$BRANCH"
 
 local_rev="$(git rev-parse HEAD)"
@@ -32,10 +71,14 @@ deployed_rev="$(docker compose exec -T api cat /app/REVISION 2>/dev/null | tr -d
 
 # The timer fires every 5 minutes. Rebuilding on every tick regardless of whether
 # anything changed grew the build cache to 12.78GB and restarted api/worker ~288
-# times a day. CI reaches this script through `systemctl start`, and at that point
-# the VM has not pulled yet, so a real deploy still passes the check below.
+# times a day. The revision is baked into the image, so a tick that wins the race against
+# CI may have deployed it already and then failed the readiness probe: the revision reads as
+# served from then on. Hence the probe runs here too, instead of reporting a broken API as
+# "nothing to deploy" with exit 0 (and a green CI run).
 if [ "$deployed_rev" = "$remote_rev" ] && [ "${FORCE_DEPLOY:-false}" != "true" ]; then
-  echo "Already serving $remote_rev; nothing to deploy"
+  echo "Already serving $remote_rev; checking it is healthy"
+  wait_for_api_ready
+  echo "Nothing to deploy"
   exit 0
 fi
 
@@ -48,35 +91,23 @@ else
   echo "Retrying deploy of $remote_rev; containers serve ${deployed_rev:-unknown}"
 fi
 
-APP_REVISION="$remote_rev" docker compose build api worker migrate
-docker compose run --rm migrate
+# build retags the shared `:local` image before `migrate` runs. If the build or the migration
+# fails the schema is still the old one, so put the tag back: anything that resolves it
+# (`docker compose run --rm sync`, a recreated container) would otherwise boot the new code on it.
+image_tag="yclients_bi_system-app:local"
+previous_image="$(docker image inspect -f '{{.Id}}' "$image_tag" 2>/dev/null || true)"
+
+if ! { APP_REVISION="$remote_rev" docker compose build api worker migrate && docker compose run --rm migrate; }; then
+  echo "Build or migration failed" >&2
+  if [ -n "$previous_image" ]; then
+    docker tag "$previous_image" "$image_tag"
+    echo "Restored $image_tag to $previous_image" >&2
+  fi
+  exit 1
+fi
 docker compose up -d api worker
 
-if [ -f .env ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . ./.env
-  set +a
-fi
-
-# Readiness, not liveness: the async engine is lazy, so /health answers 200 even when
-# the database is unreachable and every dashboard route returns 500.
-health_url="http://127.0.0.1:${API_PORT:-8000}/health/ready"
-health_retries="${HEALTH_RETRIES:-30}"
-health_interval_seconds="${HEALTH_INTERVAL_SECONDS:-2}"
-
-for attempt in $(seq 1 "$health_retries"); do
-  if curl -fsS "$health_url" >/dev/null; then
-    echo "API health check passed"
-    break
-  fi
-  if [ "$attempt" -eq "$health_retries" ]; then
-    echo "API did not become healthy after $health_retries attempts: $health_url" >&2
-    exit 1
-  fi
-  echo "Waiting for API health ($attempt/$health_retries): $health_url"
-  sleep "$health_interval_seconds"
-done
+wait_for_api_ready
 
 # Create-only bootstrap: an existing user is skipped, so a deploy never rewrites a password an admin
 # changed or re-enables a deactivated account. The password is not on the command line: the
@@ -94,14 +125,17 @@ ensure_portal_admin() {
     --full-name "$full_name"
 }
 
-if [ -n "${PORTAL_ADMIN_PASSWORD:-}" ]; then
-  ensure_portal_admin "${PORTAL_ADMIN_EMAIL:-}" "${PORTAL_ADMIN_NAME:-Portal Admin}"
-  if [ -n "${PORTAL_EXTRA_ADMIN_EMAILS:-}" ]; then
-    IFS=',' read -ra extra_admin_emails <<< "$PORTAL_EXTRA_ADMIN_EMAILS"
+if [ -n "$(env_value PORTAL_ADMIN_PASSWORD)" ]; then
+  admin_name="$(env_value PORTAL_ADMIN_NAME)"
+  ensure_portal_admin "$(env_value PORTAL_ADMIN_EMAIL)" "${admin_name:-Portal Admin}"
+  extra_admin_emails_value="$(env_value PORTAL_EXTRA_ADMIN_EMAILS)"
+  if [ -n "$extra_admin_emails_value" ]; then
+    extra_admin_name="$(env_value PORTAL_EXTRA_ADMIN_NAME)"
+    IFS=',' read -ra extra_admin_emails <<< "$extra_admin_emails_value"
     for extra_admin_email in "${extra_admin_emails[@]}"; do
       extra_admin_email="${extra_admin_email#"${extra_admin_email%%[![:space:]]*}"}"
       extra_admin_email="${extra_admin_email%"${extra_admin_email##*[![:space:]]}"}"
-      ensure_portal_admin "$extra_admin_email" "${PORTAL_EXTRA_ADMIN_NAME:-Portal Admin}"
+      ensure_portal_admin "$extra_admin_email" "${extra_admin_name:-Portal Admin}"
     done
   fi
 fi
