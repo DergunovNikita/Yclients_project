@@ -4,6 +4,7 @@ from datetime import date, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 import api
 import dashboard_routes
@@ -15,6 +16,10 @@ from models import (
     Company,
     FinancialTransaction,
     Group,
+    ManualFactMetric,
+    PlanBranchSetting,
+    ServiceCatalog,
+    ServiceLabel,
     Staff,
     Transaction,
 )
@@ -164,3 +169,90 @@ async def test_summary_with_the_breakdown_still_reads_it(async_session):
 
     assert summary['appointments_breakdown']['total'] == 3
     assert statements.matching('as cancelled')
+
+
+async def _seed_departed_branch(session):
+    session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Stays', group_id=1),
+        Company(id=2, title='Left', group_id=1, reporting_end_date=date(2025, 8, 31)),
+        Staff(id=11, name='Admin', position='Администратор', company_id=1, fired=0),
+        ServiceCatalog(company_id=2, service_id=10, title='Cut', updated_at=datetime(2025, 1, 1)),
+        ServiceCatalog(company_id=1, service_id=10, title='Cut', updated_at=datetime(2025, 1, 1)),
+    ])
+    await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_service_management_refuses_a_branch_that_left_the_tenant(async_session):
+    await _seed_departed_branch(async_session)
+
+    with pytest.raises(ValueError, match='company is not allowed'):
+        await dashboard_service.save_service_management(
+            async_session,
+            row_changes=[{'company_id': 2, 'service_id': 10, 'is_extra': True}],
+            group_changes=[],
+            allowed_company_ids=[1, 2],
+            portal_account_id=1,
+        )
+    assert (await async_session.execute(select(ServiceLabel))).scalars().all() == []
+
+    saved = await dashboard_service.save_service_management(
+        async_session,
+        row_changes=[{'company_id': 1, 'service_id': 10, 'is_extra': True}],
+        group_changes=[],
+        allowed_company_ids=[1, 2],
+        portal_account_id=1,
+    )
+    assert [row['company_id'] for row in saved['rows']] == [1]
+
+
+@pytest.mark.asyncio
+async def test_plan_settings_refuse_a_month_after_the_branch_left(async_session):
+    await _seed_departed_branch(async_session)
+
+    async def save(month, branch_id):
+        return await dashboard_service.save_plan_settings(
+            async_session, month, [{'company_id': branch_id, 'wax_pct': 10}], [],
+            allowed_company_ids=[1, 2], actor_user_id=None, portal_account_id=None,
+        )
+
+    with pytest.raises(ValueError, match='left the tenant before 2025-09'):
+        await save('2025-09', 2)
+    assert (await async_session.execute(select(PlanBranchSetting))).scalars().all() == []
+
+    await save('2025-08', 2)
+    await save('2025-09', 1)
+    assert {row.company_id for row in (await async_session.execute(select(PlanBranchSetting))).scalars()} == {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_duplicate_plan_rows_are_a_validation_error_not_a_conflict(async_session):
+    await _seed_departed_branch(async_session)
+    staff_row = {'company_id': 1, 'staff_id': 11, 'staff_category': 'administrator', 'reviews_qty': 3}
+
+    for branches, staff, message in (
+        ([{'company_id': 1, 'wax_pct': 10}, {'company_id': 1, 'wax_pct': 11}], [], 'duplicate branch setting'),
+        ([{'company_id': 1, 'wax_pct': 10}], [staff_row, dict(staff_row)], 'duplicate staff input'),
+    ):
+        with pytest.raises(ValueError, match=message):
+            await dashboard_service.save_plan_settings(
+                async_session, '2025-01', branches, staff,
+                allowed_company_ids=[1], actor_user_id=None, portal_account_id=None,
+            )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_manual_fact_rows_are_refused(async_session):
+    await _seed_departed_branch(async_session)
+
+    with pytest.raises(ValueError, match='duplicate row for staff 11'):
+        await dashboard_service.save_manual_facts(
+            async_session, '2025-01', 'reviews_qty', None, None,
+            [
+                {'company_id': 1, 'staff_id': 11, 'value': 3, 'previous_value': None},
+                {'company_id': 1, 'staff_id': 11, 'value': 4, 'previous_value': None},
+            ],
+            allowed_company_ids=[1], actor_user_id=None, portal_account_id=None,
+        )
+    assert (await async_session.execute(select(ManualFactMetric))).scalars().all() == []

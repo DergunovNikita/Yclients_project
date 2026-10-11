@@ -3090,6 +3090,11 @@ async def _editable_service_catalog(
 ) -> ServiceCatalog:
     if allowed_company_ids is not None and company_id not in set(allowed_company_ids):
         raise ValueError('company is not allowed')
+    # The listing hides a branch that has left the tenant; a stale tab must not relabel its services,
+    # which would rewrite the extra-service figures of history the reports still show.
+    window = (await fetch_reporting_windows(db, [company_id])).get(company_id)
+    if window is not None and window.end is not None and window.end < factual_branch_date():
+        raise ValueError('company is not allowed')
     catalog = await _service_catalog_row(db, company_id, service_id)
     if catalog is None:
         raise ValueError('unknown service for company')
@@ -7496,11 +7501,15 @@ def _normalize_plan_settings_payload(
 ) -> tuple[date, date, list[dict[str, Any]], list[dict[str, Any]]]:
     period_start, period_end = _plan_month_range(month)
     normalized_branches: list[dict[str, Any]] = []
+    seen_branches: set[int] = set()
     for row in branches:
         try:
             company_id = int(row.get('company_id'))
         except (TypeError, ValueError):
             raise ValueError('company_id is required for every branch setting') from None
+        if company_id in seen_branches:
+            raise ValueError(f'duplicate branch setting for company {company_id}')
+        seen_branches.add(company_id)
         values = {
             field: _parse_setting_number(row.get(field), field, percent=field in PERCENT_SETTING_FIELDS)
             for field in BRANCH_SETTING_FIELDS
@@ -7508,12 +7517,16 @@ def _normalize_plan_settings_payload(
         normalized_branches.append({'company_id': company_id, **values})
 
     normalized_staff: list[dict[str, Any]] = []
+    seen_staff: set[tuple[int, int]] = set()
     for row in staff:
         try:
             company_id = int(row.get('company_id'))
             staff_id = int(row.get('staff_id'))
         except (TypeError, ValueError):
             raise ValueError('company_id and staff_id are required for every staff input') from None
+        if (company_id, staff_id) in seen_staff:
+            raise ValueError(f'duplicate staff input for staff {staff_id}')
+        seen_staff.add((company_id, staff_id))
         category = str(row.get('staff_category') or '').strip()
         if category not in STAFF_CATEGORY_METRIC_CODES:
             raise ValueError(f'invalid staff category for staff {staff_id}')
@@ -7585,6 +7598,13 @@ async def save_plan_settings(
     missing_company_ids = sorted(set(branch_ids) - existing_company_ids)
     if missing_company_ids:
         raise ValueError(f'company does not exist: {missing_company_ids[0]}')
+    # Same upper cut as the editor's own listing (`branches_not_yet_left`): a plan for months after the
+    # branch left the tenant could never be shown again.
+    windows = await fetch_reporting_windows(db, branch_ids)
+    for branch_id in branch_ids:
+        window = windows.get(branch_id)
+        if window is not None and window.end is not None and window.end < period_start:
+            raise ValueError(f'company {branch_id} left the tenant before {period_start:%Y-%m}')
 
     # Saving is delete-all + insert, so two saves of one month must queue up: the second would
     # otherwise delete nothing and collide with the first one's rows on the unique indexes.
@@ -8317,6 +8337,8 @@ async def _write_manual_facts(
             raise ValueError(f'staff {item_staff_id} does not belong to selected company {scoped_company_id}')
         if scoped_staff_id is not None and item_staff_id != scoped_staff_id:
             raise ValueError(f'staff {item_staff_id} does not match selected staff {scoped_staff_id}')
+        if (item_company_id, item_staff_id) in normalized_items:
+            raise ValueError(f'duplicate row for staff {item_staff_id} in company {item_company_id}')
         normalized_items[(item_company_id, item_staff_id)] = (
             _parse_manual_value(item.get('value'), metric_code, item_staff_id),
             _parse_manual_value(item.get('previous_value'), metric_code, item_staff_id),
