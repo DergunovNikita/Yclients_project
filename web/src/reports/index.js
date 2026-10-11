@@ -1,13 +1,4 @@
-import {
-  createLatestRequestScope,
-  fetchJson,
-  isSupersededRequest,
-  reportDataCacheKey,
-  reportDataState,
-  reportRefreshPresentation,
-  reportScopedFilterAllowsLoad,
-  staffRefreshAllowsDataLoad,
-} from '../dashboardApi.js';
+import { fetchJson, isSupersededRequest } from '../dashboardApi.js';
 import { ReportChartManager } from './charts.js';
 import { formatDate, periodSubtitle } from './format.js';
 import { escapeHtml } from '../html.js';
@@ -27,6 +18,12 @@ import { branchesForPeriod } from '../reportingWindow.js';
 import {
   DEFAULT_GRANULARITY,
   REPORT_FILTER_KEYS,
+  createLatestRequestScope,
+  reportDataCacheKey,
+  reportDataState,
+  reportRefreshPresentation,
+  reportScopedFilterAllowsLoad,
+  staffRefreshAllowsDataLoad,
   reportComparisonRequest,
   reportDataParams,
   reportFilterVisibility,

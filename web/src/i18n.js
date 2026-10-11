@@ -42,9 +42,8 @@ export function getLocale() {
  * Translate a dotted key for the active locale.
  * Falls back to Italian, then to the key itself.
  */
-export function t(key, paramsOrLocale = {}, maybeLocale) {
-  const params = typeof paramsOrLocale === 'string' ? {} : paramsOrLocale;
-  const locale = typeof paramsOrLocale === 'string' ? paramsOrLocale : (maybeLocale || getLocale());
+export function t(key, params = {}) {
+  const locale = getLocale();
   const value = lookup(messages[locale], key);
   const fallback = lookup(messages[DEFAULT_LOCALE], key);
   const template = value != null ? value : (fallback != null ? fallback : key);

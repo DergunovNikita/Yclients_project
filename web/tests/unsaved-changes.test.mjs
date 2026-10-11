@@ -87,17 +87,14 @@ test('floating save dock follows the active editor dirty and saving state', () =
   };
 
   assert.deepEqual(editorSaveDockState(base), {
-    editor: 'planSettings',
     visible: false,
     saving: false,
   });
   assert.deepEqual(editorSaveDockState({ ...base, planSettingsDirty: true }), {
-    editor: 'planSettings',
     visible: true,
     saving: false,
   });
   assert.deepEqual(editorSaveDockState({ ...base, planSettingsSaving: true }), {
-    editor: 'planSettings',
     visible: true,
     saving: true,
   });
@@ -106,7 +103,6 @@ test('floating save dock follows the active editor dirty and saving state', () =
     activeView: 'reviewFacts',
     reviewFactDirty: true,
   }), {
-    editor: 'reviewFacts',
     visible: true,
     saving: false,
   });
@@ -115,7 +111,6 @@ test('floating save dock follows the active editor dirty and saving state', () =
     activeView: 'opzFacts',
     opzFactDirty: true,
   }), {
-    editor: 'opzFacts',
     visible: true,
     saving: false,
   });
@@ -124,7 +119,6 @@ test('floating save dock follows the active editor dirty and saving state', () =
     activeView: 'opzFacts',
     opzFactSaving: true,
   }), {
-    editor: 'opzFacts',
     visible: true,
     saving: true,
   });
@@ -147,7 +141,6 @@ test('floating save dock follows the Yandex Pay editor', () => {
     activeView: 'yandexPayFacts',
     yandexPayDirty: true,
   }), {
-    editor: 'yandexPayFacts',
     visible: true,
     saving: false,
   });
@@ -156,7 +149,6 @@ test('floating save dock follows the Yandex Pay editor', () => {
     activeView: 'yandexPayFacts',
     yandexPaySaving: true,
   }), {
-    editor: 'yandexPayFacts',
     visible: true,
     saving: true,
   });
@@ -181,7 +173,6 @@ test('floating save dock stays hidden outside editors and in demo mode', () => {
   };
 
   assert.deepEqual(editorSaveDockState(dirtyPlan), {
-    editor: null,
     visible: false,
     saving: false,
   });
@@ -190,7 +181,6 @@ test('floating save dock stays hidden outside editors and in demo mode', () => {
     activeView: 'planSettings',
     isDemo: true,
   }), {
-    editor: null,
     visible: false,
     saving: false,
   });

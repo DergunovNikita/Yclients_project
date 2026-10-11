@@ -373,7 +373,6 @@
     "apiForbidden": "API: нет доступа",
     "apiTimeout": "API: таймаут",
     "apiServerError": "API: ошибка сервера",
-    "apiSyncProblem": "API: проблема синхронизации",
     "apiConnected": "API: подключен",
     "apiSaving": "API: сохранение",
     "apiError": "API: ошибка",

@@ -26,15 +26,18 @@ import {
   setSelectedPortalAccountId,
 } from './auth.js';
 import {
-  createLatestRequestScope,
   fetchJson as sharedFetchJson,
-  filterServiceManagementResult,
   isSupersededRequest,
+  patchJson as sharedPatchJson,
+  postJson as sharedPostJson,
+  apiKey,
+} from './dashboardApi.js';
+import {
+  createLatestRequestScope,
+  filterServiceManagementResult,
   latestServiceManagementTimestamp,
   mergeServiceManagementResult,
-  patchJson as sharedPatchJson,
   reportSearchParams,
-  postJson as sharedPostJson,
   serviceManagementChanges,
   serviceManagementControls,
   serviceManagementLoadAllowed,
@@ -42,8 +45,7 @@ import {
   runServiceManagementMutation,
   settleServiceManagementLoad,
   staffRefreshAllowsDataLoad,
-  apiKey,
-} from './dashboardApi.js';
+} from './dashboardRequestState.js';
 
 import { escapeHtml } from './html.js';
 import {
@@ -604,8 +606,6 @@ function setApiStatus(status) {
     forbidden: [t('dash.apiForbidden'), 'error'],
     timeout: [t('dash.apiTimeout'), 'error'],
     server_error: [t('dash.apiServerError'), 'error'],
-    sync_problem: [t('dash.apiSyncProblem'), 'warn'],
-    ok: [t('dash.apiConnected'), 'ok'],
     error: [t('dash.apiError'), 'error'],
   };
   const [label, kind] = states[status] || states.error;
@@ -735,8 +735,13 @@ function setManualFactDefaultMonths() {
   filterEls.reviewFacts.month.value = month;
   filterEls.opzFacts.month.value = month;
   filterEls.yandexPay.month.value = month;
-  // A month that has not started has nothing to enter; the server refuses it too.
-  filterEls.yandexPay.month.max = month;
+  limitYandexPayMonth();
+}
+
+// A month that has not started has nothing to enter; the server refuses it too. Read per
+// activation: a tab left open across the month boundary would otherwise keep the old limit.
+function limitYandexPayMonth() {
+  filterEls.yandexPay.month.max = monthValue(branchToday());
 }
 
 function overviewPresetRange(preset) {
@@ -808,8 +813,7 @@ function currentMonthValue() {
 
 function previousMonthValue(month) {
   const [year, monthNumber] = String(month || currentMonthValue()).split('-').map(Number);
-  const date = new Date(year, monthNumber - 2, 1);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+  return monthValue(new Date(year, monthNumber - 2, 1));
 }
 
 function overviewReportUrl(reportId) {
@@ -1860,13 +1864,7 @@ function renderServiceBranchOptions() {
   // in the reports, but its services are no longer the tenant's to edit.
   const today = inputDateValue(branchToday());
   const options = branchesForPeriod(branchOptions, today, today);
-  els.serviceFilterBranch.innerHTML = `<option value="">${t('dash.allBranches')}</option>`;
-  options.forEach((branch) => {
-    const option = document.createElement('option');
-    option.value = branch.id;
-    option.textContent = branch.title;
-    els.serviceFilterBranch.appendChild(option);
-  });
+  fillBranchSelect(els.serviceFilterBranch, options);
   els.serviceFilterBranch.value = options.some((branch) => String(branch.id) === selected) ? selected : '';
 }
 
@@ -2290,17 +2288,21 @@ function filterPeriod(filter) {
   return range || { start: '', end: '' };
 }
 
+function fillBranchSelect(select, branches) {
+  select.innerHTML = `<option value="">${t('dash.allBranches')}</option>`;
+  branches.forEach((branch) => {
+    const option = document.createElement('option');
+    option.value = branch.id;
+    option.textContent = branch.title;
+    select.appendChild(option);
+  });
+}
+
 function renderBranchOptions(filter) {
   const selected = filter.branch.value;
   const { start, end } = filterPeriod(filter);
   const options = branchesForPeriod(branchOptions, start, end);
-  filter.branch.innerHTML = `<option value="">${t('dash.allBranches')}</option>`;
-  options.forEach((branch) => {
-    const option = document.createElement('option');
-    option.value = branch.id;
-    option.textContent = branch.title;
-    filter.branch.appendChild(option);
-  });
+  fillBranchSelect(filter.branch, options);
   // A branch the new period cannot reach falls back to the whole scope, the same way an
   // unknown id always has: keeping it selected would filter by a branch that is not listed.
   filter.branch.value = options.some((branch) => String(branch.id) === selected) ? selected : '';
@@ -2311,7 +2313,6 @@ async function loadStaff(filter, { force = false } = {}) {
   if (force) loadedStaffFilters.delete(filter);
   if (loadedStaffFilters.has(filter)) return 'ready';
   const request = requestScopeForStaff(filter).start();
-  const selected = filter.staff.value;
   try {
     const { start, end } = filterPeriod(filter);
     const payload = await fetchJson('/dashboard/staff', {
@@ -2324,6 +2325,8 @@ async function loadStaff(filter, { force = false } = {}) {
       slowState: false,
     });
     if (!request.isCurrent()) return 'superseded';
+    // Read after the response: a choice made while the list was loading has already reloaded the data.
+    const selected = filter.staff.value;
     const staffOptions = payload.data || [];
     const defaultLabel = filter === filterEls.reviewFacts || filter === filterEls.opzFacts
       ? t('dash.allStaff')
@@ -2471,6 +2474,7 @@ function setActiveView(view) {
   els.reviewFactsView.classList.toggle('active', view === 'reviewFacts');
   els.opzFactsView.classList.toggle('active', view === 'opzFacts');
   els.yandexPayView.classList.toggle('active', view === 'yandexPayFacts');
+  if (view === 'yandexPayFacts') limitYandexPayMonth();
   els.reportsView.classList.toggle('active', view === 'reports');
   els.viewLinks.forEach((link) => {
     const isActive = link.dataset.viewLink === view;
@@ -2934,7 +2938,7 @@ document.addEventListener('keydown', (event) => {
 
 document.addEventListener('click', async (event) => {
   const link = event.target.closest('[data-report-link]');
-  if (!link) return;
+  if (!link || !shouldHandleSameTabNavigation(event)) return;
   const href = link.getAttribute('href');
   if (!href || !href.startsWith('/reports')) return;
   event.preventDefault();
@@ -2949,7 +2953,7 @@ document.addEventListener('click', async (event) => {
 els.viewLinks.forEach((link) => {
   link.addEventListener('click', async (event) => {
     const view = link.dataset.viewLink;
-    if (!view) return;
+    if (!view || !shouldHandleSameTabNavigation(event)) return;
     event.preventDefault();
     if (!canAccessView(view)) {
       await runDashboardNavigation(async () => {
@@ -2979,11 +2983,15 @@ els.profileSettingsLink?.addEventListener('click', async (event) => {
   });
 });
 
-window.addEventListener('popstate', async (event) => {
-  const targetPosition = Number(event.state?.[HISTORY_POSITION_KEY]);
-  const needsGuard = protectedSavePending()
+function navigationNeedsGuard() {
+  return protectedSavePending()
     || hasProtectedDirtyChanges()
     || (activeView === 'serviceManagement' && (serviceManagementDirty || serviceManagementMutationPending));
+}
+
+window.addEventListener('popstate', async (event) => {
+  const targetPosition = Number(event.state?.[HISTORY_POSITION_KEY]);
+  const needsGuard = navigationNeedsGuard();
   const decision = historyNavigationDecision({
     targetPosition,
     currentPosition: historyPosition,
@@ -3068,9 +3076,7 @@ window.addEventListener('hashchange', async (event) => {
     [HISTORY_POSITION_KEY]: targetPosition,
   }, '', event.newURL);
 
-  const needsGuard = protectedSavePending()
-    || hasProtectedDirtyChanges()
-    || (activeView === 'serviceManagement' && (serviceManagementDirty || serviceManagementMutationPending));
+  const needsGuard = navigationNeedsGuard();
   if (!needsGuard) {
     historyPosition = targetPosition;
     currentHistoryUrl = event.newURL;

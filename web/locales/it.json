@@ -373,7 +373,6 @@
     "apiForbidden": "API: accesso negato",
     "apiTimeout": "API: timeout",
     "apiServerError": "API: errore server",
-    "apiSyncProblem": "API: problema sync",
     "apiConnected": "API: connessa",
     "apiSaving": "API: salvataggio",
     "apiError": "API: errore",

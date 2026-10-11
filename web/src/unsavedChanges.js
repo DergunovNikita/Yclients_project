@@ -59,9 +59,8 @@ export function editorSaveDockState({
     },
   };
   const editor = editors[activeView];
-  if (!editor || isDemo) return { editor: null, visible: false, saving: false };
+  if (!editor || isDemo) return { visible: false, saving: false };
   return {
-    editor: activeView,
     visible: Boolean(editor.dirty || editor.saving),
     saving: Boolean(editor.saving),
   };
