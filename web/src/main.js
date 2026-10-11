@@ -1812,13 +1812,13 @@ function setPlanSettingsInputsLocked(locked) {
 async function savePlanSettings() {
   if (planSettingsSaving || planSettingsLoading || !planSettingsData) return;
   planSettingsSaving = true;
-  // A key typed while the request is out would be lost: the response re-renders the tables and takes a new baseline.
-  setPlanSettingsInputsLocked(true);
-  updateFloatingEditorSave();
-  clearError();
-  setPlanSettingsLoading(true);
-  setApiState(t('dash.apiSaving'), 'warn');
   try {
+    // A key typed while the request is out would be lost: the response re-renders the tables and takes a new baseline.
+    setPlanSettingsInputsLocked(true);
+    updateFloatingEditorSave();
+    clearError();
+    setPlanSettingsLoading(true);
+    setApiState(t('dash.apiSaving'), 'warn');
     const requestPayload = collectPlanSettingsPayload();
     if (planSettingsData.copy_from) requestPayload.copy_from = planSettingsData.copy_from;
     const payload = await postJson('/dashboard/plan/settings', requestPayload);

@@ -98,6 +98,9 @@ function reportPath(reportId = '', search = '') {
 }
 
 function reportIdFromLocation() {
+  // Links before 2026-06-11 were `/reports?report=<id>`; bookmarks and mailed links still carry them.
+  const legacyReportId = new URLSearchParams(window.location.search).get('report');
+  if (legacyReportId) return legacyReportId;
   const path = window.location.pathname.replace(/\/+$/, '');
   if (path === '/reports') return '';
   if (!path.startsWith('/reports/')) return '';
