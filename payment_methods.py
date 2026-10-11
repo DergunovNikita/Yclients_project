@@ -216,7 +216,7 @@ async def fetch_yandex_pay_editor(
             'data_through': _iso(item.data_through) if item is not None else None,
             'default_data_through': _iso(default_through),
             'max_data_through': _iso(max_through),
-            'cashless_yclients': _money(by_type.get(branch_id, {}).get('cashless', 0.0)),
+            'cashless_yclients': _money(by_type.get(branch_id, {}).get(ACCOUNT_TYPE_BUCKETS[1], 0.0)),
             # Same anchor as the report cut: the stored row is judged by its period_end.
             'counted': window is None or window.covers(month_end),
             'updated_at': item.updated_at.isoformat() if item is not None and item.updated_at else None,
@@ -549,7 +549,9 @@ async def fetch_payment_breakdown(
         for branch in branches:
             for name, amount in by_month.get((int(branch['id']), month_start), {}).items():
                 sums[name] += amount
-        cash, cashless_yclients, other = (sums[ACCOUNT_TYPE_BUCKETS[0]], sums[ACCOUNT_TYPE_BUCKETS[1]], sums['other'])
+        cash = sums[ACCOUNT_TYPE_BUCKETS[0]]
+        cashless_yclients = sums[ACCOUNT_TYPE_BUCKETS[1]]
+        other = sums[OTHER_ACCOUNT_BUCKET]
         # The same rule as the table's, asked of each value on its own.
         entered = []
         for branch in branches:

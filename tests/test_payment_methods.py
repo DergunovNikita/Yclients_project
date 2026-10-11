@@ -1203,7 +1203,7 @@ async def test_the_monthly_share_chart_comes_last_spans_the_grid_and_leaves_gaps
     assert [dataset['label'] for dataset in chart['datasets']] == [
         'Наличные', 'Безналичные', 'Яндекс Пэй', 'Прочие кассы'
     ]
-    assert all(dataset['format'] == 'percent' and dataset['fill'] is False for dataset in chart['datasets'])
+    assert all(dataset['format'] == 'percent' and 'fill' not in dataset for dataset in chart['datasets'])
     cash, cashless, yandex, other = (dataset['data'] for dataset in chart['datasets'])
     assert cash[0] == pytest.approx(12345.0 / 12470.0 * 100, abs=0.01)
     assert yandex == [None, pytest.approx(600.0 / 5300.0 * 100, abs=0.01)]
