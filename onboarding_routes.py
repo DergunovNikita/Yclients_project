@@ -8,7 +8,7 @@ Two logical steps:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from clock import utcnow
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -62,7 +62,7 @@ async def _ensure_owner_account(db: AsyncSession, user: PortalUser) -> int:
         return int(user.portal_account_id)
     account = PortalAccount(
         label=(user.full_name or user.email).strip() or user.email,
-        created_at=datetime.utcnow(),
+        created_at=utcnow(),
     )
     db.add(account)
     await db.flush()
@@ -115,7 +115,7 @@ async def onboarding_state(
     has_branches = bool(branches)
     step = _step_from_state(user, has_credentials, has_branches)
     if step == 'done' and user.onboarding_completed_at is None:
-        user.onboarding_completed_at = datetime.utcnow()
+        user.onboarding_completed_at = utcnow()
         await db.commit()
     return {
         'success': True,
@@ -246,7 +246,7 @@ async def onboarding_branches(
         else:
             link.credential_id = credential.id
 
-    user.onboarding_completed_at = datetime.utcnow()
+    user.onboarding_completed_at = utcnow()
     await log_portal_audit(
         db,
         actor_user_id=user.id,

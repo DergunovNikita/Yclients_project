@@ -715,7 +715,7 @@ class PortalRefreshToken(Base):
 
     __tablename__ = 'portal_refresh_tokens'
     __table_args__ = (
-        Index('ix_portal_refresh_tokens_user_state', 'user_id', 'revoked_at', 'last_used_at'),
+        Index('ix_portal_refresh_tokens_user_state', 'user_id', 'last_used_at'),
         Index('ix_portal_refresh_tokens_previous_hash', 'previous_token_hash'),
         {'schema': SYSTEM_SCHEMA},
     )
@@ -724,7 +724,6 @@ class PortalRefreshToken(Base):
     user_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_users.id', ondelete='CASCADE'), nullable=False)
     token_hash = Column(String(64), nullable=False, unique=True)
     expires_at = Column(DateTime, nullable=False)
-    revoked_at = Column(DateTime)
     last_used_at = Column(DateTime)
     user_agent = Column(String(500))
     device_label = Column(String(100))
@@ -785,7 +784,6 @@ class YClientsCredential(Base):
     last_error_at = Column(DateTime)
     last_error = Column(Text)
     needs_reauth = Column(Boolean, nullable=False, default=False)
-    credential_fingerprint = Column(String(64), index=True)
     created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, nullable=False)
 
@@ -855,7 +853,9 @@ class SyncJob(Base):
     initiator = Column(String)
     status = Column(String, nullable=False, index=True)
     portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), index=True)
-    credential_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.yclients_credentials.id'), index=True)
+    credential_id = Column(
+        Integer, ForeignKey(f'{SYSTEM_SCHEMA}.yclients_credentials.id', ondelete='SET NULL'), index=True
+    )
     company_ids = Column(JSON)
     progress_pct = Column(Integer, nullable=False, default=0)
     current_stage = Column(String)
@@ -879,7 +879,9 @@ class SyncJobEvent(Base):
         Integer, ForeignKey(f'{SYSTEM_SCHEMA}.sync_jobs.id', ondelete='CASCADE'), nullable=False, index=True
     )
     portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), index=True)
-    credential_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.yclients_credentials.id'), index=True)
+    credential_id = Column(
+        Integer, ForeignKey(f'{SYSTEM_SCHEMA}.yclients_credentials.id', ondelete='SET NULL'), index=True
+    )
     company_id = Column(Integer, ForeignKey('companies.id'), index=True)
     stage_key = Column(String, index=True)
     status = Column(String, nullable=False, index=True)
@@ -933,7 +935,7 @@ class PortalAuditEvent(Base):
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    actor_user_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_users.id'), index=True)
+    actor_user_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_users.id', ondelete='SET NULL'), index=True)
     portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), index=True)
     action = Column(String, nullable=False, index=True)
     target_type = Column(String, index=True)

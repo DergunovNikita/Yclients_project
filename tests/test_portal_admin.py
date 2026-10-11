@@ -584,8 +584,14 @@ def test_passphrase_keys_are_warned_about_in_production_without_logging_the_key(
     monkeypatch.setattr(yclients_credentials, 'PORTAL_CREDENTIALS_ENCRYPTION_KEY', passphrase)
     monkeypatch.setattr(yclients_credentials, 'PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD', Fernet.generate_key().decode())
 
-    with caplog.at_level(logging.WARNING, logger='yclients_credentials'):
-        yclients_credentials.warn_if_passphrase_keys()
+    # Like `yclients.auth`, this logger stops propagating once api.py has configured the `yclients` tree.
+    logger = logging.getLogger('yclients.credentials')
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger='yclients.credentials'):
+            yclients_credentials.warn_if_passphrase_keys()
+    finally:
+        logger.removeHandler(caplog.handler)
 
     assert 'PORTAL_CREDENTIALS_ENCRYPTION_KEY is not a urlsafe-base64' in caplog.text
     assert 'KEY_OLD' not in caplog.text
@@ -597,7 +603,7 @@ def test_a_real_fernet_key_or_a_dev_environment_is_not_warned_about(monkeypatch,
 
     monkeypatch.setattr(yclients_credentials, 'PORTAL_CREDENTIALS_ENCRYPTION_KEY', Fernet.generate_key().decode())
     monkeypatch.setattr(yclients_credentials, 'PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD', '')
-    with caplog.at_level(logging.WARNING, logger='yclients_credentials'):
+    with caplog.at_level(logging.WARNING, logger='yclients.credentials'):
         monkeypatch.setattr(yclients_credentials, 'IS_PRODUCTION', True)
         yclients_credentials.warn_if_passphrase_keys()
         monkeypatch.setattr(yclients_credentials, 'PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'passphrase')
@@ -612,8 +618,14 @@ def test_a_full_entropy_hex_key_is_not_warned_about(monkeypatch, caplog):
     monkeypatch.setattr(yclients_credentials, 'IS_PRODUCTION', True)
     monkeypatch.setattr(yclients_credentials, 'PORTAL_CREDENTIALS_ENCRYPTION_KEY', secrets.token_hex(32))
     monkeypatch.setattr(yclients_credentials, 'PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD', 'ab' * 16)
-    with caplog.at_level(logging.WARNING, logger='yclients_credentials'):
-        yclients_credentials.warn_if_passphrase_keys()
+    # Like `yclients.auth`, this logger stops propagating once api.py has configured the `yclients` tree.
+    logger = logging.getLogger('yclients.credentials')
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger='yclients.credentials'):
+            yclients_credentials.warn_if_passphrase_keys()
+    finally:
+        logger.removeHandler(caplog.handler)
 
     assert 'PORTAL_CREDENTIALS_ENCRYPTION_KEY is not' not in caplog.text
     assert 'PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD is not' in caplog.text

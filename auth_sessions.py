@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from fastapi import HTTPException, Request, Response, status
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clock import utcnow
 from config import (
     AUTH_COOKIE_DOMAIN,
     AUTH_COOKIE_SAMESITE,
@@ -120,7 +121,7 @@ async def issue_session(
     """Create a fresh refresh record and bundle access/refresh/csrf tokens."""
     raw_refresh = secrets.token_urlsafe(48)
     csrf_token = secrets.token_urlsafe(32)
-    now = datetime.utcnow()
+    now = utcnow()
 
     user_agent = request.headers.get('user-agent', '')
     refresh = PortalRefreshToken(
@@ -159,7 +160,7 @@ async def rotate_session(
     revokes the session as a replay.
     """
     presented_hash = _hash_token(raw_refresh)
-    now = datetime.utcnow()
+    now = utcnow()
     refresh, within_grace = await _load_rotatable_refresh(db, presented_hash, now)
     user = (
         await db.execute(select(PortalUser).where(PortalUser.id == refresh.user_id))
@@ -184,7 +185,6 @@ async def rotate_session(
         .where(
             PortalRefreshToken.id == refresh.id,
             matches,
-            PortalRefreshToken.revoked_at.is_(None),
             PortalRefreshToken.expires_at > now,
         )
         .values(
@@ -239,13 +239,12 @@ async def list_user_sessions(
     *,
     is_demo: bool = False,
 ) -> list[PortalRefreshToken]:
-    now = datetime.utcnow()
+    now = utcnow()
     await _maintain_user_sessions(db, user_id, now, is_demo=is_demo)
     rows = await db.execute(
         select(PortalRefreshToken)
         .where(
             PortalRefreshToken.user_id == user_id,
-            PortalRefreshToken.revoked_at.is_(None),
             PortalRefreshToken.expires_at > now,
         )
         .order_by(PortalRefreshToken.last_used_at.desc().nullslast(), PortalRefreshToken.id.desc())
@@ -275,10 +274,7 @@ async def _maintain_user_sessions(
     await db.execute(
         delete(PortalRefreshToken).where(
             PortalRefreshToken.user_id == user_id,
-            or_(
-                PortalRefreshToken.revoked_at.is_not(None),
-                PortalRefreshToken.expires_at <= now,
-            ),
+            PortalRefreshToken.expires_at <= now,
         )
     )
     max_active = DEMO_MAX_ACTIVE_SESSIONS if is_demo else max(1, int(AUTH_MAX_ACTIVE_SESSIONS))
@@ -288,8 +284,7 @@ async def _maintain_user_sessions(
                 select(PortalRefreshToken.id)
                 .where(
                     PortalRefreshToken.user_id == user_id,
-                    PortalRefreshToken.revoked_at.is_(None),
-                    PortalRefreshToken.expires_at > now,
+                            PortalRefreshToken.expires_at > now,
                 )
                 .order_by(
                     PortalRefreshToken.last_used_at.desc().nullslast(),
@@ -338,7 +333,7 @@ async def _load_rotatable_refresh(
             )
             await _end_session(db, refresh)
             raise HTTPException(status_code=401, detail='Invalid refresh token')
-    if refresh.revoked_at is not None or refresh.expires_at < now:
+    if refresh.expires_at < now:
         raise HTTPException(status_code=401, detail='Refresh token expired or revoked')
     if refresh.created_at + timedelta(days=max(1, AUTH_SESSION_MAX_AGE_DAYS)) <= now:
         await _end_session(db, refresh)

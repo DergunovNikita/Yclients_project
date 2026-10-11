@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from clock import utcnow
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,6 @@ async def log_portal_audit(
             target_type=target_type,
             target_id=str(target_id) if target_id is not None else None,
             metadata_json=metadata or {},
-            created_at=datetime.utcnow(),
+            created_at=utcnow(),
         )
     )

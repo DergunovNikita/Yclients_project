@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime
+from clock import utcnow
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
@@ -261,7 +261,7 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     if existing is not None:
         raise HTTPException(status_code=409, detail='Email already registered')
 
-    now = datetime.utcnow()
+    now = utcnow()
     user = PortalUser(
         portal_account_id=None,
         email=email,
@@ -334,7 +334,7 @@ async def login(
     if AUTH_EMAIL_VERIFY_REQUIRED and user.email_verified_at is None:
         raise HTTPException(status_code=403, detail='Email verification required')
 
-    user.last_login_at = datetime.utcnow()
+    user.last_login_at = utcnow()
     session = await issue_session(db, user, request, access_token_fn=_access_token_for)
     return await _finalize_session_response(db, response, user, session)
 
@@ -452,7 +452,7 @@ async def demo_login(
     if user is None:
         raise HTTPException(status_code=503, detail='Demo mode is not available')
 
-    user.last_login_at = datetime.utcnow()
+    user.last_login_at = utcnow()
     session = await issue_session(db, user, request, access_token_fn=_access_token_for)
     return await _finalize_session_response(db, response, user, session)
 
@@ -599,7 +599,7 @@ async def verify_email(body: TokenRequest, db: AsyncSession = Depends(get_async_
     user = await consume_email_token(db, body.token, TOKEN_PURPOSE_VERIFY)
     if user is None:
         raise HTTPException(status_code=400, detail='Invalid or expired token')
-    user.email_verified_at = datetime.utcnow()
+    user.email_verified_at = utcnow()
     await db.commit()
     return {'success': True, 'message': 'Email подтверждён. Теперь можно войти в кабинет.'}
 
@@ -688,7 +688,7 @@ async def reset_password(
     if user is None:
         raise HTTPException(status_code=400, detail='Invalid or expired token')
     user.password_hash = await asyncio.to_thread(hash_password, body.password)
-    user.password_changed_at = datetime.utcnow()
+    user.password_changed_at = utcnow()
     bump_user_token_version(user)
     await revoke_user_sessions(db, user.id)
     await invalidate_email_tokens(db, user.id, TOKEN_PURPOSE_RESET)
@@ -708,7 +708,7 @@ async def change_password(
         raise HTTPException(status_code=400, detail='Новый пароль должен отличаться от текущего')
 
     user.password_hash = await asyncio.to_thread(hash_password, body.new_password)
-    user.password_changed_at = datetime.utcnow()
+    user.password_changed_at = utcnow()
     bump_user_token_version(user)
     await revoke_user_sessions(db, user.id)
     await invalidate_email_tokens(db, user.id, TOKEN_PURPOSE_RESET)
@@ -960,7 +960,7 @@ async def admin_create_user(
             else:
                 account = PortalAccount(
                     label=(body.full_name or body.email).strip(),
-                    created_at=datetime.utcnow(),
+                    created_at=utcnow(),
                 )
                 db.add(account)
                 await db.flush()
@@ -990,8 +990,8 @@ async def admin_create_user(
         full_name=body.full_name,
         role=body.role,
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     db.add(user)
     await db.flush()
@@ -1063,7 +1063,7 @@ async def admin_update_user(
             if existing is not None:
                 raise HTTPException(status_code=409, detail='Email already registered')
             user.email = email
-            user.email_verified_at = datetime.utcnow()
+            user.email_verified_at = utcnow()
 
     if user.role == 'platform_admin':
         user.portal_account_id = None

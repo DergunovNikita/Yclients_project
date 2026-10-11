@@ -241,15 +241,6 @@ async def test_sessions_list_removes_inactive_and_oldest_excess_sessions(auth_db
             last_used_at=now - timedelta(days=40),
             created_at=now - timedelta(days=40),
         ),
-        PortalRefreshToken(
-            id=201,
-            user_id=1,
-            token_hash='revoked',
-            expires_at=now + timedelta(days=10),
-            revoked_at=now - timedelta(days=1),
-            last_used_at=now - timedelta(days=1),
-            created_at=now - timedelta(days=1),
-        ),
     ])
     await auth_db.commit()
 
