@@ -6274,9 +6274,11 @@ def _metric_plan_value(group: dict[str, Any], code: str) -> float | None:
     return None
 
 
+STAFF_LEADERBOARD_LIMIT = 5
+
+
 def _staff_leaderboards_payload(
     groups: list[dict[str, Any]],
-    limit: int = 5,
     extra_revenue_by_staff: dict[int, float] | None = None,
     extra_revenue_available: bool = True,
     branch_groups: list[dict[str, Any]] | None = None,
@@ -6320,7 +6322,7 @@ def _staff_leaderboards_payload(
             int(row.get('company_id') or 0),
             int(row.get('staff_id') or 0),
         ))
-        return eligible[:limit]
+        return eligible[:STAFF_LEADERBOARD_LIMIT]
 
     def extra_rows(
         source: list[dict[str, Any]],
@@ -8599,13 +8601,14 @@ async def fetch_plan_fact(
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
-    include_extra_service_revenue: bool = False,
-    include_all_staff_in_leaderboards: bool = False,
-    include_staff_leaderboards: bool = False,
+    for_ratings: bool = False,
     include_branch_row: bool = True,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    """Plan/fact payload; `staff_leaderboards` is built only for the ratings report, the SPA never reads it.
+    """Plan/fact payload.
+
+    `for_ratings` is the ratings report's mode: every staff row of the branch (not just the selected
+    one), the extra-service revenue per staff, and `staff_leaderboards`, which the SPA never reads.
 
     `include_branch_row=False` withholds the single-branch view's `parent_group` and diagnostics (whole-branch
     totals) from a staff-clamped personal role; only that role's own rows remain.
@@ -8655,7 +8658,7 @@ async def fetch_plan_fact(
                 'goods_kpi_execution': _goods_kpi_execution_payload([]),
                 'groups': [],
             }
-            if include_staff_leaderboards:
+            if for_ratings:
                 empty['staff_leaderboards'] = _staff_leaderboards_payload([])
             return empty
 
@@ -8672,7 +8675,7 @@ async def fetch_plan_fact(
             plan_end,
             branch_id,
             staff_id,
-            include_all_staff=include_all_staff_in_leaderboards,
+            include_all_staff=for_ratings,
             company_title=branch['title'],
             opz_events=branch_opz_events,
             factual_at=factual_at,
@@ -8692,10 +8695,7 @@ async def fetch_plan_fact(
                 factual_at,
             )
         extra_revenue_result = (
-            await _extra_service_revenue_by_staff(
-                db, start, end, [branch_id], factual_at
-            )
-            if include_extra_service_revenue else {}
+            await _extra_service_revenue_by_staff(db, start, end, [branch_id], factual_at) if for_ratings else None
         )
 
         payload = {
@@ -8712,7 +8712,7 @@ async def fetch_plan_fact(
             'goods_kpi_execution': _goods_kpi_execution_payload(groups),
             'groups': groups,
         }
-        if include_staff_leaderboards:
+        if for_ratings:
             payload['staff_leaderboards'] = _staff_leaderboards_payload(
                 groups,
                 extra_revenue_by_staff=extra_revenue_result or {},
@@ -8765,7 +8765,7 @@ async def fetch_plan_fact(
             plan_end,
             branch_id,
             None,
-            include_all_staff=include_all_staff_in_leaderboards,
+            include_all_staff=for_ratings,
             company_title=next(
                 (branch['title'] for branch in branches if int(branch['id']) == branch_id),
                 None,
@@ -8814,10 +8814,7 @@ async def fetch_plan_fact(
         for group in staff_groups_by_company.get(branch_id, [])
     ]
     extra_revenue_result = (
-        await _extra_service_revenue_by_staff(
-            db, start, end, company_ids, factual_at
-        )
-        if include_extra_service_revenue else {}
+        await _extra_service_revenue_by_staff(db, start, end, company_ids, factual_at) if for_ratings else None
     )
     diagnostics = []
     branch_title_by_id = {int(branch['id']): branch['title'] for branch in branches}
@@ -8851,7 +8848,7 @@ async def fetch_plan_fact(
         'goods_kpi_execution': _goods_kpi_execution_payload(all_staff_groups),
         'groups': groups,
     }
-    if include_staff_leaderboards:
+    if for_ratings:
         payload['staff_leaderboards'] = _staff_leaderboards_payload(
             all_staff_groups,
             extra_revenue_by_staff=extra_revenue_result or {},
