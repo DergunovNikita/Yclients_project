@@ -1313,6 +1313,35 @@ def _direct_revenue_classifiers(staff_id: Optional[int] = None) -> tuple[Any, An
     return goods, topup
 
 
+async def _completed_visit_counts(
+    db: AsyncSession,
+    dr: DateRange,
+    company_id: Optional[int],
+    staff_id: Optional[int],
+    company_ids: Optional[list[int]],
+    factual_at: Optional[datetime],
+) -> tuple[int, int]:
+    """Completed visits and distinct clients of a period: the Overview's denominators."""
+    row = (
+        await db.execute(
+            select(
+                func.count(func.distinct(Appointment.id)).label('completed_appointments'),
+                func.count(func.distinct(Appointment.client_id)).label('unique_clients'),
+            ).where(
+                _appt_revenue_filters(
+                    dr.start,
+                    dr.end,
+                    company_id,
+                    staff_id,
+                    allowed_company_ids=company_ids,
+                    factual_at=factual_at,
+                )
+            )
+        )
+    ).one()
+    return int(row.completed_appointments or 0), int(row.unique_clients or 0)
+
+
 async def _average_check_block(
     db: AsyncSession,
     dr: DateRange,
@@ -1322,23 +1351,9 @@ async def _average_check_block(
     factual_at: Optional[datetime] = None,
     covered_ranges: Optional[dict[int, tuple[Optional[date], Optional[date]]]] = None,
 ) -> dict[str, Any]:
-    visit_condition = _appt_revenue_filters(
-        dr.start,
-        dr.end,
-        company_id,
-        staff_id,
-        allowed_company_ids=company_ids,
-        factual_at=factual_at,
+    completed_appointments, unique_clients = await _completed_visit_counts(
+        db, dr, company_id, staff_id, company_ids, factual_at
     )
-
-    visit_row = (
-        await db.execute(
-            select(
-                func.count(func.distinct(Appointment.id)).label('completed_appointments'),
-                func.count(func.distinct(Appointment.client_id)).label('unique_clients'),
-            ).where(visit_condition)
-        )
-    ).one()
 
     service_revenue_branches = _service_revenue_union(dr, company_id, staff_id, company_ids, factual_at)
     service_revenue = float(
@@ -1385,8 +1400,6 @@ async def _average_check_block(
         'topup_revenue': float(classification_row.topup_revenue or 0),
     }
 
-    unique_clients = int(visit_row.unique_clients or 0)
-    completed_appointments = int(visit_row.completed_appointments or 0)
     numerator = (
         service_revenue
         + classified_revenue['goods_revenue']
@@ -2043,6 +2056,108 @@ async def _revenue_block(
     }
 
 
+EXTRA_SERVICE_FIELDS = (
+    'extra_service_revenue',
+    'extra_service_count',
+    'extra_service_appointments',
+    'extra_service_clients',
+)
+
+
+def _extra_service_metrics(
+    block: dict[str, Any], scope: AdministratorServiceScope, appointments: float
+) -> dict[str, Optional[float]]:
+    """Extra-service figures of one period as the Overview shows them; `None` while the scope is not ready."""
+    ready = scope.source_status == 'ready'
+    revenue = float(block['extra_service_revenue']) if ready else None
+    count = float(block['extra_service_count']) if ready else None
+    clients = float(block['extra_service_clients']) if ready else None
+    unique_clients = float(block['unique_clients'] or 0)
+    appointment_denominator = float(scope.appointment_count) if scope.is_administrator else appointments
+    client_denominator = float(scope.unique_client_count) if scope.is_administrator else unique_clients
+    return {
+        'revenue': revenue,
+        'count': count,
+        'clients': clients,
+        'appointments': block['extra_service_appointments'] if ready else None,
+        'average': _safe_div(revenue, count) if revenue is not None and count is not None else None,
+        'per_appointment_pct': 100.0 * _safe_div(count, appointment_denominator) if count is not None else None,
+        'clients_pct': 100.0 * _safe_div(clients, client_denominator) if clients is not None else None,
+    }
+
+
+def _visit_count_metrics(
+    cur_appointments: int, cur_unique_clients: int, prev_appointments: int, prev_unique_clients: int
+) -> dict[str, Any]:
+    cur_visits_per_client = _safe_div(float(cur_appointments), float(cur_unique_clients))
+    prev_visits_per_client = _safe_div(float(prev_appointments), float(prev_unique_clients))
+    return {
+        'unique_clients': cur_unique_clients,
+        'unique_clients_change_pct': _pct_change(float(cur_unique_clients), float(prev_unique_clients)),
+        'visits_per_client': cur_visits_per_client,
+        'visits_per_client_change_pct': _pct_change(cur_visits_per_client, prev_visits_per_client),
+    }
+
+
+async def _client_recency_metrics(
+    db: AsyncSession,
+    current_dr: DateRange,
+    prev_dr: DateRange,
+    company_id: Optional[int],
+    staff_id: Optional[int],
+    company_ids: Optional[list[int]],
+    factual_at: Optional[datetime],
+) -> dict[str, Any]:
+    """New and repeat client counts, shares and their change against the previous window."""
+    cur, prev = [
+        await _client_recency_block(
+            db, period, company_id, staff_id, allowed_company_ids=company_ids, factual_at=factual_at
+        )
+        for period in (current_dr, prev_dr)
+    ]
+    metrics: dict[str, Any] = {}
+    for kind in ('new', 'repeat'):
+        metrics[f'{kind}_clients'] = cur[f'{kind}_clients']
+        metrics[f'{kind}_clients_change_pct'] = _pct_change(
+            float(cur[f'{kind}_clients']), float(prev[f'{kind}_clients'])
+        )
+        metrics[f'{kind}_clients_pct'] = cur[f'{kind}_clients_pct']
+        metrics[f'{kind}_clients_pct_change_pct'] = _pct_change(cur[f'{kind}_clients_pct'], prev[f'{kind}_clients_pct'])
+    return metrics
+
+
+async def fetch_client_mix_metrics(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: Optional[int] = None,
+    staff_id: Optional[int] = None,
+    allowed_company_ids: Optional[list[int]] = None,
+    *,
+    factual_at: Optional[datetime] = None,
+    period_preset: Optional[str] = None,
+) -> dict[str, Any]:
+    """The Overview's unique/new/repeat client metrics without the rest of `fetch_summary`.
+
+    Same numbers and the same comparison baseline (`period_preset`) as the matching keys of
+    `fetch_summary()['visit_metrics']`, for the report those cards link to.
+    """
+    factual_at = factual_at or factual_now()
+    current_dr = DateRange(start=start, end=end)
+    prev_dr = current_dr.previous_period(period_preset)
+    company_ids = await _appointment_company_ids(db, company_id, staff_id, allowed_company_ids)
+    cur_appointments, cur_unique = await _completed_visit_counts(
+        db, current_dr, company_id, staff_id, company_ids, factual_at
+    )
+    prev_appointments, prev_unique = await _completed_visit_counts(
+        db, prev_dr, company_id, staff_id, company_ids, factual_at
+    )
+    return {
+        **_visit_count_metrics(cur_appointments, cur_unique, prev_appointments, prev_unique),
+        **await _client_recency_metrics(db, current_dr, prev_dr, company_id, staff_id, company_ids, factual_at),
+    }
+
+
 async def fetch_summary(
     db: AsyncSession,
     start: date,
@@ -2094,40 +2209,19 @@ async def fetch_summary(
         allowed_company_ids=effective_company_ids,
         factual_at=factual_at,
     )
-    if current_service_scope.is_administrator:
-        attributed_current = await _revenue_block(
-            db,
-            current_dr,
-            current_service_scope.company_id,
-            include_goods=False,
-            allowed_company_ids=effective_company_ids,
-            factual_at=factual_at,
-            extra_appointment_condition=current_service_scope.appointment_condition,
-        )
-        for field in (
-            'extra_service_revenue',
-            'extra_service_count',
-            'extra_service_appointments',
-            'extra_service_clients',
-        ):
-            cur[field] = attributed_current[field]
-    if previous_service_scope.is_administrator:
-        attributed_previous = await _revenue_block(
-            db,
-            prev_dr,
-            previous_service_scope.company_id,
-            include_goods=False,
-            allowed_company_ids=effective_company_ids,
-            factual_at=factual_at,
-            extra_appointment_condition=previous_service_scope.appointment_condition,
-        )
-        for field in (
-            'extra_service_revenue',
-            'extra_service_count',
-            'extra_service_appointments',
-            'extra_service_clients',
-        ):
-            prev[field] = attributed_previous[field]
+    for block, scope, period in ((cur, current_service_scope, current_dr), (prev, previous_service_scope, prev_dr)):
+        if scope.is_administrator:
+            attributed = await _revenue_block(
+                db,
+                period,
+                scope.company_id,
+                include_goods=False,
+                allowed_company_ids=effective_company_ids,
+                factual_at=factual_at,
+                extra_appointment_condition=scope.appointment_condition,
+            )
+            for field in EXTRA_SERVICE_FIELDS:
+                block[field] = attributed[field]
     cur_opz_qty = await _opz_count_scope(
         db,
         start,
@@ -2189,21 +2283,8 @@ async def fetch_summary(
         allowed_company_ids=effective_company_ids,
         factual_at=factual_at,
     )
-    cur_client_recency = await _client_recency_block(
-        db,
-        current_dr,
-        company_id,
-        staff_id,
-        allowed_company_ids=effective_company_ids,
-        factual_at=factual_at,
-    )
-    prev_client_recency = await _client_recency_block(
-        db,
-        prev_dr,
-        company_id,
-        staff_id,
-        allowed_company_ids=effective_company_ids,
-        factual_at=factual_at,
+    client_recency_metrics = await _client_recency_metrics(
+        db, current_dr, prev_dr, company_id, staff_id, effective_company_ids, factual_at
     )
     for block, average_check in ((cur, cur_average_check), (prev, prev_average_check)):
         block['service_revenue'] = average_check['service_revenue']
@@ -2234,9 +2315,7 @@ async def fetch_summary(
             factual_at,
         )
     else:
-        appointments_breakdown = await _local_appointments_breakdown(
-            db, appointment_company_ids, start, end, staff_id
-        )
+        appointments_breakdown = None
 
     cur_rev = cur['revenue']
     prev_rev = prev['revenue']
@@ -2251,80 +2330,8 @@ async def fetch_summary(
     prev_avg_services = _safe_div(prev['service_revenue'], prev_appointments)
     cur_avg_goods = _safe_div(cur['goods_revenue'], float(cur['goods_count'] or 0))
     prev_avg_goods = _safe_div(prev['goods_revenue'], float(prev['goods_count'] or 0))
-    current_extra_ready = current_service_scope.source_status == 'ready'
-    previous_extra_ready = previous_service_scope.source_status == 'ready'
-    cur_extra_service_revenue = (
-        float(cur['extra_service_revenue']) if current_extra_ready else None
-    )
-    prev_extra_service_revenue = (
-        float(prev['extra_service_revenue']) if previous_extra_ready else None
-    )
-    cur_extra_service_count = (
-        float(cur['extra_service_count']) if current_extra_ready else None
-    )
-    prev_extra_service_count = (
-        float(prev['extra_service_count']) if previous_extra_ready else None
-    )
-    cur_extra_denominator = (
-        float(current_service_scope.appointment_count)
-        if current_service_scope.is_administrator
-        else cur_appointments
-    )
-    prev_extra_denominator = (
-        float(previous_service_scope.appointment_count)
-        if previous_service_scope.is_administrator
-        else prev_appointments
-    )
-    cur_avg_extra_services = (
-        _safe_div(cur_extra_service_revenue, cur_extra_service_count)
-        if cur_extra_service_revenue is not None and cur_extra_service_count is not None
-        else None
-    )
-    prev_avg_extra_services = (
-        _safe_div(prev_extra_service_revenue, prev_extra_service_count)
-        if prev_extra_service_revenue is not None and prev_extra_service_count is not None
-        else None
-    )
-    cur_extra_services_per_appointment_pct = (
-        100.0 * _safe_div(cur_extra_service_count, cur_extra_denominator)
-        if cur_extra_service_count is not None
-        else None
-    )
-    prev_extra_services_per_appointment_pct = (
-        100.0 * _safe_div(prev_extra_service_count, prev_extra_denominator)
-        if prev_extra_service_count is not None
-        else None
-    )
-    cur_unique_clients = float(cur['unique_clients'] or 0)
-    prev_unique_clients = float(prev['unique_clients'] or 0)
-    cur_visits_per_client = _safe_div(cur_appointments, cur_unique_clients)
-    prev_visits_per_client = _safe_div(prev_appointments, prev_unique_clients)
-    cur_extra_service_clients = (
-        float(cur['extra_service_clients']) if current_extra_ready else None
-    )
-    prev_extra_service_clients = (
-        float(prev['extra_service_clients']) if previous_extra_ready else None
-    )
-    cur_extra_client_denominator = (
-        float(current_service_scope.unique_client_count)
-        if current_service_scope.is_administrator
-        else cur_unique_clients
-    )
-    prev_extra_client_denominator = (
-        float(previous_service_scope.unique_client_count)
-        if previous_service_scope.is_administrator
-        else prev_unique_clients
-    )
-    cur_extra_service_clients_pct = (
-        100.0 * _safe_div(cur_extra_service_clients, cur_extra_client_denominator)
-        if cur_extra_service_clients is not None
-        else None
-    )
-    prev_extra_service_clients_pct = (
-        100.0 * _safe_div(prev_extra_service_clients, prev_extra_client_denominator)
-        if prev_extra_service_clients is not None
-        else None
-    )
+    cur_extra = _extra_service_metrics(cur, current_service_scope, cur_appointments)
+    prev_extra = _extra_service_metrics(prev, previous_service_scope, prev_appointments)
     cur_opz_pct = 100.0 * _safe_div(cur_opz_qty, float(cur['appointments'] or 0))
     prev_opz_pct = 100.0 * _safe_div(prev_opz_qty, float(prev['appointments'] or 0))
 
@@ -2358,7 +2365,7 @@ async def fetch_summary(
             'service_revenue': cur['service_revenue'],
             'goods_revenue': cur['goods_revenue'],
             'topup_revenue': cur['topup_revenue'],
-            'extra_service_revenue': cur_extra_service_revenue,
+            'extra_service_revenue': cur_extra['revenue'],
             'change_pct': _pct_change(cur_rev, prev_rev),
             'service_revenue_change_pct': _pct_change(
                 float(cur['service_revenue']), float(prev['service_revenue'])
@@ -2370,8 +2377,8 @@ async def fetch_summary(
                 float(cur['topup_revenue']), float(prev['topup_revenue'])
             ),
             'extra_service_revenue_change_pct': _optional_pct_change(
-                cur_extra_service_revenue,
-                prev_extra_service_revenue,
+                cur_extra['revenue'],
+                prev_extra['revenue'],
             ),
             'service_count': cur['service_count'],
             'service_count_change_pct': _pct_change(
@@ -2381,26 +2388,24 @@ async def fetch_summary(
             'goods_count_change_pct': _pct_change(
                 float(cur['goods_count']), float(prev['goods_count'])
             ),
-            'extra_service_count': cur_extra_service_count,
+            'extra_service_count': cur_extra['count'],
             'extra_service_count_change_pct': _optional_pct_change(
-                cur_extra_service_count,
-                prev_extra_service_count,
+                cur_extra['count'],
+                prev_extra['count'],
             ),
             'appointments': int(cur_appointments),
             'appointments_change_pct': _pct_change(
                 cur_appointments, prev_appointments
             ),
-            'extra_service_appointments': (
-                cur['extra_service_appointments'] if current_extra_ready else None
-            ),
+            'extra_service_appointments': cur_extra['appointments'],
             'unique_clients': cur['unique_clients'],
             'unique_clients_change_pct': _pct_change(
                 float(cur['unique_clients']), float(prev['unique_clients'])
             ),
-            'extra_service_clients': cur_extra_service_clients,
+            'extra_service_clients': cur_extra['clients'],
             'extra_service_clients_change_pct': _optional_pct_change(
-                cur_extra_service_clients,
-                prev_extra_service_clients,
+                cur_extra['clients'],
+                prev_extra['clients'],
             ),
         },
         'visit_metrics': {
@@ -2408,66 +2413,41 @@ async def fetch_summary(
             'opz_qty_change_pct': _pct_change(cur_opz_qty, prev_opz_qty),
             'opz_pct': cur_opz_pct,
             'opz_pct_change_pct': _pct_change(cur_opz_pct, prev_opz_pct),
-            'extra_services_per_appointment_pct': cur_extra_services_per_appointment_pct,
+            'extra_services_per_appointment_pct': cur_extra['per_appointment_pct'],
             'extra_services_per_appointment_pct_change_pct': _optional_pct_change(
-                cur_extra_services_per_appointment_pct,
-                prev_extra_services_per_appointment_pct,
+                cur_extra['per_appointment_pct'],
+                prev_extra['per_appointment_pct'],
             ),
-            'unique_clients': cur['unique_clients'],
-            'unique_clients_change_pct': _pct_change(
-                float(cur['unique_clients']),
-                float(prev['unique_clients']),
+            **_visit_count_metrics(
+                cur_average_check['completed_appointments'],
+                cur_average_check['unique_clients'],
+                prev_average_check['completed_appointments'],
+                prev_average_check['unique_clients'],
             ),
-            'visits_per_client': cur_visits_per_client,
-            'visits_per_client_change_pct': _pct_change(
-                cur_visits_per_client,
-                prev_visits_per_client,
-            ),
-            'extra_service_clients': cur_extra_service_clients,
-            'extra_service_clients_pct': cur_extra_service_clients_pct,
+            'extra_service_clients': cur_extra['clients'],
+            'extra_service_clients_pct': cur_extra['clients_pct'],
             'extra_service_clients_pct_change_pct': _optional_pct_change(
-                cur_extra_service_clients_pct,
-                prev_extra_service_clients_pct,
+                cur_extra['clients_pct'],
+                prev_extra['clients_pct'],
             ),
             'client_visit_frequency': client_frequency,
-            'new_clients': cur_client_recency['new_clients'],
-            'new_clients_change_pct': _pct_change(
-                float(cur_client_recency['new_clients']),
-                float(prev_client_recency['new_clients']),
-            ),
-            'new_clients_pct': cur_client_recency['new_clients_pct'],
-            'new_clients_pct_change_pct': _pct_change(
-                cur_client_recency['new_clients_pct'],
-                prev_client_recency['new_clients_pct'],
-            ),
-            'repeat_clients': cur_client_recency['repeat_clients'],
-            'repeat_clients_change_pct': _pct_change(
-                float(cur_client_recency['repeat_clients']),
-                float(prev_client_recency['repeat_clients']),
-            ),
-            'repeat_clients_pct': cur_client_recency['repeat_clients_pct'],
-            'repeat_clients_pct_change_pct': _pct_change(
-                cur_client_recency['repeat_clients_pct'],
-                prev_client_recency['repeat_clients_pct'],
-            ),
+            **client_recency_metrics,
         },
         'average_check': {
             **cur_average_check,
             'total': cur_avg_total,
             'services': cur_avg_services,
             'goods': cur_avg_goods,
-            'extra_services': cur_avg_extra_services,
+            'extra_services': cur_extra['average'],
             'total_change_pct': _pct_change(cur_avg_total, prev_avg_total),
             'services_change_pct': _pct_change(cur_avg_services, prev_avg_services),
             'goods_change_pct': _pct_change(cur_avg_goods, prev_avg_goods),
             'extra_services_change_pct': _optional_pct_change(
-                cur_avg_extra_services,
-                prev_avg_extra_services,
+                cur_extra['average'],
+                prev_extra['average'],
             ),
             'appointments': int(cur_appointments),
-            'extra_service_appointments': (
-                cur['extra_service_appointments'] if current_extra_ready else None
-            ),
+            'extra_service_appointments': cur_extra['appointments'],
         },
         'appointments_breakdown': appointments_breakdown,
     }

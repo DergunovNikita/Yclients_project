@@ -7,6 +7,7 @@ from httpx import ASGITransport, AsyncClient
 
 import api
 import dashboard_routes
+import dashboard_service
 from api import app
 from auth_scope import AccessContext
 from models import (
@@ -102,3 +103,64 @@ async def test_plan_fact_of_a_branch_role_keeps_the_branch_row(async_session):
             app.dependency_overrides.clear()
         assert response.status_code == 200
         assert response.json()['data']['parent_group']['scope'] == 'branch'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('preset', [None, 'month'])
+async def test_client_mix_metrics_match_the_overview_without_its_other_paths(async_session, preset):
+    from test_dashboard_service_w3 import NOW, _seed_visits, _Statements
+
+    await _seed_visits(async_session)
+    async_session.add_all([
+        Appointment(id=10, company_id=1, staff_id=1, client_id=1, date=date(2024, 12, 20),
+                    datetime=datetime(2024, 12, 20, 12, 0), attendance=1),
+        Appointment(id=11, company_id=1, staff_id=1, client_id=3, date=date(2024, 12, 21),
+                    datetime=datetime(2024, 12, 21, 12, 0), attendance=1),
+    ])
+    await async_session.commit()
+    window = (date(2025, 1, 1), date(2025, 1, 31))
+
+    summary = await dashboard_service.fetch_summary(
+        async_session, *window, 1, factual_at=NOW, period_preset=preset, include_appointments_breakdown=False
+    )
+    async_session.info.clear()
+    with _Statements(async_session) as statements:
+        mix = await dashboard_service.fetch_client_mix_metrics(
+            async_session, *window, 1, factual_at=NOW, period_preset=preset
+        )
+
+    assert mix and all(summary['visit_metrics'][key] == value for key, value in mix.items())
+    assert mix['unique_clients'] == 2 and mix['new_clients'] == 1
+    for untouched in ('financial_transactions', 'transactions', 'sync_source_states', 'staff_schedules'):
+        assert statements.matching(f'from {untouched}') == [], untouched
+
+
+@pytest.mark.asyncio
+async def test_summary_without_the_breakdown_runs_no_breakdown_query(async_session):
+    from test_dashboard_service_w3 import NOW, _seed_visits, _Statements
+
+    await _seed_visits(async_session)
+
+    with _Statements(async_session) as statements:
+        summary = await dashboard_service.fetch_summary(
+            async_session, date(2025, 1, 1), date(2025, 1, 31), 1, factual_at=NOW,
+            include_appointments_breakdown=False,
+        )
+
+    assert summary['appointments_breakdown'] is None
+    assert statements.matching('as cancelled') == []
+
+
+@pytest.mark.asyncio
+async def test_summary_with_the_breakdown_still_reads_it(async_session):
+    from test_dashboard_service_w3 import NOW, _seed_visits, _Statements
+
+    await _seed_visits(async_session)
+
+    with _Statements(async_session) as statements:
+        summary = await dashboard_service.fetch_summary(
+            async_session, date(2025, 1, 1), date(2025, 1, 31), 1, factual_at=NOW
+        )
+
+    assert summary['appointments_breakdown']['total'] == 3
+    assert statements.matching('as cancelled')

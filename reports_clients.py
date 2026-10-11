@@ -21,8 +21,8 @@ from dashboard_service import (
     _service_revenue_union,
     business_appointment_condition,
     factual_branch_date,
+    fetch_client_mix_metrics,
     fetch_reporting_windows,
-    fetch_summary,
     financial_appointment_match_condition,
     reporting_window_clause,
     shift_months_back,
@@ -798,39 +798,20 @@ async def build_revenue_at_risk(req: ReportRequest) -> dict[str, Any]:
 
 
 async def build_new_vs_returning_cross(req: ReportRequest) -> dict[str, Any]:
-    return await _client_recency_payload(
-        req.db, req.base, req.start, req.end, req.company_id, req.staff_id, req.allowed_company_ids, req.factual_at,
-        req.period_preset,
-    )
-
-
-async def _client_recency_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-    period_preset: str | None = None,
-) -> dict[str, Any]:
+    base = req.base
     # The Overview's new/repeat cards link straight here, so both must measure against
     # the same baseline. Without the preset this would silently fall back to the plain
     # preceding window and contradict the card the user just clicked.
-    summary = await fetch_summary(
-        db,
-        start,
-        end,
-        company_id,
-        staff_id,
-        allowed_company_ids=allowed_company_ids,
-        factual_at=factual_at,
-        period_preset=period_preset,
-        # Only visit_metrics is read; the breakdown would add a YClients call whose result is dropped.
-        include_appointments_breakdown=False,
+    visits = await fetch_client_mix_metrics(
+        req.db,
+        req.start,
+        req.end,
+        req.company_id,
+        req.staff_id,
+        allowed_company_ids=req.allowed_company_ids,
+        factual_at=req.factual_at,
+        period_preset=req.period_preset,
     )
-    visits = summary.get('visit_metrics', {})
     rows = [
         {
             'segment': 'Новые',
