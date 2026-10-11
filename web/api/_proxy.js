@@ -31,7 +31,6 @@ const AUTH_ROUTE_RULES = [
   { methods: ['DELETE'], pattern: /^sessions\/[^/]+$/ },
   { methods: ['POST'], pattern: /^(admin\/users|admin\/provision-accounts|admin\/distribute-credentials|admin\/yclients-credentials|admin\/yclients-credentials\/test)$/ },
   { methods: ['PATCH', 'DELETE'], pattern: /^admin\/users\/[^/]+$/ },
-  { methods: ['PATCH', 'DELETE'], pattern: /^admin\/staff\/[^/]+$/ },
   { methods: ['POST'], pattern: /^admin\/staff\/[^/]+\/create-account$/ },
   { methods: ['PATCH', 'DELETE'], pattern: /^admin\/yclients-credentials\/[^/]+$/ },
   { methods: ['POST'], pattern: /^admin\/yclients-credentials\/[^/]+\/test$/ },

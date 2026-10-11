@@ -20,10 +20,6 @@
     }
   ],
   "rewrites": [
-    { "source": "/auth/admin/yclients-credentials", "destination": "/api/auth/admin/yclients-credentials" },
-    { "source": "/auth/admin/yclients-credentials/test", "destination": "/api/auth/admin/yclients-credentials/test" },
-    { "source": "/auth/admin/yclients-credentials/:credential_id", "destination": "/api/auth/admin/yclients-credentials/:credential_id" },
-    { "source": "/auth/admin/yclients-credentials/:credential_id/test", "destination": "/api/auth/admin/yclients-credentials/:credential_id/test" },
     { "source": "/auth/:path*", "destination": "/api/auth-proxy?path=:path*" },
     { "source": "/api/auth/:path*", "destination": "/api/auth-proxy?path=:path*" },
     { "source": "/dashboard/payments/:path*", "destination": "/api/auth-proxy?scope=dashboard&path=payments/:path*" },

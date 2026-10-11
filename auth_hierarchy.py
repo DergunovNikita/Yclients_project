@@ -124,15 +124,6 @@ def can_manage_staff(
     return actor_role == PLATFORM_ADMIN_ROLE or staff_company_id in actor_branch_ids
 
 
-def assert_can_manage_staff(
-    actor_role: str,
-    actor_branch_ids: list[int],
-    staff_company_id: int,
-) -> None:
-    if not can_manage_staff(actor_role, actor_branch_ids, staff_company_id):
-        raise HTTPException(status_code=403, detail='Cannot manage this staff member')
-
-
 def validate_company_ids_for_role(
     actor_role: str,
     actor_branch_ids: list[int],

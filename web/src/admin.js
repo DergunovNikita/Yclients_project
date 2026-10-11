@@ -24,13 +24,11 @@ const errorEl = document.getElementById('error');
 const successEl = document.getElementById('success');
 const createErrorEl = document.getElementById('create-error');
 const editErrorEl = document.getElementById('edit-error');
-const editStaffErrorEl = document.getElementById('edit-staff-error');
 const createStaffAccountErrorEl = document.getElementById('create-staff-account-error');
 const tableBody = document.getElementById('users-body');
 const usersSearch = document.getElementById('users-search');
 const createModal = document.getElementById('create-user-modal');
 const editModal = document.getElementById('edit-user-modal');
-const editStaffModal = document.getElementById('edit-staff-modal');
 const createStaffAccountModal = document.getElementById('create-staff-account-modal');
 const deleteConfirmModal = document.getElementById('delete-confirm-modal');
 const credentialsModal = document.getElementById('credentials-modal');
@@ -65,7 +63,6 @@ const cancelYclientsCredentialEditBtn = document.getElementById('cancel-yclients
 const saveYclientsCredentialBtn = document.getElementById('save-yclients-credential');
 const createForm = document.getElementById('create-user-form');
 const editForm = document.getElementById('edit-user-form');
-const editStaffForm = document.getElementById('edit-staff-form');
 const createStaffAccountForm = document.getElementById('create-staff-account-form');
 const createEmail = document.getElementById('create-email');
 const createPassword = document.getElementById('create-password');
@@ -77,15 +74,11 @@ const editEmail = document.getElementById('edit-email');
 const editName = document.getElementById('edit-name');
 const editRoleSelect = document.getElementById('edit-role-select');
 const editBranchSelect = document.getElementById('edit-branch-select');
-const editStaffName = document.getElementById('edit-staff-name');
-const editStaffPosition = document.getElementById('edit-staff-position');
-const editStaffBranchSelect = document.getElementById('edit-staff-branch-select');
 const createStaffAccountName = document.getElementById('create-staff-account-name');
 const createStaffAccountEmail = document.getElementById('create-staff-account-email');
 const createStaffAccountRoleSelect = document.getElementById('create-staff-account-role');
 const createStaffAccountBranchSelect = document.getElementById('create-staff-account-branches');
 const saveBtn = document.getElementById('save-user');
-const saveStaffBtn = document.getElementById('save-staff');
 const adminRoleLabel = document.getElementById('admin-role-label');
 const openCreateUserBtn = document.getElementById('open-create-user');
 const tenantSwitcherSection = document.getElementById('tenant-switcher-section');
@@ -96,7 +89,6 @@ const createRoleDropdown = enhanceSelect(createRoleSelect, { placeholder: t('adm
 const createBranchDropdown = enhanceSelect(createBranchSelect, { placeholder: t('admin.selectBranches') });
 const editRoleDropdown = enhanceSelect(editRoleSelect, { placeholder: t('admin.selectRole') });
 const editBranchDropdown = enhanceSelect(editBranchSelect, { placeholder: t('admin.selectBranches') });
-const editStaffBranchDropdown = enhanceSelect(editStaffBranchSelect, { placeholder: t('admin.selectBranch') });
 const createStaffAccountRoleDropdown = enhanceSelect(createStaffAccountRoleSelect, { placeholder: t('admin.selectRole') });
 const createStaffAccountBranchDropdown = enhanceSelect(createStaffAccountBranchSelect, { placeholder: t('admin.selectBranches') });
 const yclientsCredentialBranchDropdown = enhanceSelect(yclientsCredentialBranchSelect, { placeholder: t('admin.selectBranches') });
@@ -118,7 +110,6 @@ let adminMeta = null;
 let currentUserId = null;
 let currentUserRole = null;
 let editingUserId = null;
-let editingStaffId = null;
 let pendingStaffAccountId = null;
 let pendingDelete = null;
 let initialPasswords = [];
@@ -357,23 +348,6 @@ function closeEditModal() {
   hideFieldError(editErrorEl);
 }
 
-function openEditStaffModal(staff) {
-  if (!staff?.manageable || staff.is_portal_user) return;
-  editingStaffId = staff.staff_id;
-  hideFieldError(editStaffErrorEl);
-  editStaffName.value = staff.full_name || '';
-  editStaffPosition.value = staff.position || '';
-  renderBranchOptions(editStaffBranchSelect, editStaffBranchDropdown, staff.company_ids || [], false);
-  modals.open(editStaffModal);
-  editStaffName.focus();
-}
-
-function closeEditStaffModal() {
-  modals.close(editStaffModal);
-  editingStaffId = null;
-  hideFieldError(editStaffErrorEl);
-}
-
 function openCreateStaffAccountModal(staff) {
   if (!staff?.manageable || staff.is_portal_user) return;
   pendingStaffAccountId = staff.staff_id;
@@ -395,15 +369,11 @@ function closeCreateStaffAccountModal() {
   hideFieldError(createStaffAccountErrorEl);
 }
 
-function openDeleteConfirm({ type, id, label, subjectType }) {
-  pendingDelete = { type, id };
+function openDeleteConfirm({ id, label }) {
+  pendingDelete = { id };
   const safeLabel = escapeHtml(label);
-  const lead =
-    subjectType === 'staff'
-      ? t('admin.deleteStaffLead')
-      : t('admin.deleteUserLead');
   deleteConfirmMessage.innerHTML = `
-    <p class="admin-modal__confirm-text">${lead}<strong class="admin-modal__confirm-target">${safeLabel}</strong>?</p>
+    <p class="admin-modal__confirm-text">${t('admin.deleteUserLead')}<strong class="admin-modal__confirm-target">${safeLabel}</strong>?</p>
     <p class="admin-modal__confirm-warning">${t('admin.deleteIrreversible')}</p>
   `;
   modals.open(deleteConfirmModal);
@@ -516,7 +486,6 @@ const modals = createModalManager([
   { modal: credentialsModal, close: closeCredentialsModal },
   { modal: deleteConfirmModal, close: closeDeleteConfirm },
   { modal: createStaffAccountModal, close: closeCreateStaffAccountModal },
-  { modal: editStaffModal, close: closeEditStaffModal },
   { modal: editModal, close: closeEditModal },
   { modal: createModal, close: closeCreateModal },
 ], document.body);
@@ -574,10 +543,7 @@ function closeAllRowMenus() {
   return openMenus.length > 0;
 }
 
-function renderRowMenu({ editAttr, deleteAttr, createAccountAttr }) {
-  const createItem = createAccountAttr
-    ? `<button type="button" class="row-menu__item" role="menuitem" ${createAccountAttr}>${t('admin.createAccount')}</button>`
-    : '';
+function renderRowMenu(items) {
   return `<div class="row-menu" data-row-menu>
     <button
       type="button"
@@ -590,9 +556,7 @@ function renderRowMenu({ editAttr, deleteAttr, createAccountAttr }) {
       <span class="row-menu__dots" aria-hidden="true"></span>
     </button>
     <div class="row-menu__dropdown" role="menu" hidden>
-      ${createItem}
-      <button type="button" class="row-menu__item" role="menuitem" ${editAttr}>${t('admin.edit')}</button>
-      <button type="button" class="row-menu__item row-menu__item--danger" role="menuitem" ${deleteAttr}>${t('admin.delete')}</button>
+      ${items}
     </div>
   </div>`;
 }
@@ -626,16 +590,12 @@ function renderUsers() {
           let actions = '<span class="admin-table__muted">—</span>';
           if (user.manageable && canManageUsers()) {
             if (user.is_portal_user) {
-              actions = renderRowMenu({
-                editAttr: `data-edit-user="${escapeHtml(user.id)}"`,
-                deleteAttr: `data-delete-user="${escapeHtml(user.id)}"`,
-              });
+              actions = renderRowMenu(`
+      <button type="button" class="row-menu__item" role="menuitem" data-edit-user="${escapeHtml(user.id)}">${t('admin.edit')}</button>
+      <button type="button" class="row-menu__item row-menu__item--danger" role="menuitem" data-delete-user="${escapeHtml(user.id)}">${t('admin.delete')}</button>`);
             } else {
-              actions = renderRowMenu({
-                editAttr: `data-edit-staff="${escapeHtml(user.staff_id)}"`,
-                deleteAttr: `data-delete-staff="${escapeHtml(user.staff_id)}"`,
-                createAccountAttr: `data-create-account="${escapeHtml(user.staff_id)}"`,
-              });
+              actions = renderRowMenu(`
+      <button type="button" class="row-menu__item" role="menuitem" data-create-account="${escapeHtml(user.staff_id)}">${t('admin.createAccount')}</button>`);
             }
           }
           return `
@@ -971,53 +931,19 @@ async function deleteUser(userId) {
   }
 }
 
-async function deleteStaff(staffId) {
-  const selected = users.find((user) => user.staff_id === staffId);
-  if (!selected?.manageable) return;
-
-  hideAlerts();
-  try {
-    await authFetch(`/auth/admin/staff/${staffId}`, { method: 'DELETE' });
-    showSuccess(t('admin.staffDeleted', { name: selected.full_name }));
-    await loadUsers();
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
 function requestDeleteUser(userId) {
   const selected = users.find((user) => user.id === userId);
   if (!selected?.manageable) return;
-  openDeleteConfirm({
-    type: 'user',
-    id: userId,
-    label: selected.email,
-    subjectType: 'user',
-  });
-}
-
-function requestDeleteStaff(staffId) {
-  const selected = users.find((user) => user.staff_id === staffId);
-  if (!selected?.manageable) return;
-  openDeleteConfirm({
-    type: 'staff',
-    id: staffId,
-    label: selected.full_name || `ID ${staffId}`,
-    subjectType: 'staff',
-  });
+  openDeleteConfirm({ id: userId, label: selected.email });
 }
 
 async function confirmPendingDelete() {
   if (!pendingDelete) return;
-  const { type, id } = pendingDelete;
+  const { id } = pendingDelete;
   closeDeleteConfirm();
   confirmDeleteBtn.disabled = true;
   try {
-    if (type === 'user') {
-      await deleteUser(id);
-    } else {
-      await deleteStaff(id);
-    }
+    await deleteUser(id);
   } finally {
     confirmDeleteBtn.disabled = false;
   }
@@ -1039,20 +965,12 @@ tableBody.addEventListener('click', async (event) => {
   }
 
   const editBtn = event.target.closest('[data-edit-user]');
-  const editStaffBtn = event.target.closest('[data-edit-staff]');
   const createAccountBtn = event.target.closest('[data-create-account]');
   const deleteBtn = event.target.closest('[data-delete-user]');
-  const deleteStaffBtn = event.target.closest('[data-delete-staff]');
   if (editBtn) {
     closeAllRowMenus();
     const user = users.find((item) => item.id === Number(editBtn.dataset.editUser));
     openEditModal(user);
-    return;
-  }
-  if (editStaffBtn) {
-    closeAllRowMenus();
-    const staff = users.find((item) => item.staff_id === Number(editStaffBtn.dataset.editStaff));
-    openEditStaffModal(staff);
     return;
   }
   if (createAccountBtn) {
@@ -1071,40 +989,12 @@ tableBody.addEventListener('click', async (event) => {
   if (deleteBtn) {
     closeAllRowMenus();
     requestDeleteUser(Number(deleteBtn.dataset.deleteUser));
-    return;
-  }
-  if (deleteStaffBtn) {
-    closeAllRowMenus();
-    requestDeleteStaff(Number(deleteStaffBtn.dataset.deleteStaff));
   }
 });
 
 document.addEventListener('click', (event) => {
   if (!event.target.closest('.row-menu')) {
     closeAllRowMenus();
-  }
-});
-
-editStaffForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  if (!editingStaffId) return;
-  hideFieldError(editStaffErrorEl);
-  try {
-    await withBusyButton(saveStaffBtn, async () => {
-      await authFetch(`/auth/admin/staff/${editingStaffId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          full_name: editStaffName.value.trim(),
-          position: editStaffPosition.value.trim() || null,
-          company_id: Number(editStaffBranchSelect.value),
-        }),
-      });
-      closeEditStaffModal();
-      showSuccess(t('admin.changesSaved'));
-      await loadUsers();
-    });
-  } catch (error) {
-    showFieldError(editStaffErrorEl, error.message);
   }
 });
 
@@ -1304,8 +1194,6 @@ credentialsModal.querySelector('[data-close-modal="credentials"]')?.addEventList
 document.getElementById('cancel-create-user').addEventListener('click', closeCreateModal);
 document.getElementById('close-edit-user').addEventListener('click', closeEditModal);
 document.getElementById('cancel-edit-user').addEventListener('click', closeEditModal);
-document.getElementById('close-edit-staff').addEventListener('click', closeEditStaffModal);
-document.getElementById('cancel-edit-staff').addEventListener('click', closeEditStaffModal);
 document.getElementById('close-create-staff-account').addEventListener('click', closeCreateStaffAccountModal);
 document.getElementById('cancel-create-staff-account').addEventListener('click', closeCreateStaffAccountModal);
 document.getElementById('close-delete-confirm').addEventListener('click', closeDeleteConfirm);
@@ -1315,7 +1203,6 @@ deleteConfirmModal.querySelector('[data-close-modal="delete"]').addEventListener
 
 createModal.querySelector('[data-close-modal="create"]').addEventListener('click', closeCreateModal);
 editModal.querySelector('[data-close-modal="edit"]').addEventListener('click', closeEditModal);
-editStaffModal.querySelector('[data-close-modal="edit-staff"]').addEventListener('click', closeEditStaffModal);
 createStaffAccountModal.querySelector('[data-close-modal="create-staff-account"]').addEventListener('click', closeCreateStaffAccountModal);
 
 document.addEventListener('keydown', (event) => {
@@ -1325,7 +1212,7 @@ document.addEventListener('keydown', (event) => {
 });
 
 document.getElementById('back-profile').addEventListener('click', () => {
-  window.location.href = '/profile.html';
+  window.location.href = '/settings.html';
 });
 
 async function init() {
@@ -1335,7 +1222,7 @@ async function init() {
     currentUserId = me.data.id;
     currentUserRole = me.data.role;
     if (!ADMIN_ROLES.has(me.data.role)) {
-      window.location.href = '/profile.html';
+      window.location.href = '/settings.html';
       return;
     }
     await loadAdminMeta();

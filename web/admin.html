@@ -218,26 +218,6 @@
     </div>
   </div>
 
-  <div class="admin-modal" id="edit-staff-modal" hidden>
-    <div class="admin-modal__backdrop" data-close-modal="edit-staff"></div>
-    <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="edit-staff-title">
-      <header class="admin-modal__header">
-        <h2 id="edit-staff-title" data-i18n="admin.editStaffTitle">Modifica operatore</h2>
-        <button type="button" class="admin-modal__close" id="close-edit-staff" data-i18n-attr="aria-label:common.close" aria-label="Chiudi">×</button>
-      </header>
-      <div class="alert error" id="edit-staff-error" hidden></div>
-      <form class="admin-toolbar admin-toolbar--create" id="edit-staff-form">
-        <label><span data-i18n="admin.name">Nome</span><input type="text" id="edit-staff-name" required autocomplete="off" placeholder="Mario Rossi" data-i18n-attr="placeholder:admin.namePlaceholder" /></label>
-        <label><span data-i18n="admin.position">Ruolo/posizione</span><input type="text" id="edit-staff-position" autocomplete="off" placeholder="Parrucchiere" data-i18n-attr="placeholder:admin.positionPlaceholder" /></label>
-        <label><span data-i18n="admin.branch">Filiale</span><select id="edit-staff-branch-select"></select></label>
-        <div class="admin-modal__actions">
-          <button type="button" class="btn btn--ghost" id="cancel-edit-staff" data-i18n="common.cancel">Annulla</button>
-          <button type="submit" class="btn btn--primary" id="save-staff" data-i18n="admin.save">Salva</button>
-        </div>
-      </form>
-    </div>
-  </div>
-
   <div class="admin-modal" id="create-staff-account-modal" hidden>
     <div class="admin-modal__backdrop" data-close-modal="create-staff-account"></div>
     <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="create-staff-account-title">

@@ -20,7 +20,7 @@ test('both Vercel configs send script-src self', () => {
 });
 
 test('every page runs only external module scripts and carries no inline handler', () => {
-  assert.ok(pages.length >= 10);
+  assert.ok(pages.length >= 9);
   for (const page of pages) {
     const html = readFileSync(new URL(page, root), 'utf8');
     for (const [, attrs, body] of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)) {

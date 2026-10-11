@@ -5,7 +5,6 @@ import test from 'node:test';
 
 import rootProxyHandler, { buildTargetUrl as buildRootProxyTarget } from '../../api/[...path].js';
 import * as rootProxy from '../../api/_proxy.js';
-import credentialByIdHandler from '../api/auth/admin/yclients-credentials/[credential_id].js';
 import { buildTargetUrl as buildAuthProxyTarget } from '../api/auth-proxy.js';
 import webProxyHandler, { buildTargetUrl as buildWebProxyTarget } from '../api/[...path].js';
 import * as webProxy from '../api/_proxy.js';
@@ -451,6 +450,14 @@ test('auth proxy allows only expected paths and methods', () => {
     const aliasBlocked = buildAuthProxyTarget(requestStub('GET', {}, '/api/auth-proxy?path=admin/portal-accounts'));
     assert.equal(aliasBlocked.ok, false);
     assert.equal(aliasBlocked.statusCode, 404);
+
+    // Synced staff rows are read-only in the portal: only account creation is proxied.
+    assert.equal(buildAuthProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=admin/staff/7/create-account')).ok, true);
+    for (const method of ['PATCH', 'DELETE']) {
+      const staffBlocked = buildAuthProxyTarget(requestStub(method, {}, '/api/auth-proxy?path=admin/staff/7'));
+      assert.equal(staffBlocked.ok, false, method);
+      assert.equal(staffBlocked.statusCode, 404, method);
+    }
   } finally {
     if (originalOrigin === undefined) {
       delete process.env.VM_API_ORIGIN;
@@ -613,33 +620,36 @@ test('catch-all proxy handler delegates service mutations to the shared target',
   }
 });
 
-test('direct admin credential handlers delegate through the proxy allowlist', async () => {
+test('every admin credential path goes through the generic auth rewrite and the allowlist', async () => {
   const originalOrigin = process.env.VM_API_ORIGIN;
-  const originalFetch = globalThis.fetch;
   process.env.VM_API_ORIGIN = 'https://vm.example.test';
-  let fetchCalled = false;
-
-  globalThis.fetch = async () => {
-    fetchCalled = true;
-    return {
-      status: 200,
-      headers: upstreamHeaders([]),
-      async arrayBuffer() {
-        return new TextEncoder().encode('{}').buffer;
-      },
-    };
-  };
-
   try {
-    const res = new ResponseRecorder();
-    await credentialByIdHandler(requestStub('POST', {}, '/auth/admin/yclients-credentials/123'), res);
+    for (const vercelConfig of ['../../vercel.json', '../vercel.json']) {
+      const { rewrites } = JSON.parse(await readFile(new URL(vercelConfig, import.meta.url), 'utf8'));
+      // No dedicated function: a leftover specific rewrite would point at a file that no longer exists.
+      assert.deepEqual(
+        rewrites.filter((rule) => rule.source.includes('yclients-credentials')),
+        [],
+        `${vercelConfig} still rewrites credential paths to a dedicated function`,
+      );
+    }
 
-    assert.equal(fetchCalled, false);
-    assert.equal(res.statusCode, 405);
-    assert.equal(res.headers.get('allow'), 'DELETE, PATCH');
-    assert.equal(Buffer.from(res.body).toString('utf8'), '{"error":"Method not allowed","detail":"Method not allowed"}');
+    const cases = [
+      ['GET', 'admin/yclients-credentials'],
+      ['POST', 'admin/yclients-credentials'],
+      ['POST', 'admin/yclients-credentials/test'],
+      ['PATCH', 'admin/yclients-credentials/12'],
+      ['DELETE', 'admin/yclients-credentials/12'],
+      ['POST', 'admin/yclients-credentials/12/test'],
+    ];
+    for (const [method, path] of cases) {
+      const target = buildAuthProxyTarget(requestStub(method, {}, `/api/auth-proxy?path=${path}`));
+      assert.equal(target.ok, true, `${method} ${path}`);
+      assert.equal(target.target.href, `https://vm.example.test/dashboard/auth/${path}`);
+    }
+    const wrongMethod = buildAuthProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=admin/yclients-credentials/12'));
+    assert.equal(wrongMethod.statusCode, 405);
   } finally {
-    globalThis.fetch = originalFetch;
     if (originalOrigin === undefined) {
       delete process.env.VM_API_ORIGIN;
     } else {
@@ -655,10 +665,6 @@ test('root and web proxy files stay synchronized', async () => {
     '[...path].js',
     'auth/[...path].js',
     'dashboard/[...path].js',
-    'auth/admin/yclients-credentials.js',
-    'auth/admin/yclients-credentials/test.js',
-    'auth/admin/yclients-credentials/[credential_id].js',
-    'auth/admin/yclients-credentials/[credential_id]/test.js',
   ];
 
   for (const file of syncedFiles) {
@@ -852,8 +858,6 @@ test('both vercel.json files agree, and the auth proxy outlasts a YClients crede
   assert.ok(root.functions['api/auth-proxy.js'].maxDuration >= 60);
   // The proxy aborts its own upstream call at PROXY_TIMEOUT_MS (160 s) and must still have time to
   // answer; a shorter function limit turns every slow call into a bare Vercel timeout.
-  // The direct credential functions (api/auth/admin/yclients-credentials/**) run the same slow
-  // YClients login check.
   for (const fn of ['api/auth-proxy.js', 'api/auth/**/*.js', 'api/dashboard/**/*.js']) {
     assert.ok(root.functions[fn].maxDuration > 160, `${fn} maxDuration must exceed the 160 s proxy timeout`);
   }
