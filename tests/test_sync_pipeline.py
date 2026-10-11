@@ -2006,7 +2006,7 @@ def test_sync_staff_schedules_uses_internal_staff_id_for_tenant_scoped_staff():
         engine.dispose()
 
 
-def test_sync_staff_schedules_deduplicates_slots_and_clears_empty_window():
+def test_sync_staff_schedules_deduplicates_slots_and_keeps_past_days_on_empty_answer():
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(
         engine,
@@ -2050,7 +2050,7 @@ def test_sync_staff_schedules_deduplicates_slots_and_clears_empty_window():
             start_date='2025-01-01',
             end_date='2025-01-31',
         ) is True
-        assert db.query(StaffSchedule).count() == 0
+        assert db.query(StaffSchedule).count() == 1
         coverage = db.get(
             SyncSourceState,
             {'company_id': 1, 'source': sync_pipeline.STAFF_SCHEDULE_SOURCE},
@@ -2059,6 +2059,53 @@ def test_sync_staff_schedules_deduplicates_slots_and_clears_empty_window():
             date(2025, 1, 1),
             date(2025, 1, 31),
         )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_sync_staff_schedules_empty_answer_clears_only_days_from_branch_today():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            Group.__table__,
+            Company.__table__,
+            Staff.__table__,
+            StaffSchedule.__table__,
+            SyncSourceState.__table__,
+        ],
+    )
+    db = sessionmaker(bind=engine)()
+    try:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add(Staff(id=100, external_id=7, source_type='yclients', name='Admin', company_id=1))
+        db.commit()
+        today = sync_pipeline._branch_today(db, 1)
+        days = [today - timedelta(days=3), today, today + timedelta(days=2)]
+        for day in days:
+            db.add(StaffSchedule(staff_id=100, date=day, slot_from=time(9), slot_to=time(18), company_id=1))
+        db.commit()
+
+        assert sync_pipeline.sync_staff_schedules(
+            FakeSchedulesAPI([]),
+            db,
+            '1',
+            start_date=(today - timedelta(days=5)).isoformat(),
+            end_date=(today + timedelta(days=5)).isoformat(),
+        ) is True
+        assert [row.date for row in db.query(StaffSchedule).order_by(StaffSchedule.date)] == days[:1]
+
+        assert sync_pipeline.sync_staff_schedules(
+            FakeSchedulesAPI([{'staff_id': 7, 'date': today.isoformat(), 'slots': []}]),
+            db,
+            '1',
+            start_date=(today - timedelta(days=5)).isoformat(),
+            end_date=(today + timedelta(days=5)).isoformat(),
+        ) is True
+        # A non-empty answer is an authoritative statement about the whole window.
+        assert db.query(StaffSchedule).count() == 0
     finally:
         db.close()
         engine.dispose()

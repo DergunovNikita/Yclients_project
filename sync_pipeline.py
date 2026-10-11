@@ -2057,6 +2057,11 @@ def sync_comments(api: YClientsAPI, db, company_id: str,
 # 20. Графики работы сотрудников
 # ===================================================================
 
+def _branch_today(db, company_id: int) -> date:
+    timezone = _company_timezone({}, getattr(db.get(Company, company_id), 'timezone', None))
+    return datetime.now(ZoneInfo(timezone)).date()
+
+
 def sync_staff_schedules(api: YClientsAPI, db, company_id: str,
                          start_date: str = None, end_date: str = None,
                          db_company_id: int | None = None):
@@ -2129,9 +2134,15 @@ def sync_staff_schedules(api: YClientsAPI, db, company_id: str,
         if skipped_entries:
             print(f"  Пропущено записей за день до окна: {skipped_entries}")
 
+        delete_from = parsed_start
+        if not schedules:
+            # An empty answer is indistinguishable from a blip, and past shifts feed the administrator KPIs and
+            # cannot be re-read. Only days that the next run reads again may be cleared by it.
+            branch_today = _branch_today(db, cid)
+            delete_from = branch_today if delete_from is None else max(delete_from, branch_today)
         delete_query = db.query(StaffSchedule).filter(StaffSchedule.company_id == cid)
-        if parsed_start is not None:
-            delete_query = delete_query.filter(StaffSchedule.date >= parsed_start)
+        if delete_from is not None:
+            delete_query = delete_query.filter(StaffSchedule.date >= delete_from)
         if parsed_end is not None:
             delete_query = delete_query.filter(StaffSchedule.date <= parsed_end)
         deleted_slots = delete_query.delete(synchronize_session=False)
