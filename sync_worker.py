@@ -138,6 +138,11 @@ def process_next_job(database: Database | None = None) -> bool:
     db = database.get_db()
     jobs = SyncJobService()
     try:
+        # Claiming only to hand the job back would flip it queued <-> running every poll tick for as long as another
+        # sync holds the lock. run_sync_job's lock stays the authority; this is a cheap pre-check (a stale
+        # 'running' row only delays the claim until the idle branch's reaper closes it).
+        if SyncControlService().get_running_run(db) is not None:
+            return False
         job = jobs.claim_next_job(db)
         if job is None:
             return False
