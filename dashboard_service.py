@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import Date as SQLDate
 from sqlalchemy import DateTime as SQLDateTime
 from sqlalchemy import (
+    Boolean,
     String,
     Time as SQLTime,
     and_,
@@ -992,16 +993,44 @@ def _goods_revenue_filters(
     return and_(*parts)
 
 
+class _TitleContains(FunctionElement):
+    """`text` contains the lower-case `marker`, whatever the case of the Cyrillic letters.
+
+    PostgreSQL folds case itself (`ILIKE`), SQLite's `LIKE` only does for ASCII, so there the
+    lower-case, Capitalized and UPPER spellings are spelled out. Compiled per dialect; the
+    markers are module constants, which is why they are rendered into the SQL text.
+    """
+
+    type = Boolean()
+    inherit_cache = True
+    name = 'title_contains'
+    _traverse_internals = FunctionElement._traverse_internals + [('marker', InternalTraversal.dp_string)]
+
+    def __init__(self, text, marker: str):
+        self.marker = marker
+        super().__init__(text)
+
+
+def _render_pattern(compiler, text: str) -> str:
+    return compiler.render_literal_value(f'%{text}%', String())
+
+
+@compiles(_TitleContains)
+def _compile_title_contains(element, compiler, **kw):
+    (text,) = element.clauses
+    return f'({compiler.process(text, **kw)} ILIKE {_render_pattern(compiler, element.marker)})'
+
+
+@compiles(_TitleContains, 'sqlite')
+def _compile_title_contains_sqlite(element, compiler, **kw):
+    (text,) = element.clauses
+    column = compiler.process(text, **kw)
+    spellings = (element.marker, element.marker.capitalize(), element.marker.upper())
+    return '(' + ' OR '.join(f'{column} LIKE {_render_pattern(compiler, spelling)}' for spelling in spellings) + ')'
+
+
 def _title_contains_marker(column):
-    """Cyrillic-safe substring match: SQLite's lower() only folds ASCII."""
-    title = func.coalesce(column, '')
-    return or_(*[
-        or_(
-            title.like(f'%{marker}%'),
-            title.like(f'%{marker.capitalize()}%'),
-        )
-        for marker in NON_COSMETICS_GOODS_MARKERS
-    ])
+    return or_(*[_TitleContains(func.coalesce(column, ''), marker) for marker in NON_COSMETICS_GOODS_MARKERS])
 
 
 def cosmetics_goods_clause():
@@ -1134,27 +1163,14 @@ async def _goods_sold_count(
 
 def _physical_account_condition():
     title = func.coalesce(AccountCatalog.title, '')
-    excluded = [
-        or_(
-            title.like(f'%{marker}%'),
-            title.like(f'%{marker.capitalize()}%'),
-        )
-        for marker in NON_CASH_ACCOUNT_MARKERS
-    ]
-    return and_(*[~condition for condition in excluded])
+    return and_(*[~_TitleContains(title, marker) for marker in NON_CASH_ACCOUNT_MARKERS])
 
 
 def _personal_account_condition():
     expense_title = func.coalesce(FinancialTransaction.expense_title, '')
     return or_(
         func.coalesce(FinancialTransaction.sold_item_type, '').in_(PERSONAL_ACCOUNT_TYPES),
-        *[
-            or_(
-                expense_title.like(f'%{marker}%'),
-                expense_title.like(f'%{marker.capitalize()}%'),
-            )
-            for marker in PERSONAL_ACCOUNT_EXPENSE_MARKERS
-        ],
+        *[_TitleContains(expense_title, marker) for marker in PERSONAL_ACCOUNT_EXPENSE_MARKERS],
     )
 
 

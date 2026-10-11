@@ -12,6 +12,7 @@ import dashboard_service
 from api import app
 from auth_scope import AccessContext
 from models import (
+    AccountCatalog,
     Appointment,
     Company,
     FinancialTransaction,
@@ -301,3 +302,45 @@ async def test_first_concurrent_metric_visibility_save_answers_409_and_the_retry
     assert retried.status_code == 200
     rows = (await async_session.execute(select(PortalMetricVisibility))).scalars().all()
     assert [(row.role, row.visible_codes) for row in rows] == [('manager', ['avg_check'])]
+
+
+@pytest.mark.asyncio
+async def test_account_and_expense_markers_ignore_the_case_of_cyrillic_titles(async_session):
+    from test_dashboard_service_w3 import NOW
+
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1, fired=0),
+        AccountCatalog(company_id=1, account_id=1, title='Основная касса', updated_at=datetime(2025, 1, 1)),
+        AccountCatalog(company_id=1, account_id=2, title='БОНУСНЫЙ СЧЕТ', updated_at=datetime(2025, 1, 1)),
+        AccountCatalog(company_id=1, account_id=3, title='Подарочный Сертификат', updated_at=datetime(2025, 1, 1)),
+    ])
+    await async_session.flush()
+    rows = (
+        # id, account, sold_item_type, expense_title, amount
+        (1, 1, 'goods_transaction', None, 100.0),
+        (2, 2, 'goods_transaction', None, 1000.0),
+        (3, 3, 'goods_transaction', None, 2000.0),
+        (4, 1, 'account_expense', 'ПОПОЛНЕНИЕ СЧЕТА', 10.0),
+        (5, 1, 'account_expense', 'Личный депозит', 20.0),
+        (6, 1, 'account_expense', 'Аренда', 400.0),
+    )
+    async_session.add_all(
+        FinancialTransaction(
+            id=row_id, company_id=1, account_id=account, sold_item_type=item_type, expense_title=expense,
+            master_id=1, date=datetime(2025, 1, 10, 12, 0), amount=amount,
+        )
+        for row_id, account, item_type, expense, amount in rows
+    )
+    await async_session.commit()
+
+    block = await dashboard_service._average_check_block(
+        async_session, dashboard_service.DateRange(date(2025, 1, 1), date(2025, 1, 31)), 1,
+        company_ids=[1], factual_at=NOW,
+    )
+
+    # Bonus and certificate accounts are not cash whatever their capitalisation; the two top-ups are
+    # recognised from their expense titles, the rent is neither goods nor a top-up.
+    assert block['goods_revenue'] == 100.0
+    assert block['topup_revenue'] == 30.0
