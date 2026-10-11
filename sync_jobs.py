@@ -8,7 +8,7 @@ from sqlalchemy import func, select, text
 from config import SYNC_JOB_RETENTION_DAYS, SYNC_JOB_RETENTION_INTERVAL_HOURS
 from models import SyncJob, SyncJobEvent
 from sync_control import SyncControlService
-from sync_parsing import parse_datetime, serialize_dt
+from sync_parsing import serialize_dt
 
 # A job in one of these is still the queue's business: claim_next_job may pick it up and
 # get_active_job reports it as the current one. Retention must never delete such a row, so the
@@ -222,16 +222,13 @@ class SyncJobService:
         (a few seconds) -- without this check the retention query would run far more often than
         the cheap, infrequent maintenance task it is meant to be. Returns None when skipped.
         """
-        now = now or datetime.now()
-        control = SyncControlService()
-        last_at = parse_datetime(control.get_state_values(db, [_RETENTION_STATE_KEY]).get(_RETENTION_STATE_KEY))
-        if last_at is not None and now - last_at < timedelta(hours=interval_hours):
-            return None
-        # Recorded (and committed) before the delete, not after — see the matching comment in
-        # SyncControlService.purge_old_runs_if_due. A deterministically failing sweep must back
-        # off to the normal interval instead of retrying a bulk DELETE on every poll tick.
-        control.set_state(db, _RETENTION_STATE_KEY, now)
-        return self.purge_old_jobs(db, retention_days=retention_days, now=now)
+        return SyncControlService().run_if_due(
+            db,
+            _RETENTION_STATE_KEY,
+            interval_hours,
+            now,
+            lambda moment: self.purge_old_jobs(db, retention_days=retention_days, now=moment),
+        )
 
     def _scoped_query(self, query, portal_account_id: int | None = None):
         if portal_account_id is not None:

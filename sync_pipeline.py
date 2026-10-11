@@ -34,6 +34,7 @@ from models import (
     Comment, StaffSchedule,
     SyncState, SyncSourceState, YClientsCredential,
 )
+from sync_control import SyncControlService
 from sync_parsing import (
     parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_int,
     parse_reference_id, parse_time,
@@ -296,16 +297,6 @@ def print_sync_summary(results):
 def get_sync_state_value(db, key: str):
     state = db.get(SyncState, key)
     return state.value if state else None
-
-
-def set_sync_state_value(db, key: str, value: str):
-    state = db.get(SyncState, key)
-    if not state:
-        state = SyncState(key=key)
-        db.add(state)
-    state.value = value
-    state.updated_at = datetime.now()
-    db.commit()
 
 
 def transactional_state_key(company_id: int) -> str:
@@ -2507,7 +2498,7 @@ def execute_sync(
                     # failing must not cost the branch a full history pass tomorrow, now
                     # that the nightly job is a narrow window rather than that pass.
                     if has_complete_historical_source_coverage(db, company.id, end):
-                        set_sync_state_value(
+                        SyncControlService().set_state(
                             db,
                             historical_coverage_state_key(company.id),
                             ed,
@@ -2518,7 +2509,7 @@ def execute_sync(
                             f"инкрементальный режим не включен [{company_label}]"
                         )
                 if steps_successful(company_step_results, checkpoint_step_names):
-                    set_sync_state_value(db, transactional_state_key(company.id), ed)
+                    SyncControlService().set_state(db, transactional_state_key(company.id), ed)
                     print(f"✓ Обновлено состояние инкрементальной синхронизации [{company_label}]: {ed}")
                 else:
                     print(f"! Состояние инкрементальной синхронизации не обновлено [{company_label}]")

@@ -20,7 +20,9 @@ from pathlib import Path
 
 LOG_DIR = Path(os.environ.get('SYNC_LOG_DIR', 'logs'))
 
-STEP_RE = re.compile(r'^\s*\[(OK|WARN|ERR|ERROR|FAIL)\]\s+(.*?)\s+(\d[\d.: ]*(?:ч|мин|сек|s|m|ms)[\d\s ч мин сек]*)\s*$')
+STEP_RE = re.compile(
+    r'^\s*\[(OK|WARN|ERR|ERROR|FAIL)\]\s+(.*?)\s+(\d[\d.: ]*(?:ч|мин|сек|s|m|ms)[\d\s ч мин сек]*)\s*$'
+)
 BRANCH_RE = re.compile(r'^Филиал:\s+(?P<name>.+?)\s*$')
 ERROR_MARKERS = ('✗', 'Ошибк', 'Traceback', 'ERROR', 'ERR ', '[ERR]', '[FAIL]')
 # The pipeline prints [WARN] for a step that returned False (often benign, e.g. an empty catalog) and

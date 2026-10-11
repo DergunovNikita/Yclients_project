@@ -145,16 +145,13 @@ class SyncControlService:
         (a few seconds) — without this check the retention query would run far more often than
         the cheap, infrequent maintenance task it is meant to be. Returns None when skipped.
         """
-        now = now or datetime.now()
-        last_at = parse_datetime(self.get_state_values(db, [_RETENTION_STATE_KEY]).get(_RETENTION_STATE_KEY))
-        if last_at is not None and now - last_at < timedelta(hours=interval_hours):
-            return None
-        # The attempt is recorded (and committed) before the delete, not after: a sweep that
-        # fails deterministically would otherwise never write the key and so retry its bulk
-        # DELETE on every poll tick — every few seconds, forever. Backing off to the normal
-        # interval is the right answer for best-effort maintenance; the caller logs the failure.
-        self.set_state(db, _RETENTION_STATE_KEY, now)
-        return self.purge_old_runs(db, retention_days=retention_days, now=now)
+        return self.run_if_due(
+            db,
+            _RETENTION_STATE_KEY,
+            interval_hours,
+            now,
+            lambda moment: self.purge_old_runs(db, retention_days=retention_days, now=moment),
+        )
 
     def purge_old_report_usage(
         self,
@@ -185,14 +182,28 @@ class SyncControlService:
     ) -> int | None:
         """Throttled purge_old_report_usage(), on the same schedule and with the same attempt-first throttle
         as purge_old_runs_if_due. Returns None when skipped."""
-        now = now or datetime.now()
-        last_at = parse_datetime(
-            self.get_state_values(db, [_REPORT_USAGE_RETENTION_STATE_KEY]).get(_REPORT_USAGE_RETENTION_STATE_KEY)
+        return self.run_if_due(
+            db,
+            _REPORT_USAGE_RETENTION_STATE_KEY,
+            interval_hours,
+            now,
+            lambda moment: self.purge_old_report_usage(db, retention_days=retention_days, now=moment),
         )
+
+    def run_if_due(self, db, state_key: str, interval_hours: int, now: datetime | None, sweep) -> Any | None:
+        """Run `sweep(now)` unless the state key says it ran less than interval_hours ago; None when skipped.
+
+        The attempt is recorded (and committed) before the sweep, not after: a sweep that fails
+        deterministically would otherwise never write the key and retry its bulk DELETE on every
+        poll tick, every few seconds, forever. Backing off to the normal interval is the right
+        answer for best-effort maintenance; the caller logs the failure.
+        """
+        now = now or datetime.now()
+        last_at = parse_datetime(self.get_state_values(db, [state_key]).get(state_key))
         if last_at is not None and now - last_at < timedelta(hours=interval_hours):
             return None
-        self.set_state(db, _REPORT_USAGE_RETENTION_STATE_KEY, now)
-        return self.purge_old_report_usage(db, retention_days=retention_days, now=now)
+        self.set_state(db, state_key, now)
+        return sweep(now)
 
     def create_run(self, db, mode: str, trigger_type: str, initiator: str, log_path: str) -> SyncRun:
         now = datetime.now()
