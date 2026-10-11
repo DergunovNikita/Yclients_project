@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from dashboard_service import fetch_plan_fact
 from report_payload import (
@@ -24,89 +23,55 @@ from report_payload import (
 )
 
 logger = logging.getLogger('yclients.reports')
-# What makes a leaderboard run worth retrying: the database (or its connection) failed, not the request or the code.
-INFRASTRUCTURE_ERRORS = (SQLAlchemyError, OSError)
+
+
+def _is_retryable(error: BaseException) -> bool:
+    """Whether trying again could help: the connection or the pool failed, not the statement.
+
+    A statement cancelled by `statement_timeout` reaches us as a plain `DBAPIError` (asyncpg's
+    `QueryCanceledError` is not an `OperationalError`) and would time out again on the same window,
+    so it, like a programming error, surfaces as a 500 instead of a "retry".
+    """
+    if isinstance(error, DBAPIError):
+        return error.connection_invalidated or isinstance(error, (OperationalError, InterfaceError))
+    return isinstance(error, (OSError, PoolTimeout))
 
 
 async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
-    return await _leaderboard_payload(
-        req.db, req.base, req.start, req.end, req.company_id, req.staff_id, req.allowed_company_ids, req.factual_at
-    )
-
-
-async def _leaderboard_payload(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-) -> dict[str, Any]:
+    base = req.base
+    start, end, company_id, staff_id = req.start, req.end, req.company_id, req.staff_id
     started_at = time.perf_counter()
     try:
-        return await _leaderboard_payload_impl(
-            db,
-            base,
-            start,
-            end,
-            company_id,
-            staff_id,
-            allowed_company_ids,
-            factual_at,
-        )
-    except (ReportCalculationError, *INFRASTRUCTURE_ERRORS) as error:
-        # Only a failing database is retryable; anything else is a defect (500) or a refused input (400).
-        logger.exception(
-            'staff_leaderboard failed stage=%s start=%s end=%s company_id=%s',
-            getattr(error, 'stage', 'payload'), start.isoformat(), end.isoformat(), company_id,
-        )
-        try:
-            await db.rollback()
-        except Exception as rollback_error:  # noqa: BLE001 - the original failure is what the caller needs
-            logger.warning('staff_leaderboard rollback failed: %s', type(rollback_error).__name__)
-        if isinstance(error, ReportCalculationError):
-            raise
-        raise ReportCalculationError('staff leaderboard calculation failed', stage='payload') from error
-    finally:
-        logger.info(
-            'staff_leaderboard finished start=%s end=%s company_id=%s duration_ms=%s',
-            start.isoformat(), end.isoformat(), company_id, round((time.perf_counter() - started_at) * 1000),
-        )
-
-
-async def _leaderboard_payload_impl(
-    db: AsyncSession,
-    base: dict[str, Any],
-    start: date,
-    end: date,
-    company_id: int | None,
-    staff_id: int | None,
-    allowed_company_ids: list[int] | None,
-    factual_at: datetime,
-) -> dict[str, Any]:
-    stage_started = time.perf_counter()
-    try:
         plan = await fetch_plan_fact(
-            db,
+            req.db,
             start,
             end,
             company_id,
             staff_id,
-            allowed_company_ids=allowed_company_ids,
-            force_allowed=allowed_company_ids is not None,
+            allowed_company_ids=req.allowed_company_ids,
+            force_allowed=req.allowed_company_ids is not None,
             for_ratings=True,
             # The boards read the branch row only when no staff is selected.
             include_branch_row=staff_id is None,
-            factual_at=factual_at,
+            factual_at=req.factual_at,
         )
-    except INFRASTRUCTURE_ERRORS as error:
+    except (SQLAlchemyError, OSError) as error:
+        if not _is_retryable(error):
+            raise
+        logger.exception(
+            'staff_leaderboard failed stage=plan_fact start=%s end=%s company_id=%s',
+            start.isoformat(), end.isoformat(), company_id,
+        )
+        try:
+            await req.db.rollback()
+        except Exception as rollback_error:  # noqa: BLE001 - the original failure is what the caller needs
+            logger.warning('staff_leaderboard rollback failed: %s', type(rollback_error).__name__)
         raise ReportCalculationError('staff leaderboard plan/fact failed', stage='plan_fact') from error
-    logger.info(
-        'staff_leaderboard plan_fact ready start=%s end=%s company_id=%s duration_ms=%s',
-        start.isoformat(), end.isoformat(), company_id, round((time.perf_counter() - stage_started) * 1000),
-    )
+    finally:
+        logger.info(
+            'staff_leaderboard plan_fact finished start=%s end=%s company_id=%s duration_ms=%s',
+            start.isoformat(), end.isoformat(), company_id, round((time.perf_counter() - started_at) * 1000),
+        )
     boards = plan.get('staff_leaderboards', {})
     partial_reasons = set(boards.get('_partial_reasons') or [])
     if partial_reasons:
