@@ -80,7 +80,7 @@ def test_a_cancelled_statement_is_a_json_500_not_a_hang(monkeypatch):
 
     api.app.dependency_overrides[api.get_async_db] = override_db
     try:
-        response = TestClient(api.app, raise_server_exceptions=False).get('/groups')
+        response = TestClient(api.app, raise_server_exceptions=False).get('/dashboard/branches')
     finally:
         api.app.dependency_overrides.clear()
 
