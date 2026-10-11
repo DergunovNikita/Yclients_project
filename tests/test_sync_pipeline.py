@@ -1145,10 +1145,7 @@ def test_sync_clients_scopes_external_id_by_internal_company():
 
 
 def test_sync_clients_survives_a_client_repeated_in_the_listing():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__, Client.__table__])
-    db = sessionmaker(bind=engine)()
-    try:
+    with sqlite_session_with_system([Group.__table__, Company.__table__, Client.__table__]) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon 1', group_id=1))
         db.commit()
@@ -1158,9 +1155,6 @@ def test_sync_clients_survives_a_client_repeated_in_the_listing():
 
         rows = {row.external_id: row.name for row in db.query(Client).all()}
         assert rows == {42: 'Second', 7: 'Other'}
-    finally:
-        db.close()
-        engine.dispose()
 
 
 class FakeGroupsAPI:
@@ -1172,10 +1166,7 @@ class FakeGroupsAPI:
 
 
 def test_sync_groups_and_companies_creates_adopts_and_keeps_titles():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(engine, tables=[Group.__table__, Company.__table__])
-    db = sessionmaker(bind=engine)()
-    try:
+    with sqlite_session_with_system([Group.__table__, Company.__table__]) as db:
         # A pre-tenant row (external_id IS NULL, id == YClients id) is adopted instead of duplicated.
         db.add(Group(id=10, title='Legacy group'))
         db.add(Company(id=500, title='Legacy salon', group_id=10))
@@ -1198,9 +1189,6 @@ def test_sync_groups_and_companies_creates_adopts_and_keeps_titles():
         assert [g.title for g in db.query(Group)] == ['Net']
         assert sorted(c.title for c in db.query(Company)) == ['New salon', 'Salon']
         assert db.query(Company).count() == 2
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_staff_scopes_external_id_by_internal_company():
@@ -1910,19 +1898,13 @@ def test_sync_staff_schedules_deduplicates_slots_and_keeps_past_days_on_empty_an
 
 
 def test_sync_staff_schedules_empty_answer_clears_only_days_from_branch_today():
-    engine = create_engine('sqlite:///:memory:')
-    Base.metadata.create_all(
-        engine,
-        tables=[
+    with sqlite_session_with_system([
             Group.__table__,
             Company.__table__,
             Staff.__table__,
             StaffSchedule.__table__,
             SyncSourceState.__table__,
-        ],
-    )
-    db = sessionmaker(bind=engine)()
-    try:
+        ]) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add(Staff(id=100, external_id=7, source_type='yclients', name='Admin', company_id=1))
@@ -1951,9 +1933,6 @@ def test_sync_staff_schedules_empty_answer_clears_only_days_from_branch_today():
         ) is True
         # A non-empty answer is an authoritative statement about the whole window.
         assert db.query(StaffSchedule).count() == 0
-    finally:
-        db.close()
-        engine.dispose()
 
 
 def test_sync_staff_schedules_preserves_data_when_source_is_unavailable():
