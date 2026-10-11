@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import pytest
 
 import sync_worker
-from models import SyncJob, SyncJobEvent, SyncRun, SyncState, SyncStepRun, YClientsCredential
+from models import SyncJob, SyncJobEvent, SyncRun, SyncState, YClientsCredential
 from sync_control import UNSCOPED_SUCCESS_STATE_KEY, SyncControlService
 from sync_jobs import SyncJobService
 from helpers import FakeConnection, FakeDatabase, FakeEngine, FakeSession
@@ -35,14 +35,13 @@ def test_status_payload_includes_last_successful_sync_at():
 def _retention_session():
     """One session for both retention sweeps.
 
-    Shared deliberately: each sweep owns one pair of tables (runs+step_runs,
+    Shared deliberately: each sweep owns its own tables (runs,
     jobs+job_events) and neither is the other's cascade, so the assertions that matter
-    most are the ones proving a sweep left the other pair alone. That needs all four
+    most are the ones proving a sweep left the other's tables alone. That needs all three
     present in the same session.
     """
     return _sqlite_session([
         SyncRun.__table__,
-        SyncStepRun.__table__,
         SyncJob.__table__,
         SyncJobEvent.__table__,
         SyncState.__table__,
@@ -61,20 +60,18 @@ def _run(run_id, status, started_at, finished_at=None):
     )
 
 
-def test_purge_old_runs_deletes_old_finished_runs_and_their_step_runs():
+def test_purge_old_runs_deletes_old_finished_runs():
     with _retention_session() as session:
         old = datetime(2026, 1, 1)
         recent = datetime(2026, 5, 25)
         session.add(_run(1, 'success', old, old))
         session.add(_run(2, 'success', recent, recent))
-        session.add(SyncStepRun(run_id=1, step_name='Клиенты', status='success', created_at=old))
         session.commit()
 
         deleted = SyncControlService().purge_old_runs(session, retention_days=30, now=datetime(2026, 6, 1))
 
         assert deleted == 1
         assert session.get(SyncRun, 1) is None
-        assert session.query(SyncStepRun).filter(SyncStepRun.run_id == 1).count() == 0
         assert session.get(SyncRun, 2) is not None
 
 
@@ -413,22 +410,22 @@ def test_only_an_unscoped_success_arms_the_auto_sync_gate(monkeypatch):
     gate_keys = ['last_successful_sync_at', UNSCOPED_SUCCESS_STATE_KEY]
 
     with _sqlite_session([
-        YClientsCredential.__table__, SyncJob.__table__, SyncRun.__table__, SyncState.__table__, SyncStepRun.__table__,
+        YClientsCredential.__table__, SyncJob.__table__, SyncRun.__table__, SyncState.__table__,
     ]) as session:
         session.add(_credential(7))
         scoped_run = control.create_run(session, 'incremental', 'queued', 'tenant', 'a.log')
-        control.finish_run(session, scoped_run, 'success', 'ok', [], scoped=True)
+        control.finish_run(session, scoped_run, 'success', 'ok', scoped=True)
         state = control.get_state_values(session, gate_keys)
         assert state['last_successful_sync_at'] is not None
         assert state[UNSCOPED_SUCCESS_STATE_KEY] is None
         assert sync_worker.enqueue_auto_sync_jobs_if_due(session)['enqueued'] == 1
 
         failed_run = control.create_run(session, 'incremental', 'cli', 'cli', 'b.log')
-        control.finish_run(session, failed_run, 'failed', 'boom', [])
+        control.finish_run(session, failed_run, 'failed', 'boom')
         assert control.get_state_values(session, gate_keys)[UNSCOPED_SUCCESS_STATE_KEY] is None
 
         unscoped_run = control.create_run(session, 'incremental', 'cli', 'cli', 'c.log')
-        control.finish_run(session, unscoped_run, 'success', 'ok', [])
+        control.finish_run(session, unscoped_run, 'success', 'ok')
         assert control.get_state_values(session, gate_keys)[UNSCOPED_SUCCESS_STATE_KEY] is not None
         assert sync_worker.enqueue_auto_sync_jobs_if_due(session)['reason'] == 'recent_global_sync'
 

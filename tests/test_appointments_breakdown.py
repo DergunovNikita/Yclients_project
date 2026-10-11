@@ -17,7 +17,6 @@ from models import (
     Company,
     FinancialTransaction,
     Group,
-    Service,
     Staff,
     Transaction,
 )
@@ -205,7 +204,6 @@ async def test_confirmed_appointment_is_not_counted_as_completed_visit(async_ses
     async_session.add(Group(id=1, title='G'))
     async_session.add(Company(id=1, title='One', group_id=1))
     async_session.add(Staff(id=1, name='Master', company_id=1, fired=0))
-    async_session.add(Service(id=10, title='Cut', company_id=1))
     await async_session.flush()
     async_session.add_all([
         Appointment(

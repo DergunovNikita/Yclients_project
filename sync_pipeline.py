@@ -1667,7 +1667,6 @@ def mark_sync_source_coverage(
             source=source,
             period_start=period_start,
             period_end=period_end,
-            synced_at=datetime.now(),
         )
         db.add(state)
     else:
@@ -1683,7 +1682,6 @@ def mark_sync_source_coverage(
             # falsely advertise it as complete; retain the newest interval.
             state.period_start = period_start
             state.period_end = period_end
-        state.synced_at = datetime.now()
 
 
 def _window_safe_to_purge(api, full_refresh: bool, source_label: str) -> bool:

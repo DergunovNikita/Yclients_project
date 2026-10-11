@@ -3325,7 +3325,6 @@ async def test_forbid_demo_blocks_writes_but_allows_reads(auth_db):
             '/sync/trigger',
             '/dashboard/plan/opz_fact',
             '/dashboard/payments/yandex_pay',
-            '/dashboard/services/kpi_groups',
             '/onboarding/credentials',
             '/auth/logout-all',
         ):
@@ -3336,7 +3335,7 @@ async def test_forbid_demo_blocks_writes_but_allows_reads(auth_db):
         batch = await client.patch(
             '/dashboard/services',
             headers=headers,
-            json={'row_changes': [], 'group_changes': []},
+            json={'row_changes': []},
         )
         assert batch.status_code == 403
         assert batch.json()['detail'] == 'Demo account is read-only'

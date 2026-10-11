@@ -182,13 +182,13 @@ def run_sync_job(
                 'message': finished_message,
                 'step_results': step_results,
             })
-        control.finish_run(control_db, run, finished_status, finished_message, step_results, scoped=scoped)
+        control.finish_run(control_db, run, finished_status, finished_message, scoped=scoped)
     except Exception as exc:
         with stream_run_output(log_path):
             print(traceback.format_exc())
         finished_status = 'failed'
         finished_message = str(exc)
-        control.finish_run(control_db, run, finished_status, finished_message, step_results, scoped=scoped)
+        control.finish_run(control_db, run, finished_status, finished_message, scoped=scoped)
         result.update({
             'status': finished_status,
             'error': str(exc),

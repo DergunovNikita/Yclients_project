@@ -26,7 +26,7 @@ JAN = (date(2025, 1, 1), date(2025, 1, 31))
 def _full_coverage(first_day, last_day):
     return [
         SyncSourceState(
-            company_id=1, source=source, period_start=first_day, period_end=last_day, synced_at=datetime(2021, 4, 5, 13)
+            company_id=1, source=source, period_start=first_day, period_end=last_day
         )
         for source in ('appointments_detail', 'financial_transactions_detail', 'goods_transactions_detail')
     ]

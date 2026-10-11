@@ -16,7 +16,6 @@ from sqlalchemy import (
     String,
     Text,
     Time,
-    UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base
 
@@ -95,17 +94,6 @@ class ServiceCategoryCatalog(Base):
     )
 
 
-class Service(Base):
-    __tablename__ = 'services'
-
-    id = Column(Integer, primary_key=True)
-    title = Column(String, nullable=False)
-    price_min = Column(Float)
-    duration = Column(Integer)
-    category_title = Column(String, index=True)
-    company_id = Column(Integer, ForeignKey('companies.id'), index=True)
-
-
 class ServiceCatalog(Base):
     __tablename__ = 'service_catalog'
 
@@ -130,42 +118,9 @@ class ServiceLabel(Base):
 
     __tablename__ = 'service_labels'
 
-    service_id = Column(Integer, ForeignKey('services.id'), primary_key=True)
+    service_id = Column(Integer, primary_key=True)
     company_id = Column(Integer, ForeignKey('companies.id'), primary_key=True, index=True)
     is_extra = Column(Boolean, nullable=False, default=False)
-    source = Column(String, default='dashboard')
-    updated_at = Column(DateTime, nullable=False)
-
-
-class ServiceKpiGroup(Base):
-    """Dashboard-maintained service groups for KPI calculations."""
-
-    __tablename__ = 'service_kpi_groups'
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), nullable=False, index=True)
-    code = Column(String, nullable=False, index=True)
-    title = Column(String, nullable=False)
-    description = Column(Text)
-    is_active = Column(Boolean, nullable=False, default=True, index=True)
-    sort_order = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime, nullable=False)
-    updated_at = Column(DateTime, nullable=False)
-
-    # Mirrors the constraint migration 0023 created; without it SQLite tests cannot see a duplicate code.
-    __table_args__ = (
-        UniqueConstraint('portal_account_id', 'code', name='uq_service_kpi_groups_account_code'),
-    )
-
-
-class ServiceKpiAssignment(Base):
-    """Branch-scoped assignment of a current YClients service to one KPI group."""
-
-    __tablename__ = 'service_kpi_assignments'
-
-    company_id = Column(Integer, ForeignKey('companies.id'), primary_key=True)
-    service_id = Column(Integer, primary_key=True)
-    group_id = Column(Integer, ForeignKey('service_kpi_groups.id'), nullable=False, index=True)
     source = Column(String, default='dashboard')
     updated_at = Column(DateTime, nullable=False)
 
@@ -175,7 +130,6 @@ class ServiceKpiAssignment(Base):
             ['service_catalog.company_id', 'service_catalog.service_id'],
             ondelete='CASCADE',
         ),
-        Index('ix_service_kpi_assignments_service_id', 'service_id'),
     )
 
 
@@ -377,7 +331,6 @@ class SyncSourceState(Base):
     source = Column(String, primary_key=True)
     period_start = Column(Date, nullable=False)
     period_end = Column(Date, nullable=False)
-    synced_at = Column(DateTime, nullable=False)
 
 
 class GoodTransaction(Base):
@@ -829,19 +782,6 @@ class SyncRun(Base):
     finished_at = Column(DateTime, index=True)
     log_path = Column(String)
     message = Column(Text)
-
-
-class SyncStepRun(Base):
-    __tablename__ = 'sync_step_runs'
-    __table_args__ = {'schema': SYSTEM_SCHEMA}
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.sync_runs.id'), nullable=False, index=True)
-    step_name = Column(String, nullable=False, index=True)
-    step_key = Column(String, index=True)
-    status = Column(String, nullable=False, index=True)
-    elapsed_seconds = Column(Float)
-    created_at = Column(DateTime, nullable=False, index=True)
 
 
 class SyncJob(Base):

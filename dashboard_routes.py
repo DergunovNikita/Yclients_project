@@ -50,7 +50,6 @@ from dashboard_service import (
     fetch_revenue_daily,
     fetch_dashboard_services,
     save_service_management,
-    create_service_kpi_group,
     save_plan_settings,
     save_manual_facts,
     fetch_staff,
@@ -202,61 +201,20 @@ class PlanSettingsPayload(BaseModel):
     staff: list[PlanSettingsStaffPayload]
 
 
-class ServiceKpiGroupPayload(BaseModel):
-    title: str | None = None
-    code: str | None = None
-    description: str | None = None
-    sort_order: int | None = None
-    is_active: bool | None = None
-
-
 class ServiceManagementRowChange(BaseModel):
     company_id: int
     service_id: int
-    is_extra: bool | None = None
-    kpi_group_id: int | None = None
-
-    @model_validator(mode='after')
-    def validate_change(self):
-        changed_fields = self.model_fields_set & {'is_extra', 'kpi_group_id'}
-        if not changed_fields:
-            raise ValueError('service row change must include is_extra or kpi_group_id')
-        if 'is_extra' in changed_fields and self.is_extra is None:
-            raise ValueError('is_extra cannot be null')
-        return self
-
-
-class ServiceManagementGroupChange(BaseModel):
-    id: int
-    title: str | None = None
-    code: str | None = None
-    description: str | None = None
-    sort_order: int | None = None
-    is_active: bool | None = None
-
-    @model_validator(mode='after')
-    def validate_change(self):
-        mutable_fields = {'title', 'code', 'description', 'sort_order', 'is_active'}
-        if not self.model_fields_set & mutable_fields:
-            raise ValueError('service group change must include at least one mutable field')
-        for field in ('title', 'code', 'sort_order', 'is_active'):
-            if field in self.model_fields_set and getattr(self, field) is None:
-                raise ValueError(f'{field} cannot be null')
-        return self
+    is_extra: bool
 
 
 class ServiceManagementPayload(BaseModel):
     row_changes: list[ServiceManagementRowChange] = Field(default_factory=list)
-    group_changes: list[ServiceManagementGroupChange] = Field(default_factory=list)
 
     @model_validator(mode='after')
     def validate_unique_targets(self):
         row_keys = [(item.company_id, item.service_id) for item in self.row_changes]
         if len(row_keys) != len(set(row_keys)):
             raise ValueError('duplicate service row change')
-        group_ids = [item.id for item in self.group_changes]
-        if len(group_ids) != len(set(group_ids)):
-            raise ValueError('duplicate service group change')
         return self
 
 
@@ -531,8 +489,6 @@ async def dashboard_services(
     q: str | None = Query(None),
     category: str | None = Query(None),
     is_extra: bool | None = Query(None),
-    kpi_group_id: int | None = Query(None),
-    x_portal_account_id: int | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -547,9 +503,7 @@ async def dashboard_services(
             q=q,
             category=category,
             is_extra=is_extra,
-            kpi_group_id=kpi_group_id,
             allowed_company_ids=scope['allowed_company_ids'],
-            portal_account_id=await _require_kpi_portal_account_id(db, ctx, x_portal_account_id),
         ),
     }
 
@@ -557,43 +511,17 @@ async def dashboard_services(
 @router.patch('/services', dependencies=[Depends(forbid_demo)])
 async def dashboard_services_save(
     payload: ServiceManagementPayload,
-    x_portal_account_id: int | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    """Atomically persist dashboard-managed service and KPI group changes."""
+    """Atomically persist dashboard-managed service labels."""
     _require_settings_admin(ctx)
     allowed_company_ids, _ = user_branch_ids(ctx)
-    portal_account_id = await _require_kpi_portal_account_id(db, ctx, x_portal_account_id)
     with _value_error_as_400():
         data = await save_service_management(
             db,
-            row_changes=[item.model_dump(exclude_unset=True) for item in payload.row_changes],
-            group_changes=[item.model_dump(exclude_unset=True) for item in payload.group_changes],
+            row_changes=[item.model_dump() for item in payload.row_changes],
             allowed_company_ids=allowed_company_ids,
-            portal_account_id=portal_account_id,
-        )
-    return {'success': True, 'data': data}
-
-
-@router.post('/services/kpi_groups', dependencies=[Depends(forbid_demo)])
-async def dashboard_service_kpi_group_create(
-    payload: ServiceKpiGroupPayload,
-    x_portal_account_id: int | None = Header(default=None),
-    db: AsyncSession = Depends(get_async_db),
-    ctx: AccessContext = Depends(get_dashboard_access),
-):
-    _require_settings_admin(ctx)
-    portal_account_id = await _require_kpi_portal_account_id(db, ctx, x_portal_account_id)
-    with _value_error_as_400():
-        data = await create_service_kpi_group(
-            db,
-            portal_account_id=portal_account_id,
-            title=payload.title or '',
-            code=payload.code,
-            description=payload.description,
-            sort_order=payload.sort_order,
-            is_active=True if payload.is_active is None else payload.is_active,
         )
     return {'success': True, 'data': data}
 

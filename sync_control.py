@@ -11,7 +11,7 @@ from config import (
     SYNC_RUN_RETENTION_DAYS,
     SYNC_RUN_RETENTION_INTERVAL_HOURS,
 )
-from models import ReportUsageEvent, SyncJob, SyncRun, SyncState, SyncStepRun
+from models import ReportUsageEvent, SyncJob, SyncRun, SyncState
 from sync_logging import remove_run_logs
 from sync_parsing import parse_datetime, serialize_dt
 
@@ -80,7 +80,7 @@ class SyncControlService:
         *,
         now: datetime | None = None,
     ) -> int:
-        """Delete finished sync_runs older than retention_days, and their sync_step_runs.
+        """Delete finished sync_runs older than retention_days.
 
         A run still 'running' is never touched regardless of age, and the single most recent
         run is always kept so get_status_payload() can still report a last_run even if sync has
@@ -130,7 +130,6 @@ class SyncControlService:
         db.query(SyncJob).filter(SyncJob.run_id.in_(stale_select)).update(
             {SyncJob.run_id: None}, synchronize_session=False
         )
-        db.query(SyncStepRun).filter(SyncStepRun.run_id.in_(stale_select)).delete(synchronize_session=False)
         deleted = db.query(SyncRun).filter(SyncRun.id.in_(stale_select)).delete(synchronize_session=False)
         db.commit()
         # After the commit: the run rows are the only index of these files, and a file that outlives its row is
@@ -241,7 +240,6 @@ class SyncControlService:
         run: SyncRun,
         status: str,
         message: str,
-        step_results: list[dict[str, Any]],
         *,
         scoped: bool = False,
     ) -> SyncRun:
@@ -255,7 +253,6 @@ class SyncControlService:
         run.message = message
         db.commit()
 
-        self._replace_step_results(db, run.id, step_results)
         self.set_state(db, 'last_run_status', status)
         self.set_state(db, 'last_run_finished_at', now)
         if status == 'success':
@@ -264,20 +261,6 @@ class SyncControlService:
             if not scoped:
                 self.set_state(db, UNSCOPED_SUCCESS_STATE_KEY, now)
         return run
-
-    def _replace_step_results(self, db, run_id: int, step_results: list[dict[str, Any]]) -> None:
-        db.query(SyncStepRun).filter(SyncStepRun.run_id == run_id).delete()
-        created_at = datetime.now()
-        for step in step_results:
-            db.add(SyncStepRun(
-                run_id=run_id,
-                step_name=step['name'],
-                step_key=step.get('key'),
-                status='success' if step.get('success') else 'warning',
-                elapsed_seconds=step.get('elapsed'),
-                created_at=created_at,
-            ))
-        db.commit()
 
     def set_state(self, db, key: str, value: str | datetime | None) -> None:
         state = db.get(SyncState, key)

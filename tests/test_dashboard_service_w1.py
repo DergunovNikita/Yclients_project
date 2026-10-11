@@ -194,18 +194,14 @@ async def test_service_management_refuses_a_branch_that_left_the_tenant(async_se
         await dashboard_service.save_service_management(
             async_session,
             row_changes=[{'company_id': 2, 'service_id': 10, 'is_extra': True}],
-            group_changes=[],
             allowed_company_ids=[1, 2],
-            portal_account_id=1,
         )
     assert (await async_session.execute(select(ServiceLabel))).scalars().all() == []
 
     saved = await dashboard_service.save_service_management(
         async_session,
         row_changes=[{'company_id': 1, 'service_id': 10, 'is_extra': True}],
-        group_changes=[],
         allowed_company_ids=[1, 2],
-        portal_account_id=1,
     )
     assert [row['company_id'] for row in saved['rows']] == [1]
 
