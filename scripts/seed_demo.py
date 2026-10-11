@@ -25,16 +25,10 @@ from auth_service import generate_bootstrap_password, hash_password, normalize_e
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER  # noqa: E402
 from database import init_database  # noqa: E402
 from models import (  # noqa: E402
-    Appointment,
     Company,
-    FinancialTransaction,
     PortalAccount,
     PortalBranch,
     PortalUser,
-    Service,
-    ServiceCatalog,
-    ServiceCategoryCatalog,
-    Transaction,
 )
 from seed_fake_data import seed_activity, seed_companies  # noqa: E402
 
@@ -152,98 +146,6 @@ def ensure_branches(db, account_id: int, company_ids: list[int]) -> None:
             raise RuntimeError(f'Demo company {company_id} already belongs to another tenant')
 
 
-def repair_demo_data(db, company_ids: list[int]) -> None:
-    """Backfill dashboard-facing demo rows and repair older demo payment links."""
-    now = datetime.utcnow()
-    category_by_company_title = {
-        (row.company_id, row.title): row.category_id
-        for row in db.execute(
-            select(ServiceCategoryCatalog).where(ServiceCategoryCatalog.company_id.in_(company_ids))
-        ).scalars()
-        if row.title
-    }
-    services = db.execute(select(Service).where(Service.company_id.in_(company_ids))).scalars().all()
-    service_catalogs = {
-        (row.company_id, row.service_id): row
-        for row in db.execute(
-            select(ServiceCatalog).where(ServiceCatalog.company_id.in_(company_ids))
-        ).scalars()
-    }
-    for service in services:
-        category_id = category_by_company_title.get((service.company_id, service.category_title))
-        catalog = service_catalogs.get((service.company_id, service.id))
-        if catalog is None:
-            db.add(
-                ServiceCatalog(
-                    company_id=service.company_id,
-                    service_id=service.id,
-                    title=service.title,
-                    price_min=service.price_min,
-                    duration=service.duration,
-                    category_id=category_id,
-                    category_title=service.category_title,
-                    updated_at=now,
-                )
-            )
-        else:
-            catalog.title = service.title
-            catalog.price_min = service.price_min
-            catalog.duration = service.duration
-            catalog.category_id = category_id
-            catalog.category_title = service.category_title
-            catalog.updated_at = now
-
-    appointments = (
-        db.execute(select(Appointment).where(Appointment.company_id.in_(company_ids))).scalars().all()
-    )
-    appointment_by_company_pk = {
-        (appointment.company_id, appointment.id): appointment
-        for appointment in appointments
-    }
-    appointment_by_company_external = {
-        (appointment.company_id, appointment.external_id): appointment
-        for appointment in appointments
-        if appointment.external_id is not None
-    }
-    first_service_by_appointment = {
-        row[0]: row[1]
-        for row in db.execute(
-            select(Transaction.appointment_id, Transaction.service_id)
-            .where(Transaction.company_id.in_(company_ids))
-            .order_by(Transaction.appointment_id.asc(), Transaction.id.asc())
-        ).all()
-        if row[1] is not None
-    }
-    financial_rows = (
-        db.execute(
-            select(FinancialTransaction).where(
-                FinancialTransaction.company_id.in_(company_ids),
-                FinancialTransaction.sold_item_type == 'service',
-            )
-        )
-        .scalars()
-        .all()
-    )
-    for payment in financial_rows:
-        appointment = None
-        for candidate_id in (payment.record_id, payment.document_id, payment.visit_id):
-            if candidate_id is None:
-                continue
-            appointment = appointment_by_company_external.get((payment.company_id, candidate_id))
-            if appointment is None:
-                appointment = appointment_by_company_pk.get((payment.company_id, candidate_id))
-            if appointment is not None:
-                break
-        if appointment is None:
-            continue
-        if appointment.external_id is not None:
-            payment.record_id = appointment.external_id
-            payment.visit_id = appointment.external_id
-        service_id = first_service_by_appointment.get(appointment.id)
-        if service_id is not None:
-            payment.sold_item_id = service_id
-
-
 def ensure_demo_user(db, account_id: int) -> PortalUser:
     email = normalize_email(DEMO_EMAIL)
     now = datetime.utcnow()
@@ -294,7 +196,6 @@ def main() -> int:
             company_ids = generate_demo_data(db, args, account.id)
 
         ensure_branches(db, account.id, company_ids)
-        repair_demo_data(db, company_ids)
         user = ensure_demo_user(db, account.id)
         db.commit()
         print(f'Demo tenant ready: account_id={account.id}, user={user.email}, branches={len(company_ids)}')
