@@ -18,7 +18,6 @@ from auth_hierarchy import (
     USER_ADMIN_ROLES,
     assignable_roles,
     assert_can_assign_role,
-    assert_can_manage_staff,
     assert_can_manage_user,
     can_list_user,
     can_manage_staff,
@@ -167,12 +166,6 @@ class AdminUserCreateRequest(BaseModel):
     role: str
     portal_account_id: int | None = None
     company_ids: CompanyIds = Field(default_factory=list)
-
-
-class AdminStaffUpdateRequest(BaseModel):
-    full_name: str = Field(min_length=1, max_length=255)
-    company_id: int
-    position: str | None = Field(default=None, max_length=255)
 
 
 def _user_payload(
@@ -816,7 +809,6 @@ async def admin_meta(
 
 
 @router.get('/portal-accounts')
-@router.get('/admin/portal-accounts')
 async def admin_list_portal_accounts(
     _actor: PortalUser = Depends(require_roles('platform_admin')),
     db: AsyncSession = Depends(get_async_db),
@@ -1131,48 +1123,6 @@ async def admin_delete_user(
     await db.delete(user)
     await db.commit()
     return {'success': True, 'message': 'User deleted'}
-
-
-@router.patch('/admin/staff/{staff_id}', dependencies=[Depends(forbid_demo)])
-async def admin_update_staff(
-    staff_id: int,
-    body: AdminStaffUpdateRequest,
-    x_portal_account_id: int | None = Header(default=None),
-    actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_async_db),
-):
-    actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
-    staff = await _load_manageable_staff(db, staff_id, actor, actor_branch_ids)
-
-    if body.company_id != staff.company_id:
-        assert_can_manage_staff(actor.role, actor_branch_ids, body.company_id)
-
-    await _validate_company_ids_in_tenant(
-        db, await _active_admin_portal_account_id(db, actor, x_portal_account_id), [body.company_id]
-    )
-
-    staff.name = body.full_name.strip()
-    staff.company_id = body.company_id
-    staff.position = body.position.strip() if body.position else None
-    await db.commit()
-    return {
-        'success': True,
-        'data': _staff_payload(staff, manageable=True),
-    }
-
-
-@router.delete('/admin/staff/{staff_id}', dependencies=[Depends(forbid_demo)])
-async def admin_delete_staff(
-    staff_id: int,
-    x_portal_account_id: int | None = Header(default=None),
-    actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_async_db),
-):
-    actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
-    staff = await _load_manageable_staff(db, staff_id, actor, actor_branch_ids)
-    staff.fired = 1
-    await db.commit()
-    return {'success': True, 'message': 'Staff member removed'}
 
 
 def _provisioned_payload(account) -> dict:

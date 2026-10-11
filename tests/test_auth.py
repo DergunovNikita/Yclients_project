@@ -461,12 +461,14 @@ async def test_platform_admin_lists_portal_accounts(auth_db, monkeypatch):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         response = await client.get(
-            '/auth/admin/portal-accounts',
+            '/auth/portal-accounts',
             headers={'Authorization': f'Bearer {token}'},
         )
+        alias = await client.get('/auth/admin/portal-accounts', headers={'Authorization': f'Bearer {token}'})
 
     app.dependency_overrides.clear()
 
+    assert alias.status_code == 404
     assert response.status_code == 200
     assert response.json()['data'] == [
         {
@@ -2586,81 +2588,6 @@ async def test_branch_admin_appears_in_dashboard_staff(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_owner_updates_unlinked_staff(auth_db, monkeypatch):
-    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    auth_db.add(
-        Staff(
-            id=9001,
-            name='Demo Worker',
-            position='master',
-            company_id=1,
-            fired=0,
-            bookable=True,
-        )
-    )
-    await auth_db.commit()
-    token = await issue_access_token(auth_db, 1, 'owner')
-
-    async def override_db():
-        yield auth_db
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        updated = await client.patch(
-            '/auth/admin/staff/9001',
-            headers={'Authorization': f'Bearer {token}'},
-            json={'full_name': 'Updated Worker', 'company_id': 2, 'position': 'senior'},
-        )
-        assert updated.status_code == 200
-        assert updated.json()['data']['full_name'] == 'Updated Worker'
-        assert updated.json()['data']['company_ids'] == [2]
-
-        listed = await client.get('/auth/admin/users', headers={'Authorization': f'Bearer {token}'})
-        staff_rows = [item for item in listed.json()['data'] if item.get('staff_id') == 9001]
-        assert staff_rows
-        assert staff_rows[0]['full_name'] == 'Updated Worker'
-        assert staff_rows[0]['manageable'] is True
-
-    app.dependency_overrides.clear()
-
-
-@pytest.mark.asyncio
-async def test_owner_deletes_unlinked_staff(auth_db, monkeypatch):
-    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    auth_db.add(
-        Staff(
-            id=9002,
-            name='Remove Me',
-            position='master',
-            company_id=1,
-            fired=0,
-            bookable=True,
-        )
-    )
-    await auth_db.commit()
-    token = await issue_access_token(auth_db, 1, 'owner')
-
-    async def override_db():
-        yield auth_db
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        deleted = await client.delete('/auth/admin/staff/9002', headers={'Authorization': f'Bearer {token}'})
-        assert deleted.status_code == 200
-        listed = await client.get('/auth/admin/users', headers={'Authorization': f'Bearer {token}'})
-        staff_ids = [item.get('staff_id') for item in listed.json()['data']]
-        assert 9002 not in staff_ids
-
-        staff = await client.get('/dashboard/staff', headers={'Authorization': f'Bearer {token}'})
-        names = [row['name'] for row in staff.json()['data']]
-        assert 'Remove Me' not in names
-
-    app.dependency_overrides.clear()
-
-
-@pytest.mark.asyncio
 async def test_provision_staff_account(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(
@@ -4211,7 +4138,6 @@ async def two_tenants(auth_db):
             created_at=datetime.utcnow(),
         )
     )
-    auth_db.add(Staff(id=9300, name='Floater', position='master', company_id=1, fired=0, bookable=True))
     await auth_db.commit()
     return auth_db
 
@@ -4232,23 +4158,6 @@ async def test_platform_admin_cannot_attach_another_tenants_branch_to_a_user(two
         await two_tenants.execute(select(PortalUserBranch.company_id).where(PortalUserBranch.user_id == 2))
     ).scalars()
     assert sorted(rows) == [2]
-
-
-@pytest.mark.asyncio
-async def test_platform_admin_cannot_move_a_staff_row_to_another_tenant(two_tenants, monkeypatch):
-    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    headers = {**(await _bearer(two_tenants, 53, 'platform_admin')), 'X-Portal-Account-Id': '1'}
-    async with _Api(two_tenants) as client:
-        foreign = await client.patch(
-            '/auth/admin/staff/9300', headers=headers, json={'full_name': 'Floater', 'company_id': 3}
-        )
-        own = await client.patch(
-            '/auth/admin/staff/9300', headers=headers, json={'full_name': 'Floater', 'company_id': 2}
-        )
-
-    assert foreign.status_code == 403
-    assert own.status_code == 200
-    assert await two_tenants.scalar(select(Staff.company_id).where(Staff.id == 9300)) == 2
 
 
 @pytest.mark.asyncio
@@ -4903,6 +4812,22 @@ async def test_demoting_an_owner_needs_explicit_branches(two_tenants, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_synced_staff_rows_cannot_be_edited_or_deleted_through_the_portal(two_tenants, monkeypatch):
+    # YClients owns these rows: the next sync would revert an edit, or duplicate a row moved between branches.
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    two_tenants.add(Staff(id=9301, name='Synced', position='master', company_id=1, fired=0, bookable=True))
+    await two_tenants.commit()
+    headers = await _bearer(two_tenants, 1, 'owner')
+    async with _Api(two_tenants) as client:
+        patched = await client.patch('/auth/admin/staff/9301', headers=headers, json={'full_name': 'Renamed'})
+        deleted = await client.delete('/auth/admin/staff/9301', headers=headers)
+
+    assert [patched.status_code, deleted.status_code] == [404, 404]
+    row = (await two_tenants.execute(select(Staff.name, Staff.fired).where(Staff.id == 9301))).one()
+    assert tuple(row) == ('Synced', 0)
+
+
+@pytest.mark.asyncio
 async def test_staff_outside_the_actors_branches_is_not_found_for_every_role(two_tenants, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     two_tenants.add_all([
@@ -4914,13 +4839,12 @@ async def test_staff_outside_the_actors_branches_is_not_found_for_every_role(two
     owner = await _bearer(two_tenants, 1, 'owner')  # branches 1 and 2
     async with _Api(two_tenants) as client:
         results = [
-            await client.delete('/auth/admin/staff/9301', headers=branch_admin),
             await client.post('/auth/admin/staff/9301/create-account', headers=branch_admin, json={'role': 'barber'}),
-            await client.delete('/auth/admin/staff/9302', headers=owner),
-            await client.delete('/auth/admin/staff/9999', headers=owner),
+            await client.post('/auth/admin/staff/9302/create-account', headers=owner, json={'role': 'barber'}),
+            await client.post('/auth/admin/staff/9999/create-account', headers=owner, json={'role': 'barber'}),
         ]
 
-    assert [response.status_code for response in results] == [404, 404, 404, 404]
+    assert [response.status_code for response in results] == [404, 404, 404]
     assert len({response.json()['detail'] for response in results}) == 1
 
 
