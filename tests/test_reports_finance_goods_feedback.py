@@ -16,9 +16,19 @@ from models import (
     GoodTransaction,
     Group,
     Staff,
+    SyncSourceState,
 )
 
 JAN = (date(2025, 1, 1), date(2025, 1, 31))
+
+
+def _full_coverage(first_day, last_day):
+    return [
+        SyncSourceState(
+            company_id=1, source=source, period_start=first_day, period_end=last_day, synced_at=datetime(2021, 4, 5, 13)
+        )
+        for source in ('appointments_detail', 'financial_transactions_detail', 'goods_transactions_detail')
+    ]
 
 
 async def _report(session, report_id, window=JAN, **kwargs):
@@ -456,3 +466,52 @@ async def test_reviews_without_data_give_no_average(async_session):
     assert cards['Средняя оценка'] is None
     assert cards['Доля оценок ниже 5'] is None
     assert _table(report, 'negative_reviews')['rows'] == []
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_year_without_completed_visits_has_no_rates(async_session, monkeypatch):
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: datetime(2026, 8, 1, 12, 0))
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        FinancialTransaction(
+            id=1, company_id=1, master_id=1, sold_item_id=10, sold_item_type='goods_transaction',
+            date=datetime(2021, 4, 5, 12), amount=250.0,
+        ),
+        *_full_coverage(date(2021, 4, 5), date(2026, 8, 1)),
+    ])
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session, 'year_over_year', *JAN, allowed_company_ids=[1]
+    )
+
+    year = _table(report, 'years')['rows'][0]
+    assert year['revenue'] == 250.0 and year['appointments'] == 0
+    # Like avg_check: no completed visits, no rate; a zero would draw a real bar in the OPZ chart.
+    assert (year['avg_check'], year['opz_pct'], year['visits_per_client']) == (None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_year_over_year_follows_the_branch_day_after_the_utc_evening(async_session, monkeypatch):
+    # 22:00 UTC on 31 December is already 1 January in Moscow: the new year has a visit and a row.
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: datetime(2026, 12, 31, 22, 0))
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Client(id=1, company_id=1, name='C'),
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2027, 1, 1), attendance=1),
+        *_full_coverage(date(2027, 1, 1), date(2027, 1, 1)),
+    ])
+    await async_session.commit()
+
+    report = await dashboard_reports.fetch_report_data(
+        async_session, 'year_over_year', *JAN, allowed_company_ids=[1]
+    )
+
+    years = {row['year']: row for row in _table(report, 'years')['rows']}
+    assert set(years) == {2027}
+    assert years[2027]['appointments'] == 1
+    assert report['period']['end'] == '2027-01-01'
