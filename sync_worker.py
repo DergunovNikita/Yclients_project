@@ -15,7 +15,7 @@ from config import (
 )
 from database import Database, init_database
 from models import SyncJob, YClientsCredential
-from sync_control import SyncControlService
+from sync_control import UNSCOPED_SUCCESS_STATE_KEY, SyncControlService
 from sync_jobs import SyncJobService
 from sync_orchestrator import run_sync_job
 
@@ -53,10 +53,12 @@ def enqueue_auto_sync_jobs_if_due(db, now: datetime | None = None) -> dict:
     control = SyncControlService()
     if control.get_running_run(db) is not None:
         return {'status': 'ok', 'enqueued': 0, 'skipped': 1, 'reason': 'sync_running'}
-    last_successful_sync_at = _parse_state_datetime(
-        control.get_state_values(db, ['last_successful_sync_at']).get('last_successful_sync_at')
+    # Only an unscoped run arms this gate: CLI/systemd runs create no job row, so the per-tenant cooldown below
+    # cannot see them, while a tenant-scoped run is already visible there and says nothing about other tenants.
+    last_unscoped_sync_at = _parse_state_datetime(
+        control.get_state_values(db, [UNSCOPED_SUCCESS_STATE_KEY]).get(UNSCOPED_SUCCESS_STATE_KEY)
     )
-    if last_successful_sync_at is not None and last_successful_sync_at > due_before:
+    if last_unscoped_sync_at is not None and last_unscoped_sync_at > due_before:
         return {'status': 'ok', 'enqueued': 0, 'skipped': 1, 'reason': 'recent_global_sync'}
 
     jobs = SyncJobService()

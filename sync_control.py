@@ -15,6 +15,7 @@ from sync_parsing import parse_datetime, serialize_dt
 
 _RETENTION_STATE_KEY = 'last_run_retention_at'
 _REPORT_USAGE_RETENTION_STATE_KEY = 'last_report_usage_retention_at'
+UNSCOPED_SUCCESS_STATE_KEY = 'last_unscoped_sync_at'
 
 
 class SyncControlService:
@@ -221,7 +222,13 @@ class SyncControlService:
         status: str,
         message: str,
         step_results: list[dict[str, Any]],
+        *,
+        scoped: bool = False,
     ) -> SyncRun:
+        """Close the run; `scoped` marks one limited to a tenant, credential or branches.
+
+        Only an unscoped success arms the auto-enqueue gate: a run for one tenant says nothing about the others.
+        """
         now = datetime.now()
         run.status = status
         run.finished_at = now
@@ -234,6 +241,8 @@ class SyncControlService:
         if status == 'success':
             self.set_state(db, 'last_successful_run_id', str(run.id))
             self.set_state(db, 'last_successful_sync_at', now)
+            if not scoped:
+                self.set_state(db, UNSCOPED_SUCCESS_STATE_KEY, now)
         return run
 
     def _replace_step_results(self, db, run_id: int, step_results: list[dict[str, Any]]) -> None:

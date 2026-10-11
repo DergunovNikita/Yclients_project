@@ -4,7 +4,7 @@ import pytest
 
 import sync_worker
 from models import SyncJob, SyncJobEvent, SyncRun, SyncState, SyncStepRun, YClientsCredential
-from sync_control import SyncControlService
+from sync_control import UNSCOPED_SUCCESS_STATE_KEY, SyncControlService
 from sync_jobs import SyncJobService
 from helpers import FakeConnection, FakeDatabase, FakeEngine, FakeSession
 from helpers import sqlite_session_with_system as _sqlite_session
@@ -342,7 +342,7 @@ def test_auto_sync_skips_after_recent_global_sync(monkeypatch):
 
     with _auto_sync_session() as session:
         session.add(_credential(7))
-        SyncControlService().set_state(session, 'last_successful_sync_at', now - timedelta(minutes=30))
+        SyncControlService().set_state(session, UNSCOPED_SUCCESS_STATE_KEY, now - timedelta(minutes=30))
 
         result = sync_worker.enqueue_auto_sync_jobs_if_due(session, now)
 
@@ -353,6 +353,33 @@ def test_auto_sync_skips_after_recent_global_sync(monkeypatch):
             'reason': 'recent_global_sync',
         }
         assert session.query(SyncJob).count() == 0
+
+
+def test_only_an_unscoped_success_arms_the_auto_sync_gate(monkeypatch):
+    monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_ENABLED', True)
+    monkeypatch.setattr(sync_worker, 'SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES', 240)
+    control = SyncControlService()
+    gate_keys = ['last_successful_sync_at', UNSCOPED_SUCCESS_STATE_KEY]
+
+    with _sqlite_session([
+        YClientsCredential.__table__, SyncJob.__table__, SyncRun.__table__, SyncState.__table__, SyncStepRun.__table__,
+    ]) as session:
+        session.add(_credential(7))
+        scoped_run = control.create_run(session, 'incremental', 'queued', 'tenant', 'a.log')
+        control.finish_run(session, scoped_run, 'success', 'ok', [], scoped=True)
+        state = control.get_state_values(session, gate_keys)
+        assert state['last_successful_sync_at'] is not None
+        assert state[UNSCOPED_SUCCESS_STATE_KEY] is None
+        assert sync_worker.enqueue_auto_sync_jobs_if_due(session)['enqueued'] == 1
+
+        failed_run = control.create_run(session, 'incremental', 'cli', 'cli', 'b.log')
+        control.finish_run(session, failed_run, 'failed', 'boom', [])
+        assert control.get_state_values(session, gate_keys)[UNSCOPED_SUCCESS_STATE_KEY] is None
+
+        unscoped_run = control.create_run(session, 'incremental', 'cli', 'cli', 'c.log')
+        control.finish_run(session, unscoped_run, 'success', 'ok', [])
+        assert control.get_state_values(session, gate_keys)[UNSCOPED_SUCCESS_STATE_KEY] is not None
+        assert sync_worker.enqueue_auto_sync_jobs_if_due(session)['reason'] == 'recent_global_sync'
 
 
 def test_run_sync_job_locks_on_a_connection_no_pooled_session_can_take(monkeypatch, tmp_path):
@@ -438,6 +465,34 @@ def test_run_sync_job_locks_on_a_connection_no_pooled_session_can_take(monkeypat
     )
     assert isinstance(lock_calls['acquire'], FakeConnection)
     assert lock_calls['acquire'].closed, 'the dedicated lock connection was never closed'
+
+
+@pytest.mark.parametrize(
+    ('limits', 'expected_scoped'),
+    [({}, False), ({'portal_account_id': 3}, True), ({'credential_id': 5}, True), ({'company_ids': [9]}, True)],
+)
+def test_run_sync_job_reports_whether_the_run_was_scoped(monkeypatch, tmp_path, limits, expected_scoped):
+    import sync_orchestrator
+
+    finished = {}
+    database = FakeDatabase()
+    monkeypatch.setattr(sync_orchestrator, 'init_database', lambda *a, **k: database)
+    monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
+    control_cls = sync_orchestrator.SyncControlService
+    monkeypatch.setattr(control_cls, 'acquire_lock', lambda self, db: True)
+    monkeypatch.setattr(control_cls, 'release_lock', lambda self, db: None)
+    monkeypatch.setattr(control_cls, 'cleanup_stale_runs', lambda self, db: None)
+    monkeypatch.setattr(control_cls, 'create_run', lambda self, db, *a, **k: SyncRun(id=1, started_at=datetime.now()))
+    monkeypatch.setattr(control_cls, 'finish_run', lambda self, *a, **k: finished.update(k))
+    monkeypatch.setattr(sync_orchestrator.SyncJobService, 'record_event', lambda *a, **k: None)
+    monkeypatch.setattr(sync_orchestrator.SyncJobService, 'update_progress', lambda *a, **k: None)
+    monkeypatch.setattr(sync_orchestrator, 'execute_sync', lambda **kwargs: {'success': True, 'step_results': []})
+    monkeypatch.setattr(sync_orchestrator.TelegramNotifier, 'send', lambda self, message: None)
+    monkeypatch.setattr(sync_orchestrator, 'build_log_path', lambda *a, **k: str(tmp_path / 'x.log'))
+
+    sync_orchestrator.run_sync_job(mode='incremental', trigger_type='manual', initiator='pytest', **limits)
+
+    assert finished == {'scoped': expected_scoped}
 
 
 def test_run_sync_job_releases_lock_when_create_run_raises(monkeypatch, tmp_path):
