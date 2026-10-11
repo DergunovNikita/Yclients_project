@@ -996,9 +996,11 @@ def _goods_revenue_filters(
 class _TitleContains(FunctionElement):
     """`text` contains the lower-case `marker`, whatever the case of the Cyrillic letters.
 
-    PostgreSQL folds case itself (`ILIKE`), SQLite's `LIKE` only does for ASCII, so there the
-    lower-case, Capitalized and UPPER spellings are spelled out. Compiled per dialect; the
-    markers are module constants, which is why they are rendered into the SQL text.
+    PostgreSQL gets `ILIKE`, but whether it folds Cyrillic depends on the database ctype (musl
+    builds of the image may not), so the lower-case and Capitalized spellings the old `LIKE` pair
+    matched stay as a floor: the result is never narrower than before. SQLite's `LIKE` only folds
+    ASCII, so there the lower-case, Capitalized and UPPER spellings are spelled out. Compiled per
+    dialect; the markers are module constants, which is why they are rendered into the SQL text.
     """
 
     type = Boolean()
@@ -1018,7 +1020,13 @@ def _render_pattern(compiler, text: str) -> str:
 @compiles(_TitleContains)
 def _compile_title_contains(element, compiler, **kw):
     (text,) = element.clauses
-    return f'({compiler.process(text, **kw)} ILIKE {_render_pattern(compiler, element.marker)})'
+    column = compiler.process(text, **kw)
+    marker = element.marker
+    return (
+        f'({column} ILIKE {_render_pattern(compiler, marker)}'
+        f' OR {column} LIKE {_render_pattern(compiler, marker)}'
+        f' OR {column} LIKE {_render_pattern(compiler, marker.capitalize())})'
+    )
 
 
 @compiles(_TitleContains, 'sqlite')
