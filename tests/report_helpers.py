@@ -3,6 +3,19 @@
 from typing import Any
 
 
+def cards(report: dict[str, Any]) -> dict[str, Any]:
+    """The report's cards as `{label: value}`."""
+    return {card['label']: card['value'] for card in report['cards']}
+
+
+def table(report: dict[str, Any], table_id: str) -> dict[str, Any]:
+    """The whole table `table_id` (columns, notes and rows); raises if the report has no such table."""
+    for item in report['tables']:
+        if item['id'] == table_id:
+            return item
+    raise KeyError(f"{table_id!r} is not a table of {report.get('report_id')!r}: {[t['id'] for t in report['tables']]}")
+
+
 def table_rows(report: dict[str, Any], table_id: str) -> list[dict[str, Any]]:
     """Rows of the table `table_id`; raises if the report has no such table."""
     for table in report['tables']:

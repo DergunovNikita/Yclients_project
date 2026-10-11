@@ -9,6 +9,7 @@ import pytest_asyncio
 import dashboard_reports
 import dashboard_service
 import reports_services
+from report_helpers import cards as _cards, table as _table
 from models import Appointment, Company, FinancialTransaction, Group, ServiceCatalog, Staff, Transaction
 
 NOW = datetime(2026, 9, 15, 12, 0)
@@ -107,14 +108,6 @@ async def seeded(async_session):
 
 async def _report(db, report_id, staff_id=None):
     return await dashboard_reports.fetch_report_data(db, report_id, *WINDOW, company_id=1, staff_id=staff_id)
-
-
-def _cards(data):
-    return {item['label']: item['value'] for item in data['cards']}
-
-
-def _table(data, table_id):
-    return next(item for item in data['tables'] if item['id'] == table_id)
 
 
 @pytest.mark.asyncio

@@ -103,6 +103,8 @@ def test_migrate_upgrades_alembic_stamped_database(monkeypatch):
 
 def test_migration_engine_bounds_lock_waits_on_postgres(monkeypatch):
     """The Alembic engine must carry `lock_timeout`, or a deploy can wait on a sync's locks for 30 minutes."""
+    import logging.config
+
     import sqlalchemy
 
     from database import MIGRATION_LOCK_TIMEOUT_MS, build_database_url, run_migrations
@@ -114,6 +116,8 @@ def test_migration_engine_bounds_lock_waits_on_postgres(monkeypatch):
         raise RuntimeError('stop before connecting')
 
     monkeypatch.setattr(sqlalchemy, 'engine_from_config', fake_engine_from_config)
+    # env.py applies alembic.ini's logging config, which would reset the logging of the whole test session.
+    monkeypatch.setattr(logging.config, 'fileConfig', lambda *_args, **_kwargs: None)
 
     with pytest.raises(RuntimeError, match='stop before connecting'):
         run_migrations(build_database_url('127.0.0.1', 5433, 'db', 'user', 'p%ss'))
