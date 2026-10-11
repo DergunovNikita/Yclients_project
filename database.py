@@ -128,8 +128,7 @@ def init_async_database(host: str, port: int, name: str, user: str, password: st
     # when the client has given up: Starlette does not cancel a non-streaming handler on disconnect,
     # so an abandoned slow report would otherwise hold its pooled connection to the end, and ~30 of
     # them (the whole pool) starve /auth/me. The limit applies per statement and, on the extended
-    # protocol, per Execute message, so CSV export (a server-side cursor, 1000 rows per fetch) is
-    # bounded per chunk, not per download. API engine only: the ETL engine legitimately runs
+    # protocol, per Execute message. API engine only: the ETL engine legitimately runs
     # multi-minute statements and must not inherit it.
     # pool_timeout=10 fails a queued request in 10s instead of SQLAlchemy's 30s default, so a
     # cheap call like /auth/me errors quickly rather than stalling behind a few 6s dashboard

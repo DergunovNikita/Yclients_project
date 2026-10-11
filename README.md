@@ -29,7 +29,7 @@
 - `main.py` - ручной CLI-запуск синхронизации
 - `migrate.py` - применение Alembic миграций
 - `dashboard_service.py` / `dashboard_routes.py` / `dashboard_reports.py` — агрегаты и отчёты продуктового дашборда (JSON)
-- `web/` - Vite MPA: дашборд, отчёты, auth, onboarding, profile и admin
+- `web/` - Vite MPA: дашборд, отчёты, auth, onboarding, settings и admin
 - `api/` / `web/api/` - варианты same-origin proxy для Vercel deployment
 - `docker-compose.yml` - запуск `api`, `worker` и PostgreSQL (на VM); локальная разработка идёт без Docker
 - `sync.sh` - ручной запуск one-shot sync через Docker Compose
@@ -45,7 +45,7 @@
 
 ## Дашборд и импорт
 
-Каталог [`web/`](web/) содержит Vite MPA: основной Chart.js dashboard/reports и отдельные страницы auth, onboarding, profile и admin. В локальной разработке Vite проксирует запросы в FastAPI; production-сборка может обращаться к защищённому API напрямую или через same-origin Vercel proxy.
+Каталог [`web/`](web/) содержит Vite MPA: основной Chart.js dashboard/reports и отдельные страницы auth, onboarding, settings и admin. В локальной разработке Vite проксирует запросы в FastAPI; production-сборка может обращаться к защищённому API напрямую или через same-origin Vercel proxy.
 
 
 ## Быстрый старт

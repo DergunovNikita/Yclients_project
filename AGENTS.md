@@ -21,19 +21,27 @@
 Модули в корне; фронтенд в `web/`, служебные скрипты в `scripts/`:
 ```
 # ETL / данные
-api.py              — FastAPI endpoints (данные + sync control + CSV export)
+api.py              — FastAPI-приложение: роутеры портала/дашборда/онбординга, health-пробы, sync control (`/sync/*`), middleware, обработчики ошибок
 sync_pipeline.py    — основной ETL (extract → transform → load)
 sync_orchestrator.py — оркестрация: логирование, lock, refresh views
 sync_worker.py      — polling worker для очереди задач
 sync_control.py     — advisory locks, sync state, run tracking
 sync_jobs.py        — CRUD очереди (enqueue/claim/finish)
 sync_parsing.py     — парсинг дат, нормализация данных
+sync_logging.py     — `TeeWriter` (stdout + файл лога), sync_notifier.py — Telegram-уведомления о прогоне
+sync_security.py    — `secure_equals` и правила токена `/sync/*`
+main.py             — CLI прогона синка (`--mode`), exit code 75 — синк уже идёт
 models.py           — SQLAlchemy модели (public + system schema)
 database.py         — connection pooling, миграции
 config.py           — переменные окружения (.env) + prod-валидация
+clock.py            — `utcnow()`: наивный UTC, соглашение всех `DateTime`-колонок
 yclients_api.py     — HTTP-клиент YClients с retry/throttle
+yclients_analytics.py — async-чтение аналитики YClients для дашборда
+yclients_credentials.py / yclients_credential_routes.py — шифрованные креды YClients и их админка
+data_sources.py     — граница адаптеров источника данных (онбординг, `companies_claimed_elsewhere`)
 seed_fake_data.py   — генератор синтетики; scripts/seed_demo.py — демо-стенд
-scripts/set_reporting_window.py — окно отчётности филиала (см. ниже)
+scripts/            — служебные скрипты: `set_reporting_window` (окно отчётности филиала, см. ниже), `seed_demo`,
+                      `backfill_staff_schedules`, `provision_staff_accounts`, `local-db-refresh.sh`, `preflight.sh`, `security-check.sh`
 
 # Портал (личные кабинеты, multi-tenant)
 auth_routes.py      — эндпоинты аутентификации + администрирование пользователей
@@ -41,6 +49,11 @@ auth_deps.py        — FastAPI-зависимости: require_auth, роли, 
 auth_service.py     — хэш паролей, JWT, email-токены, отправка почты
 auth_sessions.py    — refresh-токены, cookie/CSRF, управление сессиями
 auth_scope.py       — AccessContext, скоуп доступа по филиалам
+portal_audit.py     — append-only журнал `portal_audit_events`
+portal_tenant_ownership.py — кто владеет филиалами тенанта (тенант только из `platform_admin` занятым не считается)
+portal_staff_sync.py / portal_account_provision.py — зеркальные строки `staff` портальных пользователей и учётки для сотрудников из CRM
+set_portal_password.py — вручную задать постоянный пароль существующему пользователю
+plan_config.py     — определения метрик План/факта и категории сотрудников
 onboarding_routes.py — онбординг владельца (источник данных, выбор филиалов)
 dashboard_routes.py / dashboard_service.py — API и агрегации дашборда (Обзор, План/факт, виджеты)
 dashboard_reports.py — реестр отчётов (`REPORT_DEFINITIONS`), диспетчер `fetch_report_data`, сравнение периодов
@@ -52,7 +65,7 @@ reports_goods.py / reports_feedback.py / reports_team.py — билдеры от
                       «Сравнение по годам» — в finance, «Новые и вернувшиеся» — в clients, «Рейтинги» — в team
 report_usage.py     — учёт открытий отчётов и отчёт «Использование отчётов»
 payment_methods.py  — разбивка выручки по формам оплаты и ручной ввод Яндекс Пэй (отчёт `payment_methods`, `/dashboard/payments/yandex_pay`)
-web/                — Vite MPA (dashboard/reports, auth, onboarding, profile, admin, i18n ru/en/it)
+web/                — Vite MPA (dashboard/reports, auth, onboarding, settings, admin, i18n ru/en/it)
 api/ / web/api/     — варианты same-origin Vercel proxy к backend API
 ```
 
@@ -78,7 +91,7 @@ api/ / web/api/     — варианты same-origin Vercel proxy к backend API
 ### Logging
 - Sync-процессы используют `print()` + `TeeWriter` (stdout + файл в `logs/`)
 - FastAPI и auth используют стандартный Python `logging`; логгеры приложения живут под `yclients.*` (`yclients.api`,
-  `yclients.auth`, `yclients.reports`, `yclients.dashboard`) — handler и уровень `api._configure_logging` вешает именно на
+  `yclients.auth`, `yclients.reports`, `yclients.dashboard`, `yclients.credentials`) — handler и уровень `api._configure_logging` вешает именно на
   `yclients`, а логгер с именем модуля теряет всё ниже WARNING
 - Логи лаконичные — ошибки, начало/завершение операций, критические решения; не логировать credentials и токены
 - Формат sync-файлов: `sync_{timestamp}_{mode}_{trigger}.log`
@@ -132,15 +145,17 @@ cd web && npm run dev
 - **ORM**: SQLAlchemy 2.0 — sync (`Session`) для ETL, async (`AsyncSession`) для API
 - **Batch operations**: chunked по DB_BATCH_SIZE (1000)
 - **Справочники YClients** (категории и услуги, должности, кассы, склады, категории товаров, товары) живут только в
-  филиальных `*_catalog`; их читают дашборд, JSON-списки и `/export/csv/*` (под именами `*_catalog`). Старых
-  глобальных двойников нет (миграция `0054`); остался один `services` — на него смотрит FK `service_labels`, синк его
-  не пишет, строку при разметке услуги создаёт `_apply_service_label`
+  филиальных `*_catalog`; их читает дашборд. Старых глобальных двойников нет (миграции `0054`, `0056`);
+  `service_labels` ссылается составным FK `(company_id, service_id)` на `service_catalog` (`ON DELETE CASCADE`).
+  Та же `0056` убрала `system.sync_step_runs` и `sync_source_states.synced_at`: в них только писали, не читал никто
 - **Concurrency**: pg_advisory_lock, один sync за раз
 
 ### Migrations (Alembic)
 - Нумерация: `0001_<description>`, `0002_<description>`
 - Всегда проверять upgrade и downgrade
 - Запуск: `docker compose run --rm migrate` или `python migrate.py`
+- Миграции идут с `lock_timeout=30 с` (`database.migration_connect_args` → `alembic/env.py`): DDL, не получивший
+  блокировку за 30 с, падает и откатывается, а таймер деплоя повторит через 5 минут — вместо очереди за долгим запросом
 
 ## Architecture Patterns
 - **API (FastAPI)**: async request/DB layer — `AsyncSession` + `asyncpg`; блокирующие legacy-вызовы выносить через `asyncio.to_thread()`
@@ -149,15 +164,15 @@ cd web && npm run dev
 - **`statement_timeout` = 170 с — только у async-engine API.** Выше `proxy_read_timeout` nginx (150 с), ниже `maxDuration`
   Vercel (180 с): Starlette не отменяет обычный обработчик при уходе клиента, и брошенный медленный отчёт
   держал бы соединение пула до конца (30 таких — весь пул, и `/auth/me` падает по `pool_timeout`). Лимит действует на
-  каждое сообщение Execute, поэтому CSV-экспорт (серверный курсор, по 1000 строк) ограничен на порцию, а не на скачивание —
-  исключения `SET LOCAL statement_timeout = 0` не нужно. Отменённый запрос — JSON 500 из общего обработчика
-  (`Internal server error`); если отмена пришла посреди стрима CSV, статус уже отдан, и клиент видит оборванную загрузку.
+  каждое сообщение Execute. Отменённый запрос — JSON 500 из общего обработчика (`Internal server error`).
   У sync-engine ETL лимита нет намеренно: шаги синка идут минутами.
 - **Worker queue**: polling sync_jobs таблицы, без Celery/Redis
 - **Advisory locks**: предотвращение параллельных sync
   Брошенные `running`-строки (`sync_runs`, `sync_jobs`) закрывает холостой проход воркера, и только пока лок
   свободен (`SyncControlService.probe_idle_lock`): живой sync, в том числе многочасовой `full`, держит лок,
   поэтому по возрасту такие строки не рвутся. Один `Database` на воркер переиспользуется в `run_sync_job`.
+- **Хранение прогонов**: `purge_old_runs` вместе со строками `sync_runs` удаляет и их файлы логов (`sync_*.log` прямо в
+  `SYNC_LOG_DIR`, best-effort): иначе таблица худела бы, а `logs/` росла вечно.
 - **Режимы синхронизации**: `incremental` (каждые 4 часа, дочитывает `SYNC_LOOKBACK_DAYS`
   вокруг чекпоинта), `refresh` (ночью, перечитывает последние `SYNC_REFRESH_DAYS`) и
   `full` (раз в неделю, вся история). См. ниже
@@ -171,6 +186,10 @@ cd web && npm run dev
   включал бы деактивированного админа. Перезапись — только явным `--reset-password`, вручную. Пароль берётся из
   `PORTAL_ADMIN_PASSWORD` в окружении контейнера (`env_file: .env`), не из argv. Длиннее 72 байт он может быть только у уже существующего админа (его пропускают): при заведении и `--reset-password` такой пароль отклоняется с кодом 2. Деплой заводит только `PORTAL_ADMIN_EMAIL`
   и список `PORTAL_EXTRA_ADMIN_EMAILS` (через запятую); зашитых адресов нет.
+- **Скрипт деплоя** не исполняет `.env` как shell (`env_value` читает нужные ключи `sed`-ом); ветка «уже раздаётся эта
+  ревизия» тоже проверяет `/health/ready` (иначе упавший после выкладки API читался бы «нечего деплоить»); после
+  неудачных `build`/`migrate` тег образа возвращается на прежний. `API_PORT` в контейнере всегда 8000 (`.env` задаёт
+  только порт хоста).
 - **Prod fail-closed**: в production `config` требует сильные `AUTH_JWT_SECRET`/`SYNC_API_TOKEN`, `AUTH_COOKIE_SECURE=true` и выключенную публичную регистрацию; `AUTH_REQUIRE_LOGIN=false` допустим только при заданном сильном `API_KEY`; при отправке почты через SMTP (не console) `APP_PUBLIC_URL` обязан быть публичным https-адресом (ссылки в письмах), `LOG_LEVEL` — известным именем уровня
 
 ### Окно отчётности филиала
@@ -220,7 +239,7 @@ cd web && npm run dev
   `branch_window_overlap_clause()` спрашивает его о самом филиале, а не о факте, и
   покрывает оба случая: с периодом — «пересекается ли окно с периодом» (фильтр
   «Работник», `fetch_staff(start, end)`), с одинаковым днём дважды — «наш ли филиал
-  сегодня» (каталог услуг, справочники в `/export/csv/*`). На фронте то же правило —
+  сегодня» (каталог услуг). На фронте то же правило —
   `branchesForPeriod` в `web/src/reportingWindow.js`, по нему сужаются все шесть
   селекторов филиалов.
 - **Редакторы режутся только сверху.** `branches_not_yet_left()` вместо пересечения:
@@ -230,22 +249,11 @@ cd web && npm run dev
   `_write_manual_facts` отбивает `ManualFactRowNotOpen` правку строки филиала, ушедшего до начала месяца. На фронте
   правило симметричное, и это осознанное расхождение: селектор решает, что можно выбрать,
   а редактор — что можно исправить.
-- **Сырые таблицы режутся одним хелпером.** `/export/csv/*`, JSON-списки фактов и клиентов
-  (`/clients`, `/appointments`, `/transactions`, `/financial_transactions`, `/goods_transactions`,
-  `/comments`, `/staff_schedules`) и `/stats` идут через `scope_model_stmt()` в `api.py`: скоуп
-  филиалов + окно + зажим на свою строку `staff`. Справочники (`/staff`, `/accounts`, …) остаются
-  на одном `apply_company_scope`. Даты `date_from`/`date_to` — типизированные `date` (422 на
-  мусор), верхняя граница включает весь последний день.
-- **CSV-экспорт нейтрализует формулы** (`neutralize_formula`): строка, начинающаяся с `=`, `+`, `-`, `@`, таба или `\r`,
-  получает префикс `'`. Исключение — телефоноподобный текст (`+79991234567`, `+7 (999) 123-45-67`: цифры, пробелы,
-  `()-.`, знак только в начале): в нём нечего исполнять, а префикс испортил бы `clients.phone`. Числа не трогаются.
-- `/export/csv/*` **тоже режется окном**: датированные таблицы — по своему дню
-  (`EXPORT_WINDOW_DAY_COLUMNS`), справочники без даты — по «наш ли сегодня», `companies`
-  не режется вовсе, потому что именно она документирует отсечку. `transactions` дня не
-  имеет и режется днём своего визита — **не** скалярным подзапросом: вложенный в EXISTS
-  самой клаузы, он теряет корреляцию (SQLAlchemy дописывает `transactions` во внутренний
-  FROM), и экспорт молча терял всю историю филиала. Только явный EXISTS —
-  `transaction_window_clause()` в `api.py`.
+- **Сырых таблиц наружу API не отдаёт.** JSON-списки, `/stats` и `/export/csv/*` удалены; данные читает только
+  дашборд (`/dashboard/*`). Скоуп филиалов и окно там ставят сами запросы дашборда.
+- **Записи тоже отбивают филиал, ушедший от тенанта** (400): `save_plan_settings`, правка услуг
+  (`_editable_service_catalog`) и ручные факты — иначе устаревшая вкладка переписала бы цифры истории, которую отчёты ещё
+  показывают. Повтор строки филиала/сотрудника в payload плана или ручных фактов — тоже 400, не 409.
 
 ### Чужой филиал нельзя привязать вторым тенантом
 Уникальный индекс `companies` — по тенанту, поэтому схема сама не мешает второму тенанту с рабочими кредами
@@ -277,7 +285,7 @@ YClients получить свою копию уже занятой точки (
 того же отчёта разойдутся на одном экране.
 
 - Пресет приходит query-параметром `period_preset` и обязан доезжать до **каждого** пути,
-  который считает те же дельты. `_client_recency_payload` получает его, потому что на этот
+  который считает те же дельты. `fetch_client_mix_metrics` получает его, потому что на этот
   отчёт ведут карточки Обзора; новый эндпоинт, показывающий ту же цифру, обязан сделать так же,
   иначе витрины разойдутся — то же правило, что и для `reporting_window_clause()`.
 - Ссылка отчёта везёт пресет через `reportSearchParams`, хотя он и не фильтр: без этого
@@ -333,14 +341,14 @@ YClients получить свою копию уже занятой точки (
   событие клиента в году (по порядку списка) и есть то, что отдал бы проход с дедупликацией по году.
   Второй вызов `_opz_events` не нужен, а `deduplicate_by` входит в ключ кэша `db.info`.
 - Год из месяцев не суммируется, он выбирается по `seen`-множеству `(клиент, год)`. Решение «первое ли это
-  событие года» принимается **до** фильтров по сотруднику и создателю — как и раньше фильтр стоит после
+  событие года» принимается **до** фильтров по сотруднику — как и раньше фильтр стоит после
   дедупликации, иначе событие второго барбера в феврале стало бы годовым событием клиента.
 - `appointment_dependencies` считаются только по годовым событиям, как и прежде. `latest_date` из
   `fetch_opz_year_facts` убран: годы идут от первой записи до сегодняшней даты (`_year_periods`), а «последняя
   активность» из отчёта ушла вместе с блоком `raw`. Месячные зависимости (`monthly_appointment_dependencies`) — тот же
   `min/max(last_visit_date, appointment_date)`, но по месяцу события.
 - Ручная добавка (`_manual_opz_by_month`) ложится в **свой** месяц месячного ряда и в год годового, и только
-  когда нет фильтра по сотруднику и создателю — то же условие, что и везде. Новых запросов нет.
+  когда нет фильтра по сотруднику — то же условие, что и везде. Новых запросов нет.
 - Знаменатель месячного `opz_pct` — сырые завершённые визиты месяца (те же фильтры, что у
   `cur['appointments']` в Обзоре); месяц без визитов даёт `None`, как средний чек.
 - Маскирование повторяет годовое: месяц вне периода активности или с `appointments_detail`, не
@@ -423,6 +431,10 @@ SPA его не печатает: на 409 она перечитывает за�
 Каждое сохранение пишет `plan_settings.updated` в `portal_audit_events` до `commit()`; актор и тенант
 передаются в функцию обязательными именованными аргументами (как у ручных фактов).
 
+- **«Личная» роль не получает уровня филиала.** `fetch_plan_fact(include_branch_row=False)` — для `admin`/`barber`, зажатых
+  на свою строку `staff`: ни `parent_group`, ни диагностик уровня филиала в ответе нет, и запросы под них не выполняются
+  (итоги филиала раскрыли бы то, что зажим прячет, а считать их ради отброшенного ответа дорого).
+
 ### admin и barber — одна роль под двумя именами
 `ROLE_LEVEL` (`auth_hierarchy.py`) больше не выводится из позиции в `PORTAL_ROLES`: это явная
 карта, и у `admin` с `barber` **одинаковый ранг**. Ранг — единственное, что сравнивают
@@ -463,6 +475,8 @@ SPA его не печатает: на 409 она перечитывает за�
   правки: `admin` перестал падать в барберский фолбэк месячных ролей и стал администратором.
 - У учётки, заведённой из CRM (`provision_staff_account`, где `staff.id == portal_user.id`),
   должность остаётся из YClients, и ярлык роли на неё не влияет.
+- Строки `staff` из YClients в админке портала только читаются; из админки можно лишь завести учётку (`create-account`) —
+  правка и «удаление» отменялись бы следующим синком.
 - Там, где роль всё же не выбрана и вывести её не из чего, дефолт — `barber`: половина пары,
   которая **не** открывает редакторы ручных фактов. Так заданы колонка `portal_users.role` и
   параметр `provision_staff_account()`. В модалке роль выбирается явно; на быстром пути
@@ -626,10 +640,10 @@ SPA его не печатает: на 409 она перечитывает за�
   как локальное время и сохранённое после полуночи UTC покажет вчерашним днём. Оба `formatDate`
   в проекте ошибаются ровно на этой границе (в отчётах берётся только префикс даты, в настройках
   строка парсится как локальная) — новый код с серверными метками идёт через `parseServerInstant`.
-- `hidden` на вкладке и на подписи фильтра не работал сам по себе: авторские правила
-  `.tab { display: inline-flex }` и `label { display: flex }` перебивают UA-стиль `[hidden]`.
-  Скрытие держится на `.tab[hidden]` / `label[hidden]` в `web/index.html`; новая скрываемая
-  вкладка обязана попасть под то же правило.
+- `hidden` сам по себе не работал: авторские правила (`.tab { display: inline-flex }`, `label { display: flex }`)
+  перебивают UA-стиль `[hidden]`. Теперь в `web/index.html` одно общее правило `[hidden] { display: none !important; }`
+  (у остальных страниц оно в `auth.css`): новый скрываемый элемент покрыт автоматически, отдельные `[hidden]`-правила
+  не нужны.
 
 ### Недоступный блок убирается, а не показывается с ошибкой
 Если роль не может открыть блок, он не должен до неё доезжать вовсе. Иначе пользователь
@@ -648,9 +662,9 @@ SPA его не печатает: на 409 она перечитывает за�
 - **Админка.** `admin.js` пускал `manager` внутрь (`MANAGER_ROLES`), хотя **все** `/auth/admin/*`
   отвечают ему 403. `loadAdminMeta()` падал, `applyAdminMeta()` не успевал ничего скрыть, и на
   экране оставались заголовок, поиск и живая кнопка «Создать пользователя» над красным баннером.
-  Гейт выровнен по `USER_ADMIN_ROLES`; та же правка в `profile.js` убрала кнопку, которая вела
-  в этот тупик. Ключ `profile.viewUsers` остался в локалях неиспользованным — он понадобится,
-  если менеджеру когда-нибудь дадут чтение списка на бэкенде.
+  Гейт выровнен по `USER_ADMIN_ROLES`; страницу `profile.html` потом удалили целиком (кнопка «назад» в админке ведёт на
+  `/settings.html`), ключ `profile.viewUsers` удалён вместе с блоком `profile.*` — если менеджеру дадут чтение списка,
+  ключ заводится заново.
 - **Средний чек несёт в себе выручку.** Блок `average_check` целиком управляется кодом
   `avg_check`, но внутри лежит `numerator` — доход филиала за период, из которого чек и поделён,
   плюс `service_revenue` / `goods_revenue` / `topup_revenue`. Роль с `avg_check` и без `revenue`
@@ -658,22 +672,21 @@ SPA его не печатает: на 409 она перечитывает за�
   перечислены в `AVERAGE_CHECK_REVENUE_FIELDS` и вычищаются из сводки, когда скрыт `revenue`.
   Тот же перекос заложен у досок `extra_services*`: их ключи не заявлены ни одной денежной
   метрикой, поэтому ни поимённая, ни сплошная сетка до рублёвого `sum` не достаёт. Доски
-  `staff_leaderboards` строит только отчёт «Рейтинги» (`include_staff_leaderboards=True` вместе с
-  `include_extra_service_revenue`), в виджет План/факта они не попадают, и снятие у них одно —
+  `staff_leaderboards` строит только отчёт «Рейтинги» (`fetch_plan_fact(for_ratings=True)`), в виджет
+  План/факта они не попадают, и снятие у них одно —
   `_hide_staff_leaderboard_financials`: оно режет денежные таблицы по id из `MONEY_METRICS[...]['leaderboard']`
   (это id таблиц отчёта, а не ключи виджета) и колонку `sum` у `extra_services`. Снимается и ранжирование по
   `sum`: порядок сам по себе отвечает «кто больше». Включить доски в виджете — значит вернуть им снятие денег.
   Средний чек, умноженный на число визитов, всё равно даёт доход — это арифметика, а не дыра:
   счёт завершённых визитов роль видит законно. Убрана именно сумма как готовое число.
 - **Денежный замок грубее денежных метрик.** `require_financial_access()` спрашивает ровно про
-  `revenue`, а `report_requires_financials()` ловит отчёт по подстрокам имени. Поэтому менеджер,
+  `revenue`, а `report_requires_financials()` читает флаг `requires_financials` определения отчёта. Поэтому менеджер,
   которому по умолчанию открыт `avg_check`, видит средний чек на витринах, но отчёты
   «Динамика среднего чека» и «Средний чек по услугам» ему по-прежнему закрыты и в каталог не
   попадают. Осознанный размен: цифра в сводке — не то же самое, что отчёт целиком.
-- **CSS.** `hidden` сам по себе не скрывает элемент, если авторское правило задаёт ему `display`
-  (`.tab { display: inline-flex }`, `label { display: flex }`). Такие пары нужно закрывать
-  явным `[hidden]`-правилом — в проекте это уже сделано для `.tab`, `label`,
-  `.user-profile`, `.tenant-switcher`, `.floating-editor-save` и блоков отчётов.
+- **CSS.** `hidden` сам по себе не скрывает элемент, если авторское правило задаёт ему `display`; на дашборде это
+  закрывает общее `[hidden] { display: none !important; }` в `web/index.html`, отдельные пары `.tab[hidden]` и
+  подобные не нужны.
 
 Проверка одной строкой в консоли страницы: все элементы с `hidden` обязаны считаться
 `display: none`.
@@ -777,13 +790,16 @@ SPA его не печатает: на 409 она перечитывает за�
   (гранулярность, длина оси, окна, параметры сравнения), и роутер `/dashboard/reports/data` отвечает 400 только на него.
   Любой другой `ValueError` из билдера — дефект, а не ошибка клиента: он всплывает 500 с логом. Новая намеренная
   проверка во входе отчёта обязана бросать именно `ReportInputError`. Рейтинги (`staff_leaderboard`) отвечают
-  503 «повторить» только на сбой БД (`INFRASTRUCTURE_ERRORS`), остальное не маскируется; логи — `yclients.reports`.
+  503 «повторить» только на обрыв соединения или пула (`_is_retryable` в `reports_team.py`: отключение,
+  `OperationalError`/`InterfaceError`, `OSError`, таймаут пула); отмена по `statement_timeout` (в asyncpg это обычный
+  `DBAPIError`) и ошибки запроса — 500 с логом, повтор им не поможет; логи — `yclients.reports`.
 - Окно сравнения считается только для отчёта с `compare=True`: отчёт без сравнения игнорирует просьбу и не падает на окне,
   которым не пользуется. `service_combos` в прогоне сравнения отдаёт все пары, а не топ-50, по той же причине, что и графики; в блок
   `comparison` из таблицы идут только строки, у которых есть пара в текущей таблице (`_comparison_table_rows`; таблицы периодов — целиком), остальной хвост в браузер не едет.
   Список низких оценок в `nps_dashboard` ограничен 200 последними (с заметкой).
 - Окно у самых краёв календаря (`start_date <= 0001-01-01` или `end_date >= 9999-12-31`) отбивает `_parse_range` как 400 для всех эндпоинтов дашборда: полуоткрытое окно (`end + 1 день`) и база сравнения до `start` на этих датах упираются в `OverflowError`, то есть в 500. То же полуоткрытое окно у явного окна сравнения: `compare_end_date >= 9999-12-31` отбивает роутер отчётов (начало окна сравнения базы до себя не имеет).
-- Окно, прошедшее `_parse_range`, но без базы сравнения (январь 1-го года с пресетом «Месяц», окно длиннее остатка календаря перед ним): `DateRange.previous_period` отвечает `PeriodOutOfRangeError` (`ValueError`); обработчик в `api.py` превращает её в 400 на любом маршруте, отчётам отдельный `except` не нужен.
+- Окно, прошедшее `_parse_range`, но без базы сравнения (январь 1-го года с пресетом «Месяц», окно длиннее остатка календаря перед ним): `DateRange.previous_period` отвечает `PeriodOutOfRangeError` (`ValueError`); обработчик в `api.py` превращает её в 400 на любом маршруте; диспетчер отчётов (`_previous_window`) дополнительно
+  превращает её в `ReportInputError`, чтобы `track_report_usage` записал 400, а не 500.
 
 ### Заметки по отчётам (неочевидное)
 - **Название услуги по платежу идёт через `Appointment.id`.** `financial_transactions.record_id` — внешний id визита YClients,
@@ -825,6 +841,11 @@ SPA его не печатает: на 409 она перечитывает за�
   периода, карточка — их взвешенное среднее. «Записи» переименованы в «Завершённые визиты».
 - **Отзывы (`nps_dashboard`).** Анонимный дубль (мастер `NULL`, те же `company_id` + `record_id` + дата, что у отзыва с мастером) отбрасывается; отзыв без пары остаётся
   даже без мастера. Фильтр по сотруднику — `Comment.master_id`. Telegram-NPS убран.
+
+- Скоуп филиалов `req.allowed_company_ids` уже разрешён диспетчером (`_appointment_company_ids`); билдеры не разрешают его
+  повторно.
+- Годовые `opz_pct` и `visits_per_client` у года без завершённых визитов — `None`, как средний чек. Границы годов — по
+  филиальному дню.
 
 ### Учёт использования отчётов
 `system.report_usage_events` (миграция `0051`, модель `ReportUsageEvent`) — append-only журнал открытий отчётов, чтобы платформенный админ видел, какие отчёты живы, а какие можно
@@ -937,9 +958,6 @@ SPA его не печатает: на 409 она перечитывает за�
   «вкладка есть, а данных нет». По умолчанию: `platform_admin`/`owner`/`branch_admin` — да, `manager` —
   только если владелец открыл ему `revenue`, `admin`/`barber` — никогда: они зажаты на свою строку
   `staff`, и суммы по филиалу раскрыли бы то, что зажим прячет, даже при открытой выручке.
-  Тот же предикат (через `require_request_branch_payments` в `api.py`) закрывает денежные
-  сырые эндпоинты — `/transactions`, `/financial_transactions`, `/goods_transactions`, `/stats` и
-  их CSV: открытая `revenue` у `admin`/`barber` списка платежей всего филиала не открывает.
 - **Вырожденные состояния.** Если окно отчётности каждого выбранного филиала не пересекается с периодом
   (ВДНХ за сентябрь), отчёт отдаёт только предупреждение «Нет данных» — без карточек, таблиц и графиков:
   таблица из одной колонки «Показатель» читалась бы как сломанный отчёт. Без выручки графики не строятся
@@ -1062,6 +1080,9 @@ SPA его не печатает: на 409 она перечитывает за�
   читает витрины (тест, скрипт), обязан сначала `db.info.clear()` — иначе прочитает прежний ответ.
   Запись плана свои кэши ролей сбрасывает сама.
 - Добавили услугу с новым названием — ничего обновлять не нужно, список строится на лету.
+- **Маркеры счетов, статей расхода и товарных названий** (`NON_CASH_ACCOUNT_MARKERS`, `PERSONAL_ACCOUNT_EXPENSE_MARKERS`,
+  `NON_COSMETICS_GOODS_MARKERS`) сравниваются без учёта регистра через `_TitleContains`: в PostgreSQL `ILIKE` плюс прежние
+  два `LIKE` (чтобы не сузить выборку, если ctype базы не сворачивает кириллицу), в SQLite три написания `LIKE`.
 - **Дело не только в цене строки.** Десятки `LIKE` под `OR` планировщик оценить не может, и
   на базе **со статистикой** он выбирал катастрофический порядок join'ов: `revenue_decomposition`
   за всю историю — 763 с, `booking_channels` — 311 с, `year_over_year` — 53 с. На той же базе
@@ -1120,9 +1141,10 @@ SPA его не печатает: на 409 она перечитывает за�
 ## Testing
 
 ```bash
+cd web && npm test                      # все web/tests/*.test.mjs по глобу; test:dashboard — его алиас, test:auth — быстрое подмножество
 pytest tests/                           # все тесты
 pytest tests/test_sync_parsing.py       # unit без БД
-pytest tests/test_api.py                # API тесты (SQLite in-memory)
+pytest tests/test_api.py                # app-уровень: auth-гейты, sync control, health-пробы, middleware (SQLite in-memory)
 
 # Интеграционные (нужен PostgreSQL)
 TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
@@ -1140,7 +1162,7 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
 ### API Authentication
 - Модель: email+пароль → JWT в httpOnly-cookie + refresh-токен с ротацией + CSRF (double-submit); роли и скоуп по филиалам
 - Дополнительно: глобальный `X-API-Key` (full-access) и `X-Sync-Token` для `/sync/*`
-- Публичная регистрация — через `AUTH_PUBLIC_REGISTRATION_ENABLED` (в prod выключена)
+- Публичная регистрация — через `AUTH_PUBLIC_REGISTRATION_ENABLED` (в prod выключена); ссылка на неё на странице входа скрыта, пока сборка фронта не получит `VITE_PUBLIC_REGISTRATION=true`
 - Конкретные значения токенов/ключей/cookie-доменов — только через `.env`; prod-настройки и операционный доступ держать в приватных доках
 - Не документировать в публичном репозитории реальные токены, публичные хосты, правила роутинга и обход аутентификации
 - **Адрес клиента — одна функция**: `client_ip(request)` (`auth_sessions.py`) кормит и лимитер входа, и `ip_hash`
@@ -1152,13 +1174,25 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
   если задан, ≥ 32 символов. Секрет клиент подделать не может: `x-proxy-secret` не входит в allowlist прокси.
   Лимитер — in-memory на процесс; чистятся только тронутый ключ и раз в минуту холостой обход (`_sweep_idle_rate_limit_keys`),
   не весь словарь на каждый запрос.
+- **Заголовки ответа**: API отвечает с `Cache-Control: private, no-store` по умолчанию (`SECURITY_HEADERS`): всё, что оно
+  отдаёт, — данные пользователя; маршрут со своим заголовком его не теряет (`setdefault`). `/sync/trigger` с чужим
+  `credential_id` — 404.
 - **Сессии**: ротация refresh хранит `previous_token_hash` + `rotated_at` (миграция `0053`). Предыдущий токен
   принимается ещё раз в течение `REFRESH_ROTATION_GRACE` (30 с, потерянный ответ), позже — это повтор: сессия
   удаляется (с `commit` до 401, иначе откат вернул бы её), в лог идёт warning без токена. Потолок жизни —
   `AUTH_SESSION_MAX_AGE_DAYS` (90) от `created_at`: `expires_at` не уезжает дальше, ротация старше потолка отказывает.
   Живые сессии демо-аккаунта ограничены `DEMO_MAX_ACTIVE_SESSIONS` (200, старейшие удаляются). Ограничение: два
   одновременных запроса с одним *текущим* токеном по-прежнему дают одному из них 401 — SPA это закрывает
-  блокировкой refresh между вкладками. `POST /auth/logout-others` без refresh-cookie отвечает 400.
+  блокировкой refresh между вкладками. `POST /auth/logout-others` без refresh-cookie отвечает 400. Сбой `/auth/refresh`
+  (5xx, сеть) не вердикт: окно пароля и выход вызывает только 401/403 от самого refresh (`requestWithReauth`).
+  Сессии удаляются строкой, колонки `revoked_at` больше нет.
+- **Жизненный цикл учёток**: время в БД — наивный UTC из `clock.utcnow()`, не `datetime.utcnow()`. Удаление пользователя
+  или кредов не блокируется историей: `portal_audit_events.actor_user_id`, `sync_jobs.credential_id` и
+  `sync_job_events.credential_id` — `ON DELETE SET NULL` (миграция `0055`). Удаление пользователя, заведённого из CRM,
+  отвязывает его строку `staff` (`detach_portal_user_staff`). Смена email и отключение через админку сбрасывают сессии и
+  неиспользованные reset-токены; смена роли и филиалов — нет. `consume_email_token` не коммитит: трата токена и то, ради
+  чего он выдан, попадают в одну транзакцию. `list_branches` при сбое `get_groups()` — ошибка, не пустой список (иначе
+  сохранился бы ключ без филиалов); `authenticate()` успешна только с `user_token`.
 - **Контекст запроса грузится один раз**: `require_auth` кладёт `PortalUser` в `request.state.portal_user`, а
   `get_current_user`, `forbid_demo` и `is_demo_request` читают его (и `AccessContext.is_demo`), не декодируя JWT и
   не обращаясь в БД повторно. Путь, на котором `require_auth` не выполнялся, по-прежнему разбирает токен сам.
@@ -1176,8 +1210,7 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
 ### SQL Safety
 - Прикладные запросы используют SQLAlchemy ORM/Core и параметризованные выражения
 - Raw SQL допустим для инфраструктурных операций: advisory locks, атомарный claim очереди и bootstrap/maintenance; user input нельзя интерполировать в SQL
-- Параметры пагинации валидируются через FastAPI `Query(ge=, le=)`
-- `/export/csv/{table_name}` — table_name проверяется по whitelist моделей
+- Параметры запросов валидируются типами FastAPI/Pydantic (например, `date`): мусор — 422
 
 ### Public Repository Hygiene
 - Do not commit production hosts, IP addresses, DNS, routing diagrams or deployment runbooks
@@ -1192,16 +1225,22 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
 ## Common Patterns
 
 ### Добавление нового endpoint
-1. Модель в `models.py` (SQLAlchemy)
-2. Endpoint в `api.py` с `page_params`, `fetch_page`, `serialize_rows`
-3. Тест в `tests/test_api.py`
-4. Роут в allowlist same-origin прокси — **обе** копии `api/_proxy.js` и `web/api/_proxy.js`
+1. Портальные/дашборд-эндпоинты — в `auth_routes.py` / `dashboard_routes.py` / `onboarding_routes.py` с зависимостями
+   доступа (`get_dashboard_access`, роли); модель в `models.py` и тест рядом, `api.py` не трогать. На мутации навешивать
+   `forbid_demo`, чтобы демо оставался read-only.
+   Настройки тенанта (`/dashboard/metric-visibility`): у ключа API своего тенанта нет, поэтому он
+   обязан назвать его заголовком `X-Portal-Account-Id` (400 без него или с несуществующим id) — «самый маленький id»
+   и автосоздание аккаунта из GET убраны. `/dashboard/services*` его не требует (каталог и разметка идут по филиалам, не по
+   тенанту). `ValueError` сервиса в этих роутах превращается в 400 одним
+   `_value_error_as_400()` вокруг всего try/except (а не вместо узких обработчиков 409), вторую копию писать не надо.
+2. Роут в allowlist same-origin прокси — **обе** копии `api/_proxy.js` и `web/api/_proxy.js`
    (локально всё работает и без этого, а в деплое запрос вернёт 404); проверка — в
    `web/tests/proxy-runtime.test.mjs`. Allowlist мало, если путь вложенный (`payments/yandex_pay`)
    или скоуп переписывается по пути (`/onboarding/…`): catch-all `[...path].js` на Vercel ловит только
    один сегмент ниже своей папки, и такой путь — 404 от самого Vercel, до прокси. Так 08.10.2026 вкладка
    «Яндекс Пэй» вышла в прод нерабочей, а онбординг владельца отвечал 404 с самого появления.
-   **Новую функцию-обёртку не заводить**: на тарифе Hobby в деплое не больше **12** функций, их ровно 12,
+   **Новую функцию-обёртку не заводить**: на тарифе Hobby в деплое не больше **12** функций, сейчас их 8
+   (учётные данные YClients идут через общий rewrite `/auth/:path*` → `auth-proxy`, отдельных функций у них нет),
    и 13-я 09.10.2026 уронила всю сборку Vercel. Вместо этого — rewrite в **обоих** `vercel.json` на
    `api/auth-proxy.js` со скоупом и путём в query: `/api/<скоуп>/<префикс>/:path*` →
    `/api/auth-proxy?scope=<скоуп>&path=<префикс>/:path*` (и такой же для пути без `/api`, **раньше**
@@ -1210,12 +1249,9 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
    исходный query в destination) — 400, одинаковый повтор проходит: если Vercel сам продублирует
    подставленный параметр, отказ уронил бы всю авторизацию. `maxDuration` у функции 180 с (оба `vercel.json`, тест требует больше 160): онбординг проверяет креды в YClients.
    Тесты «every allowlisted route reaches a Vercel function…» и «…within the Vercel function limit»
-   ловят и пропуск, и 13-ю функцию.
-5. Портальные/дашборд-эндпоинты — в `auth_routes.py` / `dashboard_routes.py` / `onboarding_routes.py` с зависимостями доступа (`get_dashboard_access`, роли); на мутации навешивать `forbid_demo`, чтобы демо оставался read-only.
-   Настройки тенанта (`/dashboard/services*`, `/dashboard/metric-visibility`): у ключа API своего тенанта нет, поэтому он
-   обязан назвать его заголовком `X-Portal-Account-Id` (400 без него или с несуществующим id) — «самый маленький id»
-   и автосоздание аккаунта из GET убраны. `ValueError` сервиса в этих роутах превращается в 400 одним
-   `_value_error_as_400()` вокруг всего try/except (а не вместо узких обработчиков 409), вторую копию писать не надо.
+   ловят и пропуск, и 13-ю функцию. Общая таблица скоуп → префикс VM (`SCOPE_TARGET_PREFIX`) и обработчик
+   (`createProxyHandler`) живут в `_proxy.js`; `[...path].js` и `auth-proxy.js` их только используют. Ошибки прокси
+   отдают `{error, detail}`.
 
 ### Окна синхронизации: почему одного инкремента мало
 Оплату в YClients нередко проводят задним числом — через день, неделю или месяц после
@@ -1247,7 +1283,10 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
 - **Здоровье тенанта — не статус глобального прогона.** Прогон по всем тенантам кончается `success`, даже если
   у одного сломались credentials (шаг `credentials_auth` / `credentials_decrypt` в `step_results` — только предупреждение;
   `load_active_credentials_sync` молча отбрасывает недешифруемые, их находит `_undecryptable_credentials`). Глобальный
-  статус и `last_successful_sync_at` не трогаем: на нём держится `enqueue_auto_sync_jobs_if_due`. Свежесть тенанта —
+  статус и `last_successful_sync_at` не трогаем (на нём держится фолбэк виджета); гейт `enqueue_auto_sync_jobs_if_due`
+  читает отдельный ключ `last_unscoped_sync_at`, который `finish_run(scoped=False)` пишет только после успешного прогона без
+  ограничения по тенанту/кредам/филиалам: прогон одного тенанта не откладывает автосинк остальных, а прогоны CLI/timer, не
+  оставляющие строки `sync_jobs`, гейт взводят. Свежесть тенанта —
   `/dashboard/widget/sync_status` (`_tenant_sync_health`): самая старая per-branch отметка
   `transactional_state_key` среди филиалов его активных credentials (она пишется только когда записи, платежи,
   товары и комментарии филиала прочитались целиком), а `tenant_sync_failed` — `needs_reauth` любой активной credential.
@@ -1302,6 +1341,9 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
   удаляемого окна, и до 22.08.2026 каждый прошедший день так лежал в `staff_schedules`
   дважды (403 из 432 дней-филиалов в дампе за 13.08; бэкфилл 22.08 это вычистил).
 - Начинать окно с филиального дня вместо UTC бесполезно: в 20:00 UTC в Москве тот же день.
+- **Пустой ответ графиков не удаляет прошлое.** `sync_staff_schedules` на `[]` чистит только дни с филиального «сегодня»
+  (`_branch_today`): прошлые смены питают KPI администраторов и не перечитываются (бэкфилл идёт по прошлым окнам), а
+  пустой ответ неотличим от сбоя. Непустой ответ по-прежнему заменяет окно целиком.
 
 ### Добавление нового шага синхронизации
 1. Метод API в `yclients_api.py`
