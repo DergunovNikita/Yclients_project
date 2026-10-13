@@ -628,6 +628,21 @@
       height: 100%;
     }
 
+    /* Labels and deltas wrap to different line counts card by card. Label, value, delta and the
+       report link are rows shared by the whole row of cards (subgrid), so each lines up across it
+       however they wrap; a card without a delta keeps its link on the link row. */
+    :is(.kpi, .visit-metrics, .clients-metrics, .appointments-metrics) :is(.card-slot, .card) {
+      display: grid;
+      grid-row: span 4;
+      grid-template-rows: subgrid;
+      row-gap: 0;
+    }
+
+    .card > .label { grid-row: 1; }
+    .card > .value { grid-row: 2; }
+    .card > .delta { grid-row: 3; }
+    .card > .card__action { grid-row: 4; }
+
     .card--link {
       display: block;
       color: inherit;
@@ -1394,7 +1409,12 @@
       margin-bottom: 16px;
     }
 
+    /* Same as the Overview cards: a label wrapping to two lines must not push its value down. */
     .reports-metric {
+      display: grid;
+      grid-row: span 2;
+      grid-template-rows: subgrid;
+      row-gap: 0;
       min-height: 96px;
       padding: 14px;
       border: 1px solid #dbe3ef;
