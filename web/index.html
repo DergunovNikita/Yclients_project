@@ -546,6 +546,12 @@
       grid-template-columns: repeat(var(--metric-columns, 3), minmax(0, 1fr));
     }
 
+    /* The visit cards stay on one row however many the summary brings (--metric-columns,
+       never fewer than the usual four); narrow screens fall back to the shared two columns. */
+    .visit-cards-row {
+      grid-template-columns: repeat(var(--metric-columns, 4), minmax(0, 1fr));
+    }
+
     /* The last row holds fewer cards than the columns above it, so those cards name
        the column they belong to instead of being packed from the left. */
     .services-metrics .card-slot {
@@ -1970,7 +1976,7 @@
         <div class="panel-title">
           <h2 data-i18n="dash.jumpAppointments">Appuntamenti</h2>
         </div>
-        <section class="visit-metrics" id="visit-metrics" data-i18n-attr="aria-label:dash.ariaVisits" aria-label="Visite e servizi extra"></section>
+        <section class="visit-metrics visit-cards-row" id="visit-metrics" data-i18n-attr="aria-label:dash.ariaVisits" aria-label="Visite e servizi extra"></section>
         <div class="grid">
           <div class="panel wide">
             <div class="panel-title">

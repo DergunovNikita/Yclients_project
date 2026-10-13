@@ -873,7 +873,9 @@ function renderServicesMetrics(summary) {
 }
 
 function renderVisitMetrics(summary) {
-  renderCards(els.visitMetrics, visitCards(summary));
+  const cards = visitCards(summary);
+  els.visitMetrics.style.setProperty('--metric-columns', String(Math.max(4, cards.length)));
+  renderCards(els.visitMetrics, cards);
 }
 
 function renderClientsMetrics(summary) {
