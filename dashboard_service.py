@@ -8,7 +8,7 @@ from bisect import bisect_right
 from calendar import monthrange
 from collections import defaultdict
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal, Optional, get_args
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -250,6 +250,8 @@ class OpzEvent:
     last_visit_date: date
     barber_staff_id: Optional[int]
     created_user_id: Optional[int]
+    # The anchor visit is the client's first in the branch (`_first_visit_days`).
+    first_visit: bool
 
 
 @dataclass(frozen=True)
@@ -1558,6 +1560,64 @@ def _client_scope_filters(
     return filters
 
 
+def _first_visit_days(end: date, *conditions):
+    """Each client's first visit day in a branch up to `end`: `(company_id, client_id, first_day)`.
+
+    The one definition of a first visit — a visit on that day. Whole days, like the new-client
+    count, so two visits on the first day are both first, and the visits that count reads
+    (completed, business staff, reporting window), taken per branch and without `factual_at`:
+    any earlier day is already in the past.
+    OPZ events flag their anchors by it and the first-visit bases count by it. A grouped read:
+    asked per visit as a NOT EXISTS, the same question cost 0.6 s for a month of a network.
+    """
+    return (
+        select(
+            Appointment.company_id,
+            Appointment.client_id,
+            func.min(Appointment.date).label('first_day'),
+        )
+        .where(
+            Appointment.client_id.is_not(None),
+            Appointment.date <= end,
+            Appointment.attendance == COMPLETED_ATTENDANCE,
+            business_appointment_condition(),
+            reporting_window_clause(Appointment.company_id, Appointment.date),
+            *conditions,
+        )
+        .group_by(Appointment.company_id, Appointment.client_id)
+    )
+
+
+def _first_visit_join(dr: DateRange, company_id: Optional[int], company_ids: Optional[list[int]]):
+    """The first-visit days of a scope and the join that keeps only `Appointment` rows on them.
+
+    The join is on the day itself, so a caller without the history filters (business staff,
+    reporting window) still cannot count an earlier visit of a service row as a first one.
+
+    Only clients with a completed visit in `dr` are grouped: the others cannot match, and the
+    history of a whole network costs more than the period's visits.
+    """
+    scope = _company_scope_clause(Appointment.company_id, company_id, company_ids)
+    period_visit = aliased(Appointment)
+    period_scope = _company_scope_clause(period_visit.company_id, company_id, company_ids)
+    period_clients = select(period_visit.company_id, period_visit.client_id).where(
+        period_visit.attendance == COMPLETED_ATTENDANCE,
+        period_visit.date >= dr.start,
+        period_visit.date <= dr.end,
+        *([period_scope] if period_scope is not None else []),
+    )
+    first_days = _first_visit_days(
+        dr.end,
+        tuple_(Appointment.company_id, Appointment.client_id).in_(period_clients),
+        *([scope] if scope is not None else []),
+    ).subquery()
+    return first_days, and_(
+        first_days.c.company_id == Appointment.company_id,
+        first_days.c.client_id == Appointment.client_id,
+        Appointment.date == first_days.c.first_day,
+    )
+
+
 async def _client_visit_frequency_block(
     db: AsyncSession,
     dr: DateRange,
@@ -2132,7 +2192,7 @@ async def fetch_client_mix_metrics(
     factual_at: Optional[datetime] = None,
     period_preset: Optional[str] = None,
 ) -> dict[str, Any]:
-    """The Overview's unique/new/repeat client metrics without the rest of `fetch_summary`.
+    """The Overview's unique/new/repeat client metrics and the OPZ split, without the rest of `fetch_summary`.
 
     Same numbers and the same comparison baseline (`period_preset`) as the matching keys of
     `fetch_summary()['visit_metrics']`, for the report those cards link to.
@@ -2147,9 +2207,20 @@ async def fetch_client_mix_metrics(
     prev_appointments, prev_unique = await _completed_visit_counts(
         db, prev_dr, company_id, staff_id, company_ids, factual_at
     )
+    opz_split, _ = await _opz_split_metrics(
+        db,
+        current_dr,
+        prev_dr,
+        company_id=company_id,
+        staff_id=staff_id,
+        company_ids=company_ids,
+        factual_at=factual_at,
+        visits=(cur_appointments, prev_appointments),
+    )
     return {
         **_visit_count_metrics(cur_appointments, cur_unique, prev_appointments, prev_unique),
         **await _client_recency_metrics(db, current_dr, prev_dr, company_id, staff_id, company_ids, factual_at),
+        **opz_split,
     }
 
 
@@ -2216,14 +2287,7 @@ async def fetch_summary(
             )
             for field in EXTRA_SERVICE_FIELDS:
                 block[field] = attributed[field]
-    cur_opz_qty = await _opz_count_scope(
-        db,
-        start,
-        end,
-        staff_id,
-        appointment_company_ids,
-        factual_at=factual_at,
-    ) + await _manual_opz_scope_total(
+    cur_manual_opz = await _manual_opz_scope_total(
         db,
         start,
         end,
@@ -2231,14 +2295,7 @@ async def fetch_summary(
         staff_id,
         factual_at,
     )
-    prev_opz_qty = await _opz_count_scope(
-        db,
-        prev_dr.start,
-        prev_dr.end,
-        staff_id,
-        appointment_company_ids,
-        factual_at=factual_at,
-    ) + (
+    prev_manual_opz = (
         0.0
         if staff_id is not None
         else await _manual_opz_months_total(
@@ -2321,6 +2378,18 @@ async def fetch_summary(
     prev_avg_goods = _safe_div(prev['goods_revenue'], float(prev['goods_count'] or 0))
     cur_extra = _extra_service_metrics(cur, current_service_scope, cur_appointments)
     prev_extra = _extra_service_metrics(prev, previous_service_scope, prev_appointments)
+    opz_split, (cur_opz_calculated, prev_opz_calculated) = await _opz_split_metrics(
+        db,
+        current_dr,
+        prev_dr,
+        company_id=company_id,
+        staff_id=staff_id,
+        company_ids=appointment_company_ids,
+        factual_at=factual_at,
+        visits=(int(cur_appointments), int(prev_appointments)),
+    )
+    cur_opz_qty = cur_opz_calculated + cur_manual_opz
+    prev_opz_qty = prev_opz_calculated + prev_manual_opz
     cur_opz_pct = 100.0 * _safe_div(cur_opz_qty, float(cur['appointments'] or 0))
     prev_opz_pct = 100.0 * _safe_div(prev_opz_qty, float(prev['appointments'] or 0))
 
@@ -2402,6 +2471,7 @@ async def fetch_summary(
             'opz_qty_change_pct': _pct_change(cur_opz_qty, prev_opz_qty),
             'opz_pct': cur_opz_pct,
             'opz_pct_change_pct': _pct_change(cur_opz_pct, prev_opz_pct),
+            **opz_split,
             'extra_services_per_appointment_pct': cur_extra['per_appointment_pct'],
             'extra_services_per_appointment_pct_change_pct': _optional_pct_change(
                 cur_extra['per_appointment_pct'],
@@ -2461,6 +2531,7 @@ async def fetch_year_over_year_facts(
             'topup_revenue': 0.0,
             'extra_service_revenue': 0.0,
             'appointments': 0,
+            'first_visits': 0,
             'unique_clients': 0,
             'service_count': 0.0,
             'goods_count': 0.0,
@@ -2474,6 +2545,7 @@ async def fetch_year_over_year_facts(
             'goods_revenue': 0.0,
             'topup_revenue': 0.0,
             'appointments': 0,
+            'first_visits': 0,
         }
 
     annual: defaultdict[int, dict[str, float | int]] = defaultdict(annual_bucket)
@@ -2534,6 +2606,26 @@ async def fetch_year_over_year_facts(
     ).all()
     for row in appointment_month_rows:
         monthly[int(row.year)][int(row.month)]['appointments'] = int(row.appointments or 0)
+
+    # The bases of OPZ after a first visit; the rest of the completed visits are the repeat base.
+    first_days, on_first_day = _first_visit_join(DateRange(start, end), company_id, allowed_company_ids)
+    first_visit_month_rows = (
+        await db.execute(
+            select(
+                appointment_year.label('year'),
+                appointment_month.label('month'),
+                func.count(func.distinct(Appointment.id)).label('first_visits'),
+            )
+            .select_from(Appointment)
+            .join(first_days, on_first_day)
+            .where(*appointment_filters)
+            .group_by(appointment_year, appointment_month)
+        )
+    ).all()
+    for row in first_visit_month_rows:
+        first_visits = int(row.first_visits or 0)
+        annual[int(row.year)]['first_visits'] += first_visits
+        monthly[int(row.year)][int(row.month)]['first_visits'] = first_visits
 
     payment_year = extract('year', FinancialTransaction.date)
     payment_month = extract('month', FinancialTransaction.date)
@@ -3637,14 +3729,14 @@ async def _opz_events(
     end: date,
     company_id: int,
     *,
-    deduplicate_by: Literal['period', 'year', 'month'] = 'period',
     factual_at: Optional[datetime] = None,
     timezone_name: Optional[str] = None,
 ) -> list[OpzEvent]:
-    """Rebooking events in [start, end], one per client per `deduplicate_by` unit.
+    """Rebooking events made in [start, end], one per anchor visit.
 
-    'period' keeps the first event per client in the whole window (Overview), 'year' and
-    'month' restart the count at each calendar year or month of the event day.
+    The unit is the visit, like the completed visits OPZ % divides by: a client rebooked after
+    each of two visits is two events, and a visit rebooked twice is one, its first booking. So
+    the count of a window is the sum of the counts of its parts.
     """
     if timezone_name is None:
         timezone_name = (await _company_timezone_names(db, [company_id])).get(company_id)
@@ -3658,15 +3750,19 @@ async def _opz_events(
         int(company_id),
         start,
         end,
-        deduplicate_by,
         factual_at,
         timezone.key,
     )
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
+    # Bookings of the day before the period are read only to learn which anchors they already
+    # rebooked: an anchor is on the booking's day or the day before, so one day is enough, and
+    # without it a visit on the eve of the period would count once in each of two adjacent periods.
+    # Not at the very start of the calendar, where the day before (and its zone shift) would overflow.
+    reach_start = start - timedelta(days=1) if start > date.min + timedelta(days=3) else start
     create_start = (
-        datetime.combine(start, time.min, tzinfo=timezone)
+        datetime.combine(reach_start, time.min, tzinfo=timezone)
         .astimezone(UTC)
         .replace(tzinfo=None)
     )
@@ -3697,7 +3793,7 @@ async def _opz_events(
             prior_visit.client_id == Appointment.client_id,
             prior_visit.attendance == COMPLETED_ATTENDANCE,
             prior_visit.date < Appointment.date,
-            prior_visit.date >= start - timedelta(days=1),
+            prior_visit.date >= reach_start - timedelta(days=1),
             prior_visit.date <= end,
             _booked_within_anchor_reach(prior_visit, Appointment.create_date),
         )
@@ -3725,13 +3821,13 @@ async def _opz_events(
         Appointment.date.is_not(None),
         Appointment.date <= end,
         # An event is only counted when the booking was made on the anchor visit's day or
-        # the morning after, and a booking's local day is inside the period — so an anchor
+        # the morning after, and a booking's local day is inside the read window — so an anchor
         # is never older than the day before it starts. Earlier visits can only be rejected
         # further down, and dropping them here keeps a month from reading a client's whole
         # history. They cannot change which visit anchors either: they are all older than
         # every visit that survives, so they only ever win when nothing else is left, and
         # that case is rejected by the same day rule.
-        Appointment.date >= start - timedelta(days=1),
+        Appointment.date >= reach_start - timedelta(days=1),
         # Anchoring a rebooking on a visit the branch does not report would count an
         # OPZ event whose denominator visit is excluded, inflating opz_pct. Cutting the
         # anchor is enough: a rebooking made before the reporting start can only anchor
@@ -3783,7 +3879,7 @@ async def _opz_events(
         )
 
     events: list[OpzEvent] = []
-    booked_clients: set[tuple[int, ...]] = set()
+    rebooked_visit_ids: set[int] = set()
     for candidate in candidates:
         local_create_moment = _local_event_moment(candidate.create_date, timezone)
         if local_create_moment is None:
@@ -3802,14 +3898,11 @@ async def _opz_events(
             continue
         if create_day not in {last_visit_date, last_visit_date + timedelta(days=1)}:
             continue
-        client_key = (int(candidate.company_id), int(candidate.client_id))
-        if deduplicate_by == 'year':
-            client_key = (*client_key, create_day.year)
-        elif deduplicate_by == 'month':
-            client_key = (*client_key, create_day.year, create_day.month)
-        if client_key in booked_clients:
+        if last_visit.id in rebooked_visit_ids:
             continue
-        booked_clients.add(client_key)
+        rebooked_visit_ids.add(last_visit.id)
+        if create_day < start:
+            continue
         events.append(
             OpzEvent(
                 event_id=int(candidate.id),
@@ -3825,9 +3918,23 @@ async def _opz_events(
                     if candidate.created_user_id is not None
                     else None
                 ),
+                first_visit=False,  # set below, once the events' clients are known
             )
         )
 
+    if events:
+        # Only the events' own clients: most candidates never qualify.
+        history_filters = [Appointment.company_id == company_id]
+        if len(events) <= OPZ_SURVIVOR_ID_LIMIT:
+            history_filters.append(Appointment.client_id.in_({event.client_id for event in events}))
+        first_visit_days: dict[int, date] = {
+            int(row.client_id): _coerce_date(row.first_day)
+            for row in await db.execute(_first_visit_days(end, *history_filters))
+        }
+        events = [
+            replace(event, first_visit=event.last_visit_date <= first_visit_days.get(event.client_id, date.max))
+            for event in events
+        ]
     cache[cache_key] = events
     return events
 
@@ -3849,40 +3956,117 @@ async def _company_timezone_names(
     return {int(company_id): cache.get(int(company_id)) for company_id in company_ids}
 
 
-async def _opz_count(
-    db: AsyncSession,
-    start: date,
-    end: date,
-    company_id: int,
-    staff_id: Optional[int] = None,
-    factual_at: Optional[datetime] = None,
-) -> float:
-    events = await _opz_events(db, start, end, company_id, factual_at=factual_at)
-    if staff_id is not None:
-        events = [event for event in events if event.barber_staff_id == staff_id]
-    return float(len(events))
-
-
-async def _opz_count_scope(
+async def _opz_split_scope(
     db: AsyncSession,
     start: date,
     end: date,
     staff_id: Optional[int],
     company_ids: list[int],
     factual_at: Optional[datetime] = None,
-) -> float:
+) -> tuple[float, float]:
+    """Calculated OPZ of the scope as (after a first visit, after a repeat visit)."""
     await _company_timezone_names(db, company_ids)
-    total = 0.0
+    first = repeat = 0.0
     for item_company_id in company_ids:
-        total += await _opz_count(
-            db,
-            start,
-            end,
-            item_company_id,
-            staff_id=staff_id,
-            factual_at=factual_at,
+        for event in await _opz_events(db, start, end, item_company_id, factual_at=factual_at):
+            if staff_id is not None and event.barber_staff_id != staff_id:
+                continue
+            if event.first_visit:
+                first += 1.0
+            else:
+                repeat += 1.0
+    return first, repeat
+
+
+async def _first_visit_count(
+    db: AsyncSession,
+    dr: DateRange,
+    company_id: Optional[int],
+    staff_id: Optional[int],
+    company_ids: Optional[list[int]],
+    factual_at: Optional[datetime],
+) -> int:
+    """Completed visits of the period that were their client's first in the branch.
+
+    A subset of `_completed_visit_counts`, so the rest of those visits are repeat ones.
+    """
+    first_days, on_first_day = _first_visit_join(dr, company_id, company_ids)
+    count = (
+        await db.execute(
+            select(func.count(func.distinct(Appointment.id)))
+            .select_from(Appointment)
+            .join(first_days, on_first_day)
+            .where(
+                _appt_revenue_filters(
+                    dr.start,
+                    dr.end,
+                    company_id,
+                    staff_id,
+                    allowed_company_ids=company_ids,
+                    factual_at=factual_at,
+                )
+            )
         )
-    return total
+    ).scalar_one()
+    return int(count or 0)
+
+
+def _opz_rate(qty: float, visits: float) -> Optional[float]:
+    """OPZ % of a split part; a part without visits has no rate rather than a zero one."""
+    return 100.0 * qty / visits if visits else None
+
+
+def _opz_split_fields(first_qty: float, repeat_qty: float, visits: float, first_visits: float) -> dict[str, Any]:
+    """Counts and rates of both split parts for one window, the Overview's and the year-over-year rows' alike.
+
+    `visits` are the window's completed visits and `first_visits` the subset that were first: the
+    repeat part divides by the rest of them.
+    """
+    return {
+        'opz_first_visit_qty': first_qty,
+        'opz_first_visit_pct': _opz_rate(first_qty, first_visits),
+        'opz_repeat_visit_qty': repeat_qty,
+        'opz_repeat_visit_pct': _opz_rate(repeat_qty, visits - first_visits),
+    }
+
+
+async def _opz_split_metrics(
+    db: AsyncSession,
+    current_dr: DateRange,
+    prev_dr: DateRange,
+    *,
+    company_id: Optional[int],
+    staff_id: Optional[int],
+    company_ids: list[int],
+    factual_at: Optional[datetime],
+    visits: tuple[int, int],
+) -> tuple[dict[str, Any], tuple[float, float]]:
+    """OPZ after a first visit and after a repeat one, each over its own completed visits.
+
+    `visits` is the (current, previous) completed-visit count the total OPZ % divides by — from
+    `_completed_visit_counts` over the same scope, staff and `factual_at`, since the repeat base is
+    what is left of it after the first visits. Returns the block and the calculated OPZ of both
+    windows, which the total is made of, so the two cannot be counted apart. The manual top-up
+    belongs to neither part: it is one number per administrator and month. The Overview and the
+    new/repeat clients report show the same block.
+    """
+    windows = []
+    calculated = []
+    for dr, period_visits in zip((current_dr, prev_dr), visits):
+        split = await _opz_split_scope(db, dr.start, dr.end, staff_id, company_ids, factual_at=factual_at)
+        first_visits = await _first_visit_count(db, dr, company_id, staff_id, company_ids, factual_at)
+        windows.append((_opz_split_fields(*split, period_visits, first_visits), first_visits, period_visits))
+        calculated.append(sum(split))
+    (current, first_visits, period_visits), (previous, _, _) = windows
+    out: dict[str, Any] = {**current, 'first_visits': first_visits, 'repeat_visits': period_visits - first_visits}
+    for key in ('first', 'repeat'):
+        out[f'opz_{key}_visit_qty_change_pct'] = _pct_change(
+            current[f'opz_{key}_visit_qty'], previous[f'opz_{key}_visit_qty']
+        )
+        out[f'opz_{key}_visit_pct_change_pct'] = _optional_pct_change(
+            current[f'opz_{key}_visit_pct'], previous[f'opz_{key}_visit_pct']
+        )
+    return out, (calculated[0], calculated[1])
 
 
 def _widen_dependency(
@@ -3911,18 +4095,20 @@ async def fetch_opz_year_facts(
 ) -> dict[str, Any]:
     """Load OPZ once per branch, returning annual and monthly counts.
 
-    A client counts once per calendar month in `monthly_counts` and once per calendar year in
-    `counts`, so the months of a year can sum to more than the year. Both come from one
-    per-month pass: events are ordered by creation, so a client's first event of a year is
-    exactly the one a per-year pass would have kept. `appointment_dependencies` describes the
-    annual events only; `monthly_appointment_dependencies`
-    is the same span per event month, as `{year: {month: {company_id: (first, last)}}}`.
+    Events are counted per anchor visit, so the months of a year sum to the year. `counts` and
+    `monthly_counts` carry the manual top-up; `monthly_first_visit_counts` and
+    `monthly_repeat_visit_counts` split the calculated events by the anchor visit and carry no
+    top-up. `appointment_dependencies` is the span of visits the year's events rest on;
+    `monthly_appointment_dependencies` is the same per event month, as
+    `{year: {month: {company_id: (first, last)}}}`.
     """
     company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
     counts: dict[int, float] = defaultdict(float)
     monthly_counts: defaultdict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
+    monthly_first_visit_counts: defaultdict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
+    monthly_repeat_visit_counts: defaultdict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
     appointment_dependencies: defaultdict[
         int, dict[int, tuple[date, date]]
     ] = defaultdict(dict)
@@ -3936,27 +4122,20 @@ async def fetch_opz_year_facts(
             start,
             end,
             item_company_id,
-            deduplicate_by='month',
             factual_at=factual_at,
             timezone_name=timezone_names.get(item_company_id),
         )
-        seen_in_year: set[tuple[int, int]] = set()
         for event in events:
-            # Decided before the staff filters: whether the event is the client's first of the
-            # year does not depend on whose attribution is being asked about.
-            year_key = (event.client_id, event.event_date.year)
-            first_in_year = year_key not in seen_in_year
-            seen_in_year.add(year_key)
             if staff_id is not None and event.barber_staff_id != staff_id:
                 continue
             event_year = event.event_date.year
             event_month = event.event_date.month
-            monthly_counts[event_year][event_month] += 1.0
-            _widen_dependency(monthly_dependencies[event_year][event_month], item_company_id, event)
-            if not first_in_year:
-                continue
             counts[event_year] += 1.0
+            monthly_counts[event_year][event_month] += 1.0
+            split_counts = monthly_first_visit_counts if event.first_visit else monthly_repeat_visit_counts
+            split_counts[event_year][event_month] += 1.0
             _widen_dependency(appointment_dependencies[event_year], item_company_id, event)
+            _widen_dependency(monthly_dependencies[event_year][event_month], item_company_id, event)
     # A staff filter counts events by one attribution, the barber of the visit, and a top-up
     # owned by an administrator would not reconcile with it. The branch and network scopes carry it.
     if staff_id is None:
@@ -3967,6 +4146,8 @@ async def fetch_opz_year_facts(
     return {
         'counts': dict(counts),
         'monthly_counts': {year: dict(months) for year, months in monthly_counts.items()},
+        'monthly_first_visit_counts': {year: dict(months) for year, months in monthly_first_visit_counts.items()},
+        'monthly_repeat_visit_counts': {year: dict(months) for year, months in monthly_repeat_visit_counts.items()},
         'appointment_dependencies': {
             year: dict(values)
             for year, values in appointment_dependencies.items()

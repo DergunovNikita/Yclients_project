@@ -24,6 +24,7 @@ from dashboard_service import (
     _coerce_date,
     _company_scope_clause,
     _financial_staff_attribution_condition,
+    _opz_split_fields,
     _pct_change,
     _personal_account_condition,
     _physical_account_condition,
@@ -401,6 +402,10 @@ def _year_over_year_missing_sources(
     return sorted(missing)
 
 
+# The keys `_opz_split_fields` fills, so the masks below cannot miss one it gains.
+OPZ_SPLIT_METRICS = tuple(_opz_split_fields(0.0, 0.0, 0, 0))
+
+
 def _mask_unknown_year_metrics(
     row: dict[str, Any],
     missing_sources: list[str],
@@ -420,6 +425,7 @@ def _mask_unknown_year_metrics(
             'visits_per_client',
             'opz_qty',
             'opz_pct',
+            *OPZ_SPLIT_METRICS,
         ):
             row[metric] = None
 
@@ -467,6 +473,7 @@ def _year_row(
     period: dict[str, Any],
     annual: dict[str, Any],
     opz_qty: float,
+    opz_split: tuple[float, float],
 ) -> dict[str, Any]:
     appointments = int(annual.get('appointments') or 0)
     revenue = float(annual.get('revenue') or 0)
@@ -491,6 +498,7 @@ def _year_row(
         'visits_per_client': (appointments / unique_clients if unique_clients else 0.0) if appointments else None,
         'opz_qty': opz_qty,
         'opz_pct': 100.0 * opz_qty / appointments if appointments else None,
+        **_opz_split_fields(*opz_split, appointments, int(annual.get('first_visits') or 0)),
         'source_status': 'ready',
         'missing_components': [],
         'is_partial_year': is_partial_year,
@@ -509,8 +517,9 @@ def _monthly_yoy_rows(
     reporting_windows: dict[int, ReportingWindow] | None = None,
     opz_counts: dict[int, float] | None = None,
     opz_dependencies: dict[int, dict[int, tuple[date, date]]] | None = None,
+    opz_split_counts: tuple[dict[int, float], dict[int, float]] = ({}, {}),
 ) -> list[dict[str, Any]]:
-    metrics = ('revenue', 'service_revenue', 'goods_revenue', 'topup_revenue', 'appointments')
+    metrics = ('revenue', 'service_revenue', 'goods_revenue', 'topup_revenue', 'appointments', 'first_visits')
     monthly = {
         month: {metric: float(monthly_facts.get(month, {}).get(metric) or 0) for metric in metrics}
         for month in range(1, 13)
@@ -555,6 +564,15 @@ def _monthly_yoy_rows(
         revenue_known = appointments_known and financials_known
         opz_known = in_activity_period and appointments_known and 'appointments_detail' not in opz_missing
         opz_qty = float((opz_counts or {}).get(month, 0.0)) if opz_known else None
+        opz_split = (
+            _opz_split_fields(
+                *(float(counts.get(month, 0.0)) for counts in opz_split_counts),
+                values['appointments'],
+                values['first_visits'],
+            )
+            if opz_known
+            else dict.fromkeys(OPZ_SPLIT_METRICS)
+        )
         # Same formula as the annual row: revenue over completed visits. A month with
         # no visits has no average check rather than a zero one.
         avg_check = (
@@ -575,6 +593,7 @@ def _monthly_yoy_rows(
             'opz_qty': opz_qty,
             # Like avg_check: a month without visits has no rate rather than a zero one.
             'opz_pct': 100.0 * opz_qty / values['appointments'] if opz_known and values['appointments'] else None,
+            **opz_split,
             'in_activity_period': in_activity_period,
             'source_status': (
                 'ready' if in_activity_period and not missing_sources and not opz_missing else 'partial'
@@ -611,6 +630,8 @@ def _with_year_changes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             'topup_revenue',
             'opz_qty',
             'opz_pct',
+            'opz_first_visit_pct',
+            'opz_repeat_visit_pct',
         ):
             metric_comparable = (
                 comparable_period
@@ -658,6 +679,7 @@ async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
 
     activity_start, opz_facts = activity_bounds
     opz_by_year = opz_facts['counts']
+    opz_split_by_year = (opz_facts['monthly_first_visit_counts'], opz_facts['monthly_repeat_visit_counts'])
     opz_dependencies_by_year = opz_facts['appointment_dependencies']
     report_end = factual_branch_date(report_now)
     periods = _year_periods(activity_start, report_end)
@@ -684,6 +706,7 @@ async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
             period,
             fact_rows['annual'].get(year, {}),
             float(opz_by_year.get(year, 0.0)),
+            tuple(sum(counts.get(year, {}).values()) for counts in opz_split_by_year),
         )
         technical_missing = _year_over_year_missing_sources(
             state_by_key,
@@ -711,8 +734,8 @@ async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
             year_row['source_status'] = 'partial'
         _mask_unknown_year_metrics(year_row, technical_missing)
         if 'appointments_detail' in opz_missing:
-            year_row['opz_qty'] = None
-            year_row['opz_pct'] = None
+            for metric in ('opz_qty', 'opz_pct', *OPZ_SPLIT_METRICS):
+                year_row[metric] = None
         year_rows.append(year_row)
         monthly_by_year[year] = _monthly_yoy_rows(
             year,
@@ -725,6 +748,7 @@ async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
             reporting_windows,
             opz_facts['monthly_counts'].get(year),
             opz_facts['monthly_appointment_dependencies'].get(year),
+            tuple(counts.get(year, {}) for counts in opz_split_by_year),
         )
 
     year_rows = _with_year_changes(year_rows)
@@ -742,9 +766,11 @@ async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
             'Выручка, завершенные визиты и средний чек рассчитаны по тем же '
             'оплаченным компонентам и бизнес-фильтрам. Первый и последний годы '
             'показываются за их фактический период. ОПЗ считается по формуле Обзора: '
-            'клиент засчитывается один раз в месяц в помесячном ряду и один раз в год '
-            'в годовом, поэтому сумма месяцев может превышать год. Ручные добавки ОПЗ '
-            'входят в итог филиала и сети и не учитываются при фильтре по сотруднику.'
+            'одно событие на визит, после которого клиент записался, поэтому месяцы '
+            'складываются в год. ОПЗ после первого и после повторного визита считаются '
+            'от своих визитов (первых в филиале и остальных) и ручную добавку не включают. '
+            'Ручные добавки ОПЗ входят в итог филиала и сети и не учитываются при фильтре '
+            'по сотруднику.'
         ),
     })
     partial_rows = [row for row in year_rows if row.get('source_status') != 'ready']
@@ -879,6 +905,44 @@ async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
                 for year in sorted(monthly_by_year)
             ],
         ),
+        # A part with no visits in any year (a history of first visits only) has no rate to plot,
+        # and an all-empty chart reads as a broken one, so its pair of charts and empty years are left out.
+        *(
+            opz_chart
+            for key, title in (('first', 'после первого визита'), ('repeat', 'после повторного визита'))
+            if any(row[f'opz_{key}_visit_pct'] is not None for row in year_rows)
+            for opz_chart in (
+                chart(
+                    f'year_opz_{key}_visit_pct',
+                    f'ОПЗ % {title} по годам',
+                    'bar',
+                    [str(row['year']) for row in year_rows],
+                    [{
+                        'label': 'ОПЗ %',
+                        'data': [row[f'opz_{key}_visit_pct'] for row in year_rows],
+                        'format': PERCENT_FORMAT,
+                    }],
+                ),
+                chart(
+                    f'monthly_opz_{key}_visit_pct_yoy',
+                    f'Помесячный ОПЗ % {title} год к году',
+                    'line',
+                    months,
+                    [
+                        {
+                            'label': str(year),
+                            'data': [row[f'opz_{key}_visit_pct'] for row in monthly_by_year[year]],
+                            'format': PERCENT_FORMAT,
+                            # A left-out year must not shift the colours of the later ones off
+                            # the neighbouring OPZ charts.
+                            'colorIndex': position,
+                        }
+                        for position, year in enumerate(sorted(monthly_by_year))
+                        if any(row[f'opz_{key}_visit_pct'] is not None for row in monthly_by_year[year])
+                    ],
+                ),
+            )
+        ),
     ]
     base['tables'] = [
         table(
@@ -906,6 +970,12 @@ async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
                 ('opz_qty_change_pct', 'ОПЗ YoY', PERCENT_FORMAT),
                 ('opz_pct', 'ОПЗ %', PERCENT_FORMAT),
                 ('opz_pct_change_pct', 'ОПЗ % YoY', PERCENT_FORMAT),
+                ('opz_first_visit_qty', 'ОПЗ после первого визита', NUMBER_FORMAT),
+                ('opz_first_visit_pct', 'ОПЗ % после первого визита', PERCENT_FORMAT),
+                ('opz_first_visit_pct_change_pct', 'ОПЗ % после первого визита YoY', PERCENT_FORMAT),
+                ('opz_repeat_visit_qty', 'ОПЗ после повторного визита', NUMBER_FORMAT),
+                ('opz_repeat_visit_pct', 'ОПЗ % после повторного визита', PERCENT_FORMAT),
+                ('opz_repeat_visit_pct_change_pct', 'ОПЗ % после повторного визита YoY', PERCENT_FORMAT),
             ], year_rows, {'topup_revenue'}),
             year_rows,
             row_key='year',
@@ -921,6 +991,10 @@ async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
                 ('avg_check', 'Средний чек', MONEY_FORMAT),
                 ('opz_qty', 'ОПЗ', NUMBER_FORMAT),
                 ('opz_pct', 'ОПЗ %', PERCENT_FORMAT),
+                ('opz_first_visit_qty', 'ОПЗ после первого визита', NUMBER_FORMAT),
+                ('opz_first_visit_pct', 'ОПЗ % после первого визита', PERCENT_FORMAT),
+                ('opz_repeat_visit_qty', 'ОПЗ после повторного визита', NUMBER_FORMAT),
+                ('opz_repeat_visit_pct', 'ОПЗ % после повторного визита', PERCENT_FORMAT),
                 ('service_revenue', 'Услуги', MONEY_FORMAT),
                 ('goods_revenue', 'Товары', MONEY_FORMAT),
                 ('topup_revenue', 'Пополнения', MONEY_FORMAT),

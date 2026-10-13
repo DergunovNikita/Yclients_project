@@ -19,15 +19,15 @@ START, END = date(2025, 1, 1), date(2025, 6, 30)
 NOW = datetime(2025, 12, 31, 12, 0)
 
 
-def _reference(appointments, tz_name, start, end, *, dedup):
+def _reference(appointments, tz_name, start, end):
     tz = ZoneInfo(tz_name)
     visits = [a for a in appointments if a.attendance == 1 and a.client_id is not None and a.date is not None
-              and start - timedelta(days=1) <= a.date <= end]
+              and a.date <= end]
     events, seen = [], set()
     for c in sorted((a for a in appointments if a.client_id is not None and a.date is not None
                      and a.create_date is not None and a.create_date <= NOW), key=lambda a: (a.create_date, a.id)):
         local = c.create_date.replace(tzinfo=UTC).astimezone(tz).date()
-        if not (start <= local <= end):
+        if local > end:
             continue
         earlier = [v for v in visits if v.client_id == c.client_id and v.date <= local]
         if not earlier:
@@ -35,11 +35,14 @@ def _reference(appointments, tz_name, start, end, *, dedup):
         last = max(earlier, key=lambda v: (v.date, v.datetime or datetime.combine(v.date, time.min), v.id))
         if c.date <= last.date or local not in {last.date, last.date + timedelta(days=1)}:
             continue
-        key = (c.client_id, *{'period': (), 'year': (local.year,), 'month': (local.year, local.month)}[dedup])
-        if key in seen:
+        # One event per anchor visit, its first booking, whenever that booking was made.
+        if last.id in seen:
             continue
-        seen.add(key)
-        events.append((c.id, local, last.date, last.staff_id))
+        seen.add(last.id)
+        if local < start:
+            continue
+        first_visit = not any(v.client_id == c.client_id and v.date < last.date for v in visits)
+        events.append((c.id, local, last.date, last.staff_id, first_visit))
     return events
 
 
@@ -47,10 +50,9 @@ def _reference(appointments, tz_name, start, end, *, dedup):
 @pytest.mark.parametrize(
     'tz_name', ['Pacific/Kiritimati', 'Europe/Moscow', 'UTC', 'America/Los_Angeles', 'Pacific/Pago_Pago']
 )
-@pytest.mark.parametrize('dedup', ['period', 'year', 'month'])
 # 0 is the path taken past the limit: the visits read is not narrowed by candidate ids
 @pytest.mark.parametrize('survivor_limit', [20000, 0])
-async def test_opz_events_match_the_unfiltered_rule(async_session, monkeypatch, tz_name, dedup, survivor_limit):
+async def test_opz_events_match_the_unfiltered_rule(async_session, monkeypatch, tz_name, survivor_limit):
     monkeypatch.setattr(dashboard_service, 'OPZ_SURVIVOR_ID_LIMIT', survivor_limit)
     rng = random.Random(7)
     async_session.add(Company(id=1, title='Branch', timezone=tz_name))
@@ -66,13 +68,39 @@ async def test_opz_events_match_the_unfiltered_rule(async_session, monkeypatch, 
                                                                  time(rng.choice([0, 1, 9, 13, 14, 22, 23]), 30)),
                                     created_user_id=rng.randint(1, 2)))
             next_id += 1
+    # Visits on the last day of a month, rebooked that day and again the next morning: the second
+    # booking falls into the next month and must not count there a second time.
+    for client, month in zip(range(41, 51), [1, 2, 3, 4, 5] * 2):
+        day = date(2025, month + 1, 1) - timedelta(days=1)
+        rows.append(Appointment(id=next_id, company_id=1, client_id=client, staff_id=1, date=day,
+                                datetime=datetime.combine(day, time(10)), attendance=1,
+                                create_date=datetime.combine(day - timedelta(days=5), time(9)), created_user_id=1))
+        for created in (datetime.combine(day, time(rng.choice([5, 13, 20]), 30)),
+                        datetime.combine(day + timedelta(days=1), time(rng.choice([1, 9, 15]), 30))):
+            next_id += 1
+            rows.append(Appointment(id=next_id, company_id=1, client_id=client, staff_id=1,
+                                    date=day + timedelta(days=20), attendance=0, create_date=created,
+                                    created_user_id=1))
+        next_id += 1
     async_session.add_all(rows)
     await async_session.commit()
 
-    got = await dashboard_service._opz_events(async_session, START, END, 1, deduplicate_by=dedup, factual_at=NOW)
-    assert [(e.event_id, e.event_date, e.last_visit_date, e.barber_staff_id) for e in got] == _reference(
-        rows, tz_name, START, END, dedup=dedup)
-    assert got  # a vacuous comparison would prove nothing
+    got = await dashboard_service._opz_events(async_session, START, END, 1, factual_at=NOW)
+    assert [(e.event_id, e.event_date, e.last_visit_date, e.barber_staff_id, e.first_visit) for e in got] == _reference(
+        rows, tz_name, START, END)
+    # a vacuous comparison would prove nothing
+    assert {e.first_visit for e in got} == {True, False}
+
+    # Months add up to the window: an anchor rebooked on the eve of a month belongs to one month only.
+    month_starts = [date(2025, month, 1) for month in range(1, 8)]
+    parts = [
+        event
+        for month_start, next_start in zip(month_starts, month_starts[1:])
+        for event in await dashboard_service._opz_events(
+            async_session, month_start, next_start - timedelta(days=1), 1, factual_at=NOW,
+        )
+    ]
+    assert sorted((e.event_id, e.first_visit) for e in parts) == sorted((e.event_id, e.first_visit) for e in got)
 
 
 @pytest.mark.asyncio

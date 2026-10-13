@@ -828,10 +828,34 @@ async def build_new_vs_returning_cross(req: ReportRequest) -> dict[str, Any]:
             'share_change_pct': visits.get('repeat_clients_pct_change_pct'),
         },
     ]
+    opz_rows = [
+        {
+            'segment': segment,
+            'visits': int(visits.get(f'{key}_visits') or 0),
+            'opz_qty': visits.get(f'opz_{key}_visit_qty', 0),
+            'opz_pct': visits.get(f'opz_{key}_visit_pct'),
+            'opz_qty_change_pct': visits.get(f'opz_{key}_visit_qty_change_pct'),
+            'opz_pct_change_pct': visits.get(f'opz_{key}_visit_pct_change_pct'),
+        }
+        for key, segment in (('first', 'После первого визита'), ('repeat', 'После повторного визита'))
+    ]
     base['notes'].append({
         'kind': 'formula',
         'title': 'Обезличенный расчет',
         'text': 'Отчет показывает только агрегаты по сегментам клиентов без имен, телефонов и клиентских карточек.',
+    })
+    base['notes'].append({
+        'kind': 'formula',
+        'title': 'ОПЗ после первого и повторного визита',
+        'text': (
+            'ОПЗ делится по визиту, после которого клиент записался: первый визит клиента в филиале '
+            'или повторный. Доля считается от своих визитов: первых — для первой строки, остальных '
+            'завершённых (включая визиты без карточки клиента) — для второй. Клиент, пришедший '
+            'в периоде дважды, может дать по событию в каждую строку. Два визита в первый день оба '
+            'считаются первыми, поэтому первых визитов бывает больше, чем новых клиентов, а при '
+            'фильтре по мастеру — меньше: первый визит нового клиента мог быть у другого мастера. '
+            'Ручная добавка ОПЗ в разбивку не входит.'
+        ),
     })
     base['cards'] = [
         card('Уникальные клиенты', visits.get('unique_clients', 0), NUMBER_FORMAT),
@@ -840,6 +864,8 @@ async def build_new_vs_returning_cross(req: ReportRequest) -> dict[str, Any]:
         card('Повторные клиенты', visits.get('repeat_clients', 0), NUMBER_FORMAT),
         card('Доля повторных', visits.get('repeat_clients_pct', 0), PERCENT_FORMAT),
         card('Визитов на клиента', visits.get('visits_per_client', 0), DECIMAL_FORMAT),
+        card('ОПЗ % после первого визита', visits.get('opz_first_visit_pct'), PERCENT_FORMAT),
+        card('ОПЗ % после повторного визита', visits.get('opz_repeat_visit_pct'), PERCENT_FORMAT),
     ]
     base['charts'] = [
         chart(
@@ -863,6 +889,20 @@ async def build_new_vs_returning_cross(req: ReportRequest) -> dict[str, Any]:
             ],
             rows,
             row_key='segment',
-        )
+        ),
+        table(
+            'opz_by_visit',
+            'ОПЗ после первого и повторного визита',
+            [
+                ('segment', 'Визит', 'text'),
+                ('visits', 'Визитов', NUMBER_FORMAT),
+                ('opz_qty', 'ОПЗ', NUMBER_FORMAT),
+                ('opz_pct', 'ОПЗ %', PERCENT_FORMAT),
+                ('opz_qty_change_pct', 'Изменение ОПЗ', PERCENT_FORMAT),
+                ('opz_pct_change_pct', 'Изменение ОПЗ %', PERCENT_FORMAT),
+            ],
+            opz_rows,
+            row_key='segment',
+        ),
     ]
     return base

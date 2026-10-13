@@ -617,3 +617,56 @@ def test_deleting_a_credential_referenced_by_sync_jobs_keeps_the_history(pg_sess
         assert session.execute(select(SyncJobEvent.credential_id)).scalar_one() is None
     finally:
         session.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_opz_split_counts_first_visits_per_branch(pg_session_factory):
+    """The tuple IN and the grouped first-day join only run on PostgreSQL in production."""
+    async_url = make_url(TEST_DATABASE_URL).set(drivername='postgresql+asyncpg')
+    engine = create_async_engine(async_url)
+
+    def visit(id, company_id, client_id, day, created=None, attendance=1):
+        return Appointment(
+            id=id, company_id=company_id, client_id=client_id, staff_id=company_id, date=day,
+            datetime=datetime.combine(day, time(12)), attendance=attendance,
+            create_date=created or datetime(2024, 1, 1, 9),
+        )
+
+    try:
+        async with AsyncSession(engine) as db:
+            for row in [
+                Group(id=1, title='G1'),
+                Company(id=1, title='Salon', group_id=1, timezone='UTC'),
+                Company(id=2, title='Second salon', group_id=1, timezone='UTC'),
+                Staff(id=1, name='Barber one', position='Барбер', company_id=1),
+                Staff(id=2, name='Barber two', position='Барбер', company_id=2),
+                # Branch 1: client 1 first comes on March 3 and is rebooked twice; client 2 is a repeat.
+                visit(1, 1, 1, date(2025, 3, 3)),
+                visit(2, 1, 1, date(2025, 3, 20), created=datetime(2025, 3, 3, 13)),
+                visit(3, 1, 1, date(2025, 4, 10), created=datetime(2025, 3, 20, 13), attendance=0),
+                visit(4, 1, 2, date(2025, 1, 10)),
+                visit(5, 1, 2, date(2025, 3, 5)),
+                # Branch 2 reuses client id 2: its first visit there, rebooked.
+                visit(6, 2, 2, date(2025, 3, 12)),
+                visit(7, 2, 2, date(2025, 4, 2), created=datetime(2025, 3, 12, 13), attendance=0),
+            ]:
+                db.add(row)
+                await db.flush()
+            await db.commit()
+
+            metrics = (await dashboard_service.fetch_summary(
+                db, date(2025, 3, 1), date(2025, 3, 31), allowed_company_ids=[1, 2],
+            ))['visit_metrics']
+            facts = await dashboard_service.fetch_year_over_year_facts(
+                db, date(2025, 1, 1), date(2025, 12, 31), None, None, [1, 2],
+            )
+            events = await dashboard_service._opz_events(
+                db, date(2025, 3, 1), date(2025, 3, 31), 2, factual_at=datetime(2026, 1, 1),
+            )
+
+            assert (metrics['first_visits'], metrics['repeat_visits']) == (2, 2)
+            assert (metrics['opz_first_visit_qty'], metrics['opz_repeat_visit_qty']) == (2.0, 1.0)
+            assert facts['monthly'][2025][3]['first_visits'] == 2
+            assert [(event.event_id, event.first_visit) for event in events] == [(7, True)]
+    finally:
+        await engine.dispose()

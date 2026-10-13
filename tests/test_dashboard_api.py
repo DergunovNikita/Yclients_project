@@ -687,7 +687,9 @@ async def test_dashboard_client_reports_revenue_uses_paid_service_rows(async_ses
         date(2025, 1, 1),
         date(2025, 1, 31),
         1,
-        opz_override=await dashboard_service._opz_count(async_session, date(2025, 1, 1), date(2025, 1, 31), 1),
+        opz_override=float(len(
+            await dashboard_service._opz_events(async_session, date(2025, 1, 1), date(2025, 1, 31), 1)
+        )),
     )
     assert data['cards'][2]['value'] == overview['revenue']['service_revenue'] == 2200.0
     assert data['cards'][2]['value'] == plan_fact['revenue']
@@ -884,7 +886,7 @@ async def test_dashboard_year_over_year_uses_actual_history_and_overview_formula
     assert r.status_code == 200
     data = r.json()['data']
     assert data['report_id'] == 'year_over_year'
-    assert statement_count <= 16
+    assert statement_count <= 17
     assert data['source_status'] == 'ready'
     assert [row['year'] for row in table_rows(data, 'years')] == [2023, 2024, 2025, 2026]
     assert table_rows(data, 'years')[0]['period_start'] == '2023-05-10'
@@ -938,7 +940,9 @@ async def test_dashboard_year_over_year_uses_actual_history_and_overview_formula
         date(2025, 1, 1),
         date(2025, 12, 31),
         1,
-        opz_override=await dashboard_service._opz_count(async_session, date(2025, 1, 1), date(2025, 12, 31), 1),
+        opz_override=float(len(
+            await dashboard_service._opz_events(async_session, date(2025, 1, 1), date(2025, 12, 31), 1)
+        )),
     )
     assert years_by_year[2025]['revenue'] == overview['revenue']['total']
     assert years_by_year[2025]['revenue'] == plan_fact_components['revenue']
@@ -1095,6 +1099,11 @@ async def test_year_over_year_charts_render_values_after_full_historical_sync(
         table = next(item for item in data['tables'] if item['id'] == table_id)
         assert 'topup_revenue' not in {column['key'] for column in table['columns']}
         assert 'revenue' in {column['key'] for column in table['columns']}
+
+    # Every visit here is a client's first, so the repeat part has no rate in any year and no charts at all.
+    assert 'year_opz_first_visit_pct' in charts
+    assert 'year_opz_repeat_visit_pct' not in charts
+    assert 'monthly_opz_repeat_visit_pct_yoy' not in charts
 
     # Every chart must plot at least one real point; an all-None series reads as an empty chart.
     for chart_id, chart in charts.items():
@@ -3445,11 +3454,11 @@ async def test_year_over_year_query_count_does_not_grow_with_history_years(
         event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
 
     assert [row['year'] for row in table_rows(data, 'years')] == list(range(2015, 2027))
-    assert statement_count <= 16
+    assert statement_count <= 17
 
 
 @pytest.mark.asyncio
-async def test_year_over_year_opz_deduplicates_repeated_client_per_year(
+async def test_year_over_year_opz_counts_a_returning_client_in_each_year(
     async_session,
     monkeypatch,
 ):
@@ -3546,6 +3555,9 @@ async def test_year_over_year_opz_deduplicates_repeated_client_per_year(
 
     assert years[2024]['opz_qty'] == overview_2024['visit_metrics']['opz_qty'] == 1.0
     assert years[2025]['opz_qty'] == overview_2025['visit_metrics']['opz_qty'] == 1.0
+    # The 2024 visit was the client's first, the 2025 one a repeat.
+    assert (years[2024]['opz_first_visit_qty'], years[2024]['opz_repeat_visit_qty']) == (1.0, 0.0)
+    assert (years[2025]['opz_first_visit_qty'], years[2025]['opz_repeat_visit_qty']) == (0.0, 1.0)
 
 
 @pytest.mark.asyncio
@@ -3614,7 +3626,9 @@ async def test_year_over_year_opz_fact_advances_latest_year(
         date(2025, 1, 1),
         date(2025, 1, 1),
         1,
-        opz_override=await dashboard_service._opz_count(async_session, date(2025, 1, 1), date(2025, 1, 1), 1),
+        opz_override=float(len(
+            await dashboard_service._opz_events(async_session, date(2025, 1, 1), date(2025, 1, 1), 1)
+        )),
     )
 
     assert years[2025]['opz_qty'] == overview['visit_metrics']['opz_qty'] == 1.0
@@ -3681,6 +3695,8 @@ async def test_year_over_year_masks_opz_when_dependent_appointments_are_uncovere
     assert year_2025['missing_components'] == ['appointments_detail']
     assert year_2025['opz_qty'] is None
     assert year_2025['opz_pct'] is None
+    for metric in reports_finance.OPZ_SPLIT_METRICS:
+        assert year_2025[metric] is None, metric
     assert year_2025['revenue'] == 0.0
     assert year_2025['appointments'] == 0
 
@@ -3758,7 +3774,7 @@ async def _seed_opz_history(async_session):
 
 
 @pytest.mark.asyncio
-async def test_year_over_year_monthly_opz_counts_a_client_once_per_month(
+async def test_year_over_year_opz_counts_each_rebooked_visit_so_months_add_up_to_the_year(
     async_session,
     monkeypatch,
 ):
@@ -3775,10 +3791,19 @@ async def test_year_over_year_monthly_opz_counts_a_client_once_per_month(
     years = {row['year']: row for row in table_rows(report, 'years')}
     months = {(row['year'], row['month']): row for row in table_rows(report, 'months')}
 
-    # The client rebooked in two months of 2025: two monthly events, one annual event.
+    # The client was rebooked after two visits of 2025: two events, in their months and in the year.
     assert months[(2025, 1)]['opz_qty'] == 1.0
     assert months[(2025, 2)]['opz_qty'] == 1.0
-    assert years[2025]['opz_qty'] == 1.0
+    assert years[2025]['opz_qty'] == 2.0
+    # January's anchor is the client's first visit, February's the second one.
+    assert months[(2025, 1)]['opz_first_visit_qty'] == 1.0
+    assert months[(2025, 1)]['opz_first_visit_pct'] == 100.0
+    assert months[(2025, 1)]['opz_repeat_visit_qty'] == 0.0
+    assert months[(2025, 1)]['opz_repeat_visit_pct'] is None
+    assert months[(2025, 2)]['opz_repeat_visit_qty'] == 1.0
+    assert months[(2025, 2)]['opz_repeat_visit_pct'] == 100.0
+    assert months[(2025, 2)]['opz_first_visit_pct'] is None
+    assert years[2025]['opz_first_visit_pct'] == years[2025]['opz_repeat_visit_pct'] == 100.0
     assert months[(2024, 3)]['opz_qty'] == 1.0
     assert years[2024]['opz_qty'] == 1.0
     assert months[(2025, 3)]['opz_qty'] == 0.0
@@ -3801,31 +3826,29 @@ async def test_year_over_year_monthly_opz_counts_a_client_once_per_month(
         )
         assert months[(year, month)]['opz_qty'] == overview['visit_metrics']['opz_qty']
         assert months[(year, month)]['opz_pct'] == overview['visit_metrics']['opz_pct']
+        for key in ('opz_first_visit_qty', 'opz_repeat_visit_qty', 'opz_first_visit_pct', 'opz_repeat_visit_pct'):
+            assert months[(year, month)][key] == overview['visit_metrics'][key]
 
 
 @pytest.mark.asyncio
-async def test_opz_year_facts_annual_events_are_the_first_monthly_event_of_the_year(async_session):
+async def test_opz_year_facts_count_each_rebooked_visit(async_session):
     await _seed_opz_history(async_session)
     bounds = (date(2024, 1, 1), date(2025, 12, 31))
 
-    year_events = await dashboard_service._opz_events(
-        async_session, *bounds, 1, deduplicate_by='year', factual_at=REPORT_NOW_2026,
-    )
-    month_events = await dashboard_service._opz_events(
-        async_session, *bounds, 1, deduplicate_by='month', factual_at=REPORT_NOW_2026,
-    )
+    events = await dashboard_service._opz_events(async_session, *bounds, 1, factual_at=REPORT_NOW_2026)
     facts = await dashboard_service.fetch_opz_year_facts(
         async_session, *bounds, 1, None, factual_at=REPORT_NOW_2026,
     )
 
-    assert [event.event_id for event in year_events] == [5, 2]
-    assert [event.event_id for event in month_events] == [5, 2, 3]
-    assert facts['counts'] == {2024: 1.0, 2025: 1.0}
+    assert [(event.event_id, event.first_visit) for event in events] == [(5, True), (2, True), (3, False)]
+    assert facts['counts'] == {2024: 1.0, 2025: 2.0}
     assert facts['monthly_counts'] == {2024: {3: 1.0}, 2025: {1: 1.0, 2: 1.0}}
+    assert facts['monthly_first_visit_counts'] == {2024: {3: 1.0}, 2025: {1: 1.0}}
+    assert facts['monthly_repeat_visit_counts'] == {2025: {2: 1.0}}
     assert 'latest_date' not in facts
     assert facts['appointment_dependencies'] == {
         2024: {1: (date(2024, 3, 10), date(2024, 4, 1))},
-        2025: {1: (date(2025, 1, 10), date(2025, 2, 5))},
+        2025: {1: (date(2025, 1, 10), date(2025, 3, 1))},
     }
     assert facts['monthly_appointment_dependencies'] == {
         2024: {3: {1: (date(2024, 3, 10), date(2024, 4, 1))}},
@@ -3837,8 +3860,8 @@ async def test_opz_year_facts_annual_events_are_the_first_monthly_event_of_the_y
 
 
 @pytest.mark.asyncio
-async def test_opz_year_facts_decide_the_year_before_filtering_by_barber(async_session):
-    """A second barber's February event must not turn into the client's annual one."""
+async def test_opz_year_facts_filter_events_by_the_anchor_barber(async_session):
+    """The February event belongs to the barber of its anchor visit, January's to the first one."""
     async_session.add_all([
         *_opz_client_fixtures(),
         Staff(id=2, name='Second master', position='Барбер', company_id=1),
@@ -3853,9 +3876,9 @@ async def test_opz_year_facts_decide_the_year_before_filtering_by_barber(async_s
         async_session, date(2024, 1, 1), date(2025, 12, 31), 1, 2, factual_at=REPORT_NOW_2026,
     )
 
-    # The January event is anchored on barber 1 and is the annual one; barber 2 owns only February.
-    assert facts['counts'] == {}
+    assert facts['counts'] == {2025: 1.0}
     assert facts['monthly_counts'] == {2025: {2: 1.0}}
+    assert facts['monthly_repeat_visit_counts'] == {2025: {2: 1.0}}
 
 
 @pytest.mark.asyncio
@@ -3916,6 +3939,8 @@ async def test_year_over_year_masks_monthly_opz_without_hiding_revenue_and_visit
     january = months[(2025, 1)]
     assert january['opz_qty'] is None
     assert january['opz_pct'] is None
+    for metric in reports_finance.OPZ_SPLIT_METRICS:
+        assert january[metric] is None, metric
     assert january['appointments'] == 1.0
     assert january['revenue'] == 0.0
     assert january['missing_components'] == ['appointments_detail']
@@ -3966,7 +3991,9 @@ async def test_year_over_year_monthly_opz_carries_manual_top_up_except_under_sta
     years = {row['year']: row for row in table_rows(report, 'years')}
     assert months[(2025, 1)]['opz_qty'] == 1.0
     assert months[(2025, 2)]['opz_qty'] == 5.0
-    assert years[2025]['opz_qty'] == 5.0
+    assert years[2025]['opz_qty'] == 6.0
+    # The top-up belongs to neither part of the split.
+    assert months[(2025, 2)]['opz_repeat_visit_qty'] == 1.0
     overview = await dashboard_service.fetch_summary(
         async_session, date(2025, 2, 1), date(2025, 2, 28), company_id=1,
     )
@@ -3980,7 +4007,7 @@ async def test_year_over_year_monthly_opz_carries_manual_top_up_except_under_sta
         async_session, date(2024, 1, 1), date(2025, 12, 31), 1, 2, factual_at=REPORT_NOW_2026,
     )
     assert barber_facts['monthly_counts'][2025] == {1: 1.0, 2: 1.0}
-    assert barber_facts['counts'][2025] == 1.0
+    assert barber_facts['counts'][2025] == 2.0
     assert admin_facts['monthly_counts'] == {}
 
 
@@ -4009,9 +4036,15 @@ async def test_year_over_year_payload_exposes_opz_charts_columns_and_cards(
         'year_avg_check', 'monthly_avg_check_yoy',
         'year_opz', 'monthly_opz_yoy',
         'year_opz_pct', 'monthly_opz_pct_yoy',
+        'year_opz_first_visit_pct', 'monthly_opz_first_visit_pct_yoy',
+        'year_opz_repeat_visit_pct', 'monthly_opz_repeat_visit_pct_yoy',
     ]
     assert charts['year_opz']['labels'] == years
-    assert charts['year_opz']['datasets'][0]['data'][:2] == [1.0, 1.0]
+    assert charts['year_opz']['datasets'][0]['data'][:2] == [1.0, 2.0]
+    # 2024 had no repeat visit, so it has no rate and no line on the monthly repeat chart.
+    assert charts['year_opz_repeat_visit_pct']['datasets'][0]['data'][:2] == [None, 100.0]
+    repeat_datasets = charts['monthly_opz_repeat_visit_pct_yoy']['datasets']
+    assert [(dataset['label'], dataset['colorIndex']) for dataset in repeat_datasets] == [('2025', 1)]
     for chart_id in ('monthly_opz_yoy', 'monthly_opz_pct_yoy'):
         assert [dataset['label'] for dataset in charts[chart_id]['datasets']] == years
         assert all(len(dataset['data']) == 12 for dataset in charts[chart_id]['datasets'])
@@ -4027,8 +4060,15 @@ async def test_year_over_year_payload_exposes_opz_charts_columns_and_cards(
     years_columns = columns['years']
     assert years_columns.index('opz_qty_change_pct') == years_columns.index('opz_qty') + 1
     assert years_columns.index('opz_pct_change_pct') == years_columns.index('opz_pct') + 1
+    assert years_columns[years_columns.index('opz_pct_change_pct') + 1:][:6] == [
+        'opz_first_visit_qty', 'opz_first_visit_pct', 'opz_first_visit_pct_change_pct',
+        'opz_repeat_visit_qty', 'opz_repeat_visit_pct', 'opz_repeat_visit_pct_change_pct',
+    ]
     months_columns = columns['months']
-    assert months_columns[months_columns.index('avg_check') + 1:][:2] == ['opz_qty', 'opz_pct']
+    assert months_columns[months_columns.index('avg_check') + 1:][:6] == [
+        'opz_qty', 'opz_pct',
+        'opz_first_visit_qty', 'opz_first_visit_pct', 'opz_repeat_visit_qty', 'opz_repeat_visit_pct',
+    ]
 
 
 def test_with_year_changes_compares_opz_year_over_year():
@@ -4529,7 +4569,9 @@ async def test_dashboard_staff_efficiency_revenue_uses_paid_service_rows(async_s
         date(2025, 1, 1),
         date(2025, 1, 31),
         1,
-        opz_override=await dashboard_service._opz_count(async_session, date(2025, 1, 1), date(2025, 1, 31), 1),
+        opz_override=float(len(
+            await dashboard_service._opz_events(async_session, date(2025, 1, 1), date(2025, 1, 31), 1)
+        )),
     )
     assert data['cards'][2]['value'] == overview['revenue']['service_revenue'] == 2200.0
     assert data['cards'][2]['value'] == plan_fact['revenue']

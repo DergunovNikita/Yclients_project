@@ -269,7 +269,18 @@ export function visitCards(summary) {
       value: formatMetricValue(visitMetrics.opz_pct, 'percent'),
       change: visitMetrics.opz_pct_change_pct,
     }),
-    ...(administratorSchedule ? [] : [extraServicesPerAppointmentCard(visitMetrics)]),
+    // An administrator's own visits are not where OPZ anchors, so both splits would only show a dash.
+    ...(administratorSchedule ? [] : [
+      metricCard('OpzFirstVisit', {
+        value: formatMetricValue(visitMetrics.opz_first_visit_pct, 'percent'),
+        change: visitMetrics.opz_first_visit_pct_change_pct,
+      }),
+      metricCard('OpzRepeatVisit', {
+        value: formatMetricValue(visitMetrics.opz_repeat_visit_pct, 'percent'),
+        change: visitMetrics.opz_repeat_visit_pct_change_pct,
+      }),
+      extraServicesPerAppointmentCard(visitMetrics),
+    ]),
   ];
 }
 

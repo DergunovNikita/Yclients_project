@@ -240,7 +240,10 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
     ReportDefinition(
         id='new_vs_returning_cross',
         title='Новые и повторные клиенты',
-        description='Сколько клиентов пришло впервые и сколько вернулось, их доли и изменение к прошлому периоду.',
+        description=(
+            'Сколько клиентов пришло впервые и сколько вернулось, их доли и изменение к прошлому периоду; '
+            'ОПЗ после первого и повторного визита.'
+        ),
         group='clients',
         themes=('клиенты',),
         roles=_FRONT_DESK_ROLES,
