@@ -918,3 +918,364 @@ test('requestWithReauth can skip password prompt for quiet session checks', asyn
   assert.equal(refreshCalls, 1);
   assert.equal(requestCalls, 3);
 });
+
+// ---- unsaved work, the password dialog and the inactivity logout ----
+
+function installFakeReauthModal() {
+  const control = (properties = {}) => fakeEventTarget({ hidden: false, value: '', textContent: '', focus() {}, ...properties });
+  const parts = {
+    '#reauth-form': control(),
+    '#reauth-email': control(),
+    '#reauth-password': control(),
+    '#reauth-error': control(),
+    '#reauth-submit': control(),
+    '#reauth-cancel': control(),
+    '#reauth-toggle-password': control(),
+    '#reauth-note': control({ hidden: true }),
+  };
+  const modal = { hidden: true, querySelector: (selector) => parts[selector] };
+  document.getElementById = (id) => (id === 'reauth-modal' ? modal : null);
+  return { modal, parts };
+}
+
+function userResponse(user) {
+  return new Response(JSON.stringify({ success: true, data: { user } }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+const OWNER = { id: 1, email: 'owner@example.com', role: 'owner', company_ids: [1] };
+const settle = () => new Promise((resolve) => { setTimeout(resolve, 0); });
+
+async function signedInAuth(t, options = {}) {
+  const { auth, server } = await loadAuthModule({ locks: new MemoryLockManager(), ...options });
+  t.after(() => server.close());
+  globalThis.fetch = async () => new Response(JSON.stringify({ success: true, data: OWNER }), { status: 200 });
+  await auth.loadCurrentUser();
+  return auth;
+}
+
+function deadSessionFetch(calls = []) {
+  return async (url) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify({ detail: 'expired' }), { status: 401 });
+  };
+}
+
+test('a dead session with unsaved work asks for the password instead of wiping the page', async (t) => {
+  const auth = await signedInAuth(t);
+  const { modal, parts } = installFakeReauthModal();
+  auth.registerUnsavedWork(() => true);
+  globalThis.fetch = deadSessionFetch();
+
+  const probe = auth.revalidateSessionIdentity({ force: true });
+  await settle();
+  await settle();
+
+  assert.equal(modal.hidden, false, 'the dialog is shown');
+  assert.equal(parts['#reauth-note'].hidden, false, 'and says the input is kept');
+  assert.equal(document.body.cleared, false, 'the page keeps what the user typed');
+  assert.equal(window.location.href, '');
+
+  parts['#reauth-cancel'].dispatchEvent({ type: 'click' });
+  await probe;
+  assert.equal(document.body.cleared, true, 'declining to sign in leaves the page');
+  assert.match(window.location.href, /^\/login\.html\?return_to=/);
+});
+
+test('a dead-session verdict that arrives after the page started leaving shows no password dialog', async (t) => {
+  const auth = await signedInAuth(t);
+  const { modal } = installFakeReauthModal();
+  auth.registerUnsavedWork(() => true);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  globalThis.fetch = async () => {
+    await gate;
+    return new Response(JSON.stringify({ detail: 'expired' }), { status: 401 });
+  };
+
+  const probe = auth.revalidateSessionIdentity({ force: true });
+  await settle();
+  window.dispatchEvent({
+    type: 'storage',
+    key: 'portal_auth_event',
+    newValue: JSON.stringify({ id: 'peer-idle', type: 'session-ended', reason: 'idle' }),
+  });
+  release();
+  await probe;
+  await settle();
+
+  assert.equal(modal.hidden, true, 'the dialog never opens over the page that is being torn down');
+});
+
+test('a dead session without unsaved work still leaves the page at once', async (t) => {
+  const auth = await signedInAuth(t);
+  const { modal } = installFakeReauthModal();
+  auth.registerUnsavedWork(() => false);
+  globalThis.fetch = deadSessionFetch();
+
+  await auth.revalidateSessionIdentity({ force: true });
+
+  assert.equal(modal.hidden, true);
+  assert.equal(document.body.cleared, true);
+  assert.match(window.location.href, /^\/login\.html\?return_to=/);
+});
+
+test('signing the same user in again through the dialog keeps the page and its input', async (t) => {
+  const auth = await signedInAuth(t);
+  const { modal, parts } = installFakeReauthModal();
+  auth.registerUnsavedWork(() => true);
+  globalThis.fetch = deadSessionFetch();
+
+  const probe = auth.revalidateSessionIdentity({ force: true });
+  await settle();
+  await settle();
+  parts['#reauth-password'].value = 'secret';
+  globalThis.fetch = async () => userResponse(OWNER);
+  parts['#reauth-form'].dispatchEvent({ type: 'submit', preventDefault() {} });
+  await probe;
+
+  assert.equal(modal.hidden, true);
+  assert.equal(document.body.cleared, false);
+  assert.equal(window.location.reloadCalls, 0);
+});
+
+test('a different user signing in through the dialog never keeps the previous user page', async (t) => {
+  const auth = await signedInAuth(t);
+  const { parts } = installFakeReauthModal();
+  auth.registerUnsavedWork(() => true);
+  const reasons = [];
+  window.addEventListener('portal:session-transition', (event) => reasons.push(event.detail?.reason));
+  globalThis.fetch = deadSessionFetch();
+
+  const probe = auth.revalidateSessionIdentity({ force: true });
+  await settle();
+  await settle();
+  globalThis.fetch = async () => userResponse({ ...OWNER, id: 2, email: 'other@example.com' });
+  parts['#reauth-form'].dispatchEvent({ type: 'submit', preventDefault() {} });
+  await probe;
+  await settle();
+
+  assert.equal(document.body.cleared, true);
+  assert.equal(window.location.reloadCalls, 1);
+  assert.deepEqual(reasons, ['changed']);
+});
+
+test('the same user signing in on another tab closes this tab dialog without reloading it', async (t) => {
+  const auth = await signedInAuth(t);
+  const { modal } = installFakeReauthModal();
+  auth.registerUnsavedWork(() => true);
+  globalThis.fetch = deadSessionFetch();
+  const fingerprint = JSON.stringify({
+    id: 1, role: 'owner', portalAccountId: null, companyIds: [1], isDemo: false,
+  });
+
+  const probe = auth.revalidateSessionIdentity({ force: true });
+  await settle();
+  await settle();
+  assert.equal(modal.hidden, false);
+  window.dispatchEvent({
+    type: 'storage',
+    key: 'portal_auth_event',
+    newValue: JSON.stringify({ id: 'peer', type: 'session-changed', fingerprint }),
+  });
+  await probe;
+
+  assert.equal(modal.hidden, true);
+  assert.equal(document.body.cleared, false);
+  assert.equal(window.location.reloadCalls, 0);
+});
+
+test('a peer dismissal during an in-flight password submit settles the dialog once', async (t) => {
+  const auth = await signedInAuth(t);
+  const { modal, parts } = installFakeReauthModal();
+  const fingerprint = JSON.stringify({
+    id: 1, role: 'owner', portalAccountId: null, companyIds: [1], isDemo: false,
+  });
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+
+  const first = auth.promptReauth();
+  parts['#reauth-password'].value = 'secret';
+  globalThis.fetch = async () => {
+    await gate;
+    return userResponse(OWNER);
+  };
+  parts['#reauth-form'].dispatchEvent({ type: 'submit', preventDefault() {} });
+  await settle();
+  window.dispatchEvent({
+    type: 'storage',
+    key: 'portal_auth_event',
+    newValue: JSON.stringify({ id: 'peer-same', type: 'session-changed', fingerprint }),
+  });
+  assert.equal(await first, null, 'the peer sign-in resolved the dialog');
+  assert.equal(modal.hidden, true);
+
+  // The next dead session opens a fresh dialog while the old password request is still flying.
+  const second = auth.promptReauth();
+  assert.equal(modal.hidden, false);
+  release();
+  await settle();
+  await settle();
+
+  assert.equal(modal.hidden, false, 'the late answer does not hide the dialog opened since');
+  parts['#reauth-cancel'].dispatchEvent({ type: 'click' });
+  await assert.rejects(second);
+});
+
+test('another identity signing in on another tab still reloads this one', async (t) => {
+  await signedInAuth(t);
+  window.dispatchEvent({
+    type: 'storage',
+    key: 'portal_auth_event',
+    newValue: JSON.stringify({
+      id: 'peer',
+      type: 'session-changed',
+      fingerprint: JSON.stringify({ id: 2, role: 'owner', portalAccountId: null, companyIds: [1], isDemo: false }),
+    }),
+  });
+
+  assert.equal(document.body.cleared, true);
+  assert.equal(window.location.reloadCalls, 1);
+});
+
+test('session-ended from another tab carries why: logout wipes drafts there, idle and unknown keep them', async (t) => {
+  for (const [sent, expected] of [
+    [{ reason: 'logout' }, 'logout'],
+    [{ reason: 'idle' }, 'idle'],
+    [{}, 'ended'],
+    [{ reason: 'whatever' }, 'ended'],
+  ]) {
+    await signedInAuth(t);
+    const reasons = [];
+    window.addEventListener('portal:session-transition', (event) => reasons.push(event.detail?.reason));
+
+    window.dispatchEvent({
+      type: 'storage',
+      key: 'portal_auth_event',
+      newValue: JSON.stringify({ id: `peer-${expected}`, type: 'session-ended', ...sent }),
+    });
+
+    assert.deepEqual(reasons, [expected], JSON.stringify(sent));
+    assert.equal(document.body.cleared, true);
+    assert.match(window.location.href, /^\/login\.html\?return_to=/);
+  }
+});
+
+test('an explicit logout tells the other tabs it was a logout', async (t) => {
+  const auth = await signedInAuth(t);
+  const published = [];
+  const storage = globalThis.localStorage;
+  const setItem = storage.setItem.bind(storage);
+  storage.setItem = (key, value) => {
+    if (key === 'portal_auth_event') published.push(JSON.parse(value));
+    setItem(key, value);
+  };
+  globalThis.fetch = async () => new Response('{}', { status: 200 });
+
+  await auth.logout();
+
+  assert.deepEqual(published.map(({ type, reason }) => [type, reason]), [['session-ended', 'logout']]);
+});
+
+test('an explicit logout wipes the tab drafts from any page, an idle or ended session keeps them', async (t) => {
+  const draftKey = 'portal-draft/v1/7/1/planSettings/month=2026-10';
+  for (const [sent, kept] of [
+    [{ reason: 'logout' }, false],
+    [{ reason: 'idle' }, true],
+    [{}, true],
+  ]) {
+    await signedInAuth(t);
+    sessionStorage.setItem(draftKey, '{"v":1}');
+    window.dispatchEvent({
+      type: 'storage',
+      key: 'portal_auth_event',
+      newValue: JSON.stringify({ id: `drafts-${JSON.stringify(sent)}`, type: 'session-ended', ...sent }),
+    });
+    assert.equal(sessionStorage.getItem(draftKey) !== null, kept, JSON.stringify(sent));
+  }
+
+  const auth = await signedInAuth(t);
+  sessionStorage.setItem(draftKey, '{"v":1}');
+  globalThis.fetch = async () => new Response('{}', { status: 200 });
+  await auth.logout();
+  assert.equal(sessionStorage.getItem(draftKey), null);
+});
+
+test('a tab sitting on the login page still wipes its drafts when another tab logs out on purpose', async (t) => {
+  const { server } = await loadAuthModule({ pathname: '/login.html' });
+  t.after(() => server.close());
+  const draftKey = 'portal-draft/v1/7/1/planSettings/month=2026-10';
+
+  for (const [sent, kept] of [[{ reason: 'idle' }, true], [{ reason: 'logout' }, false]]) {
+    sessionStorage.setItem(draftKey, '{"v":1}');
+    window.dispatchEvent({
+      type: 'storage',
+      key: 'portal_auth_event',
+      newValue: JSON.stringify({ id: `login-${sent.reason}`, type: 'session-ended', ...sent }),
+    });
+    assert.equal(sessionStorage.getItem(draftKey) !== null, kept, JSON.stringify(sent));
+  }
+});
+
+async function idleAuth(t, user, idleForMs) {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), method: options.method });
+    return new Response(JSON.stringify({ success: true, data: user }), { status: 200 });
+  };
+  await auth.loadCurrentUser();
+  // The page then sits untouched: the clock moves, nobody does anything.
+  const realNow = Date.now;
+  Date.now = () => realNow() + idleForMs;
+  t.after(() => { Date.now = realNow; });
+  return { auth, calls };
+}
+
+test('three hours of inactivity logs out on the server and returns to the page after sign-in', async (t) => {
+  const { calls } = await idleAuth(t, OWNER, 3 * 60 * 60 * 1000);
+  const published = [];
+  const setItem = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (key, value) => {
+    if (key === 'portal_auth_event') published.push(JSON.parse(value));
+    setItem(key, value);
+  };
+  window.location.pathname = '/reports';
+  window.location.search = '?report_id=x';
+  const reasons = [];
+  window.addEventListener('portal:session-transition', (event) => reasons.push(event.detail?.reason));
+
+  window.dispatchEvent({ type: 'focus' });
+  await settle();
+  await settle();
+
+  assert.ok(calls.some((call) => call.url.endsWith('/auth/logout') && call.method === 'POST'));
+  assert.deepEqual(reasons, ['idle']);
+  assert.deepEqual(published.map(({ type, reason }) => [type, reason]), [['session-ended', 'idle']]);
+  assert.equal(document.body.cleared, true);
+  assert.equal(window.location.href, '/login.html?return_to=%2Freports%3Freport_id%3Dx');
+  assert.equal(localStorage.getItem('portal_user_email'), null);
+});
+
+test('the shared demo account is never logged out for inactivity', async (t) => {
+  const { calls } = await idleAuth(t, { ...OWNER, is_demo: true }, 3 * 60 * 60 * 1000);
+
+  window.dispatchEvent({ type: 'focus' });
+  await settle();
+
+  assert.equal(calls.some((call) => call.url.endsWith('/auth/logout')), false);
+  assert.equal(document.body.cleared, false);
+});
+
+test('a recently active user is not logged out', async (t) => {
+  const { calls } = await idleAuth(t, OWNER, 60 * 1000);
+
+  window.dispatchEvent({ type: 'focus' });
+  await settle();
+
+  assert.equal(calls.some((call) => call.url.endsWith('/auth/logout')), false);
+  assert.equal(document.body.cleared, false);
+});

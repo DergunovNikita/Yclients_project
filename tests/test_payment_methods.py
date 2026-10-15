@@ -290,8 +290,9 @@ async def test_report_matches_overview_per_branch_and_for_the_network(client, se
     assert [column['key'] for column in amounts['columns']] == [
         'metric',
         'total',
-        'company_1',
+        # Opening date first, branches without one last: Beta (opened 10.08) precedes Alpha and Gamma.
         'company_2',
+        'company_1',
         'company_3',
     ]
     revenue_row = amounts['rows'][0]
@@ -422,7 +423,7 @@ async def test_report_shape_for_one_branch_and_the_stacked_chart(client, seeded)
     assert 'stacked' not in doughnut
 
     network = (await _report(client)).json()['data']
-    assert network['charts'][0]['labels'] == ['Alpha', 'Beta', 'Gamma', 'Все филиалы']
+    assert network['charts'][0]['labels'] == ['Beta', 'Alpha', 'Gamma', 'Все филиалы']
     assert [dataset['label'] for dataset in network['charts'][0]['datasets']] == [
         'Наличные', 'Безналичные', 'Яндекс Пэй', 'Прочие кассы'
     ]
@@ -556,7 +557,7 @@ async def test_branch_outside_the_scope_is_refused(client):
     # The branch admin's report covers only the branches they hold.
     scoped = (await _report(client, 'branch_admin')).json()['data']
     amounts = _table(scoped, 'payment_amounts')
-    assert [column['key'] for column in amounts['columns']] == ['metric', 'total', 'company_1', 'company_2']
+    assert [column['key'] for column in amounts['columns']] == ['metric', 'total', 'company_2', 'company_1']
 
 
 @pytest.mark.asyncio
@@ -1497,7 +1498,7 @@ async def test_a_period_starting_after_the_first_blocks_that_branch_even_without
     assert branches[3]['yandex_pay_applied'] is True
     assert breakdown['yandex_pay_applied'] is False
     text = next(note['text'] for note in payload['notes'] if note['title'] == 'Яндекс Пэй не учтён')
-    assert 'Alpha, Beta: Яндекс Пэй вводится за месяц с 1-го числа' in text and 'период начинается позже' in text
+    assert 'Beta, Alpha: Яндекс Пэй вводится за месяц с 1-го числа' in text and 'период начинается позже' in text
     single = (await _report(client, start=date(2026, 8, 2), company_id=1)).json()['data']
     single_text = next(note['text'] for note in single['notes'] if note['title'] == 'Яндекс Пэй не учтён')
     assert single_text.startswith('Яндекс Пэй вводится за месяц с 1-го числа')  # one branch: no list of names
@@ -1552,7 +1553,7 @@ async def test_a_partial_month_gets_a_note_naming_the_dates_by_month(client, see
     note = next(note for note in payload['notes'] if note['title'] == 'Яндекс Пэй внесён не за весь месяц')
     assert note['kind'] == 'info'
     assert note['text'].startswith(
-        'июль 2026: данные по 20.07 — Alpha. август 2026: данные по 20.08 — Alpha, Beta.'
+        'июль 2026: данные по 20.07 — Alpha. август 2026: данные по 20.08 — Beta, Alpha.'
     )
     assert 'Gamma' not in note['text']
     assert 'Выручка YClients посчитана по 31.08' in note['text']

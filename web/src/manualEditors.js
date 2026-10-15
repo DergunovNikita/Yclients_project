@@ -9,6 +9,7 @@ import {
   formatInputNumber,
   manualFactRowKey,
   manualFactSaveScope,
+  storedValue,
 } from './manualFactInput.js';
 import { formatMoneyExact, formatNumber } from './reports/format.js';
 import { BRANCH_TIME_ZONE, parseServerInstant } from './timestamps.js';
@@ -57,6 +58,30 @@ function manualFactPayload(loadedFilters, liveFilters, editorEl, rows, invalidMe
   const built = buildManualFactItems(rows, rawByKey);
   if (built.error) throw new Error(t(invalidMessageKey));
   return { ...manualFactSaveScope(loadedFilters, liveFilters), items: built.items };
+}
+
+// Draft model of the reviews / OPZ cells: the typed text against what the server drew, and the stored value the
+// text was typed over (what the save would send as `previous_value`).
+function manualFactDraftRows(editorEl, rows) {
+  const byKey = new Map(rows.map((row) => [manualFactRowKey(row.company_id, row.staff_id), row]));
+  return [...editorEl.querySelectorAll('input[data-staff-id]')].map((input) => {
+    const key = manualFactRowKey(input.dataset.companyId, input.dataset.staffId);
+    const row = byKey.get(key);
+    return {
+      key,
+      cells: { value: input.value.trim() },
+      server: { value: formatInputNumber(row?.value) },
+      previous: { value: row ? storedValue(row) : null },
+    };
+  });
+}
+
+function applyManualFactDraft(editorEl, items) {
+  const cellsByKey = new Map(items.map((item) => [item.key, item.cells]));
+  editorEl.querySelectorAll('input[data-staff-id]').forEach((input) => {
+    const cells = cellsByKey.get(manualFactRowKey(input.dataset.companyId, input.dataset.staffId));
+    if (cells && typeof cells.value === 'string') input.value = cells.value;
+  });
 }
 
 const manualFactParams = (filters) => ({
@@ -250,6 +275,11 @@ export function createManualEditors({ els, filterEls, host }) {
     conflictMessageKey: 'dash.manualFactConflict',
     refreshStaffOnBranch: true,
     draftSnapshot: () => manualFactDraftSnapshot(els.reviewFactEditor),
+    draft: {
+      id: 'reviewFacts',
+      collect: () => manualFactDraftRows(els.reviewFactEditor, review.rows),
+      apply: (items) => applyManualFactDraft(els.reviewFactEditor, items),
+    },
     request: () => ({
       filters: review.loadedFilters || review.filters(),
       body: manualFactPayload(
@@ -312,6 +342,14 @@ export function createManualEditors({ els, filterEls, host }) {
     conflictMessageKey: 'dash.manualFactConflict',
     refreshStaffOnBranch: true,
     draftSnapshot: () => manualFactDraftSnapshot(els.opzFactEditor),
+    draft: {
+      id: 'opzFacts',
+      collect: () => manualFactDraftRows(els.opzFactEditor, opz.rows),
+      apply: (items) => {
+        applyManualFactDraft(els.opzFactEditor, items);
+        refreshOpzFactTotals();
+      },
+    },
     onInput: refreshOpzFactTotals,
     request: () => ({
       filters: opz.loadedFilters || opz.filters(),
@@ -360,6 +398,35 @@ export function createManualEditors({ els, filterEls, host }) {
     dateInput.value = syncYandexPayDate(amountInput.value, dateInput.value, row?.default_data_through);
   }
 
+  // The pair the server holds for a branch is (amount, date); the draft is valid only against that same pair.
+  function yandexDraftRows() {
+    const dateInputs = new Map(yandexDateInputs().map((input) => [input.dataset.throughCompanyId, input]));
+    const rowsById = new Map(yandex.rows.map((row) => [String(row.company_id), row]));
+    return yandexInputs().map((input) => {
+      const id = input.dataset.companyId;
+      const row = rowsById.get(id);
+      return {
+        key: id,
+        cells: { value: input.value.trim(), date: dateInputs.get(id)?.value || '' },
+        server: { value: formatInputNumber(row?.value), date: row?.data_through || '' },
+        previous: { value: row ? storedValue(row) : null, data_through: row?.data_through ?? null },
+      };
+    });
+  }
+
+  function applyYandexDraft(items) {
+    const cellsByKey = new Map(items.map((item) => [item.key, item.cells]));
+    yandexInputs().forEach((input) => {
+      const cells = cellsByKey.get(input.dataset.companyId);
+      if (cells && typeof cells.value === 'string') input.value = cells.value;
+    });
+    yandexDateInputs().forEach((input) => {
+      const cells = cellsByKey.get(input.dataset.throughCompanyId);
+      if (cells && typeof cells.date === 'string') input.value = cells.date;
+    });
+    refreshYandexPayTotal();
+  }
+
   const yandex = createManualEntryEditor({
     view: 'yandexPayFacts',
     filter: filterEls.yandexPay,
@@ -369,6 +436,7 @@ export function createManualEditors({ els, filterEls, host }) {
     params: (filters) => ({ month: filters.month, company_id: filters.branch }),
     conflictMessageKey: 'dash.yandexPayConflict',
     emptyMonthRestores: true,
+    draft: { id: 'yandexPayFacts', collect: yandexDraftRows, apply: applyYandexDraft },
     draftSnapshot: () => {
       const dates = yandexRawDates();
       return JSON.stringify(yandexInputs().map((input) => [

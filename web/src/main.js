@@ -15,6 +15,7 @@ import {
 // report viewer's charts.js — see chartResponsive.js for how/why it applies before layout.
 import './chartResponsive.js';
 import { enhanceSelect } from './customSelect.js';
+import { mountJumpNav } from './jumpNav.js';
 import {
   acquireStartupSession,
   authFetch,
@@ -22,6 +23,7 @@ import {
   getSelectedPortalAccountId,
   loadCurrentUserQuietly,
   redirectToLogin,
+  registerUnsavedWork,
   requiresLogin,
   setSelectedPortalAccountId,
 } from './auth.js';
@@ -48,7 +50,9 @@ import {
 } from './dashboardRequestState.js';
 
 import { escapeHtml } from './html.js';
+import { mergedStaffTable } from './planStaffTable.js';
 import {
+  administratorCards,
   appointmentsCards,
   cardsHtml,
   clientsCards,
@@ -64,8 +68,10 @@ import {
   BRANCH_PLAN_SETTING_FIELDS,
   STAFF_PLAN_SETTING_FIELDS_BY_CATEGORY,
   buildPlanSettingsPayload,
+  applyPlanSettingsCells,
   isScheduleAttributionDiagnostic,
   planSettingsInputReader,
+  planSettingsTypedCells,
 } from './planSettings.js';
 import {
   filterPlanFactForDisplay,
@@ -82,12 +88,16 @@ import {
   formatDate,
   formatMoney,
   formatNumber,
+  formatValue,
 } from './reports/format.js';
 import { canEnterManualFacts, entersManualFactsForSelf } from './manualFactAccess.js';
 import { canViewBranchPayments } from './branchPaymentsAccess.js';
 import { formatInputNumber } from './manualFactInput.js';
 import { createManualEditors } from './manualEditors.js';
+import './editorDrafts.css';
+import { bindDraftFlush, createDraftController, fingerprint } from './editorDrafts.js';
 import { formatBranchDateTime } from './timestamps.js';
+import { staffOption } from './staffLabel.js';
 import { initReports } from './reports/index.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, roleLabel, t } from './i18n.js';
 import {
@@ -129,6 +139,10 @@ const els = {
   servicesMetrics: document.getElementById('services-metrics'),
   staffPersonalScope: document.getElementById('staff-personal-scope'),
   staffPersonalTitle: document.getElementById('staff-personal-title'),
+  staffPersonalDescription: document.getElementById('staff-personal-description'),
+  staffAdminMetrics: document.getElementById('staff-admin-metrics'),
+  staffAdminOpz: document.getElementById('staff-admin-opz'),
+  opzChartPanel: document.getElementById('opz-chart-panel'),
   staffBranchScope: document.getElementById('staff-branch-scope'),
   staffBranchTitle: document.getElementById('staff-branch-title'),
   staffBranchMetrics: document.getElementById('staff-branch-metrics'),
@@ -148,6 +162,7 @@ const els = {
   planMeta: document.getElementById('plan-meta'),
   tableMeta: document.getElementById('table-meta'),
   planInsights: document.getElementById('plan-insights'),
+  shell: document.querySelector('.shell'),
   planFactTable: document.getElementById('plan-fact-table'),
   planColumnPicker: document.getElementById('plan-column-picker'),
   planColumnToggle: document.getElementById('plan-column-toggle'),
@@ -212,7 +227,6 @@ const els = {
   tenantMeta: document.getElementById('tenant-meta'),
   overviewPresetButtons: [...document.querySelectorAll('[data-overview-preset]')],
   compareNote: document.getElementById('overview-compare-note'),
-  overviewJumpButtons: [...document.querySelectorAll('[data-overview-jump]')],
   profileSettingsLink: document.querySelector('#user-profile-link a[href]'),
   unsavedChangesDialog: document.getElementById('unsaved-changes-dialog'),
   unsavedChangesStay: document.getElementById('unsaved-changes-stay'),
@@ -283,6 +297,7 @@ const PLAN_SCALE_GROUPS = [
 ];
 
 let activeView = 'overview';
+const jumpNav = mountJumpNav();
 let branchOptions = [];
 let planSettingsData = null;
 let planSettingsSavedData = null;
@@ -362,6 +377,7 @@ function protectedSavePending() {
 
 function discardProtectedChanges() {
   if (activeView === 'planSettings') {
+    discardPlanSettingsDraft();
     if (planSettingsSavedData) renderPlanSettings(JSON.parse(JSON.stringify(planSettingsSavedData)));
     else setPlanSettingsDirty(false);
   }
@@ -375,10 +391,25 @@ const protectedChangesGuard = createUnsavedChangesGuard({
   onDiscard: discardProtectedChanges,
 });
 
+// Unsaved input survives a reload or a session that ended under the page (sessionStorage, this tab only). The key
+// carries the person and the tenant, so another login never sees it; demo has no editors to draft.
+const editorDrafts = createDraftController({
+  identity: () => {
+    if (currentUser?.is_demo) return null;
+    if (!currentUser && !apiKey) return null;
+    const accountId = currentUser?.role === 'platform_admin' || !currentUser
+      ? getSelectedPortalAccountId()
+      : currentUser.portal_account_id;
+    return { userId: currentUser?.id ?? 'api-key', accountId: accountId ?? '' };
+  },
+});
+bindDraftFlush(editorDrafts);
+
 const manualEditors = createManualEditors({
   els,
   filterEls,
   host: {
+    drafts: editorDrafts,
     fetchJson,
     postJson,
     beginViewRequest,
@@ -485,7 +516,22 @@ els.unsavedChangesDialog?.addEventListener('click', (event) => {
   if (event.target === els.unsavedChangesDialog) els.unsavedChangesDialog.close('stay');
 });
 
+// Whatever the editors hold that is not on the server yet. The session layer asks before it wipes the
+// page for a dead session, and the beforeunload guard asks before the tab closes.
+function hasUnsavedEditorWork() {
+  return planSettingsDirty
+    || planSettingsSaving
+    || Object.values(manualEditors.byView).some((editor) => editor.dirty || editor.saving)
+    || serviceManagementDirty
+    || serviceManagementMutationPending;
+}
+registerUnsavedWork(hasUnsavedEditorWork);
+
+// The page is being torn down on purpose (logout, session ended, another user): the browser's
+// "leave this site?" prompt would only block the redirect, and the input is already preserved.
+let sessionLeaving = false;
 window.addEventListener('portal:session-transition', () => {
+  sessionLeaving = true;
   Object.values(viewRequestScopes).forEach((scope) => scope.abort());
   reportsController?.clear();
   currentPlanFactPayload = null;
@@ -569,17 +615,17 @@ function setOverviewSectionHidden(section, hidden) {
   document.querySelectorAll(`[data-overview-section="${section}"]`).forEach((node) => {
     node.hidden = hidden;
   });
-  els.overviewJumpButtons
-    .filter((button) => button.dataset.overviewJump === section)
-    .forEach((button) => {
-      button.hidden = hidden;
-    });
 }
 
 function applyFinancialVisibility(summary) {
   const financialsHidden = Boolean(summary?.financials_hidden);
-  setOverviewSectionHidden('revenue', financialsHidden);
-  setOverviewSectionHidden('services', financialsHidden);
+  // An administrator's sections by master contradict his own block: he is rarely the master of a visit.
+  const administrator = usesAdministratorSchedule(summary);
+  setOverviewSectionHidden('revenue', financialsHidden || administrator);
+  setOverviewSectionHidden('services', financialsHidden || administrator);
+  setOverviewSectionHidden('appointments', administrator);
+  setOverviewSectionHidden('clients', administrator);
+  els.kpi.hidden = administrator;
 }
 
 function setApiState(text, kind = 'warn') {
@@ -832,14 +878,32 @@ function renderKpi(summary) {
   renderCards(els.kpi, kpiCards(summary));
 }
 
-function renderStaffPersonalScope() {
+// Where the OPZ chart lives when the Appointments section is not shown (an administrator selected).
+const opzChartHome = els.opzChartPanel.parentElement;
+
+function renderStaffPersonalScope(summary) {
   const selectedOption = filterEls.overview.staff.selectedOptions[0];
   const hasSelectedStaff = Boolean(filterEls.overview.staff.value && selectedOption);
+  const administrator = hasSelectedStaff && usesAdministratorSchedule(summary);
   els.staffPersonalScope.hidden = !hasSelectedStaff;
+  // The block gets a jump-nav entry only when it holds cards; for a barber it is a heading over the sections below.
+  if (administrator) els.staffPersonalScope.setAttribute('data-jump-target', 'overview-personal');
+  else els.staffPersonalScope.removeAttribute('data-jump-target');
+  els.staffAdminMetrics.hidden = !administrator;
+  els.staffAdminOpz.hidden = !administrator;
+  (administrator ? els.staffAdminOpz : opzChartHome).appendChild(els.opzChartPanel);
   if (!hasSelectedStaff) return;
-  els.staffPersonalTitle.textContent = t('dash.personalMetricsTitle', {
-    name: selectedOption.textContent?.trim() || t('dash.worker'),
+  const name = selectedOption.dataset.name || t('dash.worker');
+  els.staffPersonalTitle.textContent = t(administrator ? 'dash.administratorMetricsTitle' : 'dash.personalMetricsTitle', {
+    name,
   });
+  els.staffPersonalDescription.textContent = t(
+    administrator ? 'dash.administratorMetricsDescription' : 'dash.personalMetricsDescription',
+  );
+  if (!administrator) return;
+  const { cards, columnCount } = administratorCards(summary);
+  els.staffAdminMetrics.style.setProperty('--metric-columns', String(columnCount));
+  renderCards(els.staffAdminMetrics, cards);
 }
 
 function renderStaffBranchMetrics(summary) {
@@ -851,12 +915,14 @@ function renderStaffBranchMetrics(summary) {
     detailsParent.appendChild(els.servicesDetails);
   }
   els.staffBranchScope.hidden = !isBranchScope;
+  // The branch's extras during his shifts would contradict the ones credited to him in his personal block.
+  els.extraServicesTable.closest('.panel').hidden = isBranchScope;
   if (!isBranchScope) {
     renderCards(els.staffBranchMetrics, []);
     return;
   }
 
-  const selectedStaff = filterEls.overview.staff.selectedOptions[0]?.textContent?.trim()
+  const selectedStaff = filterEls.overview.staff.selectedOptions[0]?.dataset.name
     || t('dash.worker');
   els.staffBranchTitle.textContent = t('dash.branchShiftMetricsTitle', { name: selectedStaff });
   renderCards(els.staffBranchMetrics, staffBranchCards(summary));
@@ -883,10 +949,10 @@ function renderClientsMetrics(summary) {
 }
 
 function renderAppointmentsMetrics(summary) {
-  const { cards, exact, notice } = appointmentsCards(summary);
+  const { cards, notice } = appointmentsCards(summary);
   renderCards(els.appointmentsMetrics, cards);
   els.appointmentsWarning.textContent = notice;
-  els.appointmentsWarning.classList.toggle('visible', !exact);
+  els.appointmentsWarning.classList.toggle('visible', Boolean(notice));
 }
 
 function destroyChart(name) {
@@ -986,6 +1052,14 @@ function renderOpzChart(daily) {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
+      plugins: {
+        tooltip: {
+          callbacks: {
+            // The share is a percent with one decimal ("33,3%"), the count a whole number.
+            label: (ctx) => ` ${ctx.dataset.label}: ${formatValue(ctx.parsed.y, ctx.dataset.yAxisID === 'y1' ? 'percent' : 'number')}`,
+          },
+        },
+      },
       scales: {
         y: { beginAtZero: true, title: { display: true, text: t('dash.opzShort') } },
         y1: {
@@ -1170,14 +1244,45 @@ function applyPlanMetricVisibility(nextHiddenCodes) {
   updatePlanColumnPickerState();
 }
 
-function renderPlanTable(groups, metrics) {
-  const rowTypes = [
-    ['plan', t('dash.plan')],
-    ['fact', t('dash.fact')],
-    ['remaining', t('dash.remaining')],
-    ['completion_pct', t('dash.completionPct')],
-  ];
+const PLAN_ROW_TYPES = [
+  ['plan', 'dash.plan'],
+  ['fact', 'dash.fact'],
+  ['remaining', 'dash.remaining'],
+  ['completion_pct', 'dash.completionPct'],
+];
 
+// `cells` (code -> cell) lets the merged staff table leave a column empty for a row that
+// does not carry it; without it every column reads the group's own metric of that code.
+function renderPlanGroupRows(group, metrics, cells = null) {
+  const cellsByCode = cells || new Map((group.metrics || []).map((cell) => [cell.code, cell]));
+  return PLAN_ROW_TYPES
+    .map(([field, labelKey], index) => `
+      <tr>
+        ${
+          index === 0
+            ? `<th class="branch-cell" rowspan="${PLAN_ROW_TYPES.length}">${escapeHtml(group.title)}</th>`
+            : ''
+        }
+        <td class="row-label">${t(labelKey)}</td>
+        ${metrics
+          .map((metric) => {
+            const cell = cellsByCode.get(metric.code);
+            if (cells && !cell) {
+              return `<td class="number plan-cell-empty" data-metric="${escapeHtml(metric.code)}">—</td>`;
+            }
+            const format = field === 'completion_pct' ? 'percent' : metric.format;
+            const statusClass = field === 'completion_pct'
+              ? ` metric-status ${escapeHtml(cell?.status || 'no-plan')}`
+              : '';
+            return `<td class="number${statusClass}" data-metric="${escapeHtml(metric.code)}">${escapeHtml(formatMetricValue(cell?.[field], format))}</td>`;
+          })
+          .join('')}
+      </tr>
+    `)
+    .join('');
+}
+
+function renderPlanTableShell(metrics, bodyHtml) {
   return `
     <div class="table-scroll">
       <table class="plan-table">
@@ -1188,93 +1293,118 @@ function renderPlanTable(groups, metrics) {
             ${metrics.map((metric) => `<th class="number" data-metric="${escapeHtml(metric.code)}">${escapeHtml(metric.label)}</th>`).join('')}
           </tr>
         </thead>
-        <tbody>
-          ${groups
-            .map((group) =>
-              rowTypes
-                .map(([field, label], index) => `
-                  <tr>
-                    ${
-                      index === 0
-                        ? `<th class="branch-cell" rowspan="${rowTypes.length}">${escapeHtml(group.title)}</th>`
-                        : ''
-                    }
-                    <td class="row-label">${escapeHtml(label)}</td>
-                    ${metrics
-                      .map((metric) => {
-                        const cellsByCode = Object.fromEntries((group.metrics || []).map((cell) => [cell.code, cell]));
-                        const cell = cellsByCode[metric.code] || {};
-                        const format = field === 'completion_pct' ? 'percent' : metric.format;
-                        const statusClass = field === 'completion_pct' ? ` metric-status ${escapeHtml(cell.status || 'no-plan')}` : '';
-                        return `<td class="number${statusClass}" data-metric="${escapeHtml(metric.code)}">${escapeHtml(formatMetricValue(cell[field], format))}</td>`;
-                      })
-                      .join('')}
-                  </tr>
-                `)
-                .join(''),
-            )
-            .join('')}
-        </tbody>
+        <tbody>${bodyHtml}</tbody>
       </table>
     </div>
   `;
 }
 
-function renderPlanSection(title, groups, metrics, meta = '') {
+function renderPlanTable(groups, metrics) {
+  return renderPlanTableShell(metrics, groups.map((group) => renderPlanGroupRows(group, metrics)).join(''));
+}
+
+function jumpAttrs(key, labelKey) {
+  return `data-jump-target="${key}" data-jump-label="${escapeHtml(t(labelKey))}"`;
+}
+
+function planScopeHintHtml(scope) {
+  const key = PLAN_SCOPE_HINT_KEYS[scope];
+  return key ? `<p class="plan-section-hint">${escapeHtml(t(key))}</p>` : '';
+}
+
+function renderPlanSection(title, groups, metrics, meta = '', jump = null, scope = '') {
   if (!groups.length || !metrics.length) return '';
   return `
-    <section class="plan-section">
+    <section class="plan-section" ${jump ? jumpAttrs(...jump) : ''}>
       <div class="plan-section-title">
         <h3>${escapeHtml(title)}</h3>
         <span class="meta">${escapeHtml(meta)}</span>
       </div>
+      ${planScopeHintHtml(scope)}
       ${renderPlanTable(groups, metrics)}
     </section>
   `;
 }
 
-const PLAN_SCOPE_ORDER = ['personal', 'administrator_records', 'administrator_shift'];
+const PLAN_SCOPE_ORDER = ['personal', 'administrator_records'];
+
+// What the administrator-only scope counts differs from "personal": say it under the title.
+const PLAN_SCOPE_HINT_KEYS = {
+  administrator_records: 'dash.scopeAdministratorRecordsHint',
+};
 
 function planScopeLabel(scope) {
   const labels = {
     personal: t('dash.scopePersonal'),
     administrator_records: t('dash.scopeAdministratorRecords'),
-    administrator_shift: t('dash.scopeAdministratorShift'),
   };
   return labels[scope] || labels.personal;
 }
 
-function renderStaffCategorySections(prefix, groups, metricSets, metrics) {
-  const sections = [];
-  const categoryOrder = ['barber', 'administrator', 'unknown'];
-  categoryOrder.forEach((category) => {
-    const categoryGroups = groups.filter((group) => (group.category || 'unknown') === category);
-    if (!categoryGroups.length) return;
-    const categoryMetrics = metricSets[category] || metrics;
-    const label = categoryGroups[0].category_label || category;
-    const baseTitle = prefix ? `${prefix} · ${label}` : label;
-    const scopeByCode = new Map(
-      categoryGroups
-        .flatMap((group) => group.metrics || [])
-        .map((metric) => [metric.code, metric.calculation_scope || 'personal']),
-    );
-    const scopes = category === 'administrator' ? PLAN_SCOPE_ORDER : ['personal'];
-    scopes.forEach((scope) => {
-      const scopeMetrics = categoryMetrics.filter(
-        (metric) => (scopeByCode.get(metric.code) || 'personal') === scope,
-      );
-      if (!scopeMetrics.length) return;
-      const title = category === 'administrator'
-        ? `${baseTitle} · ${planScopeLabel(scope)}`
-        : baseTitle;
-      sections.push(renderPlanSection(
-        title,
-        categoryGroups,
-        scopeMetrics,
-        t('dash.staffCount', { count: categoryGroups.length }),
-      ));
-    });
-  });
+const STAFF_BLOCK_LABEL_KEYS = {
+  barber: 'dash.barbers',
+  administrator: 'dash.administrators',
+  unknown: 'dash.staffUncategorized',
+};
+
+const STAFF_BLOCK_JUMPS = {
+  barber: ['plan-barbers', 'dash.jumpBarbers'],
+  administrator: ['plan-admins', 'dash.jumpAdmins'],
+};
+
+// Barbers and administrators' personal KPIs share one table (sub-header rows tell them apart);
+// the administrators' KPIs credited to them by records (visits, OPZ, extra services) mean something else and stay separate.
+function renderMergedStaffSection(groups, metricSets, metrics) {
+  const { columns, blocks } = mergedStaffTable({ groups, metrics, metricSets });
+  if (!blocks.length || !columns.length) return '';
+  const staffCount = blocks.reduce((total, block) => total + block.groups.length, 0);
+  const body = blocks
+    .map((block) => {
+      const jump = STAFF_BLOCK_JUMPS[block.category];
+      const label = t(STAFF_BLOCK_LABEL_KEYS[block.category]);
+      return `
+        <tr class="plan-subheader">
+          <th colspan="${columns.length + 2}" ${jump ? jumpAttrs(...jump) : ''}>
+            <span class="plan-subheader-label">${escapeHtml(label)} · ${escapeHtml(t('dash.staffCount', { count: block.groups.length }))}</span>
+          </th>
+        </tr>
+        ${block.groups.map((row) => renderPlanGroupRows(row.group, columns, row.cells)).join('')}
+      `;
+    })
+    .join('');
+  return `
+    <section class="plan-section">
+      <div class="plan-section-title">
+        <h3>${escapeHtml(t('dash.staffPersonalTitle'))}</h3>
+        <span class="meta">${escapeHtml(t('dash.staffCount', { count: staffCount }))}</span>
+      </div>
+      ${renderPlanTableShell(columns, body)}
+    </section>
+  `;
+}
+
+const ADMIN_RECORDS_JUMP = ['plan-admin-records', 'dash.jumpAdminRecords'];
+
+function renderStaffCategorySections(groups, metricSets, metrics) {
+  const sections = [renderMergedStaffSection(groups, metricSets, metrics)];
+  const adminGroups = groups.filter((group) => group.category === 'administrator');
+  if (!adminGroups.length) return sections;
+  const adminMetrics = metricSets.administrator || metrics;
+  const scopeByCode = new Map(
+    adminGroups
+      .flatMap((group) => group.metrics || [])
+      .map((metric) => [metric.code, metric.calculation_scope || 'personal']),
+  );
+  const scope = 'administrator_records';
+  const scopeMetrics = adminMetrics.filter((metric) => (scopeByCode.get(metric.code) || 'personal') === scope);
+  sections.push(renderPlanSection(
+    planScopeLabel(scope),
+    adminGroups,
+    scopeMetrics,
+    t('dash.staffCount', { count: adminGroups.length }),
+    ADMIN_RECORDS_JUMP,
+    scope,
+  ));
   return sections;
 }
 
@@ -1294,6 +1424,7 @@ function renderSelectedStaffPlanTable(staffPlan) {
           <h3>${escapeHtml(`${title} · ${planScopeLabel(scope)}`)}</h3>
           <span class="meta">${escapeHtml(staffPlan.category_label || '')}</span>
         </div>
+        ${planScopeHintHtml(scope)}
         <div class="table-scroll staff-plan-scroll">
           <table class="staff-plan-table">
             <thead>
@@ -1467,6 +1598,7 @@ function renderPlanInsights(planFact) {
         plugins: {
           tooltip: {
             callbacks: {
+              label: (ctx) => ` ${ctx.dataset.label}: ${formatMetricValue(ctx.parsed.y, goodsKpis[ctx.dataIndex]?.format)}`,
               afterBody: (items) => {
                 const item = goodsKpis[items[0]?.dataIndex];
                 return item ? [t('dash.completionTooltip', { value: formatMetricValue(item.completion_pct, 'percent') })] : [];
@@ -1541,12 +1673,41 @@ const planTableStickyObserver = new ResizeObserver((entries) => {
   });
 });
 
+// A table that fits is not a scroll container, so its sticky header follows the page; one that does not fit
+// scrolls inside a height-limited box instead (see .table-scroll--sticky-head in index.html).
+// The width is compared with the box's inner width *including* the room a vertical scrollbar would take: the
+// table is as wide as max(min-content, room), so the answer is the same whether or not the box scrolls right now.
+// `scroll.scrollWidth <= scroll.clientWidth` would not be: a table between the two widths would stay in whichever
+// state it was in (not fitting with a scrollbar, fitting without one) until the next resize.
+function syncPlanTableFit(scroll) {
+  const table = scroll.querySelector('.plan-table');
+  if (!table) return;
+  const style = getComputedStyle(scroll);
+  const inner = scroll.offsetWidth - (parseFloat(style.borderLeftWidth) || 0) - (parseFloat(style.borderRightWidth) || 0);
+  scroll.classList.toggle('table-scroll--fits', table.offsetWidth <= inner + 1);
+  // The sticky header's real height: a jump to a sub-header row must land below it (see index.html).
+  const head = table.querySelector('thead');
+  if (head) scroll.style.setProperty('--plan-head-height', `${head.offsetHeight}px`);
+}
+
+const planTableFitObserver = new ResizeObserver((entries) => {
+  entries.forEach((entry) => syncPlanTableFit(entry.target.closest('.table-scroll') || entry.target));
+});
+
 function syncPlanTableStickyOffsets() {
   // Disconnect first: each render replaces the table markup wholesale, so the previous
   // .branch-cell elements are already detached and would otherwise pile up as dead
   // observations for as long as the page stays open.
   planTableStickyObserver.disconnect();
+  planTableFitObserver.disconnect();
   document.querySelectorAll('.plan-table').forEach((table) => {
+    const scroll = table.closest('.table-scroll');
+    if (scroll) {
+      scroll.classList.add('table-scroll--sticky-head');
+      syncPlanTableFit(scroll);
+      planTableFitObserver.observe(scroll);
+      planTableFitObserver.observe(table);
+    }
     const branchCell = table.querySelector('.branch-cell');
     if (!branchCell) return;
     // box: 'border-box' — the default (content-box) would miss a future CSS edit that
@@ -1567,6 +1728,7 @@ function renderPlanFact(planFact) {
     renderPlanInsights(null);
     els.planFactTable.innerHTML = `${diagnosticsHtml}<div class="empty">${t('dash.noPlanForPeriod')}</div>`;
     els.planMeta.textContent = '';
+    window.dispatchEvent(new CustomEvent('jump-targets-changed'));
     return;
   }
   renderPlanInsights(planFact);
@@ -1579,9 +1741,15 @@ function renderPlanFact(planFact) {
     } else {
       if (planFact.parent_group) {
         const branchTitle = planFact.branch?.title || planFact.parent_group.title || t('dash.branch');
-        sections.push(renderPlanSection(branchTitle, [planFact.parent_group], metricSets.branch || metrics));
+        sections.push(renderPlanSection(
+          branchTitle,
+          [planFact.parent_group],
+          metricSets.branch || metrics,
+          '',
+          ['plan-branch', 'dash.jumpBranch'],
+        ));
       }
-      sections.push(...renderStaffCategorySections('', groups, metricSets, metrics));
+      sections.push(...renderStaffCategorySections(groups, metricSets, metrics));
     }
 
     els.planFactTable.innerHTML = diagnosticsHtml + (
@@ -1599,6 +1767,7 @@ function renderPlanFact(planFact) {
     : t('dash.networkAndBranches');
   els.planMeta.textContent = t('dash.planMeta', { scope: scopeText, count: groups.length, period: planPeriodText });
   syncPlanTableStickyOffsets();
+  window.dispatchEvent(new CustomEvent('jump-targets-changed'));
 }
 
 function renderPlanSettingInput(scope, row, field) {
@@ -1739,7 +1908,59 @@ function updatePlanSettingsDirtyFromForm() {
   setPlanSettingsDirty(JSON.stringify(collectPlanSettingsPayload()) !== planSettingsSavedSnapshot);
 }
 
+// The plan has no per-row lock (the last save wins), so a draft is put back only over the very data it was typed on:
+// a fingerprint of what the tables showed when they were loaded.
+const planSettingsDraftInputs = () => document.querySelectorAll('input[data-plan-branch], input[data-plan-staff]');
+const planSettingsDraftScope = () => ({ month: planSettingsLoadedMonth });
+const planSettingsNoticeAnchor = () => els.planSettingsBranches.parentElement;
+
+function schedulePlanSettingsDraft() {
+  // A copy of last month is a one-click action, not typing: it is not worth restoring over a plain load.
+  if (!planSettingsData || planSettingsData.copy_from || planSettingsSaving) return;
+  editorDrafts.schedule('planSettings', planSettingsDraftScope(), () => {
+    const cells = planSettingsTypedCells(planSettingsDraftInputs());
+    return Object.keys(cells).length ? { fingerprint: fingerprint(planSettingsSavedSnapshot), cells } : null;
+  });
+}
+
+function discardPlanSettingsDraft() {
+  editorDrafts.clear('planSettings', planSettingsDraftScope());
+  editorDrafts.hideNotice(planSettingsNoticeAnchor());
+}
+
+function restorePlanSettingsDraft() {
+  const scope = planSettingsDraftScope();
+  const stored = editorDrafts.read('planSettings', scope);
+  if (!stored) return;
+  const cells = stored.cells && typeof stored.cells === 'object' ? stored.cells : {};
+  if (!Object.keys(cells).length) {
+    editorDrafts.clear('planSettings', scope);
+    return;
+  }
+  const anchor = planSettingsNoticeAnchor();
+  if (stored.fingerprint !== fingerprint(planSettingsSavedSnapshot)) {
+    editorDrafts.clear('planSettings', scope);
+    editorDrafts.showNotice(anchor, 'outdated');
+    return;
+  }
+  if (!applyPlanSettingsCells(planSettingsDraftInputs(), cells)) {
+    editorDrafts.clear('planSettings', scope);
+    return;
+  }
+  updatePlanSettingsDirtyFromForm();
+  schedulePlanSettingsDraft();
+  editorDrafts.showNotice(anchor, 'restored', {
+    onDiscard: () => {
+      discardPlanSettingsDraft();
+      if (planSettingsSavedData) renderPlanSettings(JSON.parse(JSON.stringify(planSettingsSavedData)));
+    },
+  });
+}
+
 function renderPlanSettings(data, { updateSnapshot = true, dirty = false } = {}) {
+  // Whatever was waiting to be written belongs to the tables that are about to be redrawn.
+  editorDrafts.cancel('planSettings');
+  editorDrafts.hideNotice(planSettingsNoticeAnchor());
   planSettingsData = data;
   els.planSettingsMonth.value = data.month;
   planSettingsLoadedMonth = data.month;
@@ -1787,6 +2008,7 @@ async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom 
     });
     if (!request.isCurrent()) return false;
     renderPlanSettings(payload.data, { updateSnapshot: !copyFrom, dirty });
+    if (!copyFrom) restorePlanSettingsDraft();
     viewsWithData.add('planSettings');
     clearError();
     setLoadedApiState(payload.data, {
@@ -1825,9 +2047,11 @@ async function savePlanSettings() {
     if (planSettingsData.copy_from) requestPayload.copy_from = planSettingsData.copy_from;
     const payload = await postJson('/dashboard/plan/settings', requestPayload);
     renderPlanSettings(payload.data);
+    discardPlanSettingsDraft();
     setApiState(t('dash.apiConnected'), 'ok');
   } catch (error) {
     if (error.status === 409) {
+      discardPlanSettingsDraft();
       // Someone saved the same month first. Their plan wins; what we typed is not merged in,
       // because the sum of two people's edits is nobody's intent. The server's detail is English.
       const reloaded = await loadPlanSettings({ month: planSettingsData?.month || els.planSettingsMonth.value });
@@ -2088,7 +2312,7 @@ function renderBundle(bundle) {
   } = bundle;
   applyFinancialVisibility(summary);
   renderCompareNote(summary);
-  renderStaffPersonalScope();
+  renderStaffPersonalScope(summary);
   renderKpi(summary);
   renderStaffBranchMetrics(summary);
   renderVisitMetrics(summary);
@@ -2202,9 +2426,14 @@ async function loadStaff(filter, { force = false } = {}) {
     staffOptions.forEach((staff) => {
       const option = document.createElement('option');
       option.value = staff.id;
-      option.textContent = filter.branch.value
-        ? staff.name
-        : `${staff.name} · ${staff.company_title || t('dash.branchFallbackWithId', { id: staff.company_id })}`;
+      const { name, text } = staffOption(staff, {
+        branchTitle: filter.branch.value
+          ? ''
+          : staff.company_title || t('dash.branchFallbackWithId', { id: staff.company_id }),
+        translate: t,
+      });
+      option.textContent = text;
+      option.dataset.name = name;
       filter.staff.appendChild(option);
     });
     filter.staff.value = staffOptions.some((staff) => String(staff.id) === selected) ? selected : '';
@@ -2324,6 +2553,9 @@ function scrollActiveTabIntoView(link) {
   }
 }
 
+// Views with 14-column tables get a wider work area so they fit without a sideways scroll.
+const WIDE_VIEWS = new Set(['plan', 'planSettings', 'reports']);
+
 function setActiveView(view) {
   view = accessibleView(view);
   const previousView = activeView;
@@ -2343,12 +2575,14 @@ function setActiveView(view) {
   els.yandexPayView.classList.toggle('active', view === 'yandexPayFacts');
   if (view === 'yandexPayFacts') limitYandexPayMonth();
   els.reportsView.classList.toggle('active', view === 'reports');
+  els.shell.classList.toggle('shell--wide', WIDE_VIEWS.has(view));
   els.viewLinks.forEach((link) => {
     const isActive = link.dataset.viewLink === view;
     link.classList.toggle('active', isActive);
     if (isActive) scrollActiveTabIntoView(link);
   });
   updateFloatingEditorSave();
+  jumpNav.refresh();
   const labels = {
     overview: t('dash.subhead'),
     plan: t('dash.planSubhead'),
@@ -2550,6 +2784,7 @@ async function startSession() {
     }
 
     currentUser = me.data;
+    editorDrafts.purgeForeign();
     const onboardingOk = await ensureOnboardingComplete(currentUser);
     if (!onboardingOk) return;
     const isDemo = currentUser?.is_demo === true;
@@ -2662,13 +2897,6 @@ els.overviewPresetButtons.forEach((button) => {
     if (await refilterForPeriod(filterEls.overview)) loadDashboard();
   });
 });
-els.overviewJumpButtons.forEach((button) => {
-  button.addEventListener('click', () => {
-    const section = button.dataset.overviewJump;
-    const target = document.querySelector(`[data-overview-section="${section}"]`);
-    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  });
-});
 
 filterEls.plan.load.addEventListener('click', () => loadPlanFact());
 [filterEls.plan.start, filterEls.plan.end].forEach((input) => {
@@ -2722,12 +2950,17 @@ els.planSettingsMonth.addEventListener('change', () => reloadPlanSettingsMonth()
 els.planSettingsCopy.addEventListener('click', () => copyPreviousPlanSettings());
 els.planSettingsReset.addEventListener('click', () => {
   if (planSettingsSavedData) {
+    discardPlanSettingsDraft();
     renderPlanSettings(JSON.parse(JSON.stringify(planSettingsSavedData)));
   }
 });
 els.planSettingsSave.addEventListener('click', () => savePlanSettings());
-els.planSettingsBranches.addEventListener('input', () => updatePlanSettingsDirtyFromForm());
-els.planSettingsStaff.addEventListener('input', () => updatePlanSettingsDirtyFromForm());
+[els.planSettingsBranches, els.planSettingsStaff].forEach((container) => {
+  container.addEventListener('input', () => {
+    updatePlanSettingsDirtyFromForm();
+    schedulePlanSettingsDraft();
+  });
+});
 els.serviceFilterLoad.addEventListener('click', () => loadServiceManagement());
 els.serviceFilterBranch.addEventListener('change', () => loadServiceManagement());
 els.serviceFilterCategory.addEventListener('change', () => loadServiceManagement());
@@ -2941,13 +3174,7 @@ window.addEventListener('hashchange', async (event) => {
   }
 });
 window.addEventListener('beforeunload', (event) => {
-  if (
-    !planSettingsDirty
-    && !planSettingsSaving
-    && !Object.values(manualEditors.byView).some((editor) => editor.dirty || editor.saving)
-    && !serviceManagementDirty
-    && !serviceManagementMutationPending
-  ) return;
+  if (sessionLeaving || !hasUnsavedEditorWork()) return;
   event.preventDefault();
   event.returnValue = '';
 });

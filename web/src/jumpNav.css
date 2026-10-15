@@ -1,0 +1,139 @@
+/* Floating jump navigation (jumpNav.js). Sits under the save dock (z-index 30). On desktop it lives in the permanent
+   32px gutter of `.shell` (index.html): the page width does not depend on the nav, and the nav (38px + 6px offset)
+   covers no content. Widen the nav, or move it closer to the middle, only together with that gutter. */
+
+.jump-nav[hidden] {
+  display: none !important;
+}
+
+[data-jump-target] {
+  scroll-margin-top: 16px;
+}
+
+.jump-nav {
+  position: fixed;
+  top: 50%;
+  right: 6px;
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  max-width: 220px;
+  max-height: calc(100vh - 220px);
+  padding: 6px 4px;
+  overflow: auto;
+  transform: translateY(-50%);
+  border: 1px solid #cbd5e1;
+  border-radius: 16px;
+  background: rgb(255 255 255 / 92%);
+  box-shadow: 0 8px 24px rgb(15 23 42 / 14%);
+}
+
+.jump-nav__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.jump-nav__dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #94a3b8;
+}
+
+/* Collapsed to dots; hover or keyboard focus opens the labels. `:focus-visible`, not `:focus-within`: a mouse click
+   leaves focus on the button, and the opened labels would then keep covering the table until the next click. */
+.jump-nav__label {
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  transition: max-width 0.15s ease, opacity 0.15s ease;
+}
+
+.jump-nav:hover .jump-nav__label,
+.jump-nav:has(:focus-visible) .jump-nav__label {
+  max-width: 180px;
+  opacity: 1;
+}
+
+.jump-nav__item:hover {
+  background: #e6fffb;
+  color: #0f766e;
+}
+
+.jump-nav__item:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 1px;
+}
+
+.jump-nav__item.active {
+  color: #0f766e;
+}
+
+.jump-nav__item.active .jump-nav__dot {
+  background: #0f766e;
+  box-shadow: 0 0 0 3px #ccfbf1;
+}
+
+@media (max-width: 560px) {
+  .jump-nav {
+    top: auto;
+    right: 10px;
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    left: 10px;
+    flex-direction: row;
+    align-items: center;
+    max-width: none;
+    max-height: none;
+    padding: 4px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    transform: none;
+  }
+
+  .jump-nav__item {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+  }
+
+  .jump-nav__dot {
+    display: none;
+  }
+
+  .jump-nav__item.active {
+    background: #e6fffb;
+  }
+
+  .jump-nav .jump-nav__label,
+  .jump-nav:hover .jump-nav__label {
+    max-width: none;
+    opacity: 1;
+  }
+
+  /* The save dock sits at the very bottom here (taller once its text wraps); the bar stays above it. */
+  body.floating-editor-save-visible .jump-nav {
+    bottom: calc(100px + env(safe-area-inset-bottom, 0px));
+  }
+
+  body.jump-nav-visible .shell {
+    padding-bottom: 72px;
+  }
+
+  body.jump-nav-visible.floating-editor-save-visible .shell {
+    padding-bottom: 210px;
+  }
+}

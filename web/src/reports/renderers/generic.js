@@ -15,7 +15,7 @@ import { rankingRowsForMetric, tableHasRows } from '../ranking.js';
 function renderCards(cards = []) {
   if (!cards.length) return '';
   return `
-    <div class="reports-metrics">
+    <div class="reports-metrics" data-jump-target="report-metrics" data-jump-label="${escapeHtml(t('reports.jumpMetrics'))}">
       ${cards.map((card) => `
         <article class="reports-metric">
           <div class="reports-metric__label">${escapeHtml(card.label)}</div>
@@ -57,7 +57,7 @@ function renderCalculationScope(scope) {
 function renderCharts(charts = []) {
   if (!charts.length) return '';
   return `
-    <div class="reports-chart-grid">
+    <div class="reports-chart-grid" data-jump-target="report-charts" data-jump-label="${escapeHtml(t('reports.jumpCharts'))}">
       ${charts.map((chart) => `
         <section class="reports-panel${chart.wide === true ? ' reports-panel--span' : ''}">
           <div class="reports-panel__head">
@@ -119,7 +119,7 @@ function renderTables(tables = [], comparison = null) {
       </label>
     ` : '';
     return `
-      <section class="reports-panel reports-panel--wide" data-report-table="${escapeHtml(table.id)}">
+      <section class="reports-panel reports-panel--wide" data-report-table="${escapeHtml(table.id)}" data-jump-target="report-table-${escapeHtml(table.id)}" data-jump-label="${escapeHtml(table.title || t('reports.table'))}">
         <div class="reports-panel__head">
           <h3>${escapeHtml(table.title || t('reports.table'))}</h3>
           <div class="reports-panel__actions">
@@ -192,7 +192,7 @@ function renderComparison(data) {
         delta_pct: null,
       }));
   return `
-    <section class="reports-panel reports-panel--wide reports-compare">
+    <section class="reports-panel reports-panel--wide reports-compare" data-jump-target="report-comparison" data-jump-label="${escapeHtml(t('reports.comparison'))}">
       <div class="reports-panel__head">
         <h3>${t('reports.comparison')}</h3>
       </div>

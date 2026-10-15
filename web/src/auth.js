@@ -1,6 +1,8 @@
 import './reauth.css';
 import { togglePasswordVisibility } from './formHelpers.js';
 import { t } from './i18n.js';
+import { clearAllDrafts } from './editorDrafts.js';
+import { startIdleSession } from './idleSession.js';
 
 // Mirrors the backend's USER_ADMIN_ROLES (auth_hierarchy.py:26) — the only roles
 // `/auth/admin/*` accepts. Keep the two lists in sync by hand; nothing enforces that
@@ -17,6 +19,7 @@ const REFRESH_LOCK_NAME = 'portal-auth-refresh';
 const SESSION_PROBE_INTERVAL_MS = 1000;
 const PEER_REFRESH_WAIT_MS = 750;
 const REAUTH_REQUIRED = Symbol('reauth-required');
+const SESSION_ENDED_REASONS = new Set(['logout', 'idle']);
 const apiBase = import.meta.env.VITE_API_BASE || '';
 let refreshInFlight = null;
 let reauthInFlight = null;
@@ -29,6 +32,31 @@ let lastSessionProbeAt = 0;
 let sessionTransitionStarted = false;
 let peerRefreshVersion = 0;
 const peerRefreshWaiters = new Set();
+let dismissReauthFromPeer = null;
+let idleSession = null;
+const unsavedWorkProviders = new Set();
+const IDLE_LOGOUT_REQUEST_TIMEOUT_MS = 5000;
+
+/**
+ * Let a page say whether it holds input that a lost session would destroy.
+ *
+ * @param {() => boolean} provider - true while the page has unsaved or in-flight edits
+ * @returns {() => void} unregister function
+ */
+export function registerUnsavedWork(provider) {
+  unsavedWorkProviders.add(provider);
+  return () => unsavedWorkProviders.delete(provider);
+}
+
+export function hasUnsavedWork() {
+  return [...unsavedWorkProviders].some((provider) => {
+    try {
+      return Boolean(provider());
+    } catch {
+      return false;
+    }
+  });
+}
 
 // Merely touching window.localStorage throws when the browser blocks site data, and this runs at import.
 function localStore() {
@@ -83,9 +111,19 @@ function sessionTransitionError() {
   return error;
 }
 
-function clearSensitivePage() {
+// `reason` tells listeners why the page is being torn down, because they treat the cases differently:
+// 'logout' is the user leaving on purpose, 'idle' the inactivity timeout (unsaved input must survive it),
+// 'ended' the session dying or being ended by another tab, 'changed' another identity taking over.
+function clearSensitivePage(reason = 'ended') {
+  // Drafts live in this tab's sessionStorage and outlast the page that wrote them: an explicit logout (or password
+  // change) from any page of the tab, not only the dashboard that owns the editors, must end them too.
+  if (reason === 'logout') clearAllDrafts();
   if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof Event === 'function') {
-    window.dispatchEvent(new Event('portal:session-transition'));
+    window.dispatchEvent(
+      typeof CustomEvent === 'function'
+        ? new CustomEvent('portal:session-transition', { detail: { reason } })
+        : new Event('portal:session-transition'),
+    );
   }
   if (typeof document !== 'undefined' && typeof document.body?.replaceChildren === 'function') {
     document.body.replaceChildren();
@@ -93,13 +131,13 @@ function clearSensitivePage() {
   }
 }
 
-function beginSessionTransition(destination = 'reload', loginPath = '/login.html') {
+function beginSessionTransition(destination = 'reload', loginPath = '/login.html', reason = null) {
   // Public auth pages hold no session data to protect, and wiping them is what broke sign-in: a stale
   // csrf cookie made the focus probe fail, the page blanked itself and reloaded as
   // /login.html?return_to=/login.html, so the next successful login returned to the login page.
   if (sessionTransitionStarted || typeof window === 'undefined' || isPublicAuthPage()) return;
   sessionTransitionStarted = true;
-  clearSensitivePage();
+  clearSensitivePage(reason || (destination === 'login' ? 'ended' : 'changed'));
   if (destination === 'login') {
     window.location.href = loginPathWithReturnTo(loginPath);
   } else if (typeof window.location.reload === 'function') {
@@ -109,10 +147,11 @@ function beginSessionTransition(destination = 'reload', loginPath = '/login.html
   }
 }
 
-function publishAuthEvent(type) {
+function publishAuthEvent(type, extra = {}) {
   const event = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     type,
+    ...extra,
   };
   authChannel?.postMessage(event);
   const storage = localStore();
@@ -127,14 +166,24 @@ function publishAuthEvent(type) {
 
 function handleAuthEvent(event) {
   const type = event?.type;
-  if (type === 'session-changed') {
+  // The same person signing in again (the password dialog of another tab) changes nothing for this
+  // tab: the cookies are shared and already valid, so reloading would only throw its unsaved input away.
+  const sameIdentity = type === 'session-changed'
+    && Boolean(event.fingerprint)
+    && event.fingerprint === activeSessionFingerprint;
+  if (type === 'session-changed' && !sameIdentity) {
     beginSessionTransition('reload');
   } else if (type === 'session-ended') {
-    beginSessionTransition('login');
-  } else if (type === 'session-refreshed') {
+    // The sender says why: an explicit logout must wipe this tab's drafts too (they live in its own
+    // sessionStorage, out of the sender's reach), an idle one keeps them. No reason (an older tab) means `ended`.
+    // A public page (the login form) is not torn down by the transition, so its drafts are cleared here.
+    if (event.reason === 'logout') clearAllDrafts();
+    beginSessionTransition('login', '/login.html', SESSION_ENDED_REASONS.has(event.reason) ? event.reason : 'ended');
+  } else if (type === 'session-refreshed' || sameIdentity) {
     peerRefreshVersion += 1;
     peerRefreshWaiters.forEach((resolve) => resolve(true));
     peerRefreshWaiters.clear();
+    dismissReauthFromPeer?.();
   }
 }
 
@@ -197,7 +246,8 @@ function isLoginPage() {
 
 function rememberSessionPayload(path, payload, { allowIdentityChange = false } = {}) {
   const user = sessionUserFromPayload(path, payload);
-  if (!user) return;
+  // A page that is already being torn down must not write the identity it just wiped back into storage.
+  if (!user || sessionTransitionStarted) return;
 
   const nextFingerprint = sessionFingerprint(user);
   if (activeSessionFingerprint && activeSessionFingerprint !== nextFingerprint && !allowIdentityChange) {
@@ -218,10 +268,11 @@ function rememberSessionPayload(path, payload, { allowIdentityChange = false } =
 
   const requestPath = normalizedPath(path);
   if (requestPath === '/auth/login' || requestPath === '/auth/demo-login') {
-    publishAuthEvent('session-changed');
+    publishAuthEvent('session-changed', { fingerprint: nextFingerprint });
   } else if (requestPath === '/auth/refresh') {
     publishAuthEvent('session-refreshed');
   }
+  startIdleMonitoring(user);
 }
 
 function currentReturnTo() {
@@ -297,11 +348,57 @@ function resolveApiPath(path) {
 }
 
 export function clearLocalSession() {
+  stopIdleMonitoring();
   activeSessionUser = null;
   activeSessionFingerprint = '';
   clearLocalAuthState({ clearEmail: true });
-  publishAuthEvent('session-ended');
-  clearSensitivePage();
+  publishAuthEvent('session-ended', { reason: 'logout' });
+  clearSensitivePage('logout');
+}
+
+function startIdleMonitoring(user) {
+  // The shared demo account is read-only and has nothing to protect from an unattended screen.
+  if (idleSession || user?.is_demo || isPublicAuthPage()) return;
+  if (typeof window === 'undefined' || typeof document === 'undefined' || !document.body) return;
+  idleSession = startIdleSession({
+    onExpire: () => { void logoutForInactivity(); },
+    // The session may have died while nobody was looking; find out now instead of at the next click.
+    onContinue: () => { void revalidateSessionIdentity({ force: true }); },
+  });
+}
+
+function stopIdleMonitoring() {
+  idleSession?.stop();
+  idleSession = null;
+}
+
+async function logoutForInactivity() {
+  idleSession = null;
+  if (sessionTransitionStarted) return;
+  sessionTransitionStarted = true;
+  const returnTo = currentReturnTo();
+  // Blank the screen first: unsaved input is flushed to drafts by the transition event, and nothing
+  // sensitive stays visible while the server is being told to end the session.
+  clearSensitivePage('idle');
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const abortTimer = setTimeout(() => controller?.abort(), IDLE_LOGOUT_REQUEST_TIMEOUT_MS);
+  try {
+    await fetch(resolveApiPath('/auth/logout'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: normalizeHeaders({ method: 'POST' }),
+      signal: controller?.signal,
+    });
+  } catch {
+    /* local cleanup and redirect still happen */
+  } finally {
+    clearTimeout(abortTimer);
+  }
+  activeSessionUser = null;
+  activeSessionFingerprint = '';
+  clearLocalAuthState({ clearEmail: true });
+  publishAuthEvent('session-ended', { reason: 'idle' });
+  window.location.href = loginPathWithReturnTo('/login.html', returnTo);
 }
 
 function cachedUserEmail() {
@@ -438,7 +535,7 @@ export function wait(ms) {
 export async function revalidateSessionIdentity({ force = false } = {}) {
   if (sessionTransitionStarted || isPublicAuthPage()) return false;
   if (!hasSessionHint()) {
-    if (activeSessionUser) beginSessionTransition('login');
+    if (activeSessionUser) void endDeadSession();
     return false;
   }
   if (!force && Date.now() - lastSessionProbeAt < SESSION_PROBE_INTERVAL_MS) return true;
@@ -446,15 +543,34 @@ export async function revalidateSessionIdentity({ force = false } = {}) {
 
   sessionProbeInFlight = authFetch('/auth/me', { __skipReauth: true })
     .then(() => true)
-    .catch((error) => {
+    .catch(async (error) => {
       if (error?.name === 'SessionTransitionError') return false;
-      if (isAuthFailure(error)) beginSessionTransition('login');
+      if (isAuthFailure(error)) await endDeadSession();
       return false;
     })
     .finally(() => {
       sessionProbeInFlight = null;
     });
   return sessionProbeInFlight;
+}
+
+// The session is gone. Wiping the page would also wipe whatever the user has typed and not saved yet,
+// so while there is such input the password dialog goes first; the page is left only when there is
+// nothing to lose or the user declines to sign in again.
+async function endDeadSession() {
+  // The page is already leaving (idle logout, another tab's logout): a password dialog over a blank page would
+  // only flash before the redirect.
+  if (sessionTransitionStarted) return;
+  if (!hasUnsavedWork()) {
+    beginSessionTransition('login');
+    return;
+  }
+  try {
+    await promptReauth({ keepsWork: true });
+  } catch (error) {
+    if (error?.name === 'SessionTransitionError') return;
+    beginSessionTransition('login');
+  }
 }
 
 async function refreshSession() {
@@ -494,6 +610,7 @@ function ensureReauthModal() {
     <form class="reauth-modal__dialog" id="reauth-form">
       <h2>${t('reauth.title')}</h2>
       <p>${t('reauth.text')}</p>
+      <p class="reauth-modal__note" id="reauth-note" hidden>${t('reauth.keepsWork')}</p>
       <div class="reauth-modal__error" id="reauth-error" hidden></div>
       <label>Email<input type="email" id="reauth-email" autocomplete="username" readonly /></label>
       <label>${t('common.password')}
@@ -512,7 +629,7 @@ function ensureReauthModal() {
   return modal;
 }
 
-async function promptReauth() {
+export async function promptReauth({ keepsWork = false } = {}) {
   if (typeof document === 'undefined') {
     throw new Error(t('authErrors.authenticationRequired'));
   }
@@ -527,8 +644,10 @@ async function promptReauth() {
     const submitBtn = modal.querySelector('#reauth-submit');
     const cancelBtn = modal.querySelector('#reauth-cancel');
     const togglePasswordBtn = modal.querySelector('#reauth-toggle-password');
+    const noteEl = modal.querySelector('#reauth-note');
     const email = cachedUserEmail();
 
+    noteEl.hidden = !keepsWork;
     emailInput.value = email;
     emailInput.readOnly = Boolean(email);
     passwordInput.value = '';
@@ -540,19 +659,23 @@ async function promptReauth() {
     modal.hidden = false;
     passwordInput.focus();
 
-    const cleanup = () => {
+    // One outcome per dialog: a peer tab can dismiss it while a password submit is still in flight, and the late
+    // answer must not tear down (or hide) a dialog opened since.
+    let settled = false;
+    const settle = (outcome) => {
+      if (settled) return;
+      settled = true;
+      dismissReauthFromPeer = null;
       form.removeEventListener('submit', onSubmit);
       cancelBtn.removeEventListener('click', onCancel);
       togglePasswordBtn.removeEventListener('click', onTogglePassword);
       modal.hidden = true;
       submitBtn.disabled = false;
       reauthInFlight = null;
+      outcome();
     };
 
-    const onCancel = () => {
-      cleanup();
-      reject(new Error(t('authErrors.authenticationRequired')));
-    };
+    const onCancel = () => settle(() => reject(new Error(t('authErrors.authenticationRequired'))));
 
     const onTogglePassword = () => togglePasswordVisibility(passwordInput, togglePasswordBtn);
 
@@ -576,13 +699,13 @@ async function promptReauth() {
           nextError.status = response.status;
           throw nextError;
         }
+        if (settled) return;
         rememberSessionPayload('/auth/login', payload);
-        cleanup();
-        resolve(payload);
+        settle(() => resolve(payload));
       } catch (error) {
+        if (settled) return;
         if (error?.name === 'SessionTransitionError') {
-          cleanup();
-          reject(error);
+          settle(() => reject(error));
           return;
         }
         errorEl.textContent = error.message;
@@ -592,6 +715,8 @@ async function promptReauth() {
       }
     };
 
+    // Another tab signed the same user in: the shared cookies are valid again, no password is needed here.
+    dismissReauthFromPeer = () => settle(() => resolve(null));
     form.addEventListener('submit', onSubmit);
     cancelBtn.addEventListener('click', onCancel);
     togglePasswordBtn.addEventListener('click', onTogglePassword);
@@ -718,11 +843,12 @@ export async function logout(loginPath = '/login.html') {
   } catch {
     /* local cleanup and redirect still happen */
   }
+  stopIdleMonitoring();
   activeSessionUser = null;
   activeSessionFingerprint = '';
   clearLocalAuthState({ clearEmail: true });
-  publishAuthEvent('session-ended');
-  clearSensitivePage();
+  publishAuthEvent('session-ended', { reason: 'logout' });
+  clearSensitivePage('logout');
   window.location.href = loginPath;
 }
 

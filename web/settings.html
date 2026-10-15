@@ -24,6 +24,7 @@
       <button type="button" class="settings-tab is-active" data-tab="profile" role="tab" data-i18n="settings.tabProfile">Profilo</button>
       <button type="button" class="settings-tab" data-tab="security" role="tab" data-i18n="settings.tabSecurity">Sicurezza e sessioni</button>
       <button type="button" class="settings-tab" data-tab="sources" role="tab" hidden data-i18n="settings.tabSources">Fonti YClients</button>
+      <button type="button" class="settings-tab" data-tab="branches" role="tab" hidden data-i18n="settings.tabBranches">Filiali</button>
       <a href="/admin.html" class="settings-tab settings-tab--link" data-tab="team" hidden data-i18n="settings.tabTeam">Team</a>
     </nav>
 
@@ -91,6 +92,20 @@
           <label><span data-i18n="common.password">Password</span><input type="password" id="cred-password" required /></label>
           <button type="submit" class="btn btn--primary" id="cred-submit" data-i18n="settings.credSubmit">Salva e collega</button>
         </form>
+      </article>
+    </section>
+    <section class="settings-panel" data-panel="branches" hidden>
+      <h1 data-i18n="settings.branchOrderTitle">Ordine delle sedi</h1>
+      <p class="settings-hint" data-i18n="settings.branchOrderHint">Le sedi seguono questo ordine nel selettore, in Piano/consuntivo, nelle impostazioni e nei report.</p>
+      <article class="settings-card">
+        <div class="alert error" id="branch-order-error" hidden></div>
+        <div class="alert success" id="branch-order-success" hidden></div>
+        <p class="settings-empty" id="branch-order-tenant-hint" data-i18n="settings.branchOrderPickTenant" hidden>Seleziona prima un tenant nella dashboard.</p>
+        <ol class="branch-order-list" id="branch-order-list"></ol>
+        <div class="branch-order-actions">
+          <button type="button" class="btn btn--primary" id="branch-order-save" data-i18n="settings.branchOrderSave">Salva</button>
+          <button type="button" class="btn btn--ghost" id="branch-order-reset" data-i18n="settings.branchOrderReset">Ripristina l'ordine di apertura</button>
+        </div>
       </article>
     </section>
   </main>

@@ -146,8 +146,8 @@ ADMIN_METRIC_SCOPE_BY_CODE = {
     'clients': 'administrator_records',
     'opz_qty': 'administrator_records',
     'opz_pct': 'administrator_records',
-    'extra_services_qty': 'administrator_shift',
-    'extra_services_pct': 'administrator_shift',
+    'extra_services_qty': 'administrator_records',
+    'extra_services_pct': 'administrator_records',
 }
 
 # Order is load-bearing: `normalize_staff_category()` returns the first alias found in the

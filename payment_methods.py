@@ -223,7 +223,6 @@ async def fetch_yandex_pay_editor(
             'updated_by': item.updated_by_user_id if item is not None else None,
         })
     await _attach_manual_fact_authors(db, rows, portal_account_id)
-    rows.sort(key=lambda row: (row['company_title'] or '', row['company_id']))
     return {
         'month': _month_value(month_start),
         'period': {'start': month_start.isoformat(), 'end': month_end.isoformat()},

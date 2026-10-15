@@ -112,3 +112,9 @@
   background: #0f766e;
   color: #fff;
 }
+
+.reauth-modal__dialog .reauth-modal__note {
+  margin: -6px 0 14px;
+  color: #0f766e;
+  font-weight: 600;
+}

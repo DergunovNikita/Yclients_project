@@ -104,7 +104,8 @@ def get(session: requests.Session, base_url: str, path: str, params: dict[str, A
 
 def scopes(session: requests.Session, base_url: str) -> list[tuple[str, dict[str, Any]]]:
     """Network, one branch with a reporting start, one without, and a staff filter."""
-    branches = get(session, base_url, 'branches', {}).get('data') or []
+    # By id, not by the display order: the tenant can reorder branches, and the scopes must not move with it.
+    branches = sorted(get(session, base_url, 'branches', {}).get('data') or [], key=lambda branch: branch['id'])
     with_start = next((b for b in branches if b.get('reporting_start_date')), None)
     without_start = next((b for b in branches if not b.get('reporting_start_date')), None)
     result: list[tuple[str, dict[str, Any]]] = [('network', {})]

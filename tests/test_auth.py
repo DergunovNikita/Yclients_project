@@ -111,7 +111,7 @@ async def test_login_and_me(auth_db, monkeypatch):
         assert 'access_token' not in payload['data']
         assert 'token_type' not in payload['data']
         assert client.cookies.get(ACCESS_COOKIE_NAME)
-        assert client.cookies.get(REFRESH_COOKIE_NAME)
+        assert client.cookies.get(REFRESH_COOKIE_NAME, path='/auth')
         assert client.cookies.get(AUTH_CSRF_COOKIE_NAME)
         set_cookie_headers = login.headers.get_list('set-cookie')
         assert any(f'{ACCESS_COOKIE_NAME}=' in item and 'HttpOnly' in item for item in set_cookie_headers)
@@ -291,13 +291,13 @@ async def test_logout_requires_csrf_for_cookie_session(auth_db, monkeypatch):
 
         missing_csrf = await client.post('/auth/logout')
         assert client.cookies.get(ACCESS_COOKIE_NAME)
-        assert client.cookies.get(REFRESH_COOKIE_NAME)
+        assert client.cookies.get(REFRESH_COOKIE_NAME, path='/auth')
         bearer_without_csrf = await client.post(
             '/auth/logout',
             headers={'Authorization': 'Bearer not-a-valid-session-choice'},
         )
         assert client.cookies.get(ACCESS_COOKIE_NAME)
-        assert client.cookies.get(REFRESH_COOKIE_NAME)
+        assert client.cookies.get(REFRESH_COOKIE_NAME, path='/auth')
 
         csrf = client.cookies.get(AUTH_CSRF_COOKIE_NAME)
         logout = await client.post('/auth/logout', headers={'X-CSRF-Token': csrf})
@@ -308,8 +308,93 @@ async def test_logout_requires_csrf_for_cookie_session(auth_db, monkeypatch):
     assert bearer_without_csrf.status_code == 403
     assert logout.status_code == 200
     assert not client.cookies.get(ACCESS_COOKIE_NAME)
-    assert not client.cookies.get(REFRESH_COOKIE_NAME)
+    assert not client.cookies.get(REFRESH_COOKIE_NAME, path='/auth')
     assert not client.cookies.get(AUTH_CSRF_COOKIE_NAME)
+
+
+def _refresh_set_cookies(response):
+    """Parsed Set-Cookie headers of the refresh cookie: {path: (value, attribute set without the path)}."""
+    parsed = {}
+    for header in response.headers.get_list('set-cookie'):
+        name, _, rest = header.partition(';')
+        if not name.startswith(f'{REFRESH_COOKIE_NAME}='):
+            continue
+        attributes = {part.strip().lower() for part in rest.split(';')}
+        path = next(part[len('path='):] for part in attributes if part.startswith('path='))
+        attributes = {part for part in attributes if not part.startswith('path=')}
+        parsed[path] = (name.split('=', 1)[1], attributes)
+    return parsed
+
+
+@pytest.mark.asyncio
+async def test_login_sets_the_refresh_cookie_on_the_direct_and_proxied_auth_paths(auth_db):
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        login = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})
+    app.dependency_overrides.clear()
+
+    cookies = _refresh_set_cookies(login)
+    assert set(cookies) == {'/auth', '/api/auth'}
+    # One token, one set of attributes: a path-specific difference would be a security hole on one of the two.
+    assert cookies['/auth'] == cookies['/api/auth']
+    assert 'httponly' in cookies['/auth'][1]
+
+
+@pytest.mark.asyncio
+async def test_refresh_works_for_a_client_that_only_holds_the_proxied_cookie(auth_db):
+    """Behind /api the browser sends the /api/auth cookie and never the /auth one."""
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        login = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})
+        proxied_token = _refresh_set_cookies(login)['/api/auth'][0]
+        csrf = client.cookies.get(AUTH_CSRF_COOKIE_NAME)
+    async with AsyncClient(transport=transport, base_url='http://test') as proxied_client:
+        refresh = await proxied_client.post(
+            '/auth/refresh',
+            headers={
+                'Cookie': f'{REFRESH_COOKIE_NAME}={proxied_token}; {AUTH_CSRF_COOKIE_NAME}={csrf}',
+                'X-CSRF-Token': csrf,
+            },
+        )
+    app.dependency_overrides.clear()
+
+    assert refresh.status_code == 200
+    rotated = _refresh_set_cookies(refresh)
+    assert set(rotated) == {'/auth', '/api/auth'}
+    assert rotated['/auth'] == rotated['/api/auth']
+    assert rotated['/auth'][0] != proxied_token
+
+
+@pytest.mark.asyncio
+async def test_logout_clears_the_refresh_cookie_on_both_paths(auth_db):
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        login = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})
+        assert login.status_code == 200
+        csrf = client.cookies.get(AUTH_CSRF_COOKIE_NAME)
+        logout = await client.post('/auth/logout', headers={'X-CSRF-Token': csrf})
+    app.dependency_overrides.clear()
+
+    assert logout.status_code == 200
+    cleared = _refresh_set_cookies(logout)
+    assert set(cleared) == {'/auth', '/api/auth'}
+    assert all(value == '""' or value == '' for value, _ in cleared.values())
+    assert all(any(a.startswith('max-age=0') for a in attrs) for _, attrs in cleared.values())
+    assert cleared['/auth'][1] == cleared['/api/auth'][1]
+    assert not client.cookies.get(REFRESH_COOKIE_NAME, path='/auth')
+    assert not client.cookies.get(REFRESH_COOKIE_NAME, path='/api/auth')
 
 
 @pytest.mark.asyncio
@@ -345,7 +430,7 @@ async def test_demo_login_keeps_cookie_session_without_returning_access_token(au
     assert 'token_type' not in payload['data']
     assert payload['data']['user']['email'] == 'demo@example.com'
     assert client.cookies.get(ACCESS_COOKIE_NAME)
-    assert client.cookies.get(REFRESH_COOKIE_NAME)
+    assert client.cookies.get(REFRESH_COOKIE_NAME, path='/auth')
 
 
 @pytest.mark.asyncio
@@ -2526,7 +2611,7 @@ async def test_cross_tenant_update_and_delete_match_not_found_response(auth_db, 
 
 
 @pytest.mark.asyncio
-async def test_created_manager_appears_in_dashboard_staff(auth_db, monkeypatch):
+async def test_created_manager_is_mirrored_but_hidden_from_dashboard_staff(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     token = await issue_access_token(auth_db, 1, 'owner')
 
@@ -2551,13 +2636,15 @@ async def test_created_manager_appears_in_dashboard_staff(auth_db, monkeypatch):
         staff = await client.get('/dashboard/staff', headers={'Authorization': f'Bearer {token}'})
         assert staff.status_code == 200
         names = [row['name'] for row in staff.json()['data']]
-        assert 'Worker One' in names
+        # The mirror row exists (the account is tied to a chair for the portal) but the selectors do not offer it.
+        assert 'Worker One' not in names
+        assert await auth_db.scalar(select(func.count()).select_from(Staff).where(Staff.name == 'Worker One')) == 1
 
     app.dependency_overrides.clear()
 
 
 @pytest.mark.asyncio
-async def test_branch_admin_appears_in_dashboard_staff(auth_db, monkeypatch):
+async def test_branch_admin_is_mirrored_but_hidden_from_dashboard_staff(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     token = await issue_access_token(auth_db, 1, 'owner')
 
@@ -2582,7 +2669,9 @@ async def test_branch_admin_appears_in_dashboard_staff(auth_db, monkeypatch):
         staff = await client.get('/dashboard/staff', headers={'Authorization': f'Bearer {token}'})
         assert staff.status_code == 200
         names = [row['name'] for row in staff.json()['data']]
-        assert 'Branch Boss' in names
+        # The mirror row exists (the account is tied to a chair for the portal) but the selectors do not offer it.
+        assert 'Branch Boss' not in names
+        assert await auth_db.scalar(select(func.count()).select_from(Staff).where(Staff.name == 'Branch Boss')) == 1
 
     app.dependency_overrides.clear()
 
@@ -3138,7 +3227,7 @@ async def test_demo_login_returns_is_demo_and_scoped_companies(auth_db):
         assert user['is_demo'] is True
         assert sorted(user['company_ids']) == [1, 2]
         assert client.cookies.get(ACCESS_COOKIE_NAME)
-        assert client.cookies.get(REFRESH_COOKIE_NAME)
+        assert client.cookies.get(REFRESH_COOKIE_NAME, path='/auth')
         assert client.cookies.get(AUTH_CSRF_COOKIE_NAME)
 
     app.dependency_overrides.clear()
@@ -4653,7 +4742,7 @@ async def test_refresh_route_retries_with_the_previous_cookie_within_grace(auth_
         assert (
             await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})
         ).status_code == 200
-        first_refresh = client.cookies.get(REFRESH_COOKIE_NAME)
+        first_refresh = client.cookies.get(REFRESH_COOKIE_NAME, path='/auth')
         csrf = client.cookies.get(AUTH_CSRF_COOKIE_NAME)
         assert (await client.post('/auth/refresh', headers={'X-CSRF-Token': csrf})).status_code == 200
         client.cookies.set(REFRESH_COOKIE_NAME, first_refresh, path='/auth')

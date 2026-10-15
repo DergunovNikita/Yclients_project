@@ -1,6 +1,15 @@
 import './auth.css';
 import './settings.css';
-import { authFetch, loadCurrentUser, logout, requireAuthRedirect, clearLocalSession, USER_ADMIN_ROLES } from './auth.js';
+import {
+  authFetch,
+  loadCurrentUser,
+  logout,
+  requireAuthRedirect,
+  clearLocalSession,
+  registerUnsavedWork,
+  USER_ADMIN_ROLES,
+} from './auth.js';
+import { branchOrderChanged, moveBranch } from './branchOrder.js';
 import { clearAlert, showError } from './formHelpers.js';
 import { escapeHtml } from './html.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, roleLabel, t } from './i18n.js';
@@ -32,6 +41,12 @@ const els = {
   addCredForm: document.getElementById('add-cred-form'),
   addCredError: document.getElementById('add-cred-error'),
   addCredSuccess: document.getElementById('add-cred-success'),
+  branchOrderList: document.getElementById('branch-order-list'),
+  branchOrderError: document.getElementById('branch-order-error'),
+  branchOrderSuccess: document.getElementById('branch-order-success'),
+  branchOrderTenantHint: document.getElementById('branch-order-tenant-hint'),
+  branchOrderSave: document.getElementById('branch-order-save'),
+  branchOrderReset: document.getElementById('branch-order-reset'),
 };
 
 
@@ -44,6 +59,8 @@ function selectTab(name) {
   });
   if (name === 'security') loadSessions();
   if (name === 'sources') loadCredentials();
+  // Coming back to the tab keeps a reorder that is not saved yet.
+  if (name === 'branches' && !branchOrderChanged(branchOrderSaved, branchOrderWorking)) loadBranchOrder();
 }
 
 els.tabs.forEach((tab) => {
@@ -69,6 +86,7 @@ async function loadProfile() {
 
     const ownerOrAdmin = currentUser.role === 'owner' || currentUser.role === 'platform_admin';
     document.querySelector('[data-tab="sources"]').hidden = !ownerOrAdmin;
+    document.querySelector('[data-tab="branches"]').hidden = !ownerOrAdmin;
     document.querySelector('[data-tab="team"]').hidden = !USER_ADMIN_ROLES.includes(currentUser.role);
   } catch (error) {
     showError(els.passwordError, `${t('settings.profileLoadError')}: ${error.message}`);
@@ -252,5 +270,91 @@ els.addCredForm.addEventListener('submit', async (event) => {
     showError(els.addCredError, error.message);
   }
 });
+
+// «Порядок филиалов»: the owner reorders the tenant's branches; the server stores the position of each.
+let branchOrderSaved = [];
+let branchOrderWorking = [];
+
+registerUnsavedWork(() => branchOrderChanged(branchOrderSaved, branchOrderWorking));
+
+function renderBranchOrder() {
+  const last = branchOrderWorking.length - 1;
+  els.branchOrderList.innerHTML = branchOrderWorking
+    .map(
+      (branch, index) =>
+        '<li class="branch-order-item">' +
+        `<span class="branch-order-item__title">${escapeHtml(branch.title)}</span>` +
+        '<span class="branch-order-item__buttons">' +
+        `<button type="button" class="btn btn--ghost btn--sm" data-bo-move="-1" data-bo-index="${index}"` +
+        ` aria-label="${escapeHtml(t('settings.branchOrderUp'))}"${index === 0 ? ' disabled' : ''}>↑</button>` +
+        `<button type="button" class="btn btn--ghost btn--sm" data-bo-move="1" data-bo-index="${index}"` +
+        ` aria-label="${escapeHtml(t('settings.branchOrderDown'))}"${index === last ? ' disabled' : ''}>↓</button>` +
+        '</span></li>',
+    )
+    .join('');
+  els.branchOrderSave.disabled = !branchOrderChanged(branchOrderSaved, branchOrderWorking);
+  els.branchOrderReset.disabled = !branchOrderSaved.some((branch) => branch.sort_order !== null);
+}
+
+function setBranchOrderTenantMissing(missing) {
+  els.branchOrderTenantHint.hidden = !missing;
+  els.branchOrderList.hidden = missing;
+  els.branchOrderSave.hidden = missing;
+  els.branchOrderReset.hidden = missing;
+}
+
+// Resolves to whether the list was read: the caller must not announce a success over a failed reload.
+async function loadBranchOrder() {
+  clearAlert(els.branchOrderError);
+  try {
+    const payload = await authFetch('/dashboard/branch-order');
+    branchOrderSaved = payload.data || [];
+    branchOrderWorking = [...branchOrderSaved];
+    setBranchOrderTenantMissing(false);
+    renderBranchOrder();
+    return true;
+  } catch (error) {
+    // 400 on read: a platform admin has no tenant selected; the server's detail is English.
+    if (error.status === 400 && currentUser?.role === 'platform_admin') {
+      branchOrderSaved = [];
+      branchOrderWorking = [];
+      setBranchOrderTenantMissing(true);
+      return false;
+    }
+    showError(els.branchOrderError, error.message);
+    return false;
+  }
+}
+
+async function saveBranchOrder(companyIds, successKey = 'settings.branchOrderSaved') {
+  clearAlert(els.branchOrderError);
+  clearAlert(els.branchOrderSuccess);
+  try {
+    await authFetch('/dashboard/branch-order', {
+      method: 'PUT',
+      body: JSON.stringify({ company_ids: companyIds }),
+    });
+    if (await loadBranchOrder()) {
+      els.branchOrderSuccess.textContent = t(successKey);
+      els.branchOrderSuccess.hidden = false;
+    }
+  } catch (error) {
+    // 400: the tenant's branches changed since this tab loaded; 403: the read-only demo owner. Both details are English.
+    if (error.status === 400) await loadBranchOrder();
+    const known = { 400: 'settings.branchOrderStale', 403: 'settings.branchOrderForbidden' }[error.status];
+    showError(els.branchOrderError, known ? t(known) : error.message);
+  }
+}
+
+els.branchOrderList.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-bo-move]');
+  if (!button) return;
+  branchOrderWorking = moveBranch(branchOrderWorking, Number(button.dataset.boIndex), Number(button.dataset.boMove));
+  renderBranchOrder();
+});
+
+els.branchOrderSave.addEventListener('click', () => saveBranchOrder(branchOrderWorking.map((branch) => branch.id)));
+
+els.branchOrderReset.addEventListener('click', () => saveBranchOrder([], 'settings.branchOrderResetDone'));
 
 if (requireAuthRedirect()) loadProfile();

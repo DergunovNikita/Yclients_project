@@ -43,12 +43,14 @@ from dashboard_service import (
     PLAN_SETTINGS_CONFLICT_DETAIL,
     PlanSettingsConflict,
     fetch_branches,
+    fetch_tenant_branch_order,
     fetch_manual_opz_facts,
     fetch_manual_review_facts,
     fetch_plan_fact,
     fetch_plan_settings,
     fetch_revenue_daily,
     fetch_dashboard_services,
+    save_branch_order,
     save_service_management,
     save_plan_settings,
     save_manual_facts,
@@ -119,6 +121,11 @@ PeriodPreset = Annotated[
 class MetricVisibilityPayload(BaseModel):
     role: str
     visible_codes: list[str]
+
+
+class BranchOrderPayload(BaseModel):
+    # A tenant has a handful of branches; the cap only keeps an absurd body from reaching the comparison.
+    company_ids: list[int] = Field(max_length=1000)
 
 
 class ManualFactItem(BaseModel):
@@ -301,6 +308,11 @@ def _hide_summary_financials(summary: dict[str, Any], hidden_codes: frozenset[st
         if isinstance(average_check, dict):
             for field in AVERAGE_CHECK_REVENUE_FIELDS:
                 average_check.pop(field, None)
+    personal = payload.get('administrator_personal')
+    if isinstance(personal, dict):
+        # An administrator's own Plan/fact facts carry the money metrics under their plan keys.
+        for code in money_payload_keys(hidden_codes, 'plan'):
+            personal['metrics'].pop(code, None)
     payload['financials_hidden'] = True
     return payload
 
@@ -368,6 +380,7 @@ def _hide_staff_leaderboard_financials(
         extra_table = next((table for table in tables if table.get('id') == 'extra_services'), None)
         if extra_table is not None:
             _remove_table_field(extra_table, 'sum', metric='sum')
+            _remove_table_field(extra_table, 'avg', metric='avg')
 
     payload['tables'] = [table for table in tables if table.get('id') not in hidden_table_ids]
     if hidden_codes:
@@ -995,9 +1008,9 @@ async def dashboard_yandex_pay_save(
     return await _yandex_pay_editor(db, ctx, payload.month, scope['company_id'])
 
 
-def _require_visibility_admin(ctx: AccessContext) -> None:
+def _require_visibility_admin(ctx: AccessContext, action: str = 'configure metric visibility') -> None:
     if not (ctx.full_access or ctx.role in ('owner', 'platform_admin')):
-        raise HTTPException(status_code=403, detail='Not allowed to configure metric visibility')
+        raise HTTPException(status_code=403, detail=f'Not allowed to {action}')
 
 
 @router.get('/metric-visibility')
@@ -1085,6 +1098,41 @@ async def dashboard_metric_visibility_save(
     return {'success': True, 'data': {'role': payload.role, 'visible_codes': visible_codes}}
 
 
+@router.get('/branch-order')
+async def dashboard_branch_order(
+    x_portal_account_id: int | None = Header(default=None),
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    _require_visibility_admin(ctx, 'configure the branch order')
+    portal_account_id = await _require_visibility_portal_account_id(db, ctx, x_portal_account_id)
+    return {'success': True, 'data': await fetch_tenant_branch_order(db, portal_account_id)}
+
+
+@router.put('/branch-order', dependencies=[Depends(forbid_demo)])
+async def dashboard_branch_order_save(
+    payload: BranchOrderPayload,
+    x_portal_account_id: int | None = Header(default=None),
+    db: AsyncSession = Depends(get_async_db),
+    ctx: AccessContext = Depends(get_dashboard_access),
+):
+    _require_visibility_admin(ctx, 'configure the branch order')
+    portal_account_id = await _require_visibility_portal_account_id(db, ctx, x_portal_account_id)
+    with _value_error_as_400():
+        company_ids = await save_branch_order(db, portal_account_id, payload.company_ids)
+        await log_portal_audit(
+            db,
+            actor_user_id=ctx.user_id,
+            portal_account_id=portal_account_id,
+            action='branch_order.updated',
+            target_type='portal_account',
+            target_id=str(portal_account_id),
+            metadata={'company_ids': company_ids},
+        )
+        await db.commit()
+    return {'success': True, 'data': await fetch_tenant_branch_order(db, portal_account_id)}
+
+
 @router.get('/bundle')
 async def dashboard_bundle(
     start_date: date = Query(...),
@@ -1119,6 +1167,7 @@ async def dashboard_bundle(
         allowed_company_ids=scope['allowed_company_ids'],
         include_financials=can_see_financials,
         factual_at=factual_at,
+        administrator_attribution=True,
     )
     if not can_see_financials:
         return {

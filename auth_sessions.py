@@ -31,7 +31,10 @@ from sync_security import secure_equals
 
 ACCESS_COOKIE_NAME = 'portal_access'
 REFRESH_COOKIE_NAME = 'portal_refresh'
-REFRESH_COOKIE_PATH = '/auth'
+# The browser sends a cookie only to URLs under its Path. The API is reached as `/auth/...` directly and as
+# `/api/auth/...` through the same-origin proxy (and the Vite dev server), so the refresh token is set on both.
+# A request carries at most one of them (the paths are disjoint), and both always hold the same value.
+REFRESH_COOKIE_PATHS = ('/auth', '/api/auth')
 ACCESS_COOKIE_PATH = '/'
 SAFE_METHODS = {'GET', 'HEAD', 'OPTIONS'}
 PROXY_SECRET_HEADER = 'x-proxy-secret'
@@ -370,11 +373,12 @@ def set_auth_cookies(response: Response, session: IssuedSession) -> None:
         session.access_token,
         **_cookie_kwargs(max_age=access_max_age, path=ACCESS_COOKIE_PATH, http_only=True),
     )
-    response.set_cookie(
-        REFRESH_COOKIE_NAME,
-        session.refresh_token,
-        **_cookie_kwargs(max_age=refresh_max_age, path=REFRESH_COOKIE_PATH, http_only=True),
-    )
+    for path in REFRESH_COOKIE_PATHS:
+        response.set_cookie(
+            REFRESH_COOKIE_NAME,
+            session.refresh_token,
+            **_cookie_kwargs(max_age=refresh_max_age, path=path, http_only=True),
+        )
     # CSRF cookie must be readable by JS so the SPA can echo it in a header.
     response.set_cookie(
         AUTH_CSRF_COOKIE_NAME,
@@ -385,9 +389,11 @@ def set_auth_cookies(response: Response, session: IssuedSession) -> None:
 
 def clear_auth_cookies(response: Response) -> None:
     domain = AUTH_COOKIE_DOMAIN or None
-    response.delete_cookie(ACCESS_COOKIE_NAME, path=ACCESS_COOKIE_PATH, domain=domain)
-    response.delete_cookie(REFRESH_COOKIE_NAME, path=REFRESH_COOKIE_PATH, domain=domain)
-    response.delete_cookie(AUTH_CSRF_COOKIE_NAME, path=ACCESS_COOKIE_PATH, domain=domain)
+    attributes = {'domain': domain, 'secure': AUTH_COOKIE_SECURE, 'samesite': AUTH_COOKIE_SAMESITE}
+    response.delete_cookie(ACCESS_COOKIE_NAME, path=ACCESS_COOKIE_PATH, httponly=True, **attributes)
+    for path in REFRESH_COOKIE_PATHS:
+        response.delete_cookie(REFRESH_COOKIE_NAME, path=path, httponly=True, **attributes)
+    response.delete_cookie(AUTH_CSRF_COOKIE_NAME, path=ACCESS_COOKIE_PATH, **attributes)
 
 
 # ---------- CSRF ----------

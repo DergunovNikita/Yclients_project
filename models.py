@@ -609,12 +609,17 @@ class PortalBranch(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     portal_account_id = Column(Integer, ForeignKey(f'{SYSTEM_SCHEMA}.portal_accounts.id'), nullable=False)
     company_id = Column(Integer, ForeignKey('companies.id'), nullable=False)
+    # Owner-chosen position in branch lists; NULL falls back to the opening-date order.
+    sort_order = Column(Integer, nullable=True)
 
 
 # `admin` and `barber` are one level of access under two names: the person adding the
 # account picks the one that matches the job, so a front-desk login is not mistaken for
 # a chair. Ranks live in auth_hierarchy.ROLE_LEVEL, where the two share a rank.
 PORTAL_ROLES = ('platform_admin', 'owner', 'branch_admin', 'manager', 'admin', 'barber')
+# Roles whose synthetic `staff` mirror row (`portal_staff_sync`) is an account, not a person of the branch:
+# no analytics counts it as staff. `admin` and `barber` mirrors do stay staff.
+PORTAL_MIRROR_POSITIONS = frozenset(PORTAL_ROLES) - {'admin', 'barber'}
 
 
 class PortalMetricVisibility(Base):

@@ -15,6 +15,7 @@ import { decodePathSegment, migrateFavorites, resolveReportRoute } from './routi
 import { renderReportData } from './renderers/generic.js';
 import { intlLocale, t } from '../i18n.js';
 import { branchesForPeriod } from '../reportingWindow.js';
+import { staffOption } from '../staffLabel.js';
 import {
   DEFAULT_GRANULARITY,
   REPORT_FILTER_KEYS,
@@ -75,8 +76,9 @@ function uniqueSorted(values) {
   return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru'));
 }
 
-function optionHtml(value, label, selectedValue) {
-  return `<option value="${escapeHtml(value)}"${String(value) === String(selectedValue) ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+function optionHtml(value, label, selectedValue, name = null) {
+  const nameAttr = name === null ? '' : ` data-name="${escapeHtml(name)}"`;
+  return `<option value="${escapeHtml(value)}"${nameAttr}${String(value) === String(selectedValue) ? ' selected' : ''}>${escapeHtml(label)}</option>`;
 }
 
 function reportMatches(report, filters, favorites) {
@@ -432,11 +434,13 @@ export function initReports({
       const staff = payload.data || [];
       const selected = staffSelectionForOptions(desiredStaffId, staff.map((person) => person.id));
       els.staff.innerHTML = optionHtml('', t('dash.allStaff'), selected)
-        + staff.map((person) => optionHtml(
-          person.id,
-          els.branch.value ? person.name : `${person.name} · ${person.company_title || person.company_id}`,
-          selected,
-        )).join('');
+        + staff.map((person) => {
+          const { name, text } = staffOption(person, {
+            branchTitle: els.branch.value ? '' : person.company_title || String(person.company_id),
+            translate: t,
+          });
+          return optionHtml(person.id, text, selected, name);
+        }).join('');
       state.staffLoaded = true;
       state.staffIds = staff.map((person) => person.id);
       state.staffParamsKey = staffParamsKey();

@@ -23,6 +23,7 @@ from models import (
     PlanStaffInput,
     PortalAccount,
     PortalAuditEvent,
+    PortalBranch,
     PortalRefreshToken,
     PortalUser,
     ServiceCatalog,
@@ -488,19 +489,15 @@ async def test_postgres_administrator_attribution_uses_local_shifts_and_role_per
             ])
             await db.commit()
 
-            metrics = await dashboard_service._admin_extra_service_metrics(
+            metrics = await dashboard_service._admin_extra_services_by_staff(
                 db,
                 date(2025, 1, 1),
-                date(2025, 12, 31),
+                date(2025, 1, 31),
                 1,
                 [2],
+                {2: None},
+                [1],
                 factual_at=datetime(2026, 1, 1),
-                admin_periods_by_staff={
-                    2: [
-                        (date(2025, 1, 1), date(2025, 1, 31)),
-                        (date(2025, 3, 1), date(2025, 12, 31)),
-                    ]
-                },
             )
             plan_fact = await dashboard_service.fetch_plan_fact(
                 db,
@@ -510,14 +507,13 @@ async def test_postgres_administrator_attribution_uses_local_shifts_and_role_per
                 factual_at=datetime(2026, 1, 1),
             )
 
-            assert metrics[2] == {
-                'extra_services_qty': 9.0,
-                'extra_services_denominator': 2.0,
-            }
+            # January: the barber's visit with the extras (2) is credited to him; the other January visit has none.
+            assert metrics == {2: {'extra_services_qty': 2.0}}
             staff_group = next(group for group in plan_fact['groups'] if group['staff_id'] == 2)
             cells = {cell['code']: cell for cell in staff_group['metrics']}
             assert cells['extra_services_qty']['fact'] == 14.0
-            assert cells['extra_services_pct']['fact'] == pytest.approx(466.67, abs=0.01)
+            # 14 extras over four visits: two credited in January, his own in February, one in March.
+            assert cells['extra_services_pct']['fact'] == pytest.approx(350.0)
             assert cells['opz_qty']['fact'] == 0.0
             opz_events = await dashboard_service._opz_events(
                 db,
@@ -668,5 +664,60 @@ async def test_postgres_opz_split_counts_first_visits_per_branch(pg_session_fact
             assert (metrics['opz_first_visit_qty'], metrics['opz_repeat_visit_qty']) == (2.0, 1.0)
             assert facts['monthly'][2025][3]['first_visits'] == 2
             assert [(event.event_id, event.first_visit) for event in events] == [(7, True)]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_postgres_branch_order_puts_the_saved_order_first_and_unsaved_branches_by_opening_date(
+    pg_session_factory,
+):
+    """NULLS LAST and the correlated sort_order subquery are PostgreSQL behaviour; the row lock is a no-op elsewhere."""
+    async_url = make_url(TEST_DATABASE_URL).set(drivername='postgresql+asyncpg')
+    engine = create_async_engine(async_url)
+    try:
+        async with AsyncSession(engine) as db:
+            db.add_all([
+                Group(id=1, title='G1'),
+                PortalAccount(id=1, label='Tenant', created_at=datetime(2026, 1, 1)),
+            ])
+            await db.flush()
+            db.add_all([
+                Company(id=5, title='Echo', group_id=1, reporting_start_date=date(2025, 1, 1)),
+                Company(id=3, title='Charlie', group_id=1, reporting_start_date=date(2024, 6, 1)),
+                Company(id=9, title='Alpha', group_id=1, reporting_start_date=date(2024, 6, 1)),
+                Company(id=7, title='Bravo', group_id=1),
+                Company(id=2, title='Delta', group_id=1),
+            ])
+            await db.flush()
+            db.add_all([PortalBranch(portal_account_id=1, company_id=company) for company in (5, 3, 9, 7, 2)])
+            await db.commit()
+
+            async def listed():
+                rows = await dashboard_service.fetch_branches(db, [2, 3, 5, 7, 9], force_allowed=True)
+                return [row['id'] for row in rows]
+
+            # Opening date, no date last, id as the tiebreak (3 and 9 open the same day).
+            assert await listed() == [3, 9, 5, 2, 7]
+
+            await dashboard_service.save_branch_order(db, 1, [2, 5, 7, 9, 3])
+            await db.commit()
+            assert await listed() == [2, 5, 7, 9, 3]
+            assert [row['id'] for row in await dashboard_service.fetch_tenant_branch_order(db, 1)] == [2, 5, 7, 9, 3]
+
+            # A branch the owner never placed goes after every placed one, then by the default key.
+            await db.execute(text('UPDATE system.portal_branches SET sort_order = NULL WHERE company_id IN (3, 5)'))
+            await db.commit()
+            assert await listed() == [2, 7, 9, 3, 5]
+
+            with pytest.raises(ValueError):
+                await dashboard_service.save_branch_order(db, 1, [2, 5, 7, 9])
+            await db.rollback()
+
+            await dashboard_service.save_branch_order(db, 1, [])
+            await db.commit()
+            assert await listed() == [3, 9, 5, 2, 7]
+            sort_orders = (await db.execute(select(PortalBranch.sort_order))).scalars().all()
+            assert sort_orders == [None] * 5
     finally:
         await engine.dispose()

@@ -129,6 +129,8 @@ async def test_appointment_breakdown_falls_back_to_local_appointments(async_sess
     )
 
     assert data['source_status'] == 'local'
+    # The one reason that is a degradation, and so the one the page warns about.
+    assert data['local_reason'] == 'upstream_error'
     assert data['total'] == 3
     assert data['completed'] == 1
     assert data['cancelled'] == 1
@@ -369,4 +371,24 @@ async def test_appointment_breakdown_treats_the_branch_day_as_today(async_sessio
     )
 
     assert closed['source_status'] == 'ready'
+    assert 'local_reason' not in closed
     assert still_open['source_status'] == 'local'
+    assert still_open['local_reason'] == 'period_includes_today'
+
+
+@pytest.mark.asyncio
+async def test_a_reporting_window_is_a_local_reason_of_its_own(async_session, monkeypatch):
+    async_session.add(Group(id=1, title='G'))
+    async_session.add(Company(id=1, title='One', group_id=1, reporting_start_date=date(2026, 6, 5)))
+    await async_session.commit()
+
+    async def no_call(*args, **kwargs):
+        raise AssertionError('YClients must not be asked for a scope with a reporting window')
+
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', no_call)
+    data = await _fetch_appointments_breakdown(
+        async_session, [1], date(2026, 6, 1), date(2026, 6, 30), None, datetime(2026, 7, 15, 12, 0)
+    )
+
+    assert data['source_status'] == 'local'
+    assert data['local_reason'] == 'reporting_window'

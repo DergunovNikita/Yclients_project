@@ -1,4 +1,4 @@
-import { authHeaders, getCsrfToken, requestWithReauth } from './auth.js';
+import { authHeaders, getCsrfToken, promptReauth, requestWithReauth } from './auth.js';
 import { t, userDataLoadErrorMessage } from './i18n.js';
 import {
   createTimedAbortContext,
@@ -97,6 +97,7 @@ export async function requestJson(path, {
   slowMs = SLOW_REQUEST_MS,
   fetchImpl = globalThis.fetch,
   requestWithReauthImpl = requestWithReauth,
+  reauthImpl = promptReauth,
 } = {}) {
   const normalizedMethod = String(method || 'GET').toUpperCase();
   const timing = timedSignal(signal, { slowState, onSlow, retry, timeoutMs, slowMs });
@@ -116,6 +117,14 @@ export async function requestJson(path, {
               headers: requestHeaders(normalizedMethod, fetchOptions.headers || {}),
               body: requestBody === null ? undefined : JSON.stringify(requestBody),
             });
+          },
+          async () => {
+            timing.pauseTimeout();
+            try {
+              return await reauthImpl();
+            } finally {
+              timing.resumeTimeout();
+            }
           },
         );
       } catch (error) {

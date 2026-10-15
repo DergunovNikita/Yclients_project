@@ -399,18 +399,31 @@ export function createTimedAbortContext(externalSignal, {
   externalSignal?.addEventListener('abort', abortFromExternal, { once: true });
   if (superseded) controller.abort();
   const slowTimer = slowState ? setTimer(() => onSlow?.({ state: 'slow', retry }), slowMs) : null;
-  const timeoutTimer = setTimer(() => {
+  const startTimeout = () => setTimer(() => {
     timedOut = true;
     controller.abort();
   }, timeoutMs);
+  let timeoutTimer = startTimeout();
   return {
     signal: controller.signal,
     abortError() {
       return timedOut ? timeoutError() : (superseded ? supersededError() : null);
     },
+    // Time spent waiting for the user (the password dialog) is not the server's slowness: the
+    // timeout stops there and the retried request starts with a full one.
+    pauseTimeout() {
+      if (timeoutTimer === null) return;
+      clearTimer(timeoutTimer);
+      timeoutTimer = null;
+    },
+    resumeTimeout() {
+      if (timeoutTimer !== null || timedOut || controller.signal.aborted) return;
+      timeoutTimer = startTimeout();
+    },
     cleanup() {
       if (slowTimer !== null) clearTimer(slowTimer);
-      clearTimer(timeoutTimer);
+      if (timeoutTimer !== null) clearTimer(timeoutTimer);
+      timeoutTimer = null;
       externalSignal?.removeEventListener('abort', abortFromExternal);
     },
   };

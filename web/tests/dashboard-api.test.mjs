@@ -228,6 +228,66 @@ test('shared dashboard API handles transport, errors, retries and mutations', as
     assert.deepEqual(payload.data, { refreshed: true });
   });
 
+  await t.test('time spent in the password dialog does not count against the request timeout', async () => {
+    let fetchCount = 0;
+    const reauthCalls = [];
+    const slowReauth = async (url, options, requestFn, reauthFn) => {
+      let response = await requestFn(url, options);
+      if (response.status === 401) {
+        await reauthFn();
+        response = await requestFn(url, { ...options, __retried: true });
+      }
+      return response;
+    };
+    const payload = await api.requestJson('/dashboard/test', {
+      slowState: false,
+      timeoutMs: 40,
+      requestWithReauthImpl: slowReauth,
+      reauthImpl: async () => {
+        reauthCalls.push('prompt');
+        await new Promise((resolve) => { setTimeout(resolve, 120); });
+      },
+      fetchImpl: async (_url, options) => {
+        fetchCount += 1;
+        if (options.signal.aborted) throw new DOMException('aborted', 'AbortError');
+        return fetchCount === 1
+          ? jsonResponse({ detail: 'expired' }, 401)
+          : jsonResponse({ success: true, data: { retried: true } });
+      },
+    });
+
+    assert.deepEqual(reauthCalls, ['prompt']);
+    assert.deepEqual(payload.data, { retried: true });
+  });
+
+  await t.test('the retried request after the dialog still has its own timeout', async () => {
+    let fetchCount = 0;
+    const retryAfterDialog = async (url, options, requestFn, reauthFn) => {
+      let response = await requestFn(url, options);
+      if (response.status === 401) {
+        await reauthFn();
+        response = await requestFn(url, { ...options, __retried: true });
+      }
+      return response;
+    };
+    await assert.rejects(
+      api.requestJson('/dashboard/test', {
+        slowState: false,
+        timeoutMs: 40,
+        requestWithReauthImpl: retryAfterDialog,
+        reauthImpl: async () => {},
+        fetchImpl: (_url, options) => {
+          fetchCount += 1;
+          if (fetchCount === 1) return Promise.resolve(jsonResponse({ detail: 'expired' }, 401));
+          return new Promise((_resolve, reject) => {
+            options.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+          });
+        },
+      }),
+      (error) => error.name === 'TimeoutError',
+    );
+  });
+
   await t.test('serializes POST and PATCH bodies with CSRF headers', async () => {
     const captured = [];
     const fetchImpl = async (url, options) => {

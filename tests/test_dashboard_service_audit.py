@@ -16,6 +16,7 @@ from models import (
     Group,
     ManualFactMetric,
     PlanBranchSetting,
+    PlanMetric,
     PlanStaffInput,
     PortalAuditEvent,
     Staff,
@@ -240,3 +241,49 @@ async def test_fetch_staff_can_be_narrowed_to_one_employee(async_session):
     rows = await dashboard_service.fetch_staff(async_session, staff_id=11)
 
     assert [row['id'] for row in rows] == [11]
+
+
+@pytest.mark.asyncio
+async def test_fetch_staff_labels_a_stand_or_a_chair_by_the_monthly_role(async_session):
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Staff(id=1, name='Barber', position='Барбер', company_id=1, fired=0),
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0),
+        Staff(id=3, name='Moved', position='Барбер', company_id=1, fired=0),
+        Staff(id=4, name='Owner', position='owner', company_id=1, fired=0),
+        Staff(id=5, name='Portal admin', position='admin', company_id=1, fired=0),
+        Staff(id=6, name='Platform', position='platform_admin', company_id=1, fired=0),
+    ])
+    await async_session.flush()
+    # Moved sits at the stand from October on: the plan category wins over the position.
+    async_session.add(PlanMetric(
+        period_start=date(2026, 10, 1), period_end=date(2026, 10, 31), company_id=1, staff_id=3,
+        staff_category='administrator', metric_code='clients', value=1.0,
+        updated_at=datetime(2026, 10, 1, 10, 0, 0),
+    ))
+    await async_session.commit()
+
+    def categories(rows):
+        return {row['name']: row['category'] for row in rows}
+
+    september = await dashboard_service.fetch_staff(async_session, start=date(2026, 9, 1), end=date(2026, 9, 30))
+    october = await dashboard_service.fetch_staff(async_session, start=date(2026, 10, 1), end=date(2026, 10, 31))
+    both = await dashboard_service.fetch_staff(async_session, start=date(2026, 9, 1), end=date(2026, 10, 31))
+    unscoped = await dashboard_service.fetch_staff(async_session)
+
+    assert categories(september)['Moved'] == 'barber'
+    assert categories(october)['Moved'] == 'administrator'
+    assert categories(both)['Moved'] == 'mixed'
+    assert categories(unscoped)['Moved'] == 'barber'
+    for rows in (september, october, both, unscoped):
+        by_name = categories(rows)
+        assert by_name['Barber'] == 'barber'
+        assert by_name['Admin'] == 'administrator'
+        assert by_name['Portal admin'] == 'administrator'
+        # Portal owners and platform admins are accounts, not staff: not listed at all.
+        assert 'Owner' not in by_name
+        assert 'Platform' not in by_name

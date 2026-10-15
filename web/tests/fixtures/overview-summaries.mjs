@@ -35,6 +35,8 @@ export const FULL = {
     opz_qty_change_pct: 10,
     opz_pct: 6.53,
     opz_pct_change_pct: -1.1,
+    first_visits: 125,
+    repeat_visits: 717,
     opz_first_visit_qty: 6,
     opz_first_visit_pct: 4.8,
     opz_first_visit_pct_change_pct: -0.4,
@@ -79,12 +81,27 @@ export const FULL = {
 export const PARTIAL_AVERAGE_CHECK = {
   ...FULL,
   average_check: { ...FULL.average_check, source_status: 'partial' },
-  appointments_breakdown: { ...FULL.appointments_breakdown, source_status: 'local' },
+  appointments_breakdown: { ...FULL.appointments_breakdown, source_status: 'local', local_reason: 'upstream_error' },
+};
+
+// The administrator's own Plan/fact row for the window (`administrator_personal`), manual top-up of 3 included.
+const ADMIN_BLOCK_METRICS = {
+  revenue: { value: 31200.5, previous_value: 28000, change_pct: 11.43 },
+  avg_check_total: { value: 1040.02, previous_value: 1000, change_pct: 4 },
+  clients: { value: 33, previous_value: 61, change_pct: -45.9 },
+  cosmo_qty: { value: 12, previous_value: 12, change_pct: 0 },
+  cosmo_sum: { value: 9800, previous_value: 11000, change_pct: -10.91 },
+  opz_qty: { value: 8, previous_value: 8, change_pct: 0 },
+  opz_pct: { value: 24.24, previous_value: 13.11, change_pct: 84.9 },
+  extra_services_qty: { value: 16, previous_value: 14, change_pct: 14.29 },
+  extra_services_pct: { value: 37.21, previous_value: 22.58, change_pct: 64.79 },
+  reviews_qty: { value: 2, previous_value: 6, change_pct: -66.67 },
 };
 
 export const ADMIN_SCHEDULE = {
   ...FULL,
   service_attribution: { mode: 'administrator_schedule', appointment_count: 321, unique_client_count: 250 },
+  administrator_personal: { staff_id: 7, company_id: 1, metrics: ADMIN_BLOCK_METRICS, opz_manual_qty: 1 },
 };
 
 // Manager default: money hidden, so every revenue field is null and the block is flagged.
@@ -99,10 +116,16 @@ export const ADMIN_SCHEDULE_FINANCIALS_HIDDEN = {
     extra_service_revenue: null,
   },
   average_check: { ...FULL.average_check, total: null, services: null, goods: null, extra_services: null },
+  administrator_personal: {
+    ...ADMIN_SCHEDULE.administrator_personal,
+    metrics: Object.fromEntries(
+      Object.entries(ADMIN_BLOCK_METRICS).filter(([code]) => !['revenue', 'avg_check_total', 'cosmo_sum'].includes(code)),
+    ),
+  },
   appointments_breakdown: { source_status: 'unavailable' },
 };
 
-export const NO_BLOCKS = { appointments_breakdown: { source_status: 'local' } };
+export const NO_BLOCKS = { appointments_breakdown: { source_status: 'local', local_reason: 'upstream_error' } };
 
 export const SUMMARIES = {
   full: FULL,

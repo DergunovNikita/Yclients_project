@@ -286,7 +286,7 @@ async def test_the_report_split_matches_the_overview_under_a_staff_filter_and_pr
             key for key in overview
             if 'first_visit' in key or 'repeat_visit' in key or key.endswith('_visits')
         ]
-        assert len(split_keys) == 10
+        assert len(split_keys) == 12
         assert {key: mix[key] for key in split_keys} == {key: overview[key] for key in split_keys}
         # February is the base and has first visits of its own, so the change is a real number.
         assert overview['opz_first_visit_pct_change_pct'] is not None
@@ -308,3 +308,108 @@ async def test_an_anchor_on_a_service_staff_row_with_no_business_history_is_a_fi
     # without the business-staff filter.
     assert [(event.event_id, event.first_visit) for event in events] == [(2, True)]
     assert (metrics['opz_first_visit_qty'], metrics['first_visits'], metrics['opz_first_visit_pct']) == (1.0, 0, None)
+
+
+def _plan_fact_row(plan_fact, staff_id):
+    group = next(group for group in plan_fact['groups'] if group.get('staff_id') == staff_id)
+    return {metric['code']: metric['fact'] for metric in group['metrics']}
+
+
+async def _seed_administrator_march(async_session):
+    await _seed(async_session, [
+        # February: a repeat visit of client 2 (first seen in January), rebooked; the base of the deltas.
+        _visit(102, 2, date(2025, 2, 10)),
+        _visit(103, 2, date(2025, 3, 25), attendance=0, created=datetime(2025, 2, 10, 13)),
+        *_march_history(),
+    ])
+    async_session.add(ManualFactMetric(
+        period_start=date(2025, 3, 1), period_end=date(2025, 3, 31), company_id=1, staff_id=3,
+        metric_code='opz_qty', value=3.0, updated_at=datetime(2025, 3, 31, 10),
+    ))
+    await async_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_an_administrators_overview_opz_is_what_plan_fact_credits_to_them(async_session):
+    await _seed_administrator_march(async_session)
+
+    summary = await dashboard_service.fetch_summary(
+        async_session, *MARCH, company_id=1, staff_id=3, factual_at=NOW, period_preset='month',
+    )
+    metrics = summary['visit_metrics']
+
+    assert summary['service_attribution']['mode'] == 'administrator_schedule'
+    # Both March events are the lone administrator's, over the four visits credited to them, plus the manual 3.
+    assert (metrics['opz_qty'], metrics['opz_pct']) == (5.0, 125.0)
+    first = (metrics['opz_first_visit_qty'], metrics['first_visits'], metrics['opz_first_visit_pct'])
+    repeat = (metrics['opz_repeat_visit_qty'], metrics['repeat_visits'], metrics['opz_repeat_visit_pct'])
+    assert first == (1.0, 2, 50.0)
+    assert repeat == (1.0, 2, 50.0)
+    # The split is the calculated part: the manual top-up belongs to neither half.
+    assert metrics['opz_first_visit_qty'] + metrics['opz_repeat_visit_qty'] == metrics['opz_qty'] - 3.0
+    assert metrics['first_visits'] + metrics['repeat_visits'] == 4
+
+    # The same row of Plan/fact, manual top-up included.
+    async_session.info.clear()
+    row = _plan_fact_row(
+        await dashboard_service.fetch_plan_fact(async_session, *MARCH, company_id=1, staff_id=3, factual_at=NOW), 3,
+    )
+    assert row['opz_qty'] == metrics['opz_qty']
+    assert row['clients'] == metrics['first_visits'] + metrics['repeat_visits']
+    assert row['opz_pct'] == pytest.approx(100.0 * row['opz_qty'] / row['clients'], abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_an_administrators_opz_compares_with_the_previous_period_the_same_way(async_session):
+    await _seed_administrator_march(async_session)
+
+    metrics = (await dashboard_service.fetch_summary(
+        async_session, *MARCH, company_id=1, staff_id=3, factual_at=NOW, period_preset='month',
+    ))['visit_metrics']
+
+    # February: one repeat event over one record, no first visit at all, and no manual top-up (March's is its own).
+    assert metrics['opz_qty_change_pct'] == 400.0
+    assert metrics['opz_pct_change_pct'] == 25.0
+    assert metrics['opz_repeat_visit_pct_change_pct'] == -50.0
+    assert metrics['opz_repeat_visit_qty_change_pct'] == 0.0
+    assert metrics['opz_first_visit_pct_change_pct'] is None
+    assert metrics['opz_first_visit_qty_change_pct'] is None
+
+
+@pytest.mark.asyncio
+async def test_the_report_split_matches_the_overview_for_an_administrator(async_session):
+    await _seed_administrator_march(async_session)
+
+    overview = (await dashboard_service.fetch_summary(
+        async_session, *MARCH, company_id=1, staff_id=3, factual_at=NOW, period_preset='month',
+    ))['visit_metrics']
+    mix = await dashboard_service.fetch_client_mix_metrics(
+        async_session, *MARCH, 1, 3, factual_at=NOW, period_preset='month',
+    )
+
+    split_keys = [key for key in overview if 'first_visit' in key or 'repeat_visit' in key or key.endswith('_visits')]
+    assert len(split_keys) == 12
+    assert {key: mix[key] for key in split_keys} == {key: overview[key] for key in split_keys}
+
+
+@pytest.mark.asyncio
+async def test_an_administrators_events_are_shared_between_administrators_once(async_session):
+    await _seed_administrator_march(async_session)
+    async_session.add(Staff(id=4, name='Second admin', position='Администратор', company_id=1))
+    await async_session.commit()
+
+    credited = []
+    for staff_id in (3, 4):
+        async_session.info.clear()
+        metrics = (await dashboard_service.fetch_summary(
+            async_session, *MARCH, company_id=1, staff_id=staff_id, factual_at=NOW,
+        ))['visit_metrics']
+        # The calculated events: the manual top-up is the first administrator's alone.
+        credited.append((
+            metrics['opz_first_visit_qty'] + metrics['opz_repeat_visit_qty'],
+            metrics['first_visits'] + metrics['repeat_visits'],
+        ))
+
+    # Every event and every record goes to exactly one of them, like the Plan/fact rows.
+    assert sum(qty for qty, _ in credited) == 2.0
+    assert sum(records for _, records in credited) == 4

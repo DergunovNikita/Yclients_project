@@ -68,3 +68,36 @@ export function buildPlanSettingsPayload(data, readValue) {
   }));
   return { month: data?.month, branches, staff };
 }
+
+function planInputKey({ planBranch, companyId, staffId, field }) {
+  return planBranch !== undefined ? `branch:${companyId}:${field}` : `staff:${companyId}:${staffId}:${field}`;
+}
+
+const isPlanInput = (input) => input.dataset.planBranch !== undefined || input.dataset.planStaff !== undefined;
+
+/**
+ * What the person typed since the tables were drawn: `{ cellKey: value }` for every plan input whose text differs
+ * from the one the server rendered (`defaultValue`, which typing does not touch). Empty when nothing changed.
+ */
+export function planSettingsTypedCells(inputs) {
+  const cells = {};
+  for (const input of inputs) {
+    if (!isPlanInput(input)) continue;
+    const value = (input.value || '').trim();
+    if (value !== (input.defaultValue || '').trim()) cells[planInputKey(input.dataset)] = value;
+  }
+  return cells;
+}
+
+/** Puts drafted cells back into the inputs that are on the page; a cell with no input (row gone) is skipped. */
+export function applyPlanSettingsCells(inputs, cells) {
+  let applied = 0;
+  for (const input of inputs) {
+    if (!isPlanInput(input)) continue;
+    const key = planInputKey(input.dataset);
+    if (!Object.hasOwn(cells, key)) continue;
+    input.value = cells[key];
+    applied += 1;
+  }
+  return applied;
+}

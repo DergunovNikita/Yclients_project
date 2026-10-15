@@ -82,19 +82,18 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
                 'title': 'Часть рейтинга временно недоступна',
                 'text': 'Не удалось рассчитать суммы допуслуг. Количество и проценты показаны полностью.',
             })
-        if 'staff_schedules' in partial_reasons:
-            base['notes'].append({
-                'kind': 'warning',
-                'title': 'Не все графики администраторов загружены',
-                'text': (
-                    'Администраторы без полного покрытия выбранного периода исключены '
-                    'из рейтинга допуслуг.'
-                ),
-            })
 
     staff_col = ('staff', 'Сотрудник', 'text')
     branch_col = ('company_title', 'Барбершоп', 'text')
     qty_col = ('qty', 'Кол-во, шт', NUMBER_FORMAT)
+    sum_col = ('sum', 'Сумма', MONEY_FORMAT)
+    avg_col = ('avg', 'Ср. чек, ₽', MONEY_FORMAT)
+    money_ranking_options = [
+        ('qty', 'По количеству'),
+        ('sum', 'По сумме'),
+        ('pct', 'По проценту'),
+        ('avg', 'По среднему чеку'),
+    ]
     extra_share_col = ('share_pct', 'Доля доп. услуг по метке, %', PERCENT_FORMAT)
     cosmo_share_col = ('share_pct', 'Доля продаж косметики, %', PERCENT_FORMAT)
 
@@ -113,8 +112,7 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
             'title': 'Область расчета показателей администраторов',
             'text': (
                 'Личная выручка и косметика относятся к самому продавцу; '
-                'ОПЗ — к записям под ответственностью администратора; '
-                'допуслуги — ко всему филиалу во время его смен.'
+                'ОПЗ и допуслуги — к записям под ответственностью администратора.'
             ),
         })
     if staff_id is not None:
@@ -165,18 +163,19 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
                 staff_col,
                 branch_col,
                 qty_col,
-                ('sum', 'Сумма', MONEY_FORMAT),
+                sum_col,
+                avg_col,
                 ('pct', 'Доп. услуги, %', PERCENT_FORMAT),
                 extra_share_col,
             ],
             boards.get('extra_services_barber_rankings', {}),
             'pct',
-            [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
+            money_ranking_options,
             hide_when_empty=True,
         ),
         ranking_table(
             'extra_services_admin',
-            'Топ по допуслугам филиала во время смен — администраторы',
+            'Топ по допуслугам записей администратора',
             [staff_col, branch_col, qty_col, ('pct', 'Доп. услуги, %', PERCENT_FORMAT)],
             boards.get('extra_services_admin_rankings', {}),
             'pct',
@@ -190,13 +189,14 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
                 staff_col,
                 branch_col,
                 qty_col,
-                ('sum', 'Сумма', MONEY_FORMAT),
+                sum_col,
+                avg_col,
                 ('pct', 'Косметика, %', PERCENT_FORMAT),
                 cosmo_share_col,
             ],
             boards.get('cosmo_barber_rankings', {}),
             'sum',
-            [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
+            money_ranking_options,
             hide_when_empty=True,
         ),
         ranking_table(
@@ -206,13 +206,14 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
                 staff_col,
                 branch_col,
                 qty_col,
-                ('sum', 'Сумма', MONEY_FORMAT),
+                sum_col,
+                avg_col,
                 ('pct', 'Косметика, %', PERCENT_FORMAT),
                 cosmo_share_col,
             ],
             boards.get('cosmo_admin_rankings', {}),
             'sum',
-            [('qty', 'По количеству'), ('sum', 'По сумме'), ('pct', 'По проценту')],
+            money_ranking_options,
             hide_when_empty=True,
         ),
         ranking_table(

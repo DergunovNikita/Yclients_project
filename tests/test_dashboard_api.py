@@ -4453,9 +4453,11 @@ async def test_dashboard_staff_leaderboard_report_returns_top_tables(async_sessi
     revenue_barber = next(table for table in data['tables'] if table['id'] == 'revenue_barber')
     revenue_admin = next(table for table in data['tables'] if table['id'] == 'revenue_admin')
     assert extra_services['ranking']['default_metric'] == 'pct'
-    assert set(extra_services['ranking']['rows_by_metric']) == {'qty', 'sum', 'pct'}
+    assert set(extra_services['ranking']['rows_by_metric']) == {'qty', 'sum', 'pct', 'avg'}
     assert cosmo_barber['ranking']['default_metric'] == 'sum'
-    assert set(cosmo_barber['ranking']['rows_by_metric']) == {'qty', 'sum', 'pct'}
+    assert set(cosmo_barber['ranking']['rows_by_metric']) == {'qty', 'sum', 'pct', 'avg'}
+    assert [column['key'] for column in cosmo_barber['columns']][3:5] == ['sum', 'avg']
+    assert {option['key'] for option in extra_services['ranking']['options']} == {'qty', 'sum', 'pct', 'avg'}
     assert opz_admin['ranking']['default_metric'] == 'pct'
     assert set(opz_admin['ranking']['rows_by_metric']) == {'qty', 'pct'}
     assert {'key': 'pct', 'label': 'Косметика, %', 'format': 'percent'} in cosmo_barber['columns']
@@ -4904,8 +4906,10 @@ async def test_dashboard_staff_leaderboard_returns_partial_with_null_optional_su
     assert data['source_status'] == 'partial'
     extra = next(table for table in data['tables'] if table['id'] == 'extra_services')
     assert extra['ranking']['rows_by_metric']['sum'] == []
+    assert extra['ranking']['rows_by_metric']['avg'] == []
     assert extra['ranking']['rows_by_metric']['qty'], data
     assert extra['ranking']['rows_by_metric']['qty'][0]['sum'] is None
+    assert extra['ranking']['rows_by_metric']['qty'][0]['avg'] is None
     assert any(note['kind'] == 'warning' for note in data['notes'])
 
 
@@ -4916,7 +4920,7 @@ async def test_staff_leaderboard_applies_component_money_permissions_without_raw
     await async_session.commit()
 
     identity = {'staff': 'Master', 'staff_id': 1, 'company_id': 1, 'company_title': 'Salon'}
-    extra_row = {**identity, 'qty': 2.0, 'sum': 500.0, 'pct': 20.0, 'share_pct': 100.0}
+    extra_row = {**identity, 'qty': 2.0, 'sum': 500.0, 'avg': 250.0, 'pct': 20.0, 'share_pct': 100.0}
     admin_extra_row = {
         'staff': 'Admin',
         'staff_id': 2,
@@ -4925,7 +4929,7 @@ async def test_staff_leaderboard_applies_component_money_permissions_without_raw
         'qty': 3.0,
         'pct': 30.0,
     }
-    cosmo_row = {**identity, 'qty': 1.0, 'sum': 300.0, 'pct': 12.0, 'share_pct': 100.0}
+    cosmo_row = {**identity, 'qty': 1.0, 'sum': 300.0, 'avg': 300.0, 'pct': 12.0, 'share_pct': 100.0}
     opz_row = {**identity, 'qty': 1.0, 'pct': 10.0}
     value_row = {**identity, 'value': 2500.0}
     avg_row = {**identity, 'plan': 1000.0, 'fact': 1200.0, 'pct': 120.0}
@@ -4937,13 +4941,16 @@ async def test_staff_leaderboard_applies_component_money_permissions_without_raw
                     'qty': [extra_row],
                     'sum': [extra_row],
                     'pct': [extra_row],
+                    'avg': [extra_row],
                 },
                 'extra_services_admin_rankings': {
                     'qty': [admin_extra_row],
                     'pct': [admin_extra_row],
                 },
-                'cosmo_barber_rankings': {'qty': [cosmo_row], 'sum': [cosmo_row], 'pct': [cosmo_row]},
-                'cosmo_admin_rankings': {'qty': [], 'sum': [], 'pct': []},
+                'cosmo_barber_rankings': {
+                    'qty': [cosmo_row], 'sum': [cosmo_row], 'pct': [cosmo_row], 'avg': [cosmo_row],
+                },
+                'cosmo_admin_rankings': {'qty': [], 'sum': [], 'pct': [], 'avg': []},
                 'opz_barber_rankings': {'qty': [opz_row], 'pct': [opz_row]},
                 'opz_admin_rankings': {'qty': [], 'pct': []},
                 'reviews_admin': [{**identity, 'value': 3.0}],
@@ -4989,9 +4996,14 @@ async def test_staff_leaderboard_applies_component_money_permissions_without_raw
     } <= table_ids
     assert {'revenue_barber', 'revenue_admin', 'avg_check_plan_branch', 'avg_check_plan_staff'}.isdisjoint(table_ids)
     extra = next(table for table in data['tables'] if table['id'] == 'extra_services')
-    assert 'sum' not in {column['key'] for column in extra['columns']}
-    assert 'sum' not in extra['ranking']['rows_by_metric']
-    assert all('sum' not in row for rows in extra['ranking']['rows_by_metric'].values() for row in rows)
+    for field in ('sum', 'avg'):
+        assert field not in {column['key'] for column in extra['columns']}
+        assert field not in extra['ranking']['rows_by_metric']
+        assert field not in {option['key'] for option in extra['ranking']['options']}
+        assert all(field not in row for rows in extra['ranking']['rows_by_metric'].values() for row in rows)
+        assert all(field not in row for row in extra['rows'])
+    cosmo = next(table for table in data['tables'] if table['id'] == 'cosmo_barber')
+    assert {'sum', 'avg'} <= {column['key'] for column in cosmo['columns']}
     extra_admin = next(table for table in data['tables'] if table['id'] == 'extra_services_admin')
     assert extra_admin['rows'][0]['staff'] == 'Admin'
     assert {option['key'] for option in extra_admin['ranking']['options']} == {'qty', 'pct'}
@@ -5088,12 +5100,20 @@ def test_staff_leaderboard_metric_variants_sort_by_the_selected_measure():
     assert boards['extra_services_barber_rankings']['qty'][0]['staff'] == 'Quantity leader'
     assert boards['extra_services_barber_rankings']['sum'][0]['staff'] == 'Percent leader'
     assert boards['extra_services_barber_rankings']['pct'][0]['staff'] == 'Percent leader'
+    assert [(row['staff'], row['avg']) for row in boards['extra_services_barber_rankings']['avg']] == [
+        ('Percent leader', 100.0),
+        ('Quantity leader', 10.0),
+    ]
     assert boards['extra_services_admin_rankings']['qty'][0]['staff'] == 'Admin leader'
     assert boards['extra_services_admin_rankings']['pct'][0]['staff'] == 'Admin leader'
     assert 'sum' not in boards['extra_services_admin_rankings']
     assert boards['cosmo_barber_rankings']['qty'][0]['staff'] == 'Quantity leader'
     assert boards['cosmo_barber_rankings']['sum'][0]['staff'] == 'Percent leader'
     assert boards['cosmo_barber_rankings']['pct'][0]['staff'] == 'Percent leader'
+    assert [(row['staff'], row['avg']) for row in boards['cosmo_barber_rankings']['avg']] == [
+        ('Percent leader', 100.0),
+        ('Quantity leader', 33.33),
+    ]
     assert boards['opz_barber_rankings']['qty'][0]['staff'] == 'Quantity leader'
     assert boards['opz_barber_rankings']['pct'][0]['staff'] == 'Percent leader'
 
@@ -7513,6 +7533,37 @@ async def test_dashboard_staff_filter_excludes_waitlist_and_fired_staff(async_se
     assert [row['name'] for row in all_staff.json()['data']] == ['Active', 'Admin']
     assert branch_staff.status_code == 200
     assert [row['name'] for row in branch_staff.json()['data']] == ['Active']
+
+
+@pytest.mark.asyncio
+async def test_dashboard_staff_selector_hides_portal_owner_and_manager_mirror_rows(async_session):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon 1', group_id=1))
+    async_session.add_all([
+        Staff(id=10, name='Аполлинария', position='Администратор', company_id=1, fired=0),
+        Staff(id=11, name='Аполлинария', position='branch_admin', company_id=1, fired=0),
+        Staff(id=12, name='Менеджер', position='manager', company_id=1, fired=0),
+        Staff(id=13, name='Владелец', position='owner', company_id=1, fired=0),
+        Staff(id=14, name='Платформа', position='platform_admin', company_id=1, fired=0),
+        Staff(id=15, name='Стойка', position='admin', company_id=1, fired=0),
+        Staff(id=16, name='Кресло', position='barber', company_id=1, fired=0),
+        Staff(id=17, name='Без должности', position=None, company_id=1, fired=0),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.get('/dashboard/staff')
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert sorted(row['id'] for row in response.json()['data']) == [10, 15, 16, 17]
+    # The service never lists them either: plan settings and the editors read the same staff.
+    assert sorted(row['id'] for row in await dashboard_service.fetch_staff(async_session)) == [10, 15, 16, 17]
 
 
 @pytest.mark.asyncio
@@ -10826,7 +10877,10 @@ async def test_manual_opz_editor_totals_count_only_what_reports_count(async_sess
 
 @pytest.mark.asyncio
 async def test_manual_opz_overview_staff_filter_stays_on_one_attribution(async_session):
-    """A filtered overview attributes OPZ to the barber, so it must not add the top-up."""
+    """The top-up reaches an overview filtered to the administrator it belongs to, as in their Plan/fact row.
+
+    The year facts of the reports still leave it out under a staff filter.
+    """
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
     async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
@@ -10864,9 +10918,12 @@ async def test_manual_opz_overview_staff_filter_stays_on_one_attribution(async_s
     app.dependency_overrides.clear()
 
     assert branch_summary.json()['data']['visit_metrics']['opz_qty'] == 5.0
-    staff_metrics = staff_summary.json()['data']['visit_metrics']
-    assert staff_metrics['opz_qty'] == 0.0
+    staff_data = staff_summary.json()['data']
+    staff_metrics = staff_data['visit_metrics']
+    assert staff_metrics['opz_qty'] == 5.0
+    # No visits credited to them: nothing to divide by.
     assert staff_metrics['opz_pct'] == 0.0
+    assert staff_data['administrator_personal']['opz_manual_qty'] == 5.0
 
     # The year facts answer a staff filter the same way, for the same reason.
     branch_year = await dashboard_service.fetch_opz_year_facts(
@@ -12559,7 +12616,7 @@ async def test_admin_event_without_time_uses_only_same_day_schedule(async_sessio
     ])
     await async_session.commit()
 
-    counts = await dashboard_service._admin_event_counts(
+    assignments = await dashboard_service._admin_event_assignments(
         async_session,
         date(2025, 1, 10),
         date(2025, 1, 10),
@@ -12576,11 +12633,97 @@ async def test_admin_event_without_time_uses_only_same_day_schedule(async_sessio
         ],
     )
 
-    assert counts == {2: 0, 3: 1}
+    assert assignments == {1: 3}
+
+
+async def _double_shift_assignments(async_session, event_specs, user_id_by_staff=None):
+    """Admins 2 and 3 both work 10-22 on 2025-01-10; admin 2 also worked the whole of 2025-01-09 (more history)."""
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=2, name='Admin A', position='Администратор', company_id=1),
+        Staff(id=3, name='Admin B', position='Администратор', company_id=1),
+        StaffSchedule(staff_id=2, company_id=1, date=date(2025, 1, 9), slot_from=time(10), slot_to=time(22)),
+        StaffSchedule(staff_id=2, company_id=1, date=date(2025, 1, 10), slot_from=time(10), slot_to=time(22)),
+        StaffSchedule(staff_id=3, company_id=1, date=date(2025, 1, 10), slot_from=time(10), slot_to=time(22)),
+    ])
+    await async_session.commit()
+    events = [
+        dashboard_service.AdminAssignmentEvent(
+            event_id=event_id,
+            event_date=moment.date(),
+            event_moment=moment,
+            created_user_id=created_user_id,
+        )
+        for event_id, moment, created_user_id in event_specs
+    ]
+    return await dashboard_service._admin_event_assignments(
+        async_session,
+        date(2025, 1, 9),
+        date(2025, 1, 10),
+        1,
+        [2, 3],
+        user_id_by_staff or {2: 502, 3: 503},
+        events,
+    )
 
 
 @pytest.mark.asyncio
-async def test_admin_extra_services_use_moscow_shifts_and_credit_overlaps(async_session):
+async def test_admin_double_shift_day_is_split_evenly_not_by_month_to_date(async_session):
+    # 9th: admin 2 alone takes 4 online bookings (UTC 08:00-11:00 = 11:00-14:00 Moscow); 10th: ten more, both on shift.
+    specs = [(i, datetime(2025, 1, 9, 8 + i % 3, i), None) for i in range(1, 5)]
+    specs += [(10 + i, datetime(2025, 1, 10, 8 + i % 3, i), None) for i in range(10)]
+
+    assignments = await _double_shift_assignments(async_session, specs)
+
+    tenth = [assignments[event_id] for event_id, moment, _ in specs if moment.day == 10]
+    assert tenth.count(2) == tenth.count(3) == 5
+    assert set(assignments) == {event_id for event_id, _, _ in specs}
+
+
+@pytest.mark.asyncio
+async def test_admin_double_shift_split_counts_creator_events_and_stays_within_one(async_session):
+    # Admin 3 created three of the day's bookings himself; the online rest balances the day's totals.
+    specs = [(1, datetime(2025, 1, 10, 8, 0), 503), (2, datetime(2025, 1, 10, 8, 5), 503),
+             (3, datetime(2025, 1, 10, 8, 10), 503)]
+    specs += [(10 + i, datetime(2025, 1, 10, 9, i), None) for i in range(5)]
+
+    assignments = await _double_shift_assignments(async_session, specs)
+
+    assert [assignments[i] for i in (1, 2, 3)] == [3, 3, 3]
+    per_admin = [list(assignments.values()).count(staff_id) for staff_id in (2, 3)]
+    assert sorted(per_admin) == [4, 4]
+    # The creator rule still wins even when it unbalances the day.
+    assert all(assignments[10 + i] == 2 for i in range(3))
+
+
+@pytest.mark.asyncio
+async def test_admin_double_shift_split_is_deterministic_and_input_order_independent(async_session):
+    specs = [(10 + i, datetime(2025, 1, 10, 8 + i // 2, i), None) for i in range(7)]
+
+    first = await _double_shift_assignments(async_session, specs)
+    async_session.info.clear()
+    second = await dashboard_service._admin_event_assignments(
+        async_session,
+        date(2025, 1, 9),
+        date(2025, 1, 10),
+        1,
+        [3, 2],
+        {2: 502, 3: 503},
+        [
+            dashboard_service.AdminAssignmentEvent(
+                event_id=event_id, event_date=moment.date(), event_moment=moment, created_user_id=None
+            )
+            for event_id, moment, _ in reversed(specs)
+        ],
+    )
+
+    assert first == second
+    assert sorted(list(first.values()).count(staff_id) for staff_id in (2, 3)) == [3, 4]
+
+
+@pytest.mark.asyncio
+async def test_admin_extra_services_go_to_the_one_administrator_the_visit_is_credited_to(async_session):
     async_session.add_all([
         Group(id=1, title='G1'),
         Company(id=1, title='Salon', group_id=1),
@@ -12598,52 +12741,21 @@ async def test_admin_extra_services_use_moscow_shifts_and_credit_overlaps(async_
     ])
     await async_session.flush()
     async_session.add_all([
-        Appointment(
-            id=1,
-            company_id=1,
-            staff_id=1,
-            date=date(2025, 1, 10),
-            datetime=datetime(2025, 1, 10, 7, 30),
-            attendance=1,
-        ),
-        Appointment(
-            id=2,
-            company_id=1,
-            staff_id=1,
-            date=date(2025, 1, 10),
-            datetime=datetime(2025, 1, 10, 12, 30),
-            attendance=1,
-        ),
-        Transaction(
-            id=1,
-            appointment_id=1,
-            company_id=1,
-            service_id=10,
-            service_title='Care',
-            amount=2,
-        ),
-        StaffSchedule(
-            staff_id=2,
-            company_id=1,
-            date=date(2025, 1, 10),
-            slot_from=time(10),
-            slot_to=time(12),
-        ),
-        # A duplicate upstream slot must not double the administrator fact.
-        StaffSchedule(
-            staff_id=2,
-            company_id=1,
-            date=date(2025, 1, 10),
-            slot_from=time(10),
-            slot_to=time(12),
-        ),
-        StaffSchedule(
-            staff_id=3,
-            company_id=1,
-            date=date(2025, 1, 10),
-            slot_from=time(10),
-            slot_to=time(16),
-        ),
+        # 10:30 Moscow: both A and B are on shift, so the visit goes to the less loaded one (A).
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 1, 10),
+                    datetime=datetime(2025, 1, 10, 7, 30), attendance=1),
+        # 15:30 Moscow: only B is on shift.
+        Appointment(id=2, company_id=1, staff_id=1, date=date(2025, 1, 10),
+                    datetime=datetime(2025, 1, 10, 12, 30), attendance=1),
+        # 23:00 Moscow: nobody is on shift, so it goes to the least loaded of all (D, who has none yet).
+        Appointment(id=3, company_id=1, staff_id=1, date=date(2025, 1, 10),
+                    datetime=datetime(2025, 1, 10, 20, 0), attendance=1),
+        Transaction(id=1, appointment_id=1, company_id=1, service_id=10, service_title='Care', amount=2),
+        Transaction(id=3, appointment_id=3, company_id=1, service_id=10, service_title='Care', amount=3),
+        StaffSchedule(staff_id=2, company_id=1, date=date(2025, 1, 10), slot_from=time(10), slot_to=time(12)),
+        # A duplicate upstream slot must not change who the visit goes to.
+        StaffSchedule(staff_id=2, company_id=1, date=date(2025, 1, 10), slot_from=time(10), slot_to=time(12)),
+        StaffSchedule(staff_id=3, company_id=1, date=date(2025, 1, 10), slot_from=time(10), slot_to=time(16)),
         SyncSourceState(
             company_id=1,
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
@@ -12658,6 +12770,7 @@ async def test_admin_extra_services_use_moscow_shifts_and_credit_overlaps(async_
         date(2025, 1, 1),
         date(2025, 1, 31),
         company_id=1,
+        for_ratings=True,
     )
 
     branch_cells = {cell['code']: cell for cell in result['parent_group']['metrics']}
@@ -12666,14 +12779,20 @@ async def test_admin_extra_services_use_moscow_shifts_and_credit_overlaps(async_
         for group in result['groups']
         if group['category'] == 'administrator'
     }
-    assert branch_cells['extra_services_qty']['fact'] == 2.0
-    assert branch_cells['extra_services_pct']['fact'] == 100.0
+    assert branch_cells['extra_services_qty']['fact'] == 5.0
     assert admin_cells[2]['extra_services_qty']['fact'] == 2.0
     assert admin_cells[2]['extra_services_pct']['fact'] == 200.0
-    assert admin_cells[3]['extra_services_qty']['fact'] == 2.0
-    assert admin_cells[3]['extra_services_pct']['fact'] == 100.0
-    assert admin_cells[4]['extra_services_qty']['fact'] == 0.0
-    assert admin_cells[4]['extra_services_pct']['fact'] == 0.0
+    assert admin_cells[3]['extra_services_qty']['fact'] == 0.0
+    assert admin_cells[3]['extra_services_pct']['fact'] == 0.0
+    assert admin_cells[4]['extra_services_qty']['fact'] == 3.0
+    assert admin_cells[4]['extra_services_pct']['fact'] == 300.0
+    # Every extra service went to exactly one administrator, so the shares add up to the branch.
+    assert sum(cells['extra_services_qty']['fact'] for cells in admin_cells.values()) == 5.0
+    for cells in admin_cells.values():
+        assert cells['extra_services_qty']['calculation_scope'] == 'administrator_records'
+        assert cells['extra_services_pct']['calculation_scope'] == 'administrator_records'
+    board = {row['staff_id']: row['qty'] for row in result['staff_leaderboards']['extra_services_admin']}
+    assert board == {2: 2.0, 4: 3.0}
 
 
 @pytest.mark.asyncio
@@ -13018,10 +13137,10 @@ async def test_administrator_service_scope_fails_closed_without_schedule_coverag
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ('january_category', 'february_category', 'current_position', 'expected_qty'),
+    ('january_category', 'february_category', 'current_position', 'expected_qty', 'expected_fact'),
     [
-        ('administrator', 'barber', 'Администратор', 7),
-        ('barber', 'administrator', 'Барбер', 9),
+        ('administrator', 'barber', 'Администратор', 7, 5),
+        ('barber', 'administrator', 'Барбер', 9, 5),
     ],
 )
 async def test_administrator_service_scope_follows_monthly_role_transitions(
@@ -13030,6 +13149,7 @@ async def test_administrator_service_scope_follows_monthly_role_transitions(
     february_category,
     current_position,
     expected_qty,
+    expected_fact,
 ):
     async_session.add_all([
         Group(id=1, title='G1'),
@@ -13132,20 +13252,24 @@ async def test_administrator_service_scope_follows_monthly_role_transitions(
         for_ratings=True,
     )
 
+    # The Overview's selected administrator still means the branch during his shifts: January's 1 + 2 (every visit
+    # of his shift) plus his own February visit, or his own January visit plus all of February's.
     assert rows[0]['sold'] == expected_qty
     staff_group = next(
         group for group in plan_fact['groups']
         if group['staff_id'] == 2
     )
     cells = {cell['code']: cell for cell in staff_group['metrics']}
-    assert cells['extra_services_qty']['fact'] == expected_qty
+    # Plan/fact credits an administrator month the other visits (not the ones he did himself): 1 + his own 4, or
+    # his own 2 + February's 3.
+    assert cells['extra_services_qty']['fact'] == expected_fact
     boards = plan_fact['staff_leaderboards']
     admin_board = boards['extra_services_admin']
     barber_board = boards['extra_services_barber_rankings']['qty']
     leaderboard, other = (
         (admin_board, barber_board) if staff_group['category'] == 'administrator' else (barber_board, admin_board)
     )
-    assert next(row for row in leaderboard if row['staff_id'] == 2)['qty'] == expected_qty
+    assert next(row for row in leaderboard if row['staff_id'] == 2)['qty'] == expected_fact
     assert all(row['staff_id'] != 2 for row in other)
 
 
@@ -13353,7 +13477,8 @@ async def test_administrator_service_scope_fails_closed_without_appointment_time
     assert summary['source_status'] == 'partial'
     assert summary['missing_sources'] == ['appointments_detail']
     assert summary['revenue']['extra_service_count'] is None
-    assert cells['extra_services_qty']['fact'] is None
+    # Plan/fact credits the visit to the one administrator scheduled that day, so a visit without a time is not lost.
+    assert cells['extra_services_qty']['fact'] == 0.0
     assert any(
         item['code'] == 'appointment_timestamp_coverage'
         for item in plan_fact['diagnostics']
@@ -13361,7 +13486,7 @@ async def test_administrator_service_scope_fails_closed_without_appointment_time
 
 
 @pytest.mark.asyncio
-async def test_admin_extra_services_are_unavailable_without_schedule_coverage(async_session):
+async def test_admin_extra_services_are_credited_without_schedule_coverage(async_session):
     async_session.add_all([
         Group(id=1, title='G1'),
         Company(
@@ -13370,7 +13495,15 @@ async def test_admin_extra_services_are_unavailable_without_schedule_coverage(as
             group_id=1,
             reporting_start_date=date(2025, 1, 1),
         ),
+        Staff(id=1, name='Barber', position='Барбер', company_id=1),
         Staff(id=2, name='Admin', position='Администратор', company_id=1),
+        ServiceLabel(service_id=10, company_id=1, is_extra=True, source='dashboard', updated_at=datetime(2025, 1, 1)),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 1, 10),
+                    datetime=datetime(2025, 1, 10, 7, 30), attendance=1),
+        Transaction(id=1, appointment_id=1, company_id=1, service_id=10, service_title='Care', amount=2),
     ])
     await async_session.commit()
 
@@ -13384,12 +13517,12 @@ async def test_admin_extra_services_are_unavailable_without_schedule_coverage(as
 
     admin = next(group for group in result['groups'] if group['staff_id'] == 2)
     cells = {cell['code']: cell for cell in admin['metrics']}
-    assert cells['extra_services_qty']['fact'] is None
-    assert cells['extra_services_qty']['status'] == 'partial'
-    assert cells['extra_services_pct']['fact'] is None
-    assert cells['extra_services_pct']['status'] == 'partial'
-    assert result['staff_leaderboards']['extra_services_admin_rankings']['qty'] == []
-    assert result['staff_leaderboards']['_partial_reasons'] == ['staff_schedules']
+    # With no schedule the visit still goes to the only administrator, like the records and OPZ do.
+    assert cells['extra_services_qty']['fact'] == 2.0
+    assert cells['extra_services_pct']['fact'] == 200.0
+    assert result['staff_leaderboards']['extra_services_admin_rankings']['qty'][0]['qty'] == 2.0
+    assert '_partial_reasons' not in result['staff_leaderboards']
+    # The shortage is still reported: who was on shift decides which administrator a visit goes to.
     diagnostic = next(item for item in result['diagnostics'] if item['code'] == 'staff_schedule_coverage')
     assert diagnostic['required_start'] == '2024-12-31'
     assert diagnostic['required_end'] == '2025-01-31'
@@ -14387,7 +14520,7 @@ async def test_plan_fact_uses_standalone_input_category_for_former_admin(async_s
     assert admin['category'] == 'administrator'
     assert cells['extra_services_qty']['plan'] == 8.0
     assert cells['extra_services_pct']['plan'] == 25.0
-    assert cells['extra_services_qty']['fact'] is None
+    assert cells['extra_services_qty']['fact'] == 0.0
     parent_cells = {cell['code']: cell for cell in result['parent_group']['metrics']}
     assert parent_cells['reviews_qty']['fact'] == 3.0
     assert editor['total_value'] == 3.0
@@ -15752,3 +15885,25 @@ async def test_plan_fact_builds_staff_leaderboards_only_when_asked(async_session
         )
         assert {'revenue_barber', 'cosmo_barber_rankings', 'opz_barber_rankings'} <= set(asked['staff_leaderboards'])
 
+
+
+def test_staff_leaderboard_average_check_is_empty_without_quantity_or_revenue():
+    groups = [{
+        'staff_id': 1,
+        'title': 'No sales',
+        'company_id': 1,
+        'company_title': 'Salon',
+        'category': 'barber',
+        'metrics': [
+            {'code': 'extra_services_qty', 'plan': None, 'fact': 0.0},
+            {'code': 'cosmo_qty', 'plan': None, 'fact': 0.0},
+            {'code': 'cosmo_sum', 'plan': None, 'fact': 100.0},
+        ],
+    }]
+
+    unavailable = _staff_leaderboards_payload(groups, extra_revenue_available=False)
+    available = _staff_leaderboards_payload(groups, extra_revenue_by_staff={1: 500.0})
+
+    assert unavailable['extra_services_barber_rankings']['avg'] == []
+    assert available['extra_services_barber_rankings']['qty'] == []
+    assert available['cosmo_barber_rankings']['avg'] == []

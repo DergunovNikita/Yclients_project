@@ -1,0 +1,53 @@
+/* The "still there?" dialog is built by idleSession.js on every page that has a session, so its rules
+   live in a stylesheet of their own instead of an inline <style> a strict CSP would have to allow. */
+
+.idle-modal[hidden] {
+  display: none !important;
+}
+
+.idle-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10001;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 23, 42, .56);
+  padding: 20px;
+}
+
+.idle-modal__dialog {
+  width: min(420px, 100%);
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  box-shadow: 0 24px 80px rgba(15, 23, 42, .24);
+  padding: 22px;
+}
+
+.idle-modal__dialog h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  letter-spacing: 0;
+  color: #0f172a;
+}
+
+.idle-modal__dialog p {
+  margin: 0 0 16px;
+  color: #475569;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.idle-modal__confirm {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  border-radius: 6px;
+  border: 1px solid #0f766e;
+  background: #0f766e;
+  color: #fff;
+  padding: 0 14px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}

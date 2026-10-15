@@ -12,21 +12,40 @@ export function formatMetricValue(value, format) {
 }
 
 /**
+ * The delta of a card whose change in percent is missing, which happens exactly when the previous value is 0
+ * (or unknown). A current value of 0 has nothing to say about it; a non-zero one grew from nothing, which
+ * "+N %" cannot express. `previous`, when the summary carries it, tells a zero from an unknown base.
+ */
+function deltaWithoutChange({ current, previous }) {
+  if (current === null || current === undefined || !Number(current)) return null;
+  // `undefined`: the summary does not carry the previous value, a missing percent then means a zero base.
+  if (previous !== undefined && Number(previous) !== 0 || previous === null) return null;
+  return t('dash.changeFromZero');
+}
+
+/**
  * One card. `name` picks the `dash.card<name>` label and the `dash.hint<name>` tooltip.
  *
  * The delta is either a change in percent (`change`, rendered against the previous period and
- * coloured by its sign) or a fixed `note` with no colour; a card with neither shows no delta.
+ * coloured by its sign), "was 0" when the percent is missing because the base was 0 (`current` is the raw
+ * value; the card has no delta when it is 0 too), or a fixed `note` with no colour; a card with none shows no delta.
+ * An optional `count` is the line between the value and the delta ("22 of 378 visits" under a percent).
  */
 export function metricCard(name, options) {
-  const { value, present, href, action } = options;
+  const { value, present, href, action, count } = options;
   const card = { label: t(`dash.card${name}`), hint: t(`dash.hint${name}`), value };
-  // `in`, not `!== undefined`: a change the summary lacks is still a delta ("no base"), not no delta.
+  if (count) card.count = count;
+  // `in`, not `!== undefined`: a change the summary lacks is still a delta ("was 0"), not no delta.
   if ('note' in options) {
     card.delta = options.note;
     card.deltaValue = null;
   } else if ('change' in options) {
-    card.delta = formatPct(options.change);
-    card.deltaValue = options.change;
+    const noChange = options.change === null || options.change === undefined;
+    const delta = noChange ? deltaWithoutChange(options) : formatPct(options.change);
+    if (delta) {
+      card.delta = delta;
+      card.deltaValue = noChange ? null : options.change;
+    }
   }
   if ('present' in options) card.present = present;
   if (href) {
@@ -79,7 +98,8 @@ export function cardsHtml(cards) {
         <div class="card-slot"${slotStyle}>
           <${tag}${attrs}>
             <div class="label">${escapeHtml(card.label)}</div>
-            <div class="value">${escapeHtml(card.value)}</div>
+            <div class="value">${escapeHtml(card.value)}</div>${card.count ? `
+            <div class="card__count">${escapeHtml(card.count)}</div>` : ''}
             ${card.delta ? `<div class="delta ${deltaClass(card.deltaValue)}">${escapeHtml(card.delta)}</div>` : ''}
             ${card.action ? `<div class="card__action">${escapeHtml(card.action)}</div>` : ''}
           </${tag}>${cardHintHtml(card.hint, card.label)}
@@ -88,6 +108,13 @@ export function cardsHtml(cards) {
       },
     )
     .join('');
+}
+
+// "22 pcs of 378 visits" under a share: the numerator and the base the percent was made of.
+function opzCountLine(qty, visits) {
+  if (qty === null || qty === undefined || visits === null || visits === undefined) return '';
+  const form = new Intl.PluralRules(intlLocale()).select(Number(visits)) === 'one' ? 'One' : 'Other';
+  return t(`dash.opzOfVisits${form}`, { qty: formatNumber(qty), visits: formatNumber(visits) });
 }
 
 function goodsRevenueShare(revenue) {
@@ -101,6 +128,7 @@ function extraServicesPerAppointmentCard(visitMetrics) {
   return metricCard('ExtraServicesPerAppointment', {
     value: formatMetricValue(visitMetrics.extra_services_per_appointment_pct, 'percent'),
     change: visitMetrics.extra_services_per_appointment_pct_change_pct,
+    current: visitMetrics.extra_services_per_appointment_pct,
   });
 }
 
@@ -121,16 +149,19 @@ export function kpiCards(summary) {
     metricCard('TotalRevenue', {
       value: formatMoney(revenue.total),
       change: revenue.change_pct,
+      current: revenue.total,
       present: Boolean(revenueBlock),
     }),
     metricCard('VisitedAppointments', {
       value: formatNumber(revenue.appointments),
       change: revenue.appointments_change_pct,
+      current: revenue.appointments,
       present: Boolean(revenueBlock),
     }),
     metricCard(partial ? 'AverageCheckTotalPartial' : 'AverageCheckTotal', {
       value: formatMoney(averageCheck.total),
       change: averageCheck.total_change_pct,
+      current: averageCheck.total,
       present: Boolean(averageCheckBlock),
     }),
   ]);
@@ -138,29 +169,11 @@ export function kpiCards(summary) {
 
 export function staffBranchCards(summary) {
   const attribution = summary.service_attribution || {};
-  const revenue = summary.revenue || {};
-  const averageCheck = summary.average_check || {};
-  const visitMetrics = summary.visit_metrics || {};
-  const moneyShown = !summary.financials_hidden;
+  // Extra services are not here: the administrator's own are the ones credited to him (his personal block), and the
+  // branch's extras during his shifts would contradict them.
   return presentCards([
     metricCard('BranchShiftAppointments', { value: formatMetricValue(attribution.appointment_count, 'number') }),
     metricCard('BranchShiftClients', { value: formatMetricValue(attribution.unique_client_count, 'number') }),
-    metricCard('ExtraServiceCount', {
-      value: formatMetricValue(revenue.extra_service_count, 'number'),
-      change: revenue.extra_service_count_change_pct,
-    }),
-    extraServicesPerAppointmentCard(visitMetrics),
-    extraServiceClientsCard(visitMetrics),
-    metricCard('ExtraServiceRevenue', {
-      value: formatMetricValue(revenue.extra_service_revenue, 'money'),
-      change: revenue.extra_service_revenue_change_pct,
-      present: moneyShown,
-    }),
-    metricCard('ExtraServiceAverageCheck', {
-      value: formatMetricValue(averageCheck.extra_services, 'money'),
-      change: averageCheck.extra_services_change_pct,
-      present: moneyShown,
-    }),
   ]);
 }
 
@@ -172,14 +185,17 @@ export function revenueCards(summary) {
     metricCard('ServiceRevenue', {
       value: formatMoney(revenue.service_revenue),
       change: revenue.service_revenue_change_pct,
+      current: revenue.service_revenue,
     }),
     metricCard('GoodsRevenue', {
       value: formatMoney(revenue.goods_revenue),
       change: revenue.goods_revenue_change_pct,
+      current: revenue.goods_revenue,
     }),
     ...(administratorSchedule ? [] : [metricCard('ExtraServiceRevenue', {
       value: formatMoney(revenue.extra_service_revenue),
       change: revenue.extra_service_revenue_change_pct,
+      current: revenue.extra_service_revenue,
     })]),
   ];
 }
@@ -200,11 +216,13 @@ export function servicesCards(summary) {
       count: metricCard('ServiceCount', {
         value: formatNumber(revenue.service_count),
         change: revenue.service_count_change_pct,
+        current: revenue.service_count,
         present: revenuePresent,
       }),
       average: metricCard('ServiceAverageCheck', {
         value: formatMoney(averageCheck.services),
         change: averageCheck.services_change_pct,
+        current: averageCheck.services,
         present: averageCheckPresent,
       }),
     },
@@ -212,11 +230,13 @@ export function servicesCards(summary) {
       count: metricCard('GoodsCount', {
         value: formatNumber(revenue.goods_count),
         change: revenue.goods_count_change_pct,
+        current: revenue.goods_count,
         present: revenuePresent,
       }),
       average: metricCard('GoodsAverageCheck', {
         value: formatMoney(averageCheck.goods),
         change: averageCheck.goods_change_pct,
+        current: averageCheck.goods,
         present: averageCheckPresent,
       }),
       share: metricCard('GoodsRevenueShare', {
@@ -229,15 +249,16 @@ export function servicesCards(summary) {
       count: metricCard('ExtraServiceCount', {
         value: formatNumber(revenue.extra_service_count),
         change: revenue.extra_service_count_change_pct,
+        current: revenue.extra_service_count,
         present: revenuePresent,
       }),
       average: metricCard('ExtraServiceAverageCheck', {
         value: formatMoney(averageCheck.extra_services),
         change: averageCheck.extra_services_change_pct,
+        current: averageCheck.extra_services,
         present: averageCheckPresent,
       }),
-      // Also shown under Appointments: there it measures how often extras are sold,
-      // here it closes the extra-services column the same way the goods share does.
+      // It closes the extra-services column the way the goods share closes the goods one.
       // No `present`: it comes from the visit metrics, not from the revenue block.
       share: extraServicesPerAppointmentCard(visitMetrics),
     },
@@ -257,31 +278,93 @@ export function servicesCards(summary) {
   };
 }
 
-export function visitCards(summary) {
-  const visitMetrics = summary.visit_metrics || {};
-  const administratorSchedule = usesAdministratorSchedule(summary);
+// The OPZ cards of the Overview: the total, its share, and the share after a first and after a repeat visit.
+// `qty` and `pct` are `{ value, change, previous? }` pairs so an administrator's cards can take them from his Plan/fact row
+// while everyone else's come from the visit metrics; `qtyCount` is the line under the total.
+function opzCards(visitMetrics, { qty, pct, qtyCount }) {
   return [
     metricCard('OpzQty', {
-      value: formatNumber(visitMetrics.opz_qty),
-      change: visitMetrics.opz_qty_change_pct,
+      value: formatNumber(qty.value),
+      count: qtyCount,
+      change: qty.change,
+      current: qty.value,
+      previous: qty.previous,
     }),
     metricCard('OpzPct', {
-      value: formatMetricValue(visitMetrics.opz_pct, 'percent'),
-      change: visitMetrics.opz_pct_change_pct,
+      value: formatMetricValue(pct.value, 'percent'),
+      change: pct.change,
+      current: pct.value,
+      previous: pct.previous,
     }),
-    // An administrator's own visits are not where OPZ anchors, so both splits would only show a dash.
-    ...(administratorSchedule ? [] : [
-      metricCard('OpzFirstVisit', {
-        value: formatMetricValue(visitMetrics.opz_first_visit_pct, 'percent'),
-        change: visitMetrics.opz_first_visit_pct_change_pct,
-      }),
-      metricCard('OpzRepeatVisit', {
-        value: formatMetricValue(visitMetrics.opz_repeat_visit_pct, 'percent'),
-        change: visitMetrics.opz_repeat_visit_pct_change_pct,
-      }),
-      extraServicesPerAppointmentCard(visitMetrics),
-    ]),
+    metricCard('OpzFirstVisit', {
+      value: formatMetricValue(visitMetrics.opz_first_visit_pct, 'percent'),
+      count: opzCountLine(visitMetrics.opz_first_visit_qty, visitMetrics.first_visits),
+      change: visitMetrics.opz_first_visit_pct_change_pct,
+      current: visitMetrics.opz_first_visit_pct,
+      previous: visitMetrics.opz_first_visit_pct_previous,
+    }),
+    metricCard('OpzRepeatVisit', {
+      value: formatMetricValue(visitMetrics.opz_repeat_visit_pct, 'percent'),
+      count: opzCountLine(visitMetrics.opz_repeat_visit_qty, visitMetrics.repeat_visits),
+      change: visitMetrics.opz_repeat_visit_pct_change_pct,
+      current: visitMetrics.opz_repeat_visit_pct,
+      previous: visitMetrics.opz_repeat_visit_pct_previous,
+    }),
   ];
+}
+
+export function visitCards(summary) {
+  const visitMetrics = summary.visit_metrics || {};
+  return opzCards(visitMetrics, {
+    qty: { value: visitMetrics.opz_qty, change: visitMetrics.opz_qty_change_pct },
+    pct: { value: visitMetrics.opz_pct, change: visitMetrics.opz_pct_change_pct },
+  });
+}
+
+/**
+ * The selected administrator's own cards, in the order of his Plan/fact row, from `administrator_personal`
+ * (his Plan/fact facts for the window) and the OPZ split of the visit metrics. A money metric the role may not
+ * see is absent from the block and so from the cards.
+ */
+export function administratorCards(summary) {
+  const personal = summary.administrator_personal;
+  if (!personal) return { cards: [], columnCount: 4 };
+  const visitMetrics = summary.visit_metrics || {};
+  const metrics = personal.metrics || {};
+  const pair = (code) => ({
+    value: metrics[code]?.value,
+    change: metrics[code]?.change_pct,
+    previous: metrics[code]?.previous_value,
+  });
+  const metricCardFor = (name, code, format) => metricCard(name, {
+    value: formatMetricValue(metrics[code]?.value, format),
+    change: metrics[code]?.change_pct,
+    current: metrics[code]?.value,
+    previous: metrics[code]?.previous_value,
+    present: code in metrics,
+  });
+  const manual = Number(personal.opz_manual_qty || 0);
+  const [opzQty, opzPct, opzFirst, opzRepeat] = opzCards(visitMetrics, {
+    qty: pair('opz_qty'),
+    pct: pair('opz_pct'),
+    qtyCount: manual > 0 ? t('dash.opzManualNote', { count: formatNumber(manual) }) : '',
+  });
+  const cards = presentCards([
+    metricCardFor('AdminRevenue', 'revenue', 'money'),
+    metricCardFor('AdminAverageCheck', 'avg_check_total', 'money'),
+    metricCardFor('AdminClients', 'clients', 'number'),
+    metricCardFor('AdminCosmoQty', 'cosmo_qty', 'number'),
+    metricCardFor('AdminCosmoSum', 'cosmo_sum', 'money'),
+    opzQty,
+    opzPct,
+    opzFirst,
+    opzRepeat,
+    metricCardFor('AdminExtraServices', 'extra_services_qty', 'number'),
+    metricCardFor('AdminExtraServicesPct', 'extra_services_pct', 'percent'),
+    metricCardFor('AdminReviews', 'reviews_qty', 'number'),
+  ]);
+  // Two even rows when there are many cards (twelve make two of six); the usual four fit the shorter ones.
+  return { cards, columnCount: cards.length >= 9 ? Math.ceil(cards.length / 2) : 4 };
 }
 
 /** `reportUrl(reportId)` builds the link of the cards that open a report. */
@@ -298,10 +381,12 @@ export function clientsCards(summary, reportUrl) {
     metricCard('UniqueClients', {
       value: formatNumber(visitMetrics.unique_clients),
       change: visitMetrics.unique_clients_change_pct,
+      current: visitMetrics.unique_clients,
     }),
     metricCard('VisitsPerClient', {
       value: formatDecimal(visitMetrics.visits_per_client),
       change: visitMetrics.visits_per_client_change_pct,
+      current: visitMetrics.visits_per_client,
     }),
     ...(administratorSchedule ? [] : [extraServiceClientsCard(visitMetrics)]),
     metricCard('OneVisitClients', { value: formatNumber(oneVisit.count), note: frequencyNote(oneVisit) }),
@@ -316,21 +401,25 @@ export function clientsCards(summary, reportUrl) {
     metricCard('NewClients', {
       value: formatNumber(visitMetrics.new_clients),
       change: visitMetrics.new_clients_change_pct,
+      current: visitMetrics.new_clients,
       ...reportLink,
     }),
     metricCard('NewClientsPct', {
       value: formatMetricValue(visitMetrics.new_clients_pct, 'percent'),
       change: visitMetrics.new_clients_pct_change_pct,
+      current: visitMetrics.new_clients_pct,
       ...reportLink,
     }),
     metricCard('RepeatClients', {
       value: formatNumber(visitMetrics.repeat_clients),
       change: visitMetrics.repeat_clients_change_pct,
+      current: visitMetrics.repeat_clients,
       ...reportLink,
     }),
     metricCard('RepeatClientsPct', {
       value: formatMetricValue(visitMetrics.repeat_clients_pct, 'percent'),
       change: visitMetrics.repeat_clients_pct_change_pct,
+      current: visitMetrics.repeat_clients_pct,
       ...reportLink,
     }),
   ];
@@ -352,8 +441,10 @@ export function appointmentsCards(summary) {
       share('IncompleteAppointments', breakdown.incomplete, breakdown.incomplete_share_pct),
     ],
     exact,
+    // A local count that is only the usual one (the period reaches today, a branch has a reporting window) needs
+    // no apology; the warning is for YClients not answering.
     notice: ready
-      ? exact ? '' : t('dash.appointmentsLocalEstimate')
+      ? breakdown.local_reason === 'upstream_error' ? t('dash.appointmentsLocalEstimate') : ''
       : t('dash.appointmentsUnavailable'),
   };
 }

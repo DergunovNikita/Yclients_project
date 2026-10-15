@@ -35,10 +35,19 @@
       display: none !important;
     }
 
+    /* One page width for every view, with or without the floating jump nav: a width that depended on the nav
+       moved the page edges when the nav appeared (network vs branch view). The 32px gutter on each side is where
+       the nav (jumpNav.css: 38px wide, 6px from the window edge) lives; with the panel padding in front of the
+       content the nav covers neither a table nor a card. On phones the nav is a bar at the bottom; the 560px rule below sets its own width. */
     .shell {
-      width: min(1180px, calc(100% - 32px));
+      width: min(1180px, calc(100% - 64px));
       margin: 0 auto;
       padding: 24px 0 40px;
+    }
+
+    /* Plan/fact, plan settings and reports carry 14-column tables: see setActiveView. */
+    .shell--wide {
+      width: min(1680px, calc(100% - 64px));
     }
 
     .topbar {
@@ -533,6 +542,14 @@
       line-height: 1.5;
     }
 
+    .staff-personal-scope .staff-admin-metrics {
+      margin: 14px 0 0;
+    }
+
+    .staff-admin-opz {
+      margin-bottom: 24px;
+    }
+
     .visit-metrics {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -628,20 +645,22 @@
       height: 100%;
     }
 
-    /* Labels and deltas wrap to different line counts card by card. Label, value, delta and the
+    /* Labels and deltas wrap to different line counts card by card. Label, value, count, delta and the
        report link are rows shared by the whole row of cards (subgrid), so each lines up across it
-       however they wrap; a card without a delta keeps its link on the link row. */
+       however they wrap; a card without a delta keeps its link on the link row, and a row no card
+       fills (the count line) collapses to nothing. */
     :is(.kpi, .visit-metrics, .clients-metrics, .appointments-metrics) :is(.card-slot, .card) {
       display: grid;
-      grid-row: span 4;
+      grid-row: span 5;
       grid-template-rows: subgrid;
       row-gap: 0;
     }
 
     .card > .label { grid-row: 1; }
     .card > .value { grid-row: 2; }
-    .card > .delta { grid-row: 3; }
-    .card > .card__action { grid-row: 4; }
+    .card > .card__count { grid-row: 3; }
+    .card > .delta { grid-row: 4; }
+    .card > .card__action { grid-row: 5; }
 
     .card--link {
       display: block;
@@ -785,6 +804,12 @@
       overflow-wrap: anywhere;
     }
 
+    .card__count {
+      margin-top: 4px;
+      color: #475569;
+      font-size: 13px;
+    }
+
     .delta {
       margin-top: 8px;
       color: #64748b;
@@ -895,10 +920,14 @@
       white-space: nowrap;
     }
 
+    /* Headers wrap between words only: a mid-word break ("ВЫРУЧК|А") reads as a typo, so the
+       column is as wide as its longest word instead. */
     .plan-table th.number {
       white-space: normal;
-      word-break: break-word;
+      word-break: normal;
+      overflow-wrap: normal;
       min-width: 48px;
+      text-transform: none;
     }
 
     .table-scroll {
@@ -930,6 +959,72 @@
       min-width: 950px;
     }
 
+    /* Plan/fact: 14 metric columns must fit the wide work area (>= 1366px) without scrolling,
+       so the floor goes and cells are compacted; narrow screens still scroll sideways. */
+    .table-scroll .plan-table {
+      min-width: 0;
+      font-size: 13px;
+    }
+
+    /* Not on phones: there .branch-cell / .row-label set their own, tighter padding. */
+    @media (min-width: 561px) {
+      .plan-table th,
+      .plan-table td {
+        padding: 8px 4px;
+      }
+    }
+
+    .plan-table th.number {
+      font-size: 11px;
+    }
+
+    /* Sticky header. A table that fits (.table-scroll--fits, set next to syncPlanTableStickyOffsets) is no scroll
+       container, so the header sticks to the viewport; one that does not fit scrolls inside a height-limited box
+       and the header sticks to that box. `clip`, not `hidden`: hidden would make it a scroll container again. */
+    .table-scroll--sticky-head {
+      max-height: min(75dvh, 720px);
+      overflow: auto;
+    }
+
+    .table-scroll--sticky-head.table-scroll--fits {
+      max-height: none;
+      overflow: clip;
+    }
+
+    .plan-table thead th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: #ffffff;
+      box-shadow: inset 0 -1px 0 #e2e8f0;
+    }
+
+    .plan-table .plan-cell-empty {
+      color: #94a3b8;
+    }
+
+    .plan-table .plan-subheader th {
+      padding: 6px 8px;
+      border-top: 1px solid #cbd5e1;
+      background: #eef2f7;
+      color: #334155;
+      font-size: 12px;
+      text-transform: none;
+    }
+
+    /* The sticky header would cover a row the jump nav scrolls to the very top. Its height varies with how the
+       headers wrap (locale, width), so syncPlanTableFit publishes the real one; 76px is the fallback. */
+    .plan-table .plan-subheader th[data-jump-target] {
+      scroll-margin-top: calc(var(--plan-head-height, 76px) + 8px);
+    }
+
+    /* Pinned to the viewport edge of the scrolling table so the category name stays visible
+       on a sideways-scrolled phone, where the full-width cell itself scrolls away. */
+    .plan-subheader-label {
+      position: sticky;
+      left: 8px;
+    }
+
     .staff-plan-scroll table {
       min-width: 360px;
     }
@@ -945,18 +1040,30 @@
     }
 
     .branch-cell {
-      width: 120px;
       color: #172033;
       font-weight: 800;
       vertical-align: middle;
       background: #f8fafc;
     }
 
+    /* "Разрез" is one fixed narrow column in every plan table (network, branch, staff, administrators), so it lines
+       up from table to table and leaves the room to the metrics. The width breaks "Oldboy Москва / (ТРЦ Ривьера)"
+       and "Oldboy / Яхромская". The names render uppercase (th), so the text box (128 - 8px padding) has to be wider
+       than "OLDBOY МОСКВА" and "КОВАЛЕВСКОЙ, 6" (~114px) and narrower than "OLDBOY ЯХРОМСКАЯ" (~137px).
+       Phones keep their own pinned width below. */
+    @media (min-width: 561px) {
+      .branch-cell,
+      .plan-table thead th:first-child {
+        width: 128px;
+        min-width: 128px;
+        max-width: 128px;
+      }
+    }
+
     .row-label {
-      width: 120px;
       color: #334155;
       font-weight: 700;
-      white-space: nowrap;
+      white-space: normal;
     }
 
     .plan-section + .plan-section {
@@ -975,6 +1082,12 @@
       margin: 0;
       font-size: 15px;
       letter-spacing: 0;
+    }
+
+    .plan-section-hint {
+      margin: -4px 0 10px;
+      color: #64748b;
+      font-size: 13px;
     }
 
     .plan-diagnostics {
@@ -1762,15 +1875,8 @@
         width: 100%;
       }
 
-      /* Plan/fact table: narrow words per letter would eat the metric columns; let
-         long single-word headers grow the table instead (table-scroll already
-         handles the horizontal scroll). */
-      .plan-table th.number {
-        word-break: normal;
-      }
-
       /* "Показатель" can't break (one word, and mid-word breaks are unwanted here same as
-         .plan-table th.number above), so it — not this 64px — ends up deciding the 2nd
+         .plan-table th.number), so it — not this 64px — ends up deciding the 2nd
          column's real width; matching its padding to the body cells it sits above at
          least keeps that unavoidable width down to what the word itself needs. */
       .branch-cell,
@@ -1805,6 +1911,12 @@
       .plan-table thead th:nth-child(2) {
         position: sticky;
         z-index: 1;
+      }
+
+      /* Corner cells: above both the sticky header row (2) and the sticky-left body cells (1). */
+      .plan-table thead th:first-child,
+      .plan-table thead th:nth-child(2) {
+        z-index: 3;
       }
 
       .branch-cell,
@@ -1967,21 +2079,15 @@
 
       <p class="compare-note" id="overview-compare-note" hidden></p>
 
-      <nav class="segmented" data-i18n-attr="aria-label:dash.ariaChartGroups" aria-label="Gruppi di grafici panoramica">
-        <button type="button" data-overview-jump="appointments" data-i18n="dash.jumpAppointments">Appuntamenti</button>
-        <button type="button" data-overview-jump="clients" data-i18n="dash.jumpClients">Clienti</button>
-        <button type="button" data-overview-jump="revenue" data-i18n="dash.jumpRevenue">Ricavi</button>
-        <button type="button" data-overview-jump="services" data-i18n="dash.jumpServices">Prodotti e servizi</button>
-      </nav>
-
-      <section class="staff-personal-scope" id="staff-personal-scope" hidden>
+      <section class="staff-personal-scope" id="staff-personal-scope" data-i18n-attr="data-jump-label:dash.jumpPersonal" hidden>
         <h2 id="staff-personal-title"></h2>
-        <p class="scope-description" data-i18n="dash.personalMetricsDescription"></p>
+        <p class="scope-description" id="staff-personal-description"></p>
+        <section class="visit-metrics visit-cards-row staff-admin-metrics" id="staff-admin-metrics" hidden></section>
       </section>
 
       <section class="kpi" id="kpi"></section>
 
-      <section class="staff-branch-scope" id="staff-branch-scope" hidden>
+      <section class="staff-branch-scope" id="staff-branch-scope" data-i18n-attr="data-jump-label:dash.jumpBranchShift" data-jump-target="overview-branch-shift" hidden>
         <div class="panel-title">
           <div>
             <h2 id="staff-branch-title"></h2>
@@ -1992,7 +2098,9 @@
         <div id="staff-branch-details"></div>
       </section>
 
-      <section data-overview-section="appointments" data-i18n-attr="aria-label:dash.jumpAppointments" aria-label="Appuntamenti">
+      <div class="grid staff-admin-opz" id="staff-admin-opz" data-i18n-attr="data-jump-label:dash.jumpOpz" data-jump-target="overview-opz" hidden></div>
+
+      <section data-overview-section="appointments" data-i18n-attr="aria-label:dash.jumpAppointments,data-jump-label:dash.jumpAppointments" data-jump-target="overview-appointments" aria-label="Appuntamenti">
         <div class="panel-title">
           <h2 data-i18n="dash.jumpAppointments">Appuntamenti</h2>
         </div>
@@ -2008,7 +2116,7 @@
             <div class="chart-box short"><canvas id="appointments-chart"></canvas></div>
           </div>
 
-          <div class="panel wide">
+          <div class="panel wide" id="opz-chart-panel">
             <div class="panel-title">
               <h2 data-i18n="dash.opzShare">Riprenotazioni e quota sulle visite completate</h2>
             </div>
@@ -2017,14 +2125,14 @@
         </div>
       </section>
 
-      <section data-overview-section="clients" data-i18n-attr="aria-label:dash.ariaClients" aria-label="Clienti">
+      <section data-overview-section="clients" data-i18n-attr="aria-label:dash.ariaClients,data-jump-label:dash.jumpClients" data-jump-target="overview-clients" aria-label="Clienti">
         <div class="panel-title">
           <h2 data-i18n="dash.clients">Clienti</h2>
         </div>
         <section class="clients-metrics" id="clients-metrics" data-i18n-attr="aria-label:dash.ariaNewRepeat" aria-label="Clienti nuovi e di ritorno"></section>
       </section>
 
-      <section data-overview-section="revenue" data-i18n-attr="aria-label:dash.jumpRevenue" aria-label="Ricavi">
+      <section data-overview-section="revenue" data-i18n-attr="aria-label:dash.jumpRevenue,data-jump-label:dash.jumpRevenue" data-jump-target="overview-revenue" aria-label="Ricavi">
         <div class="panel-title">
           <h2 data-i18n="dash.jumpRevenue">Ricavi</h2>
         </div>
@@ -2040,7 +2148,7 @@
         </div>
       </section>
 
-      <section id="services-overview-section" data-overview-section="services" data-i18n-attr="aria-label:dash.jumpServices" aria-label="Prodotti e servizi">
+      <section id="services-overview-section" data-overview-section="services" data-i18n-attr="aria-label:dash.jumpServices,data-jump-label:dash.jumpServices" data-jump-target="overview-services" aria-label="Prodotti e servizi">
         <div class="panel-title">
           <h2 data-i18n="dash.jumpServices">Prodotti e servizi</h2>
         </div>
@@ -2168,7 +2276,7 @@
         </div>
       </section>
 
-      <div class="panel wide">
+      <div class="panel wide" data-jump-target="plan-settings-branches" data-i18n-attr="data-jump-label:dash.jumpPlanBranches">
         <div class="panel-title">
           <h2 data-i18n="dash.branchSettings">Impostazioni filiali</h2>
           <span class="meta" id="plan-settings-branch-meta"></span>
@@ -2176,7 +2284,7 @@
         <div id="plan-settings-branches"></div>
       </div>
 
-      <div class="panel wide manual-fact-panel">
+      <div class="panel wide manual-fact-panel" data-jump-target="plan-settings-staff" data-i18n-attr="data-jump-label:dash.jumpPlanStaff">
         <div class="panel-title">
           <h2 data-i18n="dash.staffPlans">Piani dei dipendenti</h2>
           <span class="meta" id="plan-settings-staff-meta"></span>

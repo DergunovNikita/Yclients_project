@@ -305,10 +305,19 @@ async function loadPortalAccounts() {
   renderTenantSwitcher();
 }
 
+function loadTenantScopedLists() {
+  return Promise.all([
+    loadUsers(),
+    loadInitialPasswords(),
+    loadYclientsCredentials(),
+    loadMetricVisibility(),
+  ]);
+}
+
 async function reloadTenantScopedAdminData() {
   resetYclientsCredentialForm();
   await loadBranches();
-  await Promise.all([loadUsers(), loadInitialPasswords(), loadYclientsCredentials(), loadMetricVisibility()]);
+  await loadTenantScopedLists();
 }
 
 function openCreateModal() {
@@ -520,7 +529,12 @@ function roleBadge(role) {
 
 function branchTitles(companyIds) {
   if (!companyIds?.length) return '—';
-  const titles = companyIds.map((id) => {
+  // Titles follow the tenant's branch order, not the order the ids were stored in.
+  const position = (id) => {
+    const index = branches.findIndex((item) => item.id === id);
+    return index === -1 ? branches.length : index;
+  };
+  const titles = [...companyIds].sort((a, b) => position(a) - position(b)).map((id) => {
     const branch = branches.find((item) => item.id === id);
     return branch ? branch.title : String(id);
   });
@@ -1232,7 +1246,7 @@ async function init() {
       return;
     }
     await loadBranches();
-    await Promise.all([loadUsers(), loadInitialPasswords(), loadYclientsCredentials(), loadMetricVisibility()]);
+    await loadTenantScopedLists();
   } catch (error) {
     if (!hasSessionHint()) {
       logout();

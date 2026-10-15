@@ -1,6 +1,7 @@
 // The machine behind every hand-entered editor (reviews, additional OPZ, Yandex Pay): load, edit, save with
 // optimistic locking, the unsaved-changes guard and the filter listeners. What differs between the editors —
 // markup, request body, what a typed cell means — arrives as `config`; the page's own services arrive as `host`.
+import { changedRows, decideDraftRestore } from './editorDrafts.js';
 import { t } from './i18n.js';
 
 /**
@@ -19,12 +20,17 @@ import { t } from './i18n.js';
  * @param config.onInput      optional, runs on every `input` event before the dirty check
  * @param config.emptyMonthRestores  a cleared month picker puts the loaded month back instead of loading
  * @param config.refreshStaffOnBranch  a branch change reloads the worker list first
+ * @param config.draft        optional, with `host.drafts`: keeps what was typed across a reload. `{ id, collect, apply }` —
+ *                            `collect()` lists every row as `{ key, cells, server, previous }` (`previous` is what the
+ *                            row's `previous_value` would be), `apply([{ key, cells }])` types the cells back in
  * @param host  dashboard services: fetchJson, postJson, beginViewRequest, clearError, showError, setApiState,
  *              setFilterLoading, setLoadedApiState, loadSyncStatus, viewsWithData, isSupersededRequest,
- *              updateFloatingEditorSave, refreshStaffForBranch, refilterForPeriod, guard, filterDropdowns
+ *              updateFloatingEditorSave, refreshStaffForBranch, refilterForPeriod, guard, filterDropdowns,
+ *              and optionally `drafts` (editorDrafts.js controller)
  */
 export function createManualEntryEditor(config, host) {
   const { filter } = config;
+  const drafts = config.draft ? host.drafts || null : null;
   const editor = {
     rows: [],
     editable: true,
@@ -61,8 +67,43 @@ export function createManualEntryEditor(config, host) {
     editor.setDirty(config.draftSnapshot() !== editor.savedSnapshot);
   };
 
+  // The draft follows the scope the rows were loaded for, whatever the pickers show now.
+  function scheduleDraft() {
+    if (!drafts || !editor.loadedFilters || editor.saving) return;
+    drafts.schedule(config.draft.id, editor.loadedFilters, () => {
+      const rows = changedRows(config.draft.collect());
+      return rows.length ? { rows } : null;
+    });
+  }
+
+  // Only after a plain load: a save, a discard and a 409 reload all mean the typed values are settled or refused.
+  function restoreDraft() {
+    if (!drafts || !editor.rows.length || !editor.editable) return;
+    const scope = editor.loadedFilters;
+    const stored = drafts.read(config.draft.id, scope);
+    const rows = Array.isArray(stored?.rows)
+      ? stored.rows.filter((row) => row && typeof row.key === 'string' && row.cells && typeof row.cells === 'object')
+      : [];
+    if (!rows.length) {
+      if (stored) drafts.clear(config.draft.id, scope);
+      return;
+    }
+    const { apply, dropped } = decideDraftRestore(rows, config.draft.collect());
+    if (!apply.length) {
+      drafts.clear(config.draft.id, scope);
+      drafts.showNotice(config.editorEl, 'outdated');
+      return;
+    }
+    config.draft.apply(apply);
+    editor.updateDirtyFromForm();
+    scheduleDraft();
+    drafts.showNotice(config.editorEl, 'restored', { dropped, onDiscard: () => editor.discard() });
+  }
+
   // Called by `config.render` once the rows are on the page: this is the new baseline.
   editor.accept = (data, loadedFilters) => {
+    drafts?.cancel(config.draft.id);
+    drafts?.hideNotice(config.editorEl);
     editor.savedData = structuredClone(data || { rows: [] });
     editor.loadedFilters = loadedFilters;
     editor.savedSnapshot = config.draftSnapshot();
@@ -70,18 +111,20 @@ export function createManualEntryEditor(config, host) {
   };
 
   editor.discard = () => {
+    if (editor.loadedFilters) drafts?.clear(config.draft.id, editor.loadedFilters);
     editor.restoreFilters();
     if (editor.savedData) config.render(structuredClone(editor.savedData), editor.filters());
     else editor.setDirty(false);
   };
 
-  editor.loadEditor = async ({ signal = null } = {}) => {
+  editor.loadEditor = async ({ signal = null, restore = false } = {}) => {
     const filters = editor.filters();
     const payload = await host.fetchJson(config.path, config.params(filters), {
       retry: () => editor.load(),
       signal,
     });
     config.render(payload.data, filters);
+    if (restore) restoreDraft();
   };
 
   editor.load = async () => {
@@ -91,7 +134,7 @@ export function createManualEntryEditor(config, host) {
 
     const syncStatus = host.loadSyncStatus();
     try {
-      await editor.loadEditor({ signal: request.signal });
+      await editor.loadEditor({ signal: request.signal, restore: true });
       if (!request.isCurrent()) return;
       host.viewsWithData.add(config.view);
       host.clearError();
@@ -111,6 +154,7 @@ export function createManualEntryEditor(config, host) {
   // Someone saved the same month between our load and our save. Their value wins; what we typed
   // is not merged in, because the sum of two people's edits is nobody's intent.
   async function recoverFromConflict() {
+    if (editor.loadedFilters) drafts?.clear(config.draft.id, editor.loadedFilters);
     try {
       await editor.loadEditor();
       host.showError(t(config.conflictMessageKey), { apiStatus: 'ready' });
@@ -140,6 +184,7 @@ export function createManualEntryEditor(config, host) {
       const { body, filters } = refused || config.request();
       const payload = await host.postJson(config.path, body);
       config.render(payload.data, filters);
+      drafts?.clear(config.draft.id, filters);
       host.setApiState(t('dash.apiConnected'), 'ok');
     } catch (error) {
       if (error.status === 409) await recoverFromConflict();
@@ -197,6 +242,7 @@ export function createManualEntryEditor(config, host) {
     config.editorEl.addEventListener('input', (event) => {
       config.onInput?.(event);
       editor.updateDirtyFromForm();
+      scheduleDraft();
     });
   };
 

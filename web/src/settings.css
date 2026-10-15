@@ -218,3 +218,44 @@
   color: #64748b;
   padding: 12px 4px;
 }
+
+.branch-order-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+  counter-reset: branch-order;
+}
+
+.branch-order-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  counter-increment: branch-order;
+}
+
+.branch-order-item::before {
+  content: counter(branch-order);
+  min-width: 20px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.branch-order-item__title {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.branch-order-item__buttons,
+.branch-order-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
