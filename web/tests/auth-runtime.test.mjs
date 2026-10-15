@@ -81,6 +81,10 @@ function fakeEventTarget(properties = {}) {
   };
 }
 
+// Every test loads its own copy of auth.js, but `window` is a global the copies resolve at call time: an earlier
+// copy's idle monitor would keep ticking and, once a later test moves the clock, log out on the new window.
+const loadedAuthModules = [];
+
 async function loadAuthModule({
   localValues = {},
   pathname = '/',
@@ -88,6 +92,13 @@ async function loadAuthModule({
   locks = undefined,
 } = {}) {
   if (!reuseGlobals) {
+    for (const previous of loadedAuthModules.splice(0)) {
+      try {
+        previous.clearLocalSession();
+      } catch {
+        /* the previous test's globals may already be half torn down */
+      }
+    }
     globalThis.localStorage = new MemoryStorage();
     globalThis.sessionStorage = new MemoryStorage();
     Object.entries(localValues).forEach(([key, value]) => localStorage.setItem(key, value));
@@ -129,6 +140,7 @@ async function loadAuthModule({
     server: { middlewareMode: true },
   });
   const auth = await server.ssrLoadModule('/src/auth.js');
+  loadedAuthModules.push(auth);
   return { auth, server };
 }
 
