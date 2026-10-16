@@ -139,6 +139,14 @@ PERCENT_SETTING_FIELDS = (
     'cosmo_pct',
     'opz_pct',
 )
+PLAN_RULE_METRIC_CODES = {
+    'wax_pct': 'wax_qty',
+    'head_care_pct': 'head_care_qty',
+    'face_care_pct': 'face_care_qty',
+    'camouflage_pct': 'camouflage_qty',
+    'cosmo_pct': 'cosmo_qty',
+    'opz_pct': 'opz_qty',
+}
 STAFF_INPUT_FIELDS = (
     'clients',
     'avg_check_total',
@@ -5647,6 +5655,31 @@ async def _plan_metric_components_by_company(
     }
 
 
+async def _plan_rules_for_branch(
+    db: AsyncSession,
+    start: date,
+    end: date,
+    company_id: int,
+) -> dict[str, float] | None:
+    """Percent rules the branch plan was generated from, keyed by the metric code each one produces."""
+    setting = await db.scalar(
+        select(PlanBranchSetting).where(
+            PlanBranchSetting.period_start == start,
+            PlanBranchSetting.period_end == end,
+            PlanBranchSetting.company_id == company_id,
+        )
+    )
+    window = (await fetch_reporting_windows(db, [company_id])).get(company_id)
+    if setting is None or (window is not None and not window.covers(end)):
+        return None
+    rules = {
+        code: value
+        for field, code in PLAN_RULE_METRIC_CODES.items()
+        if (value := _setting_display_value(setting, field)) is not None
+    }
+    return rules or None
+
+
 async def _plan_metric_components_by_staff(
     db: AsyncSession,
     start: date,
@@ -7365,19 +7398,18 @@ def _setting_has_values(values: dict[str, float | None], fields: tuple[str, ...]
     return any(values.get(field) is not None for field in fields)
 
 
+def _setting_display_value(setting: PlanBranchSetting | None, field: str) -> float | None:
+    """A stored branch setting as the editor shows it: percent fields as percents, not fractions."""
+    if setting is None:
+        return None
+    value = getattr(setting, field, None)
+    if field in PERCENT_SETTING_FIELDS and value is not None:
+        value = float(value) * 100.0
+    return _round_optional(value)
+
+
 def _payload_branch_setting(branch: dict[str, Any], setting: PlanBranchSetting | None) -> dict[str, Any]:
-    values = {
-        field: (
-            _round_optional(
-                float(getattr(setting, field)) * 100.0
-                if field in PERCENT_SETTING_FIELDS and getattr(setting, field, None) is not None
-                else getattr(setting, field, None)
-            )
-            if setting is not None
-            else None
-        )
-        for field in BRANCH_SETTING_FIELDS
-    }
+    values = {field: _setting_display_value(setting, field) for field in BRANCH_SETTING_FIELDS}
     return {
         'company_id': int(branch['id']),
         'company_title': branch['title'],
@@ -7515,6 +7547,8 @@ def _staff_metric_values_from_input(
             rounded_cosmo = _round_half_up_int(cosmo_qty_input)
             values['cosmo_qty'] = rounded_cosmo
             values['cosmo_sum'] = rounded_cosmo * cosmo_price
+        if clients > 0 and branch_setting.get('opz_pct') is not None:
+            values['opz_qty'] = _round_half_up_int(clients * float(branch_setting['opz_pct']))
         if extra_services_qty is not None:
             values['extra_services_qty'] = _round_half_up_int(float(extra_services_qty))
         if extra_services_pct is not None:
@@ -8862,6 +8896,7 @@ async def fetch_plan_fact(
                 'selected_staff_plan': None,
                 'metrics': list(PLAN_FACT_METRICS),
                 'metric_sets': _metric_sets_payload(),
+                'plan_rules': None,
                 'diagnostics': [],
                 'goods_kpi_execution': _goods_kpi_execution_payload([]),
                 'groups': [],
@@ -8916,6 +8951,8 @@ async def fetch_plan_fact(
             **({'parent_group': parent_group} if parent_group is not None else {}),
             'metrics': list(PLAN_FACT_METRICS),
             'metric_sets': _metric_sets_payload(),
+            # Not money, so personal roles keep it even without the branch row; the ratings report never reads it.
+            'plan_rules': None if for_ratings else await _plan_rules_for_branch(db, plan_start, plan_end, branch_id),
             'diagnostics': diagnostics,
             'goods_kpi_execution': _goods_kpi_execution_payload(groups),
             'groups': groups,

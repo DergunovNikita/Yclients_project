@@ -15907,3 +15907,306 @@ def test_staff_leaderboard_average_check_is_empty_without_quantity_or_revenue():
     assert unavailable['extra_services_barber_rankings']['avg'] == []
     assert available['extra_services_barber_rankings']['qty'] == []
     assert available['cosmo_barber_rankings']['avg'] == []
+
+
+async def _seed_plan_rules_branch(async_session, *, settings=None, reporting_end_date=None, month=(2025, 1)):
+    """One branch with a saved month plan; `settings` are the stored fractions of its rule row."""
+    year, month_number = month
+    month_start = date(year, month_number, 1)
+    month_end = date(year, month_number, monthrange(year, month_number)[1])
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1, reporting_end_date=reporting_end_date),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+    ])
+    await async_session.flush()
+    async_session.add(PlanMetric(
+        period_start=month_start,
+        period_end=month_end,
+        company_id=1,
+        metric_code='revenue',
+        value=1000.0,
+        updated_at=datetime(2025, 1, 1),
+    ))
+    if settings is not None:
+        async_session.add(PlanBranchSetting(
+            period_start=month_start,
+            period_end=month_end,
+            company_id=1,
+            updated_at=datetime(2025, 1, 1),
+            **settings,
+        ))
+    await async_session.commit()
+
+
+FULL_PLAN_RULES = {
+    'wax_pct': 0.3,
+    'head_care_pct': 0.1,
+    'face_care_pct': 0.1,
+    'camouflage_pct': 0.08,
+    'cosmo_pct': 0.09,
+    'opz_pct': 0.3,
+    'cosmo_price': 450.0,
+}
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_single_branch_returns_plan_rules_in_percent(async_session):
+    await _seed_plan_rules_branch(async_session, settings=FULL_PLAN_RULES)
+
+    result = await fetch_plan_fact(async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1)
+
+    # The price is money and is not a rule.
+    assert result['plan_rules'] == {
+        'wax_qty': 30.0,
+        'head_care_qty': 10.0,
+        'face_care_qty': 10.0,
+        'camouflage_qty': 8.0,
+        'cosmo_qty': 9.0,
+        'opz_qty': 30.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_plan_rules_omit_null_fields_and_collapse_to_none(async_session):
+    await _seed_plan_rules_branch(async_session, settings={'wax_pct': 0.25, 'cosmo_price': 450.0})
+
+    partial = await fetch_plan_fact(async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1)
+
+    assert partial['plan_rules'] == {'wax_qty': 25.0}
+
+    setting = await async_session.scalar(select(PlanBranchSetting))
+    setting.wax_pct = None
+    await async_session.commit()
+    async_session.info.clear()
+
+    empty = await fetch_plan_fact(async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1)
+
+    assert empty['plan_rules'] is None
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_plan_rules_are_none_without_a_row_for_the_plan_period(async_session):
+    await _seed_plan_rules_branch(async_session, settings=FULL_PLAN_RULES)
+
+    spans_two_months = await fetch_plan_fact(async_session, date(2025, 1, 15), date(2025, 2, 10), company_id=1)
+    mid_month = await fetch_plan_fact(async_session, date(2025, 1, 10), date(2025, 1, 20), company_id=1)
+    other_month = await fetch_plan_fact(async_session, date(2025, 3, 1), date(2025, 3, 31), company_id=1)
+
+    # A window over two months resolves to itself, so no rule row matches it.
+    assert spans_two_months['plan_period'] == {'start': '2025-01-15', 'end': '2025-02-10'}
+    assert spans_two_months['plan_rules'] is None
+    # A window inside the saved month resolves to the whole month, and the month's rules apply.
+    assert mid_month['plan_period'] == {'start': '2025-01-01', 'end': '2025-01-31'}
+    assert mid_month['plan_rules']['wax_qty'] == 30.0
+    assert other_month['plan_rules'] is None
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_plan_rules_are_none_without_a_settings_row(async_session):
+    await _seed_plan_rules_branch(async_session)
+
+    result = await fetch_plan_fact(async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1)
+
+    assert result['plan_rules'] is None
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_plan_rules_follow_the_reporting_window(async_session):
+    await _seed_plan_rules_branch(
+        async_session,
+        settings=FULL_PLAN_RULES,
+        reporting_end_date=date(2024, 12, 31),
+    )
+
+    result = await fetch_plan_fact(async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1)
+
+    assert result['plan_rules'] is None
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_plan_rules_are_none_for_a_month_before_the_branch_opened(async_session):
+    await _seed_plan_rules_branch(async_session, settings=FULL_PLAN_RULES)
+    company = await async_session.get(Company, 1)
+    company.reporting_start_date = date(2025, 2, 1)
+    await async_session.commit()
+
+    result = await fetch_plan_fact(async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1)
+
+    # The plan itself is cut by the same window, so the rules behind it go too.
+    assert result['plan_rules'] is None
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_plan_rules_survive_a_window_that_ends_on_the_last_day(async_session):
+    await _seed_plan_rules_branch(
+        async_session,
+        settings=FULL_PLAN_RULES,
+        reporting_end_date=date(2025, 1, 31),
+    )
+
+    result = await fetch_plan_fact(async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1)
+
+    assert result['plan_rules']['opz_qty'] == 30.0
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_plan_rules_are_not_computed_for_the_ratings_report(async_session):
+    await _seed_plan_rules_branch(async_session, settings=FULL_PLAN_RULES)
+
+    result = await fetch_plan_fact(
+        async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1, for_ratings=True
+    )
+
+    assert result['plan_rules'] is None
+
+
+@pytest.mark.asyncio
+async def test_plan_fact_plan_rules_are_none_for_an_unknown_branch_and_absent_from_the_network(async_session):
+    await _seed_plan_rules_branch(async_session, settings=FULL_PLAN_RULES)
+
+    unknown = await fetch_plan_fact(async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=999)
+    network = await fetch_plan_fact(async_session, date(2025, 1, 1), date(2025, 1, 31))
+
+    assert unknown['plan_rules'] is None
+    assert 'plan_rules' not in network
+
+
+@pytest.mark.asyncio
+async def test_plan_rules_reach_roles_without_money_and_personal_roles(async_session, monkeypatch):
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
+    await _seed_plan_rules_branch(async_session, settings=FULL_PLAN_RULES)
+    async_session.add_all([
+        PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()),
+        PortalBranch(portal_account_id=1, company_id=1),
+        *(
+            PortalUser(
+                id=user_id,
+                portal_account_id=1,
+                email=f'{role}-rules@example.com',
+                password_hash=cached_password_hash('Passw0rd12345!'),
+                role=role,
+                is_active=True,
+                email_verified_at=datetime.utcnow(),
+                created_at=datetime.utcnow(),
+            )
+            for user_id, role in ((300, 'manager'), (301, 'barber'))
+        ),
+        PortalUserBranch(user_id=300, company_id=1),
+        PortalUserBranch(user_id=301, company_id=1),
+    ])
+    staff = await async_session.get(Staff, 1)
+    staff.portal_user_id = 301
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    manager_headers = {'Authorization': f'Bearer {await issue_access_token(async_session, 300, "manager")}'}
+    barber_headers = {'Authorization': f'Bearer {await issue_access_token(async_session, 301, "barber")}'}
+    params = {'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1}
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        manager = await client.get('/dashboard/widget/plan_fact', params=params, headers=manager_headers)
+        barber = await client.get('/dashboard/widget/plan_fact', params=params, headers=barber_headers)
+    app.dependency_overrides.clear()
+    monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
+
+    expected = {
+        'wax_qty': 30.0,
+        'head_care_qty': 10.0,
+        'face_care_qty': 10.0,
+        'camouflage_qty': 8.0,
+        'cosmo_qty': 9.0,
+        'opz_qty': 30.0,
+    }
+    assert manager.status_code == 200
+    assert manager.json()['data']['financials_hidden'] is True
+    assert manager.json()['data']['plan_rules'] == expected
+    assert barber.status_code == 200
+    # The personal role gets no branch row, but the rules are not whole-branch totals.
+    assert 'parent_group' not in barber.json()['data']
+    assert barber.json()['data']['plan_rules'] == expected
+
+
+async def _save_admin_opz_plan(async_session, *, branch_opz_pct, admin_clients):
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0),
+        Staff(id=3, name='Barber', position='Барбер', company_id=1, fired=0),
+    ])
+    await async_session.commit()
+    await dashboard_service.save_plan_settings(
+        async_session,
+        '2025-01',
+        [{'company_id': 1, 'opz_pct': branch_opz_pct}],
+        [
+            {'company_id': 1, 'staff_id': 2, 'staff_category': 'administrator', 'clients': admin_clients},
+            {'company_id': 1, 'staff_id': 3, 'staff_category': 'barber', 'clients': 40, 'avg_check_total': 1000},
+        ],
+        actor_user_id=None,
+        portal_account_id=None,
+    )
+    rows = await async_session.scalars(select(PlanMetric).where(PlanMetric.metric_code.in_(('opz_qty', 'opz_pct'))))
+    return {(row.staff_id, row.metric_code): row.value for row in rows}
+
+
+@pytest.mark.asyncio
+async def test_administrator_opz_plan_is_clients_times_branch_rule_rounded_half_up(async_session):
+    saved = await _save_admin_opz_plan(async_session, branch_opz_pct=30, admin_clients=45)
+
+    assert saved[(2, 'opz_qty')] == 14.0  # 45 x 0.3 = 13.5
+    assert saved[(2, 'opz_pct')] == pytest.approx(100.0 * 14 / 45)
+    assert saved[(3, 'opz_qty')] == 12.0
+    # The branch plan counts the barbers' OPZ only: the administrators' is the same events attributed a second time.
+    assert saved[(None, 'opz_qty')] == 12.0
+
+    result = await fetch_plan_fact(async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1)
+    admin = next(group for group in result['groups'] if group['staff_id'] == 2)
+    cell = next(cell for cell in admin['metrics'] if cell['code'] == 'opz_qty')
+    assert cell['plan'] == 14.0
+    assert cell['completion_pct'] == 0.0
+    assert cell['status'] is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'branch_opz_pct, admin_clients',
+    [(None, 45), (30, 0)],
+    ids=['no_branch_rule', 'no_clients'],
+)
+async def test_administrator_has_no_opz_plan_without_a_rule_or_clients(async_session, branch_opz_pct, admin_clients):
+    saved = await _save_admin_opz_plan(async_session, branch_opz_pct=branch_opz_pct, admin_clients=admin_clients)
+
+    assert (2, 'opz_qty') not in saved
+    assert (2, 'opz_pct') not in saved
+
+
+@pytest.mark.asyncio
+async def test_resaving_keeps_a_legacy_administrator_opz_plan_instead_of_adding_a_second_one(async_session):
+    await _save_admin_opz_plan(async_session, branch_opz_pct=30, admin_clients=45)
+    generated = await async_session.scalar(
+        select(PlanMetric).where(PlanMetric.staff_id == 2, PlanMetric.metric_code == 'opz_qty')
+    )
+    generated.source = 'google_sheet'
+    generated.value = 99.0
+    await async_session.commit()
+
+    await dashboard_service.save_plan_settings(
+        async_session,
+        '2025-01',
+        [{'company_id': 1, 'opz_pct': 30}],
+        [
+            {'company_id': 1, 'staff_id': 2, 'staff_category': 'administrator', 'clients': 45},
+            {'company_id': 1, 'staff_id': 3, 'staff_category': 'barber', 'clients': 40, 'avg_check_total': 1000},
+        ],
+        actor_user_id=None,
+        portal_account_id=None,
+    )
+
+    rows = await async_session.scalars(
+        select(PlanMetric).where(PlanMetric.staff_id == 2, PlanMetric.metric_code == 'opz_qty')
+    )
+    assert [(row.source, row.value) for row in rows.all()] == [('google_sheet', 99.0)]

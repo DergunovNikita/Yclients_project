@@ -74,3 +74,14 @@ test('a jump to a sub-header row leaves room for the sticky table header above i
   const main = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
   assert.match(main, /setProperty\('--plan-head-height'/);
 });
+
+// The toolbar grid has one track per control and its minimums add up to ~1210px of content: a control added to it
+// overflowed the page between 1100px and ~1300px (the "Таблица / Планы" toggle did, and now sits in the panel title).
+test('the view toggle stays out of the plan toolbar grid', () => {
+  const start = html.indexOf('<section class="toolbar plan-toolbar"');
+  assert.notEqual(start, -1);
+  assert.doesNotMatch(html.slice(start, html.indexOf('</section>', start)), /plan-view-toggle/);
+  assert.match(html, /<div class="panel-title plan-title">[^]*?class="plan-view-toggle"/);
+  const tracks = rule('.plan-toolbar').match(/grid-template-columns: ([^;]+);/)[1];
+  assert.equal(tracks.replace(/minmax\([^)]*\)/g, 'M').replace(/repeat\(3, M\)/, 'M M M').trim().split(/\s+/).length, 7);
+});

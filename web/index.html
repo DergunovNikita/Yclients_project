@@ -1066,6 +1066,77 @@
       white-space: normal;
     }
 
+    .plan-title {
+      flex-wrap: wrap;
+    }
+
+    .plan-title .meta {
+      margin-left: auto;
+    }
+
+    /* "Планы" mode: metric rows x person columns. One sticky column (the metric), so the two-column
+       sticky rules above are undone for it on phones (see the 560px block). */
+    .plan-view-toggle {
+      display: inline-flex;
+    }
+
+    .plan-view-toggle button {
+      border-radius: 0;
+    }
+
+    .plan-view-toggle button:first-child {
+      border-radius: 8px 0 0 8px;
+    }
+
+    .plan-view-toggle button:last-child {
+      margin-left: -1px;
+      border-radius: 0 8px 8px 0;
+    }
+
+    .plan-view-toggle button[aria-pressed="true"] {
+      border-color: #0f766e;
+      background: #e6fffb;
+      color: #0f766e;
+    }
+
+    .plan-board .board-metric {
+      color: #334155;
+      font-weight: 700;
+      text-transform: none;
+      text-align: left;
+      background: #f8fafc;
+    }
+
+    .plan-board thead th:not(.number) {
+      text-align: left;
+    }
+
+    .plan-board .plan-board-rule {
+      color: #64748b;
+      font-size: 12px;
+    }
+
+    .plan-board .plan-board-total {
+      font-weight: 800;
+      background: #f1f5f9;
+    }
+
+    .plan-board thead th.plan-board-total {
+      background: #e2e8f0;
+    }
+
+    .plan-mark {
+      margin-left: 2px;
+      cursor: help;
+    }
+
+    .plan-footnote {
+      margin: 8px 0 0;
+      color: #64748b;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
     .plan-section + .plan-section {
       margin-top: 18px;
     }
@@ -1938,6 +2009,33 @@
         background: #f8fafc;
       }
 
+      /* "Планы" board: only the metric column is pinned. Its header's 2nd cell (rule or first person) is a
+         plain column again — it keeps the sticky top, but not the left offset meant for the 2nd pinned column. */
+      .plan-board .board-metric,
+      .plan-board thead th:first-child {
+        position: sticky;
+        left: 0;
+        z-index: 1;
+        width: 88px;
+        min-width: 88px;
+        max-width: 88px;
+        padding: 8px 4px;
+        overflow-wrap: break-word;
+        -webkit-hyphens: auto;
+        hyphens: auto;
+      }
+
+      .plan-board thead th:first-child {
+        z-index: 3;
+      }
+
+      .plan-board thead th:nth-child(2) {
+        left: auto;
+        width: auto;
+        padding: 8px 4px;
+        z-index: 2;
+      }
+
       /* Report tables: the 840px floor forces a scrollbar even for a 3-column table;
          let it size to content and pin the row label while scrolling sideways. Reused
          for the Overview extra-services table, whose first column is the same kind of
@@ -2222,7 +2320,7 @@
             aria-expanded="false"
             disabled
           >
-            <span data-i18n="dash.columns">Colonne</span>
+            <span id="plan-column-label" data-i18n="dash.columns">Colonne</span>
             <span class="plan-column-count" id="plan-column-count" hidden></span>
           </button>
           <div
@@ -2253,9 +2351,13 @@
       <div class="plan-insights" id="plan-insights"></div>
 
       <div class="panel wide">
-        <div class="panel-title">
+        <div class="panel-title plan-title">
           <h2 data-i18n="dash.planFact">Piano / consuntivo</h2>
           <span class="meta" id="plan-meta"></span>
+          <div class="plan-view-toggle" role="group" data-i18n-attr="aria-label:dash.planViewToggle" aria-label="Vista tabella">
+            <button type="button" class="secondary" data-plan-view="table" aria-pressed="true" data-i18n="dash.planViewTable">Tabella</button>
+            <button type="button" class="secondary" data-plan-view="board" aria-pressed="false" data-i18n="dash.planViewBoard">Piani</button>
+          </div>
         </div>
         <div id="plan-fact-table"></div>
       </div>
