@@ -98,29 +98,28 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
     cosmo_share_col = ('share_pct', 'Доля продаж косметики, %', PERCENT_FORMAT)
 
     revenue_barber = boards.get('revenue_barber', [])
-    revenue_admin = boards.get('revenue_admin', [])
     if any(
         boards.get(key)
         for key in (
             'extra_services_admin',
             'opz_admin',
-            'revenue_admin',
         )
     ):
         base['notes'].append({
             'kind': 'info',
             'title': 'Область расчета показателей администраторов',
             'text': (
-                'Личная выручка и косметика относятся к самому продавцу; '
+                'Косметика относится к самому продавцу; '
                 'ОПЗ и допуслуги — к записям под ответственностью администратора.'
             ),
         })
     if staff_id is not None:
-        selected_revenue = (revenue_barber or revenue_admin)
-        base['cards'] = [
+        # An administrator has no revenue metric (cosmetics is theirs): no revenue card rather than a zero.
+        selected_admin = any(group.get('category') == 'administrator' for group in plan.get('groups') or [])
+        base['cards'] = [] if selected_admin else [
             card(
                 'Личная выручка выбранного сотрудника',
-                selected_revenue[0]['value'] if selected_revenue else 0,
+                revenue_barber[0]['value'] if revenue_barber else 0,
                 MONEY_FORMAT,
             ),
         ]
@@ -141,16 +140,6 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
                 'bar',
                 [row['staff'] for row in revenue_barber],
                 [{'label': 'Выручка', 'data': [row['value'] for row in revenue_barber], 'format': MONEY_FORMAT}],
-            )
-        )
-    if revenue_admin:
-        charts.append(
-            chart(
-                'leaderboard_revenue_admin',
-                'Топ по личной выручке — администраторы',
-                'bar',
-                [row['staff'] for row in revenue_admin],
-                [{'label': 'Выручка', 'data': [row['value'] for row in revenue_admin], 'format': MONEY_FORMAT}],
             )
         )
     if charts:
@@ -208,12 +197,11 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
                 qty_col,
                 sum_col,
                 avg_col,
-                ('pct', 'Косметика, %', PERCENT_FORMAT),
                 cosmo_share_col,
             ],
             boards.get('cosmo_admin_rankings', {}),
             'sum',
-            money_ranking_options,
+            [option for option in money_ranking_options if option[0] != 'pct'],
             hide_when_empty=True,
         ),
         ranking_table(
@@ -248,13 +236,6 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
             'Топ по выручке — мастера',
             [staff_col, branch_col, ('value', 'Выручка', MONEY_FORMAT)],
             revenue_barber,
-            hide_when_empty=True,
-        ),
-        table(
-            'revenue_admin',
-            'Топ по личной выручке — администраторы',
-            [staff_col, branch_col, ('value', 'Выручка', MONEY_FORMAT)],
-            revenue_admin,
             hide_when_empty=True,
         ),
         table(

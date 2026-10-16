@@ -999,6 +999,12 @@
       box-shadow: inset 0 -1px 0 #e2e8f0;
     }
 
+    /* Plan/fact headers sit centred over their columns; the board keeps its left-aligned people names. */
+    .plan-table:not(.plan-board) thead th {
+      text-align: center;
+      vertical-align: middle;
+    }
+
     .plan-table .plan-cell-empty {
       color: #94a3b8;
     }
@@ -2352,7 +2358,7 @@
 
       <div class="panel wide">
         <div class="panel-title plan-title">
-          <h2 data-i18n="dash.planFact">Piano / consuntivo</h2>
+          <h2 id="plan-fact-title" data-i18n="dash.planFact">Piano / consuntivo</h2>
           <span class="meta" id="plan-meta"></span>
           <div class="plan-view-toggle" role="group" data-i18n-attr="aria-label:dash.planViewToggle" aria-label="Vista tabella">
             <button type="button" class="secondary" data-plan-view="table" aria-pressed="true" data-i18n="dash.planViewTable">Tabella</button>

@@ -52,6 +52,7 @@ import {
 
 import { escapeHtml } from './html.js';
 import { mergedStaffTable } from './planStaffTable.js';
+import { alignedColumnWidths, unionColumnKeys } from './planTableColumns.js';
 import {
   administratorCards,
   appointmentsCards,
@@ -165,6 +166,7 @@ const els = {
   planInsights: document.getElementById('plan-insights'),
   shell: document.querySelector('.shell'),
   planFactTable: document.getElementById('plan-fact-table'),
+  planFactTitle: document.getElementById('plan-fact-title'),
   planViewButtons: document.querySelectorAll('[data-plan-view]'),
   planColumnPicker: document.getElementById('plan-column-picker'),
   planColumnToggle: document.getElementById('plan-column-toggle'),
@@ -1684,7 +1686,52 @@ function syncPlanTableFit(scroll) {
   if (head) scroll.style.setProperty('--plan-head-height', `${head.offsetHeight}px`);
 }
 
+function columnKey(cell, index) {
+  return cell.dataset.metric || `col${index}`;
+}
+
+// The branch table and the staff table below it carry the same metric columns; left to auto layout, each spreads
+// its spare room by its own content and the columns drift apart. Measured at min-content (what the cells need),
+// then laid out fixed with one width per column key (see planTableColumns.js). The board's tables are people
+// columns, not metrics, and stay on auto layout. Re-run on every resize: the spare room depends on the box width.
+function alignPlanTableColumns(root) {
+  const tables = [...root.querySelectorAll('.plan-table:not(.plan-board)')];
+  if (tables.length < 2) return;
+  tables.forEach((table) => {
+    table.querySelector(':scope > colgroup')?.remove();
+    table.style.tableLayout = '';
+    table.style.width = 'min-content';
+  });
+  const minWidths = new Map();
+  const keysByTable = tables.map((table) => [...(table.tHead?.rows[0]?.cells || [])].map((cell, index) => {
+    const key = columnKey(cell, index);
+    minWidths.set(key, Math.max(minWidths.get(key) || 0, Math.ceil(cell.getBoundingClientRect().width)));
+    return key;
+  }));
+  const allKeys = unionColumnKeys(keysByTable);
+  tables.forEach((table, index) => {
+    const scroll = table.closest('.table-scroll');
+    const inner = scroll ? scroll.clientWidth : 0;
+    // Hidden view (nothing measured yet): back to auto layout; the fit observer runs this again once it is shown.
+    if (!inner || ![...minWidths.values()].some(Boolean)) {
+      table.style.width = '';
+      return;
+    }
+    const widths = alignedColumnWidths(keysByTable[index], allKeys, minWidths, inner);
+    const colgroup = document.createElement('colgroup');
+    widths.forEach((width) => {
+      const col = document.createElement('col');
+      col.style.width = `${width}px`;
+      colgroup.append(col);
+    });
+    table.prepend(colgroup);
+    table.style.tableLayout = 'fixed';
+    table.style.width = `${widths.reduce((sum, width) => sum + width, 0)}px`;
+  });
+}
+
 const planTableFitObserver = new ResizeObserver((entries) => {
+  alignPlanTableColumns(els.planFactTable);
   entries.forEach((entry) => syncPlanTableFit(entry.target.closest('.table-scroll') || entry.target));
 });
 
@@ -1694,6 +1741,7 @@ function syncPlanTableStickyOffsets() {
   // observations for as long as the page stays open.
   planTableStickyObserver.disconnect();
   planTableFitObserver.disconnect();
+  alignPlanTableColumns(els.planFactTable);
   document.querySelectorAll('.plan-table').forEach((table) => {
     const scroll = table.closest('.table-scroll');
     if (scroll) {
@@ -1727,6 +1775,8 @@ function syncPlanViewButtons() {
   els.planViewButtons.forEach((button) => {
     button.setAttribute('aria-pressed', String(button.dataset.planView === planViewMode));
   });
+  // The board shows plans only: no "План / факт" heading over it (the pressed "Планы" button names the view).
+  els.planFactTitle.hidden = planViewMode === 'board';
 }
 
 function setPlanViewMode(mode) {

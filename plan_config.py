@@ -32,7 +32,7 @@ MONEY_METRICS: tuple[dict[str, Any], ...] = (
         'label': 'Выручка',
         'summary': ('revenue',),
         'plan': ('revenue',),
-        'leaderboard': ('revenue_barber', 'revenue_admin'),
+        'leaderboard': ('revenue_barber',),
     },
     {
         'code': 'avg_check',
@@ -118,9 +118,9 @@ BARBER_METRIC_CODES = tuple(
     for metric in PLAN_FACT_METRICS
     if metric['code'] != REVIEWS_QTY_CODE
 )
+# No revenue / average check: an administrator's are mostly cosmetics over goods-sale "visits" (owner, 2026-10-16);
+# their money plan and fact is cosmo_sum.
 ADMIN_METRIC_CODES = (
-    'revenue',
-    'avg_check_total',
     'clients',
     'cosmo_qty',
     'cosmo_sum',

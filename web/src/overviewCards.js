@@ -350,8 +350,6 @@ export function administratorCards(summary) {
     qtyCount: manual > 0 ? t('dash.opzManualNote', { count: formatNumber(manual) }) : '',
   });
   const cards = presentCards([
-    metricCardFor('AdminRevenue', 'revenue', 'money'),
-    metricCardFor('AdminAverageCheck', 'avg_check_total', 'money'),
     metricCardFor('AdminClients', 'clients', 'number'),
     metricCardFor('AdminCosmoQty', 'cosmo_qty', 'number'),
     metricCardFor('AdminCosmoSum', 'cosmo_sum', 'money'),
@@ -363,7 +361,7 @@ export function administratorCards(summary) {
     metricCardFor('AdminExtraServicesPct', 'extra_services_pct', 'percent'),
     metricCardFor('AdminReviews', 'reviews_qty', 'number'),
   ]);
-  // Two even rows when there are many cards (twelve make two of six); the usual four fit the shorter ones.
+  // Two even rows when there are many cards (ten make two of five); the usual four fit the shorter ones.
   return { cards, columnCount: cards.length >= 9 ? Math.ceil(cards.length / 2) : 4 };
 }
 

@@ -85,7 +85,7 @@ test("an administrator's cards read the previous value from his block", () => {
       company_id: 1,
       opz_manual_qty: 0,
       metrics: {
-        revenue: { value: 5000, previous_value: 0, change_pct: null },
+        cosmo_sum: { value: 5000, previous_value: 0, change_pct: null },
         clients: { value: 0, previous_value: 0, change_pct: null },
         opz_qty: { value: 3, previous_value: null, change_pct: null },
         opz_pct: { value: 10, previous_value: 5, change_pct: 100 },
@@ -93,7 +93,7 @@ test("an administrator's cards read the previous value from his block", () => {
     },
   };
   const byLabel = Object.fromEntries(cards.administratorCards(summary).cards.map((card) => [card.label, card]));
-  assert.equal(byLabel['Выручка администратора'].delta, 'было 0');
+  assert.equal(byLabel['Космо, сумма'].delta, 'было 0');
   assert.equal('delta' in byLabel['Закреплённые визиты'], false);
   assert.equal('delta' in byLabel['Количество ОПЗ'], false);
   assert.match(byLabel['Доля ОПЗ от визитов'].delta, /\+100%/);
@@ -153,9 +153,8 @@ const labelsOf = (list) => list.map((card) => card.label);
 
 test("an administrator's cards follow his Plan/fact row and carry the manual top-up under the OPZ total", () => {
   const { cards: administrator, columnCount } = cards.administratorCards(SUMMARIES.adminSchedule);
+  // No revenue / average check: an administrator's money metric is cosmetics.
   assert.deepEqual(labelsOf(administrator), [
-    'Выручка администратора',
-    'Средний чек администратора',
     'Закреплённые визиты',
     'Космо, шт',
     'Космо, сумма',
@@ -167,7 +166,7 @@ test("an administrator's cards follow his Plan/fact row and carry the manual top
     '% доп. услуг',
     'Отзывы',
   ]);
-  assert.equal(columnCount, 6);
+  assert.equal(columnCount, 5);
   const byLabel = Object.fromEntries(administrator.map((card) => [card.label, card]));
   assert.equal(byLabel['Количество ОПЗ'].value, '8');
   assert.equal(byLabel['Количество ОПЗ'].count, 'в т.ч. доп. ОПЗ: 1');
@@ -207,7 +206,7 @@ test('a summary without the administrator block has no administrator cards', () 
 test('every administrator card has a label and a hint in every locale', () => {
   for (const code of ['ru', 'en', 'it']) {
     const dash = JSON.parse(readFileSync(new URL(`../locales/${code}.json`, import.meta.url), 'utf8')).dash;
-    for (const name of ['Revenue', 'AverageCheck', 'Clients', 'CosmoQty', 'CosmoSum', 'Reviews']) {
+    for (const name of ['Clients', 'CosmoQty', 'CosmoSum', 'Reviews']) {
       assert.equal(typeof dash[`cardAdmin${name}`], 'string', `${code}: cardAdmin${name}`);
       assert.equal(typeof dash[`hintAdmin${name}`], 'string', `${code}: hintAdmin${name}`);
     }

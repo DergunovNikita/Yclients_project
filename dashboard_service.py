@@ -6391,15 +6391,15 @@ def _staff_leaderboards_payload(
     cosmo_barber_rankings = {
         metric: top_rows(cosmo_barber_rows, metric) for metric in ('qty', 'sum', 'pct', 'avg')
     }
+    # No 'pct' for administrators: it is a share of personal revenue, and they have no revenue metric.
     cosmo_admin_rankings = {
-        metric: top_rows(cosmo_admin_rows, metric) for metric in ('qty', 'sum', 'pct', 'avg')
+        metric: top_rows(cosmo_admin_rows, metric) for metric in ('qty', 'sum', 'avg')
     }
     opz_barber_rows = opz_rows(barbers)
     opz_admin_rows = opz_rows(admins)
     opz_barber_rankings = {metric: top_rows(opz_barber_rows, metric) for metric in ('qty', 'pct')}
     opz_admin_rankings = {metric: top_rows(opz_admin_rows, metric) for metric in ('qty', 'pct')}
     revenue_barber = top_rows(value_rows(barbers, 'revenue', 'money'), 'value')
-    revenue_admin = top_rows(value_rows(admins, 'revenue', 'money'), 'value')
     reviews_admin = top_rows(value_rows(admins, REVIEWS_QTY_CODE, 'number'), 'value')
     payload = {
         'extra_services_barber_rankings': extra_barber_rankings,
@@ -6412,7 +6412,6 @@ def _staff_leaderboards_payload(
         'opz_admin_rankings': opz_admin_rankings,
         'reviews_admin': reviews_admin,
         'revenue_barber': revenue_barber,
-        'revenue_admin': revenue_admin,
         'avg_check_plan_branch': avg_check_plan_rows(branch_groups),
         'avg_check_plan_staff': avg_check_plan_rows(barbers),
     }

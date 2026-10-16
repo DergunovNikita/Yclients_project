@@ -4443,15 +4443,15 @@ async def test_dashboard_staff_leaderboard_report_returns_top_tables(async_sessi
         'opz_admin',
         'reviews_admin',
         'revenue_barber',
-        'revenue_admin',
         'avg_check_plan_branch',
         'avg_check_plan_staff',
     } <= table_ids
+    # Administrators have no revenue metric: no revenue board for them.
+    assert 'revenue_admin' not in table_ids
     extra_services = next(table for table in data['tables'] if table['id'] == 'extra_services')
     cosmo_barber = next(table for table in data['tables'] if table['id'] == 'cosmo_barber')
     opz_admin = next(table for table in data['tables'] if table['id'] == 'opz_admin')
     revenue_barber = next(table for table in data['tables'] if table['id'] == 'revenue_barber')
-    revenue_admin = next(table for table in data['tables'] if table['id'] == 'revenue_admin')
     assert extra_services['ranking']['default_metric'] == 'pct'
     assert set(extra_services['ranking']['rows_by_metric']) == {'qty', 'sum', 'pct', 'avg'}
     assert cosmo_barber['ranking']['default_metric'] == 'sum'
@@ -4462,7 +4462,6 @@ async def test_dashboard_staff_leaderboard_report_returns_top_tables(async_sessi
     assert set(opz_admin['ranking']['rows_by_metric']) == {'qty', 'pct'}
     assert {'key': 'pct', 'label': 'Косметика, %', 'format': 'percent'} in cosmo_barber['columns']
     assert all(column['key'] != 'cosmo_revenue_share_pct' for column in revenue_barber['columns'])
-    assert all(column['key'] != 'cosmo_revenue_share_pct' for column in revenue_admin['columns'])
     assert [card['label'] for card in data['cards']] == ['Топ выручка мастера']
     reviews_admin = next(table for table in data['tables'] if table['id'] == 'reviews_admin')
     assert extra_services.get('hide_when_empty') is True
@@ -4950,12 +4949,11 @@ async def test_staff_leaderboard_applies_component_money_permissions_without_raw
                 'cosmo_barber_rankings': {
                     'qty': [cosmo_row], 'sum': [cosmo_row], 'pct': [cosmo_row], 'avg': [cosmo_row],
                 },
-                'cosmo_admin_rankings': {'qty': [], 'sum': [], 'pct': [], 'avg': []},
+                'cosmo_admin_rankings': {'qty': [], 'sum': [], 'avg': []},
                 'opz_barber_rankings': {'qty': [opz_row], 'pct': [opz_row]},
                 'opz_admin_rankings': {'qty': [], 'pct': []},
                 'reviews_admin': [{**identity, 'value': 3.0}],
                 'revenue_barber': [value_row],
-                'revenue_admin': [],
                 'avg_check_plan_branch': [avg_row],
                 'avg_check_plan_staff': [avg_row],
             }
@@ -5648,12 +5646,11 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
                 'extra_services_barber_rankings': {'qty': [extra_row], 'sum': [extra_row], 'pct': [extra_row]},
                 'extra_services_admin_rankings': {'qty': [admin_extra_row], 'pct': [admin_extra_row]},
                 'cosmo_barber_rankings': {'qty': [cosmo_row], 'sum': [cosmo_row], 'pct': [cosmo_row]},
-                'cosmo_admin_rankings': {'qty': [cosmo_row], 'sum': [cosmo_row], 'pct': [cosmo_row]},
+                'cosmo_admin_rankings': {'qty': [cosmo_row], 'sum': [cosmo_row]},
                 'opz_barber_rankings': {'qty': [opz_row], 'pct': [opz_row]},
                 'opz_admin_rankings': {'qty': [opz_row], 'pct': [opz_row]},
                 'reviews_admin': [{**identity, 'value': 3.0}],
                 'revenue_barber': [value_row],
-                'revenue_admin': [value_row],
                 'avg_check_plan_branch': [avg_row],
                 'avg_check_plan_staff': [avg_row],
             }
@@ -7854,7 +7851,8 @@ async def test_goods_revenue_uses_stock_operation_seller_not_appointment_master(
     assert seller['revenue']['goods_revenue'] == 3600.0
     assert seller['revenue']['total'] == 3600.0
     assert branch['revenue']['goods_revenue'] == 4300.0
-    assert seller_metrics['revenue']['fact'] == 3600.0
+    # The seller is an administrator: no revenue metric in Plan/fact, the Overview still counts it.
+    assert 'revenue' not in seller_metrics
 
 
 @pytest.mark.asyncio
@@ -8391,9 +8389,10 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
         'Charlie',
         'Alpha',
     ]
-    assert [row['staff'] for row in network_boards['revenue_admin']] == ['Delta Admin']
-    assert network_boards['revenue_admin'][0]['value'] == 4000.0
-    assert network_boards['cosmo_admin_rankings']['sum'][0]['pct'] == 25.0
+    assert 'revenue_admin' not in network_boards
+    # An administrator's cosmetics share of personal revenue is gone with the revenue metric.
+    assert 'pct' not in network_boards['cosmo_admin_rankings']
+    assert network_boards['cosmo_admin_rankings']['sum'][0]['sum'] > 0
     # The rating pass itself reads the extra-service quantities.
     extra_top = network_boards['extra_services_barber_rankings']['qty']
     assert [(row['staff'], row['qty']) for row in extra_top] == [
@@ -8405,19 +8404,10 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
     assert report_response.status_code == 200
     report_data = report_response.json()['data']
     report_revenue_barber = next(table for table in report_data['tables'] if table['id'] == 'revenue_barber')
-    report_revenue_admin = next(table for table in report_data['tables'] if table['id'] == 'revenue_admin')
     assert [row['staff'] for row in report_revenue_barber['rows']] == ['Bravo', 'Charlie', 'Alpha']
-    assert report_revenue_admin['rows'] == [
-        {
-            'staff': 'Delta Admin',
-            'staff_id': 4,
-            'company_id': 1,
-            'company_title': 'Salon 1',
-            'value': 4000.0,
-        }
-    ]
+    assert all(table['id'] != 'revenue_admin' for table in report_data['tables'])
     report_cosmo_admin = next(table for table in report_data['tables'] if table['id'] == 'cosmo_admin')
-    assert report_cosmo_admin['rows'][0]['pct'] == 25.0
+    assert all(column['key'] != 'pct' for column in report_cosmo_admin['columns'])
     report_extra = next(
         table for table in report_data['tables'] if table['id'] == 'extra_services'
     )
@@ -8444,7 +8434,7 @@ async def test_plan_fact_returns_staff_leaderboards_and_goods_kpis_by_scope(asyn
         async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1, for_ratings=True
     ))['staff_leaderboards']
     assert [row['staff'] for row in branch_boards['revenue_barber']] == ['Bravo', 'Alpha']
-    assert [row['staff'] for row in branch_boards['revenue_admin']] == ['Delta Admin']
+    assert 'revenue_admin' not in branch_boards
     branch_goods = {row['code']: row for row in branch_data['goods_kpi_execution']}
     assert branch_goods['wax_qty']['plan'] == 2.0
     assert branch_goods['wax_qty']['fact'] == 1.0
@@ -13761,8 +13751,8 @@ async def test_admin_without_user_id_preserves_staff_attribution_in_batch(async_
 
     admin_group = next(group for group in result['groups'] if group['staff_id'] == 2)
     cells = {cell['code']: cell for cell in admin_group['metrics']}
-    assert cells['revenue']['fact'] == 1300.0
-    assert cells['avg_check_total']['fact'] == 1300.0
+    assert 'revenue' not in cells
+    assert 'avg_check_total' not in cells
     assert cells['clients']['fact'] == 1.0
 
 
@@ -13993,10 +13983,11 @@ async def test_admin_fact_keeps_personal_revenue_separate_from_responsibility_me
     )
     admin_group = next(g for g in r.json()['data']['groups'] if g['category'] == 'administrator')
     admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
-    assert admin_cells['revenue']['calculation_scope'] == 'personal'
+    assert admin_cells['cosmo_sum']['calculation_scope'] == 'personal'
     assert admin_cells['clients']['calculation_scope'] == 'administrator_records'
-    assert admin_cells['revenue']['fact'] == summary['revenue']['total'] == 0.0
-    assert admin_cells['avg_check_total']['fact'] == summary['average_check']['total'] == 0.0
+    # No revenue / average check for an administrator; their money metric is cosmo_sum.
+    assert 'revenue' not in admin_cells and 'avg_check_total' not in admin_cells
+    assert summary['revenue']['total'] == 0.0
     assert admin_cells['clients']['fact'] == 1.0
     assert admin_cells['cosmo_qty']['fact'] == 2.0
     assert admin_cells['cosmo_sum']['fact'] == 300.0
@@ -15743,7 +15734,8 @@ async def test_yoy_admin_scope_matches_personal_overview_and_plan_fact(
         for card in leaderboard['cards']
     }
 
-    assert admin_cells['revenue']['fact'] == overview['revenue']['total'] == 300.0
+    assert 'revenue' not in admin_cells
+    assert overview['revenue']['total'] == 300.0
     assert admin_cells['clients']['fact'] == 1.0
     assert yoy['calculation_scope']['mode'] == 'personal'
     assert yoy_2025['revenue'] == overview['revenue']['total'] == 300.0
@@ -15753,7 +15745,8 @@ async def test_yoy_admin_scope_matches_personal_overview_and_plan_fact(
     assert yoy_2025['appointments'] == 1
     assert yoy_2025['avg_check'] == overview['average_check']['total'] == 300.0
     assert leaderboard['calculation_scope']['mode'] == 'plan_fact'
-    assert leaderboard_cards['Личная выручка выбранного сотрудника'] == 300.0
+    # A selected administrator has no revenue metric: no revenue card instead of a zero.
+    assert 'Личная выручка выбранного сотрудника' not in leaderboard_cards
 
 
 @pytest.mark.asyncio
