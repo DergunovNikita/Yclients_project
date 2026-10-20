@@ -58,6 +58,8 @@ class ReportDefinition:
     granularity: bool = False
     compare: bool = False
     staff_filter: bool = True
+    # Whether the report can be narrowed to barber levels (`staff_position_ids`).
+    staff_level: bool = False
     date_range: bool = True
     aliases: tuple[str, ...] = ()
 
@@ -72,6 +74,7 @@ class ReportDefinition:
             'filters': {
                 'date_range': self.date_range,
                 'staff': self.staff_filter,
+                'staff_level': self.staff_level,
                 'granularity': self.granularity,
                 'compare': self.compare,
             },
@@ -195,6 +198,7 @@ REPORT_DEFINITIONS: tuple[ReportDefinition, ...] = (
         builder=reports_team.build_staff_leaderboard,
         # A mixed report (OPZ, reviews and percentages next to money): the route strips the money columns.
         requires_financials=False,
+        staff_level=True,
     ),
     ReportDefinition(
         id='peak_load',
@@ -422,6 +426,7 @@ async def fetch_report_data(
     allowed_company_ids: list[int] | None = None,
     period_preset: str | None = None,
     compare_previous: bool = False,
+    staff_position_ids: frozenset[int] | None = None,
 ) -> dict[str, Any]:
     """Report payload for a canonical id or a retired alias.
 
@@ -468,6 +473,7 @@ async def fetch_report_data(
         allowed_company_ids,
         factual_at,
         period_preset,
+        staff_position_ids=staff_position_ids,
     )
     if canonical_id != report_id:
         data['requested_report_id'] = report_id
@@ -486,6 +492,7 @@ async def fetch_report_data(
             # The preset names the primary window; the compare window is its own range.
             None,
             for_comparison=True,
+            staff_position_ids=staff_position_ids,
         )
         data['comparison'] = _comparison_payload(data, compare_data, cmp_staff_id)
     return data
@@ -553,6 +560,7 @@ async def _fetch_report_payload(
     factual_at: datetime,
     period_preset: str | None = None,
     for_comparison: bool = False,
+    staff_position_ids: frozenset[int] | None = None,
 ) -> dict[str, Any]:
     definition = REPORT_REGISTRY[report_id]
     base = {
@@ -570,6 +578,9 @@ async def _fetch_report_payload(
         # No employee filter, and the roles that may open such a report are not clamped to a
         # staff row, so a stray staff_id must not narrow the branch totals.
         staff_id = None
+    # The selected person wins over a level, and a report without levels has nothing to narrow.
+    if not definition.staff_level or staff_id is not None:
+        staff_position_ids = None
     allowed_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
@@ -591,6 +602,7 @@ async def _fetch_report_payload(
         factual_at=factual_at,
         period_preset=period_preset,
         for_comparison=for_comparison,
+        staff_position_ids=staff_position_ids,
     )
     return await definition.builder(request)
 

@@ -285,7 +285,8 @@ async def test_the_preset_survives_compare_previous_but_not_an_explicit_window(m
     seen = []
 
     async def fake_payload(
-        db, report_id, start, end, company_id, staff_id, granularity, allowed, factual_at, preset, for_comparison=False
+        db, report_id, start, end, company_id, staff_id, granularity, allowed, factual_at, preset, for_comparison=False,
+        staff_position_ids=None,
     ):
         seen.append((start, end, preset))
         return _payload()

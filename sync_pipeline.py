@@ -17,6 +17,7 @@ from config import (
     YCLIENTS_RETRY_TOTAL, YCLIENTS_RETRY_BACKOFF,
     YCLIENTS_RETRY_AFTER_MAX,
 )
+from clock import utcnow
 from data_sources import SOURCE_YCLIENTS, adapter_from_payload
 from yclients_api import YClientsAPI
 from yclients_credentials import (
@@ -28,7 +29,7 @@ from yclients_credentials import (
 from database import Database, init_database
 from models import (
     Group, Company,
-    ServiceCategoryCatalog, ServiceCatalog, StaffPositionCatalog, Staff, Client,
+    ServiceCategoryCatalog, ServiceCatalog, StaffPositionCatalog, Staff, StaffPositionMonth, Client,
     AccountCatalog, StorageCatalog, GoodCategoryCatalog, GoodCatalog,
     Appointment, Transaction, FinancialTransaction, GoodTransaction,
     Comment, StaffSchedule,
@@ -1091,6 +1092,52 @@ def sync_positions(api: YClientsAPI, db, company_id: str, db_company_id: int | N
 # 5. Сотрудники
 # ===================================================================
 
+POSITION_ID_MAX = 2**31 - 1  # `staff.position_id` is INTEGER: one out-of-range id must not fail the whole step
+
+
+def _position_external_id(value) -> int | None:
+    try:
+        position_id = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return position_id if 0 < position_id <= POSITION_ID_MAX else None
+
+
+def _snapshot_staff_positions(db, company_id: int, positions: dict[int, tuple[int | None, str | None]]) -> None:
+    """Record the current position of non-fired staff in the branch's current month (the last sync of the month wins).
+
+    Fired staff are skipped: YClients often leaves a stale position on them, and the level history is
+    only read for people who still work.
+    """
+    if not positions:
+        return
+    month = _branch_today(db, company_id).replace(day=1)
+    now = utcnow()
+    stored = {
+        row.staff_id: row
+        for row in db.query(StaffPositionMonth).filter(
+            StaffPositionMonth.month == month,
+            StaffPositionMonth.staff_id.in_(list(positions)),
+        )
+    }
+    for staff_id, (position_id, position_title) in positions.items():
+        row = stored.get(staff_id)
+        if row is None:
+            db.add(StaffPositionMonth(
+                staff_id=staff_id,
+                month=month,
+                company_id=company_id,
+                position_id=position_id,
+                position_title=position_title,
+                updated_at=now,
+            ))
+        else:
+            row.company_id = company_id
+            row.position_id = position_id
+            row.position_title = position_title
+            row.updated_at = now
+
+
 def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None = None):
     print("\n── Сотрудники ──")
 
@@ -1107,15 +1154,18 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
         existing_staff = _load_staff_map(db, cid, staff_ids)
         pk_allocator = ExternalPkAllocator(db, Staff, staff_ids)
         active_staff_ids: set[int] = set()
+        month_positions: dict[int, tuple[int | None, str | None]] = {}
         for s in staff_list:
             staff_id = _staff_external_id(s)
             if staff_id is None:
                 continue
 
             position_title = None
+            position_id = None
             pos = s.get('position')
             if isinstance(pos, dict):
                 position_title = pos.get('title')
+                position_id = _position_external_id(pos.get('id'))
             elif isinstance(pos, str):
                 position_title = pos
 
@@ -1133,6 +1183,7 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
                     email=email,
                     specialization=s.get('specialization'),
                     position=position_title,
+                    position_id=position_id,
                     rating=s.get('rating'),
                     votes_count=s.get('votes_count'),
                     bookable=s.get('bookable', True),
@@ -1148,6 +1199,7 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
                 obj.email = email
                 obj.specialization = s.get('specialization')
                 obj.position = position_title
+                obj.position_id = position_id
                 obj.rating = s.get('rating')
                 obj.votes_count = s.get('votes_count')
                 obj.bookable = s.get('bookable', True)
@@ -1159,6 +1211,7 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
 
             if obj.id is not None and not fired:
                 active_staff_ids.add(int(obj.id))
+                month_positions[int(obj.id)] = (position_id, position_title)
 
         # Portal-created rows never appear in the YClients list, so firing every
         # unlisted row made portal managers vanish from «Работник» after each sync.
@@ -1170,6 +1223,7 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
         if active_staff_ids:
             stale_query = stale_query.filter(~Staff.id.in_(active_staff_ids))
         stale_query.update({Staff.fired: 1}, synchronize_session=False)
+        _snapshot_staff_positions(db, cid, month_positions)
 
         db.commit()
         print(f"  ✓ Сотрудники сохранены ({len(staff_list)} шт.)")

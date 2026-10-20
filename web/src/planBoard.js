@@ -1,6 +1,8 @@
 // Plan/fact "Планы" mode: the same payload turned the way the owner keeps plans in a spreadsheet —
 // one column per person (plus a total), one row per metric, plan values only.
 
+import { spansBranches } from './planStaffTable.js';
+
 const BARBER_ROWS = [
   'revenue', 'clients', 'avg_check_total', 'wax_qty', 'head_care_qty', 'face_care_qty',
   'camouflage_qty', 'cosmo_qty', 'cosmo_sum', 'opz_pct', 'opz_qty', 'extra_services_qty', 'extra_services_pct',
@@ -33,7 +35,11 @@ function section(key, groups, codes, metricsByCode, { rules = null, ruleCodes = 
     .filter((row) => row.values.some((value) => value !== null));
   const keep = groups.map((_column, index) => index).filter((index) => rows.some((row) => row.values[index] !== null));
   if (!rows.length || !keep.length) return null;
-  const columns = keep.map((index) => ({ title: groups[index].title, isTotal: groups[index].isTotal }));
+  const columns = keep.map((index) => ({
+    title: groups[index].title,
+    isTotal: groups[index].isTotal,
+    branch: groups[index].branch,
+  }));
   const shownRows = rows.map((row) => {
     const values = keep.map((index) => row.values[index]);
     return {
@@ -53,8 +59,9 @@ function section(key, groups, codes, metricsByCode, { rules = null, ruleCodes = 
   };
 }
 
-function column(group, isTotal = false) {
-  return { group, title: group.title, isTotal };
+// `branch` — where the person works, only when the board spans several branches (a level over the network).
+function column(group, isTotal = false, withBranch = false) {
+  return { group, title: group.title, isTotal, branch: withBranch ? group.company_title || null : null };
 }
 
 /**
@@ -69,9 +76,10 @@ export function planBoard(payload) {
   const groups = payload?.groups || [];
   const sections = [];
   if (payload?.view_scope === 'staff') {
+    const withBranch = spansBranches(groups);
     const byCategory = (category) => groups
       .filter((group) => (group.category || 'unknown') === category)
-      .map((group) => column(group));
+      .map((group) => column(group, false, withBranch));
     const barbers = byCategory('barber');
     // One chosen person is shown alone, as in the table mode: the branch total would be a second column.
     if (payload.parent_group && !payload.selected_staff_plan) {

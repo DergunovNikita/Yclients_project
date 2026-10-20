@@ -11,11 +11,13 @@ import {
   shouldAdoptComparePeriod,
 } from '../period.js';
 import { GROUP_LABELS } from './registry.js';
+import { publishFilterHeight } from './stickyFilters.js';
 import { decodePathSegment, migrateFavorites, resolveReportRoute } from './routing.js';
 import { renderReportData } from './renderers/generic.js';
 import { intlLocale, t } from '../i18n.js';
 import { branchesForPeriod } from '../reportingWindow.js';
 import { staffOption } from '../staffLabel.js';
+import { chosenLevel, levelSelection, selectableLevelOptions } from '../staffLevels.js';
 import {
   DEFAULT_GRANULARITY,
   REPORT_FILTER_KEYS,
@@ -46,6 +48,7 @@ const FILTER_INPUTS = {
   company_id: 'branch',
   staff_id: 'staff',
   granularity: 'granularity',
+  staff_position_ids: 'level',
 };
 
 const FAVORITES_KEY = 'yclients_reports_favorites';
@@ -76,9 +79,10 @@ function uniqueSorted(values) {
   return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru'));
 }
 
-function optionHtml(value, label, selectedValue, name = null) {
+function optionHtml(value, label, selectedValue, name = null, key = null) {
   const nameAttr = name === null ? '' : ` data-name="${escapeHtml(name)}"`;
-  return `<option value="${escapeHtml(value)}"${nameAttr}${String(value) === String(selectedValue) ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+  const keyAttr = key === null ? '' : ` data-key="${escapeHtml(key)}"`;
+  return `<option value="${escapeHtml(value)}"${nameAttr}${keyAttr}${String(value) === String(selectedValue) ? ' selected' : ''}>${escapeHtml(label)}</option>`;
 }
 
 function reportMatches(report, filters, favorites) {
@@ -124,6 +128,7 @@ export function initReports({
   setApiState,
   pushHistory = (state, url) => history.pushState(state, '', url),
   replaceHistory = (state, url) => history.replaceState(state, '', url),
+  currentUser = () => null,
 }) {
   const els = {
     view: document.getElementById('reports-view'),
@@ -151,6 +156,8 @@ export function initReports({
     branch: document.getElementById('report-branch'),
     staff: document.getElementById('report-staff'),
     staffField: document.getElementById('report-staff')?.closest('label'),
+    level: document.getElementById('report-level'),
+    levelField: document.getElementById('report-level-field'),
     granularity: document.getElementById('report-granularity'),
     compareEnabled: document.getElementById('report-compare-enabled'),
     compareStart: document.getElementById('report-compare-start'),
@@ -161,6 +168,8 @@ export function initReports({
     dataLabels: document.getElementById('report-data-labels'),
   };
   if (!els.view) return null;
+
+  publishFilterHeight(els.viewer, els.view.querySelector('.report-filter-row'));
 
   const charts = new ReportChartManager();
   const reportRequests = createLatestRequestScope();
@@ -176,11 +185,14 @@ export function initReports({
     branchesLoaded: false,
     staffLoaded: false,
     staffIds: [],
+    // The list the worker select shows; the level options are grouped from it.
+    staffItems: [],
     reports: [],
     branches: [],
     activeReportId: '',
     periodApplies: true,
     staffApplies: true,
+    levelApplies: false,
     granularityApplies: true,
     compareApplies: true,
     // Which Overview preset produced the period, when the user arrived from a card.
@@ -410,16 +422,36 @@ export function initReports({
   // The selection is passed in rather than read back off the select: a staff id that
   // belongs to another branch matches no option yet and the select reports '' for it,
   // which silently widened a per-employee link to the whole branch.
-  async function loadStaff(desiredStaffId = els.staff.value) {
+  // A person and a level exclude each other, so a level only survives when no person is asked for.
+  // `desiredLevel` is `{ value, key }`: the select's own choice carries the key (kept across scopes), a link only ids.
+  function renderLevels(desiredLevel) {
+    const options = selectableLevelOptions(state.staffItems, currentUser());
+    const selected = levelSelection(options, desiredLevel);
+    els.level.innerHTML = optionHtml('', t('dash.allLevels'), selected, null, '')
+      + options.map((option) => optionHtml(option.value, option.label, selected, null, option.key)).join('');
+    els.level.value = selected;
+    updateLevelField(options.length > 0);
+  }
+
+  // Shown only for a report that offers it and only when there is a level to choose. The filter row needs no
+  // extra grid track: a report with levels has no granularity select, so the six base tracks fit exactly.
+  function updateLevelField(hasOptions = selectableLevelOptions(state.staffItems, currentUser()).length > 0) {
+    const visible = state.levelApplies && hasOptions;
+    els.levelField.hidden = !visible;
+  }
+
+  async function loadStaff(desiredStaffId = els.staff.value, desiredLevel = chosenLevel(els.level)) {
     // The list itself depends only on branch + period. Unchanged since the last successful
     // load (e.g. another report card in the same scope, or a back/forward that repeats it),
     // it only needs the selection moved to whatever id this location asks for.
     if (state.staffLoaded && state.staffParamsKey === staffParamsKey()) {
       els.staff.value = staffSelectionForOptions(desiredStaffId, state.staffIds);
+      renderLevels(els.staff.value ? {} : desiredLevel);
       return 'ready';
     }
     state.staffLoaded = false;
     state.staffIds = [];
+    state.staffItems = [];
     const request = staffRequests.start();
     try {
       const payload = await fetchJson('/dashboard/staff', {
@@ -443,12 +475,14 @@ export function initReports({
         }).join('');
       state.staffLoaded = true;
       state.staffIds = staff.map((person) => person.id);
+      state.staffItems = staff;
+      renderLevels(selected ? {} : desiredLevel);
       state.staffParamsKey = staffParamsKey();
       clearFilterWarning();
       return 'ready';
     } catch (error) {
       if (isSupersededRequest(error) || !request.isCurrent()) return 'superseded';
-      showFilterWarning(error.message, () => loadStaff(desiredStaffId));
+      showFilterWarning(error.message, () => loadStaff(desiredStaffId, desiredLevel));
       return 'failed';
     } finally {
       if (request.isCurrent()) request.finish();
@@ -507,6 +541,7 @@ export function initReports({
     state.activeReportId = '';
     state.periodApplies = true;
     state.staffApplies = true;
+    state.levelApplies = false;
     state.granularityApplies = true;
     state.compareApplies = true;
     setCatalogVisible(true);
@@ -551,6 +586,7 @@ export function initReports({
       filters: {
         ...currentFilters(),
         ...(state.staffApplies ? {} : { staff_id: '' }),
+        ...(state.levelApplies ? {} : { staff_position_ids: '' }),
         // The select is shared like the staff one: a report without it must not write it into its link.
         ...(state.granularityApplies ? {} : { granularity: '' }),
       },
@@ -565,6 +601,8 @@ export function initReports({
     state.periodApplies = visibility.dateRange;
     state.staffApplies = reportStaffApplies(filters);
     state.granularityApplies = visibility.granularity;
+    state.levelApplies = visibility.staffLevel;
+    updateLevelField();
     if (els.staffField) els.staffField.hidden = !state.staffApplies;
     if (els.monthField) els.monthField.hidden = !visibility.dateRange;
     if (els.startField) els.startField.hidden = !visibility.dateRange;
@@ -744,7 +782,8 @@ export function initReports({
       return;
     }
     const expectedBranch = els.branch.value;
-    const staffStatus = await loadStaff(requestedStaffId);
+    // A link naming a person wins over a level: the two never filter together.
+    const staffStatus = await loadStaff(requestedStaffId, requestedStaffId ? {} : { value: requested.staff_position_ids });
     if (staffStatus === 'superseded') return;
     if (!reportScopedFilterAllowsLoad(requestedStaffId, state.staffLoaded, state.staffIds)) {
       showBlockedScope();
@@ -830,7 +869,15 @@ export function initReports({
   });
   // A half-written window asks for nothing until its other bound is typed in;
   // reportCompareParams is the only gate, so the checkbox is left as the user set it.
-  [els.staff, els.granularity, els.compareEnabled, els.compareStart, els.compareEnd].forEach((input) => {
+  els.staff.addEventListener('change', () => {
+    if (els.staff.value) els.level.value = '';
+    reloadActiveReport();
+  });
+  els.level.addEventListener('change', () => {
+    if (els.level.value) els.staff.value = '';
+    reloadActiveReport();
+  });
+  [els.granularity, els.compareEnabled, els.compareStart, els.compareEnd].forEach((input) => {
     input.addEventListener('change', reloadActiveReport);
   });
   els.dataLabels.addEventListener('click', () => {
@@ -853,6 +900,7 @@ export function initReports({
       state.branchesLoaded = false;
       state.staffLoaded = false;
       state.staffIds = [];
+      state.staffItems = [];
       state.staffParamsKey = null;
       state.activeReportId = '';
       reportRequests.abort();

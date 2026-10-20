@@ -156,6 +156,8 @@ class Staff(Base):
     email = Column(String)
     specialization = Column(String)
     position = Column(String, index=True)
+    # YClients position id, the barber "level". No FK: the catalog key is per branch (company_id, position_id).
+    position_id = Column(Integer)
     rating = Column(Float)
     votes_count = Column(Integer)
     bookable = Column(Boolean, default=True)
@@ -167,6 +169,23 @@ class Staff(Base):
     __table_args__ = (
         Index('uq_staff_company_source_external', 'company_id', 'source_type', 'external_id', unique=True),
     )
+
+
+class StaffPositionMonth(Base):
+    """Position of a staff member as the sync saw it in a calendar month (the level history).
+
+    YClients keeps only the current position, so each sync overwrites the row of its own month;
+    the last sync of the month wins. `month` is always the 1st.
+    """
+
+    __tablename__ = 'staff_position_months'
+
+    staff_id = Column(Integer, ForeignKey('staff.id', ondelete='CASCADE'), primary_key=True)
+    month = Column(Date, primary_key=True)
+    company_id = Column(Integer, ForeignKey('companies.id', ondelete='CASCADE'), nullable=False)
+    position_id = Column(Integer, nullable=True)
+    position_title = Column(String, nullable=True)
+    updated_at = Column(DateTime, nullable=False)
 
 
 class Client(Base):

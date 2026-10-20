@@ -238,3 +238,37 @@ test('a plan of 0 is a value, not an empty cell', () => {
   assert.deepEqual(codes(sections[0]), ['revenue']);
   assert.deepEqual(sections[0].rows[0].values, [0]);
 });
+
+test('a level payload of one branch has people columns and no total', () => {
+  const { sections } = planBoard(branchPayload({ parent_group: undefined, level_filter: { position_ids: [3] } }));
+  const [barbers] = sections;
+  assert.deepEqual(titles(barbers), ['P1', 'P2']);
+  assert.deepEqual(barbers.columns.map((column) => column.isTotal), [false, false]);
+  assert.deepEqual(barbers.columns.map((column) => column.branch), [null, null]);
+  assert.equal(barbers.hasWeighted, false);
+});
+
+test('a network level payload lists people of every branch and names each one\'s branch', () => {
+  const at = (staffId, companyId, title, plans) => ({
+    ...person(staffId, 'barber', plans),
+    company_id: companyId,
+    company_title: title,
+  });
+  const payload = {
+    view_scope: 'staff',
+    metrics,
+    groups: [
+      at(1, 10, 'Арбат', { revenue: 100, clients: 40 }),
+      at(2, 20, 'Тверская', { revenue: 200, clients: 50 }),
+    ],
+    plan_rules: null,
+    level_filter: { position_ids: [3, 4] },
+  };
+  const { sections } = planBoard(payload);
+  assert.deepEqual(sections.map((section) => section.key), ['barber']);
+  const [barbers] = sections;
+  assert.deepEqual(titles(barbers), ['P1', 'P2']);
+  assert.deepEqual(barbers.columns.map((column) => column.branch), ['Арбат', 'Тверская']);
+  assert.equal(barbers.showRule, false);
+  assert.deepEqual(barbers.rows.find((row) => row.code === 'revenue').values, [100, 200]);
+});

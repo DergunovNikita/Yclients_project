@@ -201,7 +201,8 @@ async def test_dashboard_reports_registry_contract(async_session):
     for item in data:
         assert set(item) == {'id', 'title', 'description', 'group', 'themes', 'roles', 'filters', 'aliases'}
         assert item['description'] and item['description'] != 'Отчет строится на текущих данных YClients в PostgreSQL.'
-        assert set(item['filters']) == {'date_range', 'staff', 'granularity', 'compare'}
+        assert set(item['filters']) == {'date_range', 'staff', 'staff_level', 'granularity', 'compare'}
+        assert item['filters']['staff_level'] is (item['id'] == 'staff_leaderboard')
     assert by_id['financial_overview']['filters']['compare'] is True
     assert by_id['financial_overview']['filters']['granularity'] is True
     assert 'revenue_dynamics' in by_id['financial_overview']['aliases']

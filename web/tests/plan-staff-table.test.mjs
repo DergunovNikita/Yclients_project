@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { mergedStaffTable } from '../src/planStaffTable.js';
+import { mergedStaffTable, spansBranches } from '../src/planStaffTable.js';
 
 const metrics = ['revenue', 'clients', 'wax_qty', 'opz_pct', 'extra_services_qty', 'reviews_qty'].map((code) => ({ code }));
 const cell = (code, scope = 'personal') => ({ code, fact: 1, calculation_scope: scope });
@@ -81,4 +81,21 @@ test('rows without a category form their own trailing block', () => {
 
 test('no staff rows give no blocks', () => {
   assert.deepEqual(mergedStaffTable({ groups: [], metrics, metricSets }), { columns: [], blocks: [] });
+});
+
+test('a single-branch level payload without a branch total builds the same table', () => {
+  const { columns, blocks } = mergedStaffTable({ groups: [barber(1), barber(2)], metrics, metricSets });
+  assert.deepEqual(blocks.map((block) => [block.category, block.groups.length]), [['barber', 2]]);
+  assert.deepEqual(columns.map((column) => column.code), ['revenue', 'clients', 'wax_qty', 'opz_pct']);
+});
+
+test('rows of several branches share one barber block and are told apart by branch', () => {
+  const fromBranch = (id, companyId, title) => ({ ...barber(id), company_id: companyId, company_title: title });
+  const groups = [fromBranch(1, 10, 'Арбат'), fromBranch(2, 10, 'Арбат'), fromBranch(3, 20, 'Тверская')];
+  const { blocks } = mergedStaffTable({ groups, metrics, metricSets });
+  assert.deepEqual(blocks.map((block) => [block.category, block.groups.length]), [['barber', 3]]);
+  assert.equal(spansBranches(groups), true);
+  assert.equal(spansBranches(groups.slice(0, 2)), false);
+  assert.equal(spansBranches([barber(1)]), false);
+  assert.equal(spansBranches(), false);
 });

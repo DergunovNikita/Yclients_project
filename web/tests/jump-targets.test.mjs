@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   activeTargetIndex,
   collectJumpTargets,
+  effectiveTop,
   jumpTargetsSignature,
   shouldShowJumpNav,
 } from '../src/jumpTargets.js';
@@ -68,4 +69,17 @@ test('every jump label key exists in all locales', () => {
       assert.equal(typeof value, 'string', `${locale}: ${key}`);
     }
   }
+});
+
+test('a block parked under sticky filters is current even though its margin exceeds the offset', () => {
+  // Two-line filter row: the jumped-to block rests at 182px (margin), the previous one is far above.
+  const tops = [-600, 182, 900];
+  assert.equal(activeTargetIndex(tops), 0);
+  const lowered = tops.map((top, index) => effectiveTop(top, index === 1 ? 182 : 0));
+  assert.equal(activeTargetIndex(lowered), 1);
+  // No margin, or one below the offset, changes nothing; a block still below its parking spot is not current.
+  assert.equal(effectiveTop(300, 0), 300);
+  assert.equal(effectiveTop(300, 84), 300);
+  assert.equal(effectiveTop(300, Number.NaN), 300);
+  assert.equal(activeTargetIndex([-600, 182 + 40, 900].map((top, index) => effectiveTop(top, index === 1 ? 182 : 0))), 0);
 });

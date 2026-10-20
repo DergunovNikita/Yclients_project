@@ -219,10 +219,17 @@ test('the local-estimate notice is for YClients not answering, not for every loc
   assert.match(notice({ ...local, local_reason: 'upstream_error' }), /Точные метрики YClients временно недоступны/);
   assert.equal(notice({ ...local, local_reason: 'period_includes_today' }), '');
   assert.equal(notice({ ...local, local_reason: 'reporting_window' }), '');
+  assert.equal(notice({ ...local, local_reason: 'staff_group' }), '');
   // An older API that does not say why stays quiet rather than crying wolf.
   assert.equal(notice(local), '');
   assert.match(notice({ source_status: 'unavailable' }), /временно недоступны/);
   assert.equal(notice({ source_status: 'ready' }), '');
+});
+
+test('client cards without a report link when the report url builder declines', () => {
+  const html = cards.cardsHtml(cards.clientsCards(SUMMARIES.full, () => null));
+  assert.doesNotMatch(html, /data-report-link/);
+  assert.match(cards.cardsHtml(cards.clientsCards(SUMMARIES.full, reportUrl)), /data-report-link/);
 });
 
 test('a percent missing because the previous window has no data is not reported as "was 0"', () => {

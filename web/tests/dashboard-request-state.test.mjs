@@ -10,6 +10,7 @@ import {
   REPORT_FILTER_KEYS,
   reportCompareParams,
   reportDataCacheKey,
+  reportDataParams,
   reportDataState,
   reportFiltersFromParams,
   reportHistoryAction,
@@ -81,6 +82,7 @@ test('year-over-year filter metadata hides dates and null chart points stay unla
     dateRange: false,
     granularity: false,
     compare: false,
+    staffLevel: false,
   });
   assert.equal(shouldRenderReportDataLabel(null), false);
   assert.equal(shouldRenderReportDataLabel(undefined), false);
@@ -411,6 +413,7 @@ test('a report link carries the whole filter state, not just what it mentions', 
     company_id: '7',
     staff_id: '42',
     granularity: 'month',
+    staff_position_ids: '',
     compare_start_date: '2025-08-01',
     compare_end_date: '2025-08-31',
     compare_enabled: true,
@@ -444,6 +447,7 @@ test('a report link reads back exactly what it was written from', () => {
     company_id: '7',
     staff_id: '42',
     granularity: 'month',
+    staff_position_ids: '',
     compare_start_date: '2025-08-01',
     compare_end_date: '2025-08-31',
     compare_enabled: true,
@@ -658,4 +662,23 @@ test('a report without a staff filter neither asks for one nor links to one', ()
   });
   assert.equal(both.staff_id, '');
   assert.equal(both.start_date, '2026-08-01');
+});
+
+test('the level filter is offered only by a report whose catalog entry asks for it', () => {
+  assert.equal(reportFilterVisibility({}).staffLevel, false);
+  assert.equal(reportFilterVisibility({ staff_level: false }).staffLevel, false);
+  assert.equal(reportFilterVisibility({ staff_level: true }).staffLevel, true);
+});
+
+test('a level rides in the request and the link of a report that offers it, and nowhere else', () => {
+  const filters = { start_date: '2026-08-01', end_date: '2026-08-31', staff_position_ids: '7,12' };
+  assert.equal(reportDataParams({ reportId: 'staff_leaderboard', filters, meta: { staff_level: true } }).staff_position_ids, '7,12');
+  assert.equal(reportDataParams({ reportId: 'other', filters, meta: {} }).staff_position_ids, undefined);
+  assert.equal(reportDataParams({ reportId: 'other', filters, meta: { staff_level: false } }).staff_position_ids, undefined);
+
+  const link = reportSearchParams(filters);
+  assert.equal(link.get('staff_position_ids'), '7,12');
+  assert.equal(reportFiltersFromParams(new URLSearchParams(link.toString())).staff_position_ids, '7,12');
+  assert.equal(reportSearchParams({ ...filters, staff_position_ids: '' }).has('staff_position_ids'), false);
+  assert.equal(reportFiltersFromParams(new URLSearchParams('start_date=2026-08-01')).staff_position_ids, '');
 });

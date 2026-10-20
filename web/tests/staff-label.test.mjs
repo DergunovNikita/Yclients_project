@@ -25,6 +25,22 @@ test('the branch suffix follows the label and stays in the title name', () => {
   );
 });
 
+test('a barber level replaces the generic role word', () => {
+  const level = { key: 'премиумбарбер', title: 'ПРЕМИУМ-барбер' };
+  assert.deepEqual(
+    staffOption({ name: 'Рауф', category: 'barber', level }, { branchTitle: 'Арбат', translate }),
+    { name: 'Рауф · Арбат', text: 'Рауф — ПРЕМИУМ-барбер · Арбат' },
+  );
+  assert.equal(
+    staffOption({ name: 'Рауф', category: 'mixed', level }, { branchTitle: 'Арбат', translate }).text,
+    'Рауф — ПРЕМИУМ-барбер / администратор · Арбат',
+  );
+  assert.equal(
+    staffOption({ name: 'Рауф', category: 'barber', level: null }, { translate }).text,
+    'Рауф — барбер',
+  );
+});
+
 test('a row without a category (portal owner) is shown as before', () => {
   assert.deepEqual(staffOption({ name: 'Анна', category: null }, { branchTitle: 'Арбат', translate }), {
     name: 'Анна · Арбат',

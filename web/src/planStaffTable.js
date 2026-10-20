@@ -40,3 +40,11 @@ export function mergedStaffTable({ groups, metrics, metricSets = {} }) {
   });
   return { columns: metrics.filter((metric) => usedCodes.has(metric.code)), blocks };
 }
+
+/**
+ * Whether the staff rows come from several branches (a level filter over the whole network), in which case each
+ * person needs their branch next to the name.
+ */
+export function spansBranches(groups = []) {
+  return new Set(groups.map((group) => group.company_id).filter((id) => id !== undefined && id !== null)).size > 1;
+}

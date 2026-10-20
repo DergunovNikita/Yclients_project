@@ -52,6 +52,8 @@ class ReportRequest:
     allowed_company_ids: list[int] | None
     factual_at: datetime
     period_preset: str | None = None
+    # Barber level filter (position ids); set only for reports that offer it and when no staff is selected.
+    staff_position_ids: frozenset[int] | None = None
     # True for the run that supplies the comparison window: category charts then carry every row, not the top few,
     # because comparison looks the current top rows up by label and a row that was ranked lower would get no point.
     for_comparison: bool = False

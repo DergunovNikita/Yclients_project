@@ -24,6 +24,10 @@ from report_payload import (
 
 logger = logging.getLogger('yclients.reports')
 
+LEVEL_HIDDEN_TABLES = frozenset({
+    'extra_services_admin', 'cosmo_admin', 'opz_admin', 'reviews_admin', 'avg_check_plan_branch',
+})
+
 
 def _is_retryable(error: BaseException) -> bool:
     """Whether trying again could help: the connection or the pool failed, not the statement.
@@ -54,6 +58,7 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
             # The boards read the branch row only when no staff is selected.
             include_branch_row=staff_id is None,
             factual_at=req.factual_at,
+            staff_position_ids=req.staff_position_ids,
         )
     except (SQLAlchemyError, OSError) as error:
         if not _is_retryable(error):
@@ -73,6 +78,7 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
             start.isoformat(), end.isoformat(), company_id, round((time.perf_counter() - started_at) * 1000),
         )
     boards = plan.get('staff_leaderboards', {})
+    level_filter = plan.get('level_filter')
     partial_reasons = set(boards.get('_partial_reasons') or [])
     if partial_reasons:
         base['source_status'] = 'partial'
@@ -98,7 +104,17 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
     cosmo_share_col = ('share_pct', 'Доля продаж косметики, %', PERCENT_FORMAT)
 
     revenue_barber = boards.get('revenue_barber', [])
-    if any(
+    if level_filter is not None:
+        titles = ', '.join(level_filter.get('titles') or [])
+        base['notes'].append({
+            'kind': 'info',
+            'title': 'Рейтинги по ролям барберов',
+            'text': (
+                f'Показаны только мастера выбранных ролей{f": {titles}" if titles else ""}. '
+                'Рейтинги администраторов и итоги по барбершопам скрыты: у них нет роли.'
+            ),
+        })
+    elif any(
         boards.get(key)
         for key in (
             'extra_services_admin',
@@ -239,6 +255,18 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
             hide_when_empty=True,
         ),
         table(
+            'avg_check_barber',
+            'Топ по среднему чеку — мастера',
+            [
+                staff_col,
+                branch_col,
+                ('value', 'Ср. чек, ₽', MONEY_FORMAT),
+                ('visits', 'Завершённые визиты', NUMBER_FORMAT),
+            ],
+            boards.get('avg_check_barber', []),
+            hide_when_empty=True,
+        ),
+        table(
             'avg_check_plan_branch',
             'Топ выполнения плана среднего чека — барбершопы',
             [
@@ -264,4 +292,7 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
             hide_when_empty=True,
         ),
     ]
+    if level_filter is not None:
+        # Administrators have no level, and a branch total says nothing about one level of its barbers.
+        base['tables'] = [item for item in base['tables'] if item['id'] not in LEVEL_HIDDEN_TABLES]
     return base

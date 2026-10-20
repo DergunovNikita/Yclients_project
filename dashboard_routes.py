@@ -57,6 +57,8 @@ from dashboard_service import (
     fetch_staff,
     fetch_summary,
     fetch_top_services,
+    level_group_staff_count,
+    staff_ids_for_levels,
 )
 from dashboard_reports import (
     BRANCH_PAYMENT_REPORTS,
@@ -294,6 +296,25 @@ def _assert_manual_fact_rows_allowed(
     for item in items:
         if (item.company_id, item.staff_id) not in staff_keys:
             raise HTTPException(status_code=403, detail='Staff member not allowed')
+
+
+MAX_STAFF_POSITION_IDS = 200
+
+
+def _parse_staff_position_ids(raw: str | None) -> frozenset[int] | None:
+    """`staff_position_ids` query value: comma-separated positive ints, `None` when absent or empty."""
+    if raw is None or not raw.strip():
+        return None
+    ids: set[int] = set()
+    for part in raw.split(','):
+        part = part.strip()
+        # The length check comes first: `int()` of a thousands-digit string raises instead of answering.
+        if not (part.isascii() and part.isdigit() and len(part) <= 10 and 0 < int(part) <= 2**31 - 1):
+            raise HTTPException(status_code=400, detail='staff_position_ids must be comma-separated positive integers')
+        ids.add(int(part))
+    if len(ids) > MAX_STAFF_POSITION_IDS:
+        raise HTTPException(status_code=400, detail=f'staff_position_ids takes at most {MAX_STAFF_POSITION_IDS} ids')
+    return frozenset(ids)
 
 
 def _hide_summary_financials(summary: dict[str, Any], hidden_codes: frozenset[str]) -> dict[str, Any]:
@@ -571,11 +592,13 @@ async def dashboard_report_data(
         False, description='Compare with the Overview baseline of the period; an explicit compare window wins'
     ),
     period_preset: PeriodPreset = None,
+    staff_position_ids: str | None = Query(None, description='Comma-separated barber level position ids'),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
     is_demo: bool = Depends(is_demo_request),
 ):
     start, end = _parse_range(start_date, end_date)
+    position_ids = _parse_staff_position_ids(staff_position_ids)
     # Every gate speaks about the canonical report: a retired id must not dodge the check
     # of the report it now resolves to, nor inherit the one it used to have.
     canonical_id = resolve_report_id(report_id)
@@ -649,6 +672,7 @@ async def dashboard_report_data(
                 allowed_company_ids=scope['allowed_company_ids'],
                 period_preset=period_preset,
                 compare_previous=compare_previous,
+                staff_position_ids=position_ids,
             )
         except ReportInputError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -742,10 +766,12 @@ async def dashboard_widget_plan_fact(
     end_date: date = Query(...),
     company_id: int | None = Query(None),
     staff_id: int | None = Query(None),
+    staff_position_ids: str | None = Query(None, description='Comma-separated barber level position ids'),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
+    position_ids = _parse_staff_position_ids(staff_position_ids)
     scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
     branch_ids, force_allowed = user_branch_ids(ctx)
     plan_fact = await fetch_plan_fact(
@@ -758,6 +784,7 @@ async def dashboard_widget_plan_fact(
         force_allowed=force_allowed,
         # `effective_staff_id` clamped a personal role to its own row: whole-branch totals are not its to read.
         include_branch_row=ctx.full_access or ctx.role in BRANCH_SCOPE_ROLES,
+        staff_position_ids=position_ids,
     )
     hidden = hidden_money_codes(ctx)
     if hidden:
@@ -1140,12 +1167,28 @@ async def dashboard_bundle(
     company_id: int | None = Query(None),
     staff_id: int | None = Query(None),
     period_preset: PeriodPreset = None,
+    staff_position_ids: str | None = Query(None, description='Comma-separated barber level position ids'),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
+    position_ids = _parse_staff_position_ids(staff_position_ids)
     scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
     factual_at = dashboard_service.factual_now()
+    level_filter = None
+    if position_ids is not None and staff_id is None:
+        # The selected barbers stand in for the staff filter as a group, the same people in every window. A selected
+        # (or clamped) person wins and the level is ignored, as in Plan/fact. An empty group stays a group: it
+        # matches nobody instead of falling back to the whole branch.
+        group, titles = await staff_ids_for_levels(
+            db, end, scope['company_id'], scope['allowed_company_ids'], position_ids
+        )
+        # `staff_count` counts the people the numbers are about: members still working or with a completed visit.
+        staff_count = await level_group_staff_count(
+            db, group, start, end, scope['company_id'], scope['allowed_company_ids'], factual_at
+        )
+        level_filter = {'position_ids': sorted(position_ids), 'titles': titles, 'staff_count': staff_count}
+        staff_id = group
     summary = await fetch_summary(
         db,
         start,
@@ -1156,6 +1199,8 @@ async def dashboard_bundle(
         factual_at=factual_at,
         period_preset=period_preset,
     )
+    if level_filter is not None:
+        summary['level_filter'] = level_filter
     hidden = hidden_money_codes(ctx)
     can_see_financials = can_view_financials(ctx)
     daily = await fetch_revenue_daily(

@@ -17,6 +17,7 @@ from models import (
     ServiceCatalog,
     ServiceCategoryCatalog,
     Staff,
+    StaffPositionMonth,
     StaffSchedule,
     SyncState,
     SyncSourceState,
@@ -1184,7 +1185,9 @@ def test_sync_groups_and_companies_creates_adopts_and_keeps_titles():
 
 
 def test_sync_staff_scopes_external_id_by_internal_company():
-    with sqlite_session_with_system([Group.__table__, Company.__table__, Staff.__table__]) as db:
+    with sqlite_session_with_system(
+        [Group.__table__, Company.__table__, Staff.__table__, StaffPositionMonth.__table__]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add_all([
             Company(id=1, title='Salon 1', group_id=1),
@@ -2079,7 +2082,9 @@ def test_sync_staff_schedules_rejects_unusable_snapshot_before_replacement(paylo
 
 
 def test_sync_staff_marks_missing_staff_as_fired():
-    with sqlite_session_with_system([Group.__table__, Company.__table__, Staff.__table__]) as db:
+    with sqlite_session_with_system(
+        [Group.__table__, Company.__table__, Staff.__table__, StaffPositionMonth.__table__]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.add(Staff(id=1, name='Existing', company_id=1, fired=0))
@@ -2109,7 +2114,9 @@ def test_sync_staff_marks_missing_staff_as_fired():
 
 
 def test_sync_staff_ignores_invalid_staff_email():
-    with sqlite_session_with_system([Group.__table__, Company.__table__, Staff.__table__]) as db:
+    with sqlite_session_with_system(
+        [Group.__table__, Company.__table__, Staff.__table__, StaffPositionMonth.__table__]
+    ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
         db.commit()

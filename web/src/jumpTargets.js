@@ -49,3 +49,12 @@ export function activeTargetIndex(tops, { offset = 120, atBottom = false } = {})
   });
   return active;
 }
+
+/**
+ * A block parked by `scrollIntoView` rests at its own `scroll-margin-top`, which can lie below the activation offset
+ * (the report blocks under the sticky filters: ~110-180px). Its top edge is lowered by the overshoot, so the block
+ * the reader just jumped to is current rather than the one before it.
+ */
+export function effectiveTop(top, scrollMarginTop, { offset = 120, slack = 8 } = {}) {
+  return top - Math.max(0, (Number(scrollMarginTop) || 0) + slack - offset);
+}

@@ -51,7 +51,7 @@ import {
 } from './dashboardRequestState.js';
 
 import { escapeHtml } from './html.js';
-import { mergedStaffTable } from './planStaffTable.js';
+import { mergedStaffTable, spansBranches } from './planStaffTable.js';
 import { alignedColumnWidths, unionColumnKeys } from './planTableColumns.js';
 import {
   administratorCards,
@@ -100,6 +100,13 @@ import './editorDrafts.css';
 import { bindDraftFlush, createDraftController, fingerprint } from './editorDrafts.js';
 import { formatBranchDateTime } from './timestamps.js';
 import { staffOption } from './staffLabel.js';
+import {
+  chosenLevel,
+  levelReportParams,
+  levelRequestParam,
+  levelSelection,
+  selectableLevelOptions,
+} from './staffLevels.js';
 import { initReports } from './reports/index.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, roleLabel, t } from './i18n.js';
 import {
@@ -244,6 +251,7 @@ const filterEls = {
     end: document.getElementById('overview-end'),
     branch: document.getElementById('overview-branch'),
     staff: document.getElementById('overview-staff'),
+    level: document.getElementById('overview-level'),
     load: document.getElementById('overview-load'),
   },
   plan: {
@@ -252,6 +260,7 @@ const filterEls = {
     end: document.getElementById('plan-end'),
     branch: document.getElementById('plan-branch'),
     staff: document.getElementById('plan-staff'),
+    level: document.getElementById('plan-level'),
     load: document.getElementById('plan-load'),
   },
   reviewFacts: {
@@ -279,6 +288,9 @@ Object.values(filterEls).forEach((filter) => {
   customFilterDropdowns[filter.branch.id] = enhanceSelect(filter.branch, { placeholder: t('dash.allBranches') });
   if (filter.staff) {
     customFilterDropdowns[filter.staff.id] = enhanceSelect(filter.staff, { placeholder: t('dash.allWorkers') });
+  }
+  if (filter.level) {
+    customFilterDropdowns[filter.level.id] = enhanceSelect(filter.level, { placeholder: t('dash.allLevels') });
   }
 });
 
@@ -864,9 +876,14 @@ function previousMonthValue(month) {
   return monthValue(new Date(year, monthNumber - 2, 1));
 }
 
-function overviewReportUrl(reportId) {
+// `levelFilter` is the summary's `level_filter`: under it only a report that can filter by role gets a link, and
+// it carries the role. Null means no link at all.
+function overviewReportUrl(reportId, levelFilter) {
+  const levelParams = levelReportParams(reportId, levelFilter);
+  if (!levelParams) return null;
   const filter = filterEls.overview;
   const params = reportSearchParams({
+    ...levelParams,
     start_date: filter.start.value,
     end_date: filter.end.value,
     company_id: filter.branch.value,
@@ -890,9 +907,27 @@ function renderKpi(summary) {
 // Where the OPZ chart lives when the Appointments section is not shown (an administrator selected).
 const opzChartHome = els.opzChartPanel.parentElement;
 
+// A role filter names its group where a chosen person would be named; the server never combines it with a person.
+function renderLevelScope(levelFilter) {
+  els.staffPersonalScope.hidden = false;
+  els.staffPersonalScope.removeAttribute('data-jump-target');
+  els.staffAdminMetrics.hidden = true;
+  els.staffAdminOpz.hidden = true;
+  opzChartHome.appendChild(els.opzChartPanel);
+  els.staffPersonalTitle.textContent = t('dash.levelScope', {
+    title: (levelFilter.titles || []).join(', ') || t('dash.level'),
+    count: formatNumber(levelFilter.staff_count ?? 0),
+  });
+  els.staffPersonalDescription.textContent = t('dash.levelScopeDescription');
+}
+
 function renderStaffPersonalScope(summary) {
   const selectedOption = filterEls.overview.staff.selectedOptions[0];
   const hasSelectedStaff = Boolean(filterEls.overview.staff.value && selectedOption);
+  if (!hasSelectedStaff && summary.level_filter) {
+    renderLevelScope(summary.level_filter);
+    return;
+  }
   const administrator = hasSelectedStaff && usesAdministratorSchedule(summary);
   els.staffPersonalScope.hidden = !hasSelectedStaff;
   // The block gets a jump-nav entry only when it holds cards; for a barber it is a heading over the sections below.
@@ -954,7 +989,7 @@ function renderVisitMetrics(summary) {
 }
 
 function renderClientsMetrics(summary) {
-  renderCards(els.clientsMetrics, clientsCards(summary, overviewReportUrl));
+  renderCards(els.clientsMetrics, clientsCards(summary, (reportId) => overviewReportUrl(reportId, summary.level_filter)));
 }
 
 function renderAppointmentsMetrics(summary) {
@@ -1265,14 +1300,18 @@ const PLAN_ROW_TYPES = [
 
 // `cells` (code -> cell) lets a staff table leave a column empty for a row that does not
 // carry it; without it every column reads the group's own metric of that code.
-function renderPlanGroupRows(group, metrics, cells = null) {
+function renderPlanGroupRows(group, metrics, cells = null, { showBranch = false } = {}) {
   const cellsByCode = cells || new Map((group.metrics || []).map((cell) => [cell.code, cell]));
   return PLAN_ROW_TYPES
     .map(([field, labelKey], index) => `
       <tr>
         ${
           index === 0
-            ? `<th class="branch-cell" rowspan="${PLAN_ROW_TYPES.length}">${escapeHtml(group.title)}</th>`
+            ? `<th class="branch-cell" rowspan="${PLAN_ROW_TYPES.length}">${escapeHtml(group.title)}${
+              showBranch && group.company_title
+                ? `<span class="branch-cell-sub">${escapeHtml(group.company_title)}</span>`
+                : ''
+            }</th>`
             : ''
         }
         <td class="row-label">${t(labelKey)}</td>
@@ -1373,6 +1412,7 @@ const STAFF_BLOCK_JUMPS = {
 function renderMergedStaffSection(groups, metricSets, metrics) {
   const { columns, blocks } = mergedStaffTable({ groups, metrics, metricSets });
   if (!blocks.length || !columns.length) return '';
+  const showBranch = spansBranches(groups);
   const staffCount = blocks.reduce((total, block) => total + block.groups.length, 0);
   const body = blocks
     .map((block) => {
@@ -1385,7 +1425,7 @@ function renderMergedStaffSection(groups, metricSets, metrics) {
             <span class="plan-subheader-label">${escapeHtml(label)}${mark} · ${escapeHtml(t('dash.staffCount', { count: block.groups.length }))}</span>
           </th>
         </tr>
-        ${block.groups.map((row) => renderPlanGroupRows(row.group, columns, row.cells)).join('')}
+        ${block.groups.map((row) => renderPlanGroupRows(row.group, columns, row.cells, { showBranch })).join('')}
       `;
     })
     .join('');
@@ -1494,7 +1534,8 @@ function renderPlanInsights(planFact) {
   destroyChart('goodsKpi');
   if (!els.planInsights) return;
 
-  const goodsKpis = planFact?.goods_kpi_execution || [];
+  // The goods KPI is a branch figure: next to the rows of one level it would describe other people.
+  const goodsKpis = planFact?.level_filter ? [] : planFact?.goods_kpi_execution || [];
   const selectedStaffPlan = planFact?.selected_staff_plan;
   const panels = [];
 
@@ -1799,6 +1840,9 @@ function formatPlanRule(rule) {
 function renderPlanBoardSection(boardSection, isBranchView) {
   const title = t(STAFF_BLOCK_LABEL_KEYS[boardSection.key]);
   const columnTitle = (column) => (column.isTotal && isBranchView ? t('dash.planBoardTotal') : column.title);
+  const columnHeadHtml = (column) => `${escapeHtml(columnTitle(column))}${
+    column.branch ? `<span class="branch-cell-sub">${escapeHtml(column.branch)}</span>` : ''
+  }`;
   const cellClass = (column, extra = '') => `number${column.isTotal ? ' plan-board-total' : ''}${extra}`;
   const rows = boardSection.rows
     .map((row) => `
@@ -1832,7 +1876,7 @@ function renderPlanBoardSection(boardSection, isBranchView) {
               <th>${t('dash.planBoardMetric')}</th>
               ${boardSection.showRule ? `<th>${t('dash.planBoardRule')}</th>` : ''}
               ${boardSection.columns
-                .map((column) => `<th class="${cellClass(column)}">${escapeHtml(columnTitle(column))}</th>`)
+                .map((column) => `<th class="${cellClass(column)}">${columnHeadHtml(column)}</th>`)
                 .join('')}
             </tr>
           </thead>
@@ -1898,7 +1942,7 @@ function renderPlanFact(planFact) {
   const planPeriodText = planPeriod ? t('dash.planPeriodMeta', { start: planPeriod.start, end: planPeriod.end }) : '';
   const selectedStaff = planFact?.selected_staff;
   const scopeText = planFact?.view_scope === 'staff'
-    ? `${planFact.branch?.title || t('dash.branch')} · ${selectedStaff?.name || t('dash.staffPlural')}`
+    ? `${planFact.branch?.title || (planFact.level_filter ? t('dash.allBranches') : t('dash.branch'))} · ${selectedStaff?.name || t('dash.staffPlural')}`
     : t('dash.networkAndBranches');
   els.planMeta.textContent = t('dash.planMeta', { scope: scopeText, count: groups.length, period: planPeriodText });
   syncPlanTableStickyOffsets();
@@ -2535,6 +2579,39 @@ function renderBranchOptions(filter) {
   customFilterDropdowns[filter.branch.id]?.refresh();
 }
 
+// The level select is built from the staff list the worker select shows, so both follow the same period and branch.
+// The chosen level is kept by its key: the id set differs between the network and one branch. A level the new list
+// no longer has falls back to «all levels»; with nothing to choose the select is hidden.
+function renderLevelOptions(filter, staffItems) {
+  if (!filter.level) return;
+  const options = selectableLevelOptions(staffItems, currentUser);
+  const selected = levelSelection(options, chosenLevel(filter.level));
+  filter.level.innerHTML = [{ key: '', value: '', label: t('dash.allLevels') }, ...options]
+    .map((option) => `<option value="${escapeHtml(option.value)}" data-key="${escapeHtml(option.key)}">${escapeHtml(option.label)}</option>`)
+    .join('');
+  filter.level.value = selected;
+  customFilterDropdowns[filter.level.id]?.refresh();
+  const field = filter.level.closest('label');
+  if (field) field.hidden = !options.length;
+  filter.level.closest('.toolbar')?.classList.toggle('toolbar--level', options.length > 0);
+}
+
+// A person and a level exclude each other: the last choice wins and clears the other select.
+function bindStaffLevelExclusion(filter, load) {
+  const clear = (select) => {
+    select.value = '';
+    customFilterDropdowns[select.id]?.refresh();
+  };
+  filter.staff.addEventListener('change', () => {
+    if (filter.staff.value) clear(filter.level);
+    load();
+  });
+  filter.level.addEventListener('change', () => {
+    if (filter.level.value) clear(filter.staff);
+    load();
+  });
+}
+
 async function loadStaff(filter, { force = false } = {}) {
   if (force) loadedStaffFilters.delete(filter);
   if (loadedStaffFilters.has(filter)) return 'ready';
@@ -2573,6 +2650,7 @@ async function loadStaff(filter, { force = false } = {}) {
     });
     filter.staff.value = staffOptions.some((staff) => String(staff.id) === selected) ? selected : '';
     customFilterDropdowns[filter.staff.id]?.refresh();
+    renderLevelOptions(filter, staffOptions);
     loadedStaffFilters.add(filter);
     clearFilterWarning(filter.staff);
     return 'ready';
@@ -2740,7 +2818,11 @@ async function loadPlanFact() {
   // Sync status is independent of the view payload, so start it in parallel. It never rejects.
   const syncStatus = loadSyncStatus();
   try {
-    const payload = await fetchJson('/dashboard/widget/plan_fact', filterParams(filter), {
+    // The level rides along on these two requests only (plan/fact and the Overview bundle), never on the rest.
+    const payload = await fetchJson('/dashboard/widget/plan_fact', {
+      ...filterParams(filter),
+      staff_position_ids: levelRequestParam(filter),
+    }, {
       retry: () => loadPlanFact(),
       signal: request.signal,
     });
@@ -2773,6 +2855,7 @@ async function loadDashboard() {
   try {
     const payload = await fetchJson('/dashboard/bundle', {
       ...filterParams(filter),
+      staff_position_ids: levelRequestParam(filter),
       period_preset: activeOverviewPreset(),
     }, {
       retry: () => loadDashboard(),
@@ -2981,6 +3064,7 @@ async function init() {
     setApiState,
     pushHistory: pushDashboardHistory,
     replaceHistory: replaceDashboardHistory,
+    currentUser: () => currentUser,
   });
   mountLanguageSwitcher(document.getElementById('lang-switcher'), {
     beforeChange: () => runDashboardNavigation(async () => {}),
@@ -3024,7 +3108,7 @@ filterEls.overview.month.addEventListener('change', async () => {
 filterEls.overview.branch.addEventListener('change', async () => {
   await refreshStaffForBranch(filterEls.overview, loadDashboard);
 });
-filterEls.overview.staff.addEventListener('change', () => loadDashboard());
+bindStaffLevelExclusion(filterEls.overview, () => loadDashboard());
 els.overviewPresetButtons.forEach((button) => {
   button.addEventListener('click', async () => {
     setOverviewPreset(button.dataset.overviewPreset || 'month');
@@ -3046,7 +3130,7 @@ filterEls.plan.month.addEventListener('change', async () => {
 filterEls.plan.branch.addEventListener('change', async () => {
   await refreshStaffForBranch(filterEls.plan, loadPlanFact);
 });
-filterEls.plan.staff.addEventListener('change', () => loadPlanFact());
+bindStaffLevelExclusion(filterEls.plan, () => loadPlanFact());
 els.planViewButtons.forEach((button) => {
   button.addEventListener('click', () => setPlanViewMode(button.dataset.planView));
 });

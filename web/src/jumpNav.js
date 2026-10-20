@@ -1,6 +1,12 @@
 import './jumpNav.css';
 import { t } from './i18n.js';
-import { activeTargetIndex, collectJumpTargets, jumpTargetsSignature, shouldShowJumpNav } from './jumpTargets.js';
+import {
+  activeTargetIndex,
+  collectJumpTargets,
+  effectiveTop,
+  jumpTargetsSignature,
+  shouldShowJumpNav,
+} from './jumpTargets.js';
 
 // Blocks may be re-rendered at any time (plan table, report charts), so beside the explicit event
 // the nav also watches the content for changes.
@@ -27,7 +33,11 @@ export function mountJumpNav({ getRoot = activeView, observeRoot = document.quer
   function currentIndex() {
     const atBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - BOTTOM_TOLERANCE_PX;
     return activeTargetIndex(
-      targets.map((target) => target.element.getBoundingClientRect().top),
+      targets.map((target) => effectiveTop(
+        target.element.getBoundingClientRect().top,
+        Number.parseFloat(getComputedStyle(target.element).scrollMarginTop),
+        { offset: ACTIVE_OFFSET_PX },
+      )),
       { offset: ACTIVE_OFFSET_PX, atBottom },
     );
   }

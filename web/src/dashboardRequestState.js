@@ -48,6 +48,7 @@ export const REPORT_FILTER_KEYS = [
   'company_id',
   'staff_id',
   'granularity',
+  'staff_position_ids',
 ];
 
 /**
@@ -104,13 +105,15 @@ export function reportComparisonRequest(filters = {}) {
  * Query of `/dashboard/reports/data`.
  *
  * Parameters a report does not offer are not sent: a hidden granularity select would otherwise
- * keep re-bucketing it invisibly, and a ticked comparison box would ask a report that cannot compare.
+ * keep re-bucketing it invisibly, a ticked comparison box would ask a report that cannot compare, and a level
+ * picked on the ratings would narrow every other report invisibly.
  */
 export function reportDataParams({ reportId, filters, meta = {} }) {
   const visibility = reportFilterVisibility(meta);
   const params = { report_id: reportId };
   REPORT_FILTER_KEYS.forEach((key) => {
     if (key === 'granularity' && !visibility.granularity) return;
+    if (key === 'staff_position_ids' && !visibility.staffLevel) return;
     params[key] = filters[key];
   });
   if (filters.period_preset) params.period_preset = filters.period_preset;
@@ -209,6 +212,8 @@ export function reportFilterVisibility(filters = {}) {
     dateRange: filters.date_range !== false,
     granularity: filters.granularity !== false,
     compare: filters.compare !== false,
+    // Opt-in, unlike the others: only the reports that rank people by a barber level offer it.
+    staffLevel: filters.staff_level === true,
   };
 }
 

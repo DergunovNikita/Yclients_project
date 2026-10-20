@@ -25,6 +25,7 @@ from sqlalchemy import (
     delete,
     exists,
     extract,
+    false,
     func,
     not_,
     or_,
@@ -59,6 +60,7 @@ from models import (
     ServiceCatalog,
     ServiceLabel,
     Staff,
+    StaffPositionMonth,
     StaffSchedule,
     SyncSourceState,
     Transaction,
@@ -361,7 +363,7 @@ async def _local_appointments_breakdown(
     company_ids: list[int],
     start: date,
     end: date,
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     factual_at: Optional[datetime] = None,
     *,
     local_reason: str,
@@ -369,7 +371,8 @@ async def _local_appointments_breakdown(
     """Appointment counts from the synchronized records.
 
     `local_reason`: `period_includes_today` (YClients' stats do not cover today), `reporting_window` (they know
-    nothing about a branch's reporting window) or `upstream_error` (the only one that is a degradation).
+    nothing about a branch's reporting window), `staff_group` (they filter one employee at most) or `upstream_error`
+    (the only one that is a degradation).
     """
     if not company_ids:
         return _ready_appointments_breakdown(
@@ -387,7 +390,7 @@ async def _local_appointments_breakdown(
     if factual_at is not None:
         filters.append(_appointment_factual_at_condition(factual_at))
     if staff_id is not None:
-        filters.append(Appointment.staff_id == staff_id)
+        filters.append(_staff_match(Appointment.staff_id, staff_id))
     row = (
         await db.execute(
             select(
@@ -433,10 +436,25 @@ async def _local_appointments_breakdown(
 async def _appointment_company_ids(
     db: AsyncSession,
     company_id: Optional[int],
-    staff_id: Optional[int],
+    staff_id: Optional[StaffSelection],
     allowed_company_ids: Optional[list[int]] = None,
 ) -> list[int]:
     allowed_set = set(allowed_company_ids or []) if allowed_company_ids is not None else None
+    if isinstance(staff_id, frozenset):
+        # A group reaches the branches its members work in (an empty group, none), narrowed like a single
+        # company / allowed scope.
+        group_companies = {
+            int(item)
+            for item in (
+                await db.execute(select(Staff.company_id).where(Staff.id.in_(sorted(staff_id))).distinct())
+            ).scalars().all()
+            if item is not None
+        } if staff_id else set()
+        if company_id is not None:
+            group_companies &= {int(company_id)}
+        if allowed_set is not None:
+            group_companies &= {int(item) for item in allowed_set}
+        return sorted(group_companies)
     if staff_id is not None:
         staff_company_id = await db.scalar(
             select(Staff.company_id).where(Staff.id == staff_id).limit(1)
@@ -464,9 +482,14 @@ async def _fetch_appointments_breakdown(
     company_ids: list[int],
     start: date,
     end: date,
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
+    if isinstance(staff_id, frozenset):
+        # YClients' record stats can filter one employee only; a group is counted from the synced records.
+        return await _local_appointments_breakdown(
+            db, company_ids, start, end, staff_id, factual_at, local_reason='staff_group'
+        )
     if factual_at is not None and end >= factual_branch_date(factual_at):
         return await _local_appointments_breakdown(
             db,
@@ -516,6 +539,29 @@ async def fetch_appointments_breakdown(
         staff_id,
         factual_at,
     )
+
+
+# A staff filter is one person (`int`) or a group of people (`frozenset[int]`, see `staff_ids_for_levels`). Every
+# `staff_id` parameter annotated `Optional[StaffSelection]` takes either, so it must never be passed to `int()` or
+# compared with `==`: use `_staff_match` (SQL) / `_staff_in` (rows in memory). `is not None` still means "a staff
+# filter is active", and an EMPTY group is a filter that matches nobody, never "no filter". Administrator,
+# Plan/fact and report paths keep `Optional[int]`: a group never reaches them (`_administrator_service_scope`
+# answers "not an administrator" for a group).
+StaffSelection = int | frozenset[int]
+
+
+def _staff_match(column, selection: StaffSelection):
+    """`column` is the selected person, or one of the selected group (nobody for an empty group)."""
+    if isinstance(selection, frozenset):
+        return column.in_(sorted(selection)) if selection else false()
+    return column == selection
+
+
+def _staff_in(selection: StaffSelection, staff_id: Any) -> bool:
+    """Python mirror of `_staff_match` for rows already in memory."""
+    if isinstance(selection, frozenset):
+        return staff_id in selection
+    return staff_id == selection
 
 
 def _is_waitlist_staff_name(value: Any) -> bool:
@@ -970,10 +1016,11 @@ def _appt_revenue_filters(
     start: date,
     end: date,
     company_id: Optional[int],
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ):
+    """Completed-visit filter; `staff_id` is a person or a group of people (`StaffSelection`)."""
     parts = [
         Appointment.attendance == COMPLETED_ATTENDANCE,
         Appointment.date >= start,
@@ -985,7 +1032,7 @@ def _appt_revenue_filters(
     if scope is not None:
         parts.append(scope)
     if staff_id is not None:
-        parts.append(Appointment.staff_id == staff_id)
+        parts.append(_staff_match(Appointment.staff_id, staff_id))
     if factual_at is not None:
         parts.append(_appointment_factual_at_condition(factual_at))
     return and_(*parts)
@@ -995,10 +1042,11 @@ def _goods_revenue_filters(
     start: date,
     end: date,
     company_id: Optional[int],
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ):
+    """Goods-sale filter; `staff_id` is a person or a group of people (`StaffSelection`)."""
     parts = [
         GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
         *day_window(GoodTransaction.date, start, end),
@@ -1009,7 +1057,7 @@ def _goods_revenue_filters(
     if scope is not None:
         parts.append(scope)
     if staff_id is not None:
-        parts.append(GoodTransaction.master_id == staff_id)
+        parts.append(_staff_match(GoodTransaction.master_id, staff_id))
     if factual_at is not None:
         parts.append(GoodTransaction.date <= factual_at)
     return and_(*parts)
@@ -1101,10 +1149,11 @@ def _service_paid_filters(
     start: date,
     end: date,
     company_id: Optional[int],
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ):
+    """Paid-service filter; `staff_id` is a person or a group of people (`StaffSelection`)."""
     parts = [
         FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
         Appointment.attendance == COMPLETED_ATTENDANCE,
@@ -1123,7 +1172,7 @@ def _service_paid_filters(
     if scope is not None:
         parts.append(scope)
     if staff_id is not None:
-        parts.append(Appointment.staff_id == staff_id)
+        parts.append(_staff_match(Appointment.staff_id, staff_id))
     if factual_at is not None:
         parts.extend((
             FinancialTransaction.date <= factual_at,
@@ -1136,10 +1185,11 @@ def _goods_paid_filters(
     start: date,
     end: date,
     company_id: Optional[int],
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ):
+    """Paid-goods filter; `staff_id` is a person or a group of people (`StaffSelection`)."""
     parts = [
         FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
         FinancialTransaction.amount > 0,
@@ -1157,16 +1207,16 @@ def _goods_paid_filters(
     return and_(*parts)
 
 
-def _financial_staff_attribution_condition(staff_id: int):
+def _financial_staff_attribution_condition(staff_id: StaffSelection):
     """Use the same deterministic master for filtering and returned rows."""
-    return _financial_attributed_staff_id() == staff_id
+    return _staff_match(_financial_attributed_staff_id(), staff_id)
 
 
 async def _goods_sold_count(
     db: AsyncSession,
     dr: DateRange,
     company_id: Optional[int],
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ) -> float:
@@ -1240,7 +1290,7 @@ async def _source_coverage_status(
     start: date,
     end: date,
     company_id: Optional[int],
-    staff_id: Optional[int],
+    staff_id: Optional[StaffSelection],
     company_ids_override: Optional[list[int]] = None,
     covered_ranges: Optional[dict[int, tuple[Optional[date], Optional[date]]]] = None,
 ) -> tuple[str, list[str]]:
@@ -1278,7 +1328,7 @@ async def _source_coverage_status(
 def _service_revenue_union(
     dr: DateRange,
     company_id: Optional[int],
-    staff_id: Optional[int],
+    staff_id: Optional[StaffSelection],
     company_ids: Optional[list[int]],
     factual_at: Optional[datetime],
     extra_columns: tuple = (),
@@ -1335,7 +1385,7 @@ def _direct_payment_filters(
     return filters
 
 
-def _direct_revenue_classifiers(staff_id: Optional[int] = None) -> tuple[Any, Any]:
+def _direct_revenue_classifiers(staff_id: Optional[StaffSelection] = None) -> tuple[Any, Any]:
     """Goods and top-up classifiers over the `_direct_payment_filters` rows, attributed to `staff_id` if given.
 
     Not asserted mutually exclusive: a row matching both is counted in both buckets everywhere.
@@ -1352,7 +1402,7 @@ async def _completed_visit_counts(
     db: AsyncSession,
     dr: DateRange,
     company_id: Optional[int],
-    staff_id: Optional[int],
+    staff_id: Optional[StaffSelection],
     company_ids: Optional[list[int]],
     factual_at: Optional[datetime],
 ) -> tuple[int, int]:
@@ -1381,7 +1431,7 @@ async def _average_check_block(
     db: AsyncSession,
     dr: DateRange,
     company_id: Optional[int],
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
     covered_ranges: Optional[dict[int, tuple[Optional[date], Optional[date]]]] = None,
@@ -1646,7 +1696,7 @@ async def _client_visit_frequency_block(
     db: AsyncSession,
     dr: DateRange,
     company_id: Optional[int],
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
@@ -1661,7 +1711,7 @@ async def _client_visit_frequency_block(
 
     period_filters = [*scope_filters, Appointment.date >= dr.start, Appointment.date <= dr.end]
     if staff_id is not None:
-        period_filters.append(Appointment.staff_id == staff_id)
+        period_filters.append(_staff_match(Appointment.staff_id, staff_id))
 
     current_clients = (
         select(Appointment.client_id.label('client_id'))
@@ -1731,14 +1781,14 @@ async def _client_recency_block(
     db: AsyncSession,
     dr: DateRange,
     company_id: Optional[int],
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
     scope_filters = _client_scope_filters(company_id, allowed_company_ids, factual_at)
     current_filters = list(scope_filters)
     if staff_id is not None:
-        current_filters.append(Appointment.staff_id == staff_id)
+        current_filters.append(_staff_match(Appointment.staff_id, staff_id))
 
     current_clients = (
         select(Appointment.client_id.label('client_id'))
@@ -2024,7 +2074,7 @@ async def _revenue_block(
     db: AsyncSession,
     dr: DateRange,
     company_id: Optional[int],
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     include_goods: bool = True,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
@@ -2183,7 +2233,7 @@ async def _client_recency_metrics(
     current_dr: DateRange,
     prev_dr: DateRange,
     company_id: Optional[int],
-    staff_id: Optional[int],
+    staff_id: Optional[StaffSelection],
     company_ids: Optional[list[int]],
     factual_at: Optional[datetime],
 ) -> dict[str, Any]:
@@ -2255,7 +2305,7 @@ async def fetch_summary(
     start: date,
     end: date,
     company_id: Optional[int] = None,
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     *,
     factual_at: Optional[datetime] = None,
@@ -2421,6 +2471,7 @@ async def fetch_summary(
     )
     administrator_personal = None
     if current_service_scope.is_administrator:
+        # `is_administrator` implies `staff_id` is one person: a group is never an administrator.
         # The manual top-up is part of an administrator's Plan/fact row, so it is part of the cards too.
         administrator_personal, cur_manual_opz, prev_manual_opz = await _administrator_personal_block(
             db,
@@ -2914,7 +2965,7 @@ async def fetch_revenue_daily(
     start: date,
     end: date,
     company_id: Optional[int] = None,
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     include_financials: bool = True,
     include_opz: bool = True,
@@ -2998,7 +3049,7 @@ async def fetch_revenue_daily(
     administrator_days: Optional[dict[date, tuple[int, int]]] = None
     if administrator_attribution and include_opz and staff_id is not None:
         scope = await _administrator_service_scope(db, start, end, staff_id, effective_company_ids, factual_at)
-        if scope.is_administrator:
+        if scope.is_administrator:  # never for a group, so `staff_id` is an int here
             administrator_days = await fetch_administrator_opz_daily(
                 db, start, end, int(scope.company_id), int(staff_id), factual_at
             )
@@ -3012,7 +3063,7 @@ async def fetch_revenue_daily(
                 db, start, end, item_company_id, factual_at=factual_at
             )
             if staff_id is not None:
-                events = [event for event in events if event.barber_staff_id == staff_id]
+                events = [event for event in events if _staff_in(staff_id, event.barber_staff_id)]
             for event in events:
                 opz_by_date[event.event_date] = opz_by_date.get(event.event_date, 0) + 1
 
@@ -3282,7 +3333,7 @@ async def fetch_top_services(
     end: date,
     company_id: Optional[int] = None,
     limit: Optional[int] = 10,
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
     *,
@@ -4025,7 +4076,7 @@ async def _opz_split_scope(
     db: AsyncSession,
     start: date,
     end: date,
-    staff_id: Optional[int],
+    staff_id: Optional[StaffSelection],
     company_ids: list[int],
     factual_at: Optional[datetime] = None,
 ) -> tuple[float, float]:
@@ -4034,7 +4085,7 @@ async def _opz_split_scope(
     first = repeat = 0.0
     for item_company_id in company_ids:
         for event in await _opz_events(db, start, end, item_company_id, factual_at=factual_at):
-            if staff_id is not None and event.barber_staff_id != staff_id:
+            if staff_id is not None and not _staff_in(staff_id, event.barber_staff_id):
                 continue
             if event.first_visit:
                 first += 1.0
@@ -4047,7 +4098,7 @@ async def _first_visit_count(
     db: AsyncSession,
     dr: DateRange,
     company_id: Optional[int],
-    staff_id: Optional[int],
+    staff_id: Optional[StaffSelection],
     company_ids: Optional[list[int]],
     factual_at: Optional[datetime],
 ) -> int:
@@ -4122,7 +4173,7 @@ async def _opz_split_metrics(
     prev_dr: DateRange,
     *,
     company_id: Optional[int],
-    staff_id: Optional[int],
+    staff_id: Optional[StaffSelection],
     company_ids: list[int],
     factual_at: Optional[datetime],
     visits: tuple[int, int],
@@ -4145,6 +4196,7 @@ async def _opz_split_metrics(
             first, repeat = await _opz_split_scope(db, dr.start, dr.end, staff_id, company_ids, factual_at=factual_at)
             first_visits = await _first_visit_count(db, dr, company_id, staff_id, company_ids, factual_at)
         else:
+            # `administrator_company_id` is set only for an administrator, i.e. `staff_id` is an int.
             plan_start, plan_end = await _resolve_plan_period(db, dr.start, dr.end, [administrator_company_id])
             first, repeat, period_visits, first_visits = await _staff_opz_window_facts(
                 db, dr.start, dr.end, plan_start, plan_end, administrator_company_id, int(staff_id), factual_at
@@ -4215,7 +4267,7 @@ async def fetch_opz_year_facts(
             timezone_name=timezone_names.get(item_company_id),
         )
         for event in events:
-            if staff_id is not None and event.barber_staff_id != staff_id:
+            if staff_id is not None and not _staff_in(staff_id, event.barber_staff_id):
                 continue
             event_year = event.event_date.year
             event_month = event.event_date.month
@@ -4807,12 +4859,12 @@ async def _administrator_service_scope(
     db: AsyncSession,
     start: date,
     end: date,
-    staff_id: Optional[int],
+    staff_id: Optional[StaffSelection],
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ) -> AdministratorServiceScope:
-    """Resolve each selected-staff month using its historical role."""
-    if staff_id is None:
+    """Resolve each selected-staff month using its historical role. A group of people is never an administrator."""
+    if staff_id is None or isinstance(staff_id, frozenset):
         return AdministratorServiceScope(is_administrator=False)
 
     factual_at = factual_at or factual_now()
@@ -6089,7 +6141,7 @@ async def _manual_opz_scope_total(
     start: date,
     end: date,
     company_ids: list[int],
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     factual_at: Optional[datetime] = None,
 ) -> float:
     """Manual OPZ of a selected period, counted the way Plan/fact counts it for a branch.
@@ -6360,6 +6412,21 @@ def _staff_leaderboards_payload(
             rows.append(row)
         return rows
 
+    def avg_check_rows(source: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows = []
+        for group in source:
+            row = identity(group)
+            row.update({
+                'value': _metric_fact_optional(group, 'avg_check_total'),
+                'visits': _round_metric_value(_metric_fact_value(group, 'clients'), 'number'),
+            })
+            rows.append(row)
+        return top_rows(
+            rows,
+            'value',
+            eligibility=lambda row: float(row.get('visits') or 0.0) > 0 and row.get('value') is not None,
+        )
+
     def avg_check_plan_rows(source: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows = []
         for group in source:
@@ -6412,6 +6479,7 @@ def _staff_leaderboards_payload(
         'opz_admin_rankings': opz_admin_rankings,
         'reviews_admin': reviews_admin,
         'revenue_barber': revenue_barber,
+        'avg_check_barber': avg_check_rows(barbers),
         'avg_check_plan_branch': avg_check_plan_rows(branch_groups),
         'avg_check_plan_staff': avg_check_plan_rows(barbers),
     }
@@ -7231,6 +7299,51 @@ async def _staff_plan_groups_for_branch(
     return groups
 
 
+def level_key(title: Optional[str]) -> Optional[str]:
+    """Spelling-proof key of a position title: «ТОП-барбер», «ТОП Барбер» and «топ барбер» share one.
+
+    Lowercase, `ё` as `е`, letters and digits only. `None` for an empty title.
+    """
+    key = ''.join(char for char in str(title or '').lower().replace('ё', 'е') if char.isalnum())
+    return key or None
+
+
+async def _staff_positions_for_period(
+    db: AsyncSession,
+    staff_ids: Collection[int],
+    end: date,
+) -> dict[int, tuple[Optional[int], Optional[str]]]:
+    """`{staff_id: (position_id, position_title)}` — the barber level of each person as of the period END.
+
+    It is the latest `staff_position_months` row with `month <= first day of the end's month`: a promotion
+    counts from the month the sync snapshotted it, so a period spanning one reads the new level. A person with
+    no such row (the period starts before the sync began to snapshot) falls back to the current `staff` position.
+    The title always comes from the same source as the id.
+    """
+    month = end.replace(day=1)
+    cache: dict[tuple[date, int], tuple[Optional[int], Optional[str]]] = db.info.setdefault('staff_positions', {})
+    missing = sorted({int(staff_id) for staff_id in staff_ids if (month, int(staff_id)) not in cache})
+    if missing:
+        resolved: dict[int, tuple[Optional[int], Optional[str]]] = {}
+        snapshots = await db.execute(
+            select(StaffPositionMonth.staff_id, StaffPositionMonth.position_id, StaffPositionMonth.position_title)
+            .where(StaffPositionMonth.staff_id.in_(missing), StaffPositionMonth.month <= month)
+            .order_by(StaffPositionMonth.staff_id.asc(), StaffPositionMonth.month.desc())
+        )
+        for row in snapshots.all():
+            resolved.setdefault(int(row.staff_id), (row.position_id, row.position_title))
+        unresolved = [staff_id for staff_id in missing if staff_id not in resolved]
+        if unresolved:
+            current = await db.execute(
+                select(Staff.id, Staff.position_id, Staff.position).where(Staff.id.in_(unresolved))
+            )
+            for row in current.all():
+                resolved[int(row.id)] = (row.position_id, row.position)
+        for staff_id in missing:
+            cache[(month, staff_id)] = resolved.get(staff_id, (None, None))
+    return {int(staff_id): cache[(month, int(staff_id))] for staff_id in staff_ids}
+
+
 async def fetch_staff(
     db: AsyncSession,
     company_id: Optional[int] = None,
@@ -7261,6 +7374,7 @@ async def fetch_staff(
             Staff.id,
             Staff.name,
             Staff.position,
+            Staff.position_id,
             Staff.user_id,
             Staff.company_id,
             Staff.fired,
@@ -7292,19 +7406,110 @@ async def fetch_staff(
         if not _is_waitlist_staff_name(row.name) and not _is_admin_placeholder_staff_name(row.name)
     ]
     categories = await _staff_label_categories(db, rows, start, end)
-    return [
-        {
+    if start is not None and end is not None:
+        positions = await _staff_positions_for_period(db, [int(row.id) for row in rows], end)
+    else:
+        positions = {int(row.id): (row.position_id, row.position) for row in rows}
+    items = []
+    for row in rows:
+        category = categories.get((int(row.company_id), int(row.id)))
+        position_id, position_title = positions[int(row.id)]
+        # A level needs both its id (the filter) and its title (the label), and the title must read as a barber: the
+        # same rule `staff_ids_for_levels` applies, so an option never stands for people the Overview group omits.
+        # A mixed person who ends the period as an administrator has none: «Администратор» is not a barber level.
+        has_level = (
+            category in ('barber', 'mixed')
+            and position_id is not None
+            and level_key(position_title)
+            and normalize_staff_category(position_title) == 'barber'
+        )
+        items.append({
             'id': row.id,
             'name': row.name,
             'position': row.position,
+            'position_id': position_id,
+            'level': {'key': level_key(position_title), 'title': position_title} if has_level else None,
             'user_id': row.user_id,
             'company_id': row.company_id,
             'company_title': row.company_title,
             'is_active': not bool(row.fired),
-            'category': categories.get((int(row.company_id), int(row.id))),
-        }
-        for row in rows
+            'category': category,
+        })
+    return items
+
+
+async def staff_ids_for_levels(
+    db: AsyncSession,
+    end: date,
+    company_id: Optional[int],
+    allowed_company_ids: Optional[list[int]],
+    position_ids: frozenset[int],
+) -> tuple[frozenset[int], list[str]]:
+    """The barbers an Overview level filter stands for, and the titles of the levels that matched.
+
+    Members are the staff of the request's branch scope (`company_id` / `allowed_company_ids`, resolved like the
+    Overview's own) that are people, not portal mirror rows, waitlist or administrator placeholders, whose position
+    id as of the period `end` (`_staff_positions_for_period`) is in `position_ids` and whose position title reads as
+    a barber, never an administrator. Fired people are members too, when they resolve into the set: their visits
+    in the period are real. A person without a monthly snapshot falls back to the current `staff.position_id`.
+
+    The result is resolved once for the selected period and then stands for the SAME people in every window of the
+    request, including the comparison baseline: the deltas compare this group with itself, not with whoever held
+    the level a month earlier. Nobody matching gives an empty set, which callers must treat as a filter that matches
+    no rows (zeros), never as no filter.
+    """
+    scope_ids = await _appointment_company_ids(db, company_id, None, allowed_company_ids)
+    if not scope_ids:
+        return frozenset(), []
+    rows = (
+        await db.execute(
+            select(Staff.id, Staff.name).where(Staff.company_id.in_(scope_ids), _counts_as_staff()).order_by(Staff.id)
+        )
+    ).all()
+    people = [
+        int(row.id) for row in rows
+        if not _is_waitlist_staff_name(row.name) and not _is_admin_placeholder_staff_name(row.name)
     ]
+    positions = await _staff_positions_for_period(db, people, end)
+    members: set[int] = set()
+    titles: dict[str, str] = {}
+    for staff_id in people:
+        position_id, title = positions[staff_id]
+        if position_id not in position_ids or normalize_staff_category(title) != 'barber':
+            continue
+        members.add(staff_id)
+        titles.setdefault(level_key(title) or str(title), str(title))
+    return frozenset(members), sorted(titles.values())
+
+
+async def level_group_staff_count(
+    db: AsyncSession,
+    members: Collection[int],
+    start: date,
+    end: date,
+    company_id: Optional[int],
+    allowed_company_ids: Optional[list[int]],
+    factual_at: Optional[datetime],
+) -> int:
+    """People an Overview level group's numbers are about: members still working or with a completed visit.
+
+    A fired member without a completed visit (the Overview's own definition, `_appt_revenue_filters`) contributes
+    nothing to the figures, so he is not counted. One query for the whole group.
+    """
+    if not members:
+        return 0
+    completed_visit = exists().where(
+        Appointment.staff_id == Staff.id,
+        _appt_revenue_filters(
+            start, end, company_id, None, allowed_company_ids=allowed_company_ids, factual_at=factual_at
+        ),
+    )
+    count = await db.scalar(
+        select(func.count()).select_from(Staff).where(
+            Staff.id.in_(sorted(members)), or_(Staff.fired == 0, completed_visit)
+        )
+    )
+    return int(count or 0)
 
 
 async def _staff_label_categories(
@@ -8834,6 +9039,30 @@ async def _branch_row_and_diagnostics(
     return parent_group, diagnostics
 
 
+async def _filter_groups_by_level(
+    db: AsyncSession,
+    groups: list[dict[str, Any]],
+    end: date,
+    position_ids: frozenset[int],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Keep the barber rows whose level (position id as of the period end) is in `position_ids`.
+
+    Administrators and rows of unknown category carry no level and never match. Returns the kept rows and
+    the `level_filter` echo: the requested ids and the distinct level titles of the rows that matched.
+    """
+    candidates = [
+        group for group in groups
+        if group.get('staff_id') is not None and group.get('category') == 'barber'
+    ]
+    positions = await _staff_positions_for_period(db, [int(group['staff_id']) for group in candidates], end)
+    kept = [group for group in candidates if positions[int(group['staff_id'])][0] in position_ids]
+    titles = {}
+    for group in kept:
+        title = positions[int(group['staff_id'])][1]
+        titles.setdefault(level_key(title), title)
+    return kept, {'position_ids': sorted(position_ids), 'titles': sorted(title for title in titles.values() if title)}
+
+
 async def fetch_plan_fact(
     db: AsyncSession,
     start: date,
@@ -8845,6 +9074,7 @@ async def fetch_plan_fact(
     for_ratings: bool = False,
     include_branch_row: bool = True,
     factual_at: Optional[datetime] = None,
+    staff_position_ids: Optional[frozenset[int]] = None,
 ) -> dict[str, Any]:
     """Plan/fact payload.
 
@@ -8853,8 +9083,17 @@ async def fetch_plan_fact(
 
     `include_branch_row=False` withholds the single-branch view's `parent_group` and diagnostics (whole-branch
     totals) from a staff-clamped personal role; only that role's own rows remain.
+
+    `staff_position_ids` narrows the staff rows to barbers whose level (position id as of the period end, see
+    `_staff_positions_for_period`) is in the set. A selected `staff_id` wins and the filter is ignored. Whole-branch
+    totals would sit above a filtered list and mislead, so the branch row and diagnostics are omitted; the network
+    view then lists the staff rows of every branch (`view_scope == 'staff'`) instead of network and branch rows.
+    The payload echoes the active filter as `level_filter`.
     """
     factual_at = factual_at or factual_now()
+    if staff_id is not None:
+        staff_position_ids = None
+    level_view = staff_position_ids is not None
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
     # A branch that left the tenant contributes neither plan nor fact, so its row could only
     # ever read "0 of nothing" under the network total. A branch that has not opened yet is
@@ -8900,6 +9139,8 @@ async def fetch_plan_fact(
                 'goods_kpi_execution': _goods_kpi_execution_payload([]),
                 'groups': [],
             }
+            if level_view:
+                empty['level_filter'] = {'position_ids': sorted(staff_position_ids), 'titles': []}
             if for_ratings:
                 empty['staff_leaderboards'] = _staff_leaderboards_payload([])
             return empty
@@ -8922,10 +9163,13 @@ async def fetch_plan_fact(
             opz_events=branch_opz_events,
             factual_at=factual_at,
         )
+        level_filter = None
+        if level_view:
+            groups, level_filter = await _filter_groups_by_level(db, groups, end, staff_position_ids)
         selected_staff_plan = _selected_staff_plan_payload(selected_staff, groups)
         parent_group = None
         diagnostics: list[dict[str, Any]] = []
-        if include_branch_row:
+        if include_branch_row and not level_view:
             parent_group, diagnostics = await _branch_row_and_diagnostics(
                 db,
                 start,
@@ -8956,6 +9200,8 @@ async def fetch_plan_fact(
             'goods_kpi_execution': _goods_kpi_execution_payload(groups),
             'groups': groups,
         }
+        if level_filter is not None:
+            payload['level_filter'] = level_filter
         if for_ratings:
             payload['staff_leaderboards'] = _staff_leaderboards_payload(
                 groups,
@@ -8973,34 +9219,39 @@ async def fetch_plan_fact(
         opz_events_by_company[branch_id] = await _opz_events(
             db, start, end, branch_id, factual_at=factual_at
         )
-        facts_by_company[branch_id] = await _fact_metric_components(
+        if not level_view:
+            facts_by_company[branch_id] = await _fact_metric_components(
+                db,
+                start,
+                end,
+                branch_id,
+                opz_override=float(len(opz_events_by_company[branch_id])),
+                factual_at=factual_at,
+            )
+    # The level view returns staff rows only: branch facts and the administrator diagnostics are never shown.
+    role_periods_by_company: dict[int, dict[int, list[tuple[date, date]]]] = {}
+    if not level_view:
+        role_periods_by_company = await _administrator_role_periods_by_company(
             db,
             start,
             end,
-            branch_id,
-            opz_override=float(len(opz_events_by_company[branch_id])),
-            factual_at=factual_at,
+            company_ids,
         )
-    role_periods_by_company = await _administrator_role_periods_by_company(
-        db,
-        start,
-        end,
-        company_ids,
-    )
-    review_facts_by_company = await _manual_fact_values_for_role_periods(
-        db,
-        role_periods_by_company,
-        REVIEWS_QTY_CODE,
-    )
-    manual_opz_by_company = await _manual_fact_values_for_role_periods(
-        db,
-        role_periods_by_company,
-        OPZ_QTY_CODE,
-        _countable_manual_months(start, end, factual_at),
-    )
+        review_facts_by_company = await _manual_fact_values_for_role_periods(
+            db,
+            role_periods_by_company,
+            REVIEWS_QTY_CODE,
+        )
+        manual_opz_by_company = await _manual_fact_values_for_role_periods(
+            db,
+            role_periods_by_company,
+            OPZ_QTY_CODE,
+            _countable_manual_months(start, end, factual_at),
+        )
     for branch_id in company_ids:
-        facts_by_company[branch_id][REVIEWS_QTY_CODE] = review_facts_by_company.get(branch_id, 0.0)
-        _apply_manual_opz(facts_by_company[branch_id], manual_opz_by_company.get(branch_id, 0.0))
+        if not level_view:
+            facts_by_company[branch_id][REVIEWS_QTY_CODE] = review_facts_by_company.get(branch_id, 0.0)
+            _apply_manual_opz(facts_by_company[branch_id], manual_opz_by_company.get(branch_id, 0.0))
         staff_groups_by_company[branch_id] = await _staff_plan_groups_for_branch(
             db,
             start,
@@ -9019,7 +9270,7 @@ async def fetch_plan_fact(
         )
 
     groups: list[dict[str, Any]] = []
-    if company_ids:
+    if company_ids and not level_view:
         network_plan = _sum_metric_components([plans_by_company.get(branch_id, {}) for branch_id in company_ids])
         # The network row is the sum of the branch rows, including the two average-check
         # components: the numerator is a sum of payment amounts, and the denominator counts
@@ -9040,7 +9291,7 @@ async def fetch_plan_fact(
             'metrics': _metric_cells(network_plan, network_fact),
         })
 
-    for branch in branches:
+    for branch in ([] if level_view else branches):
         branch_id = int(branch['id'])
         groups.append({
             'company_id': branch_id,
@@ -9057,6 +9308,10 @@ async def fetch_plan_fact(
         for branch_id in company_ids
         for group in staff_groups_by_company.get(branch_id, [])
     ]
+    level_filter = None
+    if level_view:
+        all_staff_groups, level_filter = await _filter_groups_by_level(db, all_staff_groups, end, staff_position_ids)
+        groups = all_staff_groups
     extra_revenue_result = (
         await _extra_service_revenue_by_staff(db, start, end, company_ids, factual_at) if for_ratings else None
     )
@@ -9085,13 +9340,16 @@ async def fetch_plan_fact(
     payload = {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
         'plan_period': {'start': plan_start.isoformat(), 'end': plan_end.isoformat()},
-        'view_scope': 'branch',
+        'view_scope': 'staff' if level_view else 'branch',
         'metrics': list(PLAN_FACT_METRICS),
         'metric_sets': _metric_sets_payload(),
         'diagnostics': diagnostics,
         'goods_kpi_execution': _goods_kpi_execution_payload(all_staff_groups),
         'groups': groups,
     }
+    if level_view:
+        payload['plan_rules'] = None
+        payload['level_filter'] = level_filter
     if for_ratings:
         payload['staff_leaderboards'] = _staff_leaderboards_payload(
             all_staff_groups,

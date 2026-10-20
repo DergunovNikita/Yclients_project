@@ -220,6 +220,18 @@
       grid-template-columns: repeat(3, minmax(125px, 1fr)) minmax(180px, 1.25fr) minmax(180px, 1.25fr) auto auto;
     }
 
+    /* The level select takes its own track only while it is shown: a hidden label leaves the grid, and the
+       buttons would otherwise land in a wide empty track. The narrower layouts below ignore the modifier. */
+    @media (min-width: 1101px) {
+      .plan-toolbar.toolbar--level {
+        grid-template-columns: repeat(3, minmax(120px, 1fr)) repeat(3, minmax(160px, 1.2fr)) auto auto;
+      }
+
+      .overview-toolbar.toolbar--level {
+        grid-template-columns: repeat(3, minmax(120px, 1fr)) repeat(3, minmax(160px, 1.2fr)) auto;
+      }
+    }
+
     .tabs {
       display: flex;
       gap: 8px;
@@ -1052,6 +1064,16 @@
       background: #f8fafc;
     }
 
+    /* A person from a cross-branch level view: the branch under the name, not part of it. */
+    .branch-cell-sub {
+      display: block;
+      margin-top: 2px;
+      color: #64748b;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: none;
+    }
+
     /* "Разрез" is one fixed narrow column in every plan table (network, branch, staff, administrators), so it lines
        up from table to table and leaves the room to the metrics. The width breaks "Oldboy Москва / (ТРЦ Ривьера)"
        and "Oldboy / Яхромская". The names render uppercase (th), so the text box (128 - 8px padding) has to be wider
@@ -1582,6 +1604,26 @@
       border: 1px solid #dbe3ef;
       border-radius: 8px;
       background: #ffffff;
+    }
+
+    /* The open report keeps its filters in view: «Рейтинги и топы» is many tables long. Only from 1101px, where the
+       row is one or two lines (~95-170px); below it the grid folds to three columns (~216px, ~300px with the compare
+       fields) and a sticky block would take a third of a tablet screen. z-index 20: over report tables and charts (<= 3), under the jump nav (25),
+       the save dock (30), the custom-select menus (40, inside this stacking context) and dialogs. No ancestor up to the
+       viewport scrolls (no overflow on .shell, .view, .reports-viewer), which sticky needs. The first shadow is a band
+       of the page colour above the row, so content scrolling past its rounded corners does not show through. */
+    @media (min-width: 1101px) {
+      .reports-viewer .report-filter-row {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        box-shadow: 0 -8px 0 #f5f7fb, 0 8px 12px -10px rgb(15 23 42 / 30%);
+      }
+
+      /* Jump targets land below the row: its height is published by stickyFilters.js. */
+      .reports-viewer [data-jump-target] {
+        scroll-margin-top: calc(var(--report-filter-height, 0px) + 12px);
+      }
     }
 
     .report-compare-row {
@@ -2170,6 +2212,12 @@
             <option value="" data-i18n="dash.allWorkers">Tutti gli operatori</option>
           </select>
         </label>
+        <label id="overview-level-field" hidden>
+          <span data-i18n="dash.level">Ruolo</span>
+          <select id="overview-level">
+            <option value="" data-i18n="dash.allLevels">Tutti i ruoli</option>
+          </select>
+        </label>
         <button type="button" id="overview-load" data-i18n="dash.refresh">Aggiorna</button>
       </section>
 
@@ -2314,6 +2362,12 @@
           <span data-i18n="dash.worker">Operatore</span>
           <select id="plan-staff">
             <option value="" data-i18n="dash.allWorkers">Tutti gli operatori</option>
+          </select>
+        </label>
+        <label id="plan-level-field" hidden>
+          <span data-i18n="dash.level">Ruolo</span>
+          <select id="plan-level">
+            <option value="" data-i18n="dash.allLevels">Tutti i ruoli</option>
           </select>
         </label>
         <button type="button" id="plan-load" data-i18n="dash.refresh">Aggiorna</button>
@@ -2621,6 +2675,12 @@
             <span data-i18n="dash.staff">Dipendente</span>
             <select id="report-staff">
               <option value="" data-i18n="dash.allStaff">Tutti i dipendenti</option>
+            </select>
+          </label>
+          <label id="report-level-field" hidden>
+            <span data-i18n="dash.level">Ruolo</span>
+            <select id="report-level">
+              <option value="" data-i18n="dash.allLevels">Tutti i ruoli</option>
             </select>
           </label>
           <label>

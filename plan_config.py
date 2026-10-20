@@ -39,7 +39,7 @@ MONEY_METRICS: tuple[dict[str, Any], ...] = (
         'label': 'Средний чек',
         'summary': ('average_check', 'average_check_source_status'),
         'plan': ('avg_check_total',),
-        'leaderboard': ('avg_check_plan_branch', 'avg_check_plan_staff'),
+        'leaderboard': ('avg_check_barber', 'avg_check_plan_branch', 'avg_check_plan_staff'),
     },
     {
         'code': 'cosmo_sum',
