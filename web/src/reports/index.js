@@ -17,6 +17,7 @@ import { renderReportData } from './renderers/generic.js';
 import { intlLocale, t } from '../i18n.js';
 import { branchesForPeriod } from '../reportingWindow.js';
 import { staffOption } from '../staffLabel.js';
+import { mountLoader } from '../loader.js';
 import { chosenLevel, levelSelection, selectableLevelOptions } from '../staffLevels.js';
 import {
   DEFAULT_GRANULARITY,
@@ -170,6 +171,8 @@ export function initReports({
   if (!els.view) return null;
 
   publishFilterHeight(els.viewer, els.view.querySelector('.report-filter-row'));
+  // Between the filters and the report: everything it covers or dims is the report content that follows.
+  const loader = mountLoader(els.viewer.querySelector(':scope > .view-loader'), { t });
 
   const charts = new ReportChartManager();
   const reportRequests = createLatestRequestScope();
@@ -190,6 +193,8 @@ export function initReports({
     reports: [],
     branches: [],
     activeReportId: '',
+    // The report whose data is in `els.content` right now; empty when the area shows nothing or a message.
+    renderedReportId: '',
     periodApplies: true,
     staffApplies: true,
     levelApplies: false,
@@ -537,8 +542,10 @@ export function initReports({
 
   function showCatalog(push = true) {
     reportRequests.abort();
+    loader.stop();
     clearRouteNote();
     state.activeReportId = '';
+    state.renderedReportId = '';
     state.periodApplies = true;
     state.staffApplies = true;
     state.levelApplies = false;
@@ -649,6 +656,8 @@ export function initReports({
       // rather than spending a request on it — and never leave the previous report's
       // numbers standing under this report's title.
       charts.clear();
+      loader.stop();
+      state.renderedReportId = '';
       els.viewerSubtitle.textContent = `${formatDate(els.start.value)} .. ${formatDate(els.end.value)}`;
       els.content.innerHTML = `<div class="empty compact">${t('reports.periodInvertedMessage')}</div>`;
       els.refresh.disabled = false;
@@ -661,13 +670,22 @@ export function initReports({
     const cacheKey = reportDataCacheKey(requestParams);
     const previousData = state.reportData.get(cacheKey);
     const refreshPresentation = reportRefreshPresentation(previousData);
+    // Refresh dims what is on screen: the cached copy, or the same report under other filters. Anything else
+    // (another report, a message, nothing) is cleared and covered by the full loader.
+    const loaderMode = refreshPresentation.retainedData || state.renderedReportId === reportId ? 'refresh' : 'first';
     if (refreshPresentation.retainedData) {
       els.viewerSubtitle.textContent = periodSubtitle(refreshPresentation.retainedData, meta);
       renderReportData(els.content, refreshPresentation.retainedData, charts);
+      state.renderedReportId = reportId;
     } else {
       els.viewerSubtitle.textContent = t('common.loadingShort');
-      els.content.innerHTML = `<div class="empty compact">${t('reports.loadingReport')}</div>`;
+      if (loaderMode === 'first') {
+        charts.clear();
+        els.content.replaceChildren();
+        state.renderedReportId = '';
+      }
     }
+    loader.start(loaderMode);
     els.refresh.disabled = true;
     clearError();
     setApiState(
@@ -686,6 +704,7 @@ export function initReports({
       els.viewerTitle.textContent = data.title || meta.title;
       els.viewerSubtitle.textContent = periodSubtitle(data, meta);
       renderReportData(els.content, data, charts);
+      state.renderedReportId = reportId;
       clearError();
       const dataState = reportDataState(data);
       const asked = currentFilters();
@@ -708,13 +727,17 @@ export function initReports({
       charts.clear();
       showError(error.message, { apiStatus: error.apiStatus, retry: reloadActiveReport });
       if (!previousData) {
+        state.renderedReportId = '';
         els.viewerSubtitle.textContent = t('common.errorPrefix');
         els.content.innerHTML = `<div class="empty compact">${t('reports.loadFailed')}</div>`;
       } else {
         renderReportData(els.content, previousData, charts);
+        state.renderedReportId = reportId;
       }
     } finally {
       if (request.isCurrent()) {
+        // Success renders in this same tick, so stopping here is stopping at the render point.
+        loader.stop();
         els.refresh.disabled = false;
         request.finish();
       }
@@ -755,6 +778,8 @@ export function initReports({
     const requestedCompanyId = requested.company_id;
     const requestedStaffId = requested.staff_id;
     const showBlockedScope = () => {
+      // An earlier openReport (back/forward while it was loading) is still current and would render over this message.
+      reportRequests.abort();
       const retry = async () => {
         state.loaded = false;
         await loadFromLocation();
@@ -764,6 +789,11 @@ export function initReports({
       const meta = state.reports.find((report) => report.id === reportId);
       if (meta) {
         state.activeReportId = reportId;
+        state.renderedReportId = '';
+        charts.clear();
+        loader.stop();
+        // The aborted request skips its finally, which is what re-enables Refresh.
+        els.refresh.disabled = false;
         setCatalogVisible(false);
         els.viewer.classList.add('visible');
         els.viewerTitle.textContent = meta.title;
@@ -890,6 +920,8 @@ export function initReports({
     loadFromLocation,
     clear: ({ keepCatalog = false } = {}) => {
       charts.clear();
+      loader.stop();
+      state.renderedReportId = '';
       state.loaded = false;
       if (!keepCatalog) {
         state.catalogFetched = false;

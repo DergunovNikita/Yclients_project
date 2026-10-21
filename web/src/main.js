@@ -97,6 +97,8 @@ import { canViewBranchPayments } from './branchPaymentsAccess.js';
 import { formatInputNumber } from './manualFactInput.js';
 import { createManualEditors } from './manualEditors.js';
 import './editorDrafts.css';
+import './loader.css';
+import { mountLoader, stopLoaderWithRequest } from './loader.js';
 import { bindDraftFlush, createDraftController, fingerprint } from './editorDrafts.js';
 import { formatBranchDateTime } from './timestamps.js';
 import { staffOption } from './staffLabel.js';
@@ -352,6 +354,16 @@ const viewRequestScopes = {
   syncStatus: createLatestRequestScope(),
 };
 const viewsWithData = new Set();
+// One loading indicator per data view, drawn into the placeholder that follows the view's controls.
+const viewLoaders = Object.fromEntries(Object.entries({
+  overview: els.overviewView,
+  plan: els.planView,
+  planSettings: els.planSettingsView,
+  serviceManagement: els.serviceManagementView,
+  reviewFacts: els.reviewFactsView,
+  opzFacts: els.opzFactsView,
+  yandexPayFacts: els.yandexPayView,
+}).map(([view, viewEl]) => [view, mountLoader(viewEl.querySelector(':scope > .view-loader'), { t })]));
 const HISTORY_POSITION_KEY = 'dashboardPosition';
 let historyPosition = 0;
 let currentHistoryUrl = window.location.href;
@@ -440,7 +452,8 @@ const manualEditors = createManualEditors({
     setFilterLoading,
     setLoadedApiState,
     loadSyncStatus,
-    viewsWithData,
+    // The editors only ever add to it; here that also lifts the loader at the render point.
+    viewsWithData: { add: markViewLoaded },
     isSupersededRequest,
     updateFloatingEditorSave,
     refreshStaffForBranch,
@@ -554,6 +567,7 @@ let sessionLeaving = false;
 window.addEventListener('portal:session-transition', () => {
   sessionLeaving = true;
   Object.values(viewRequestScopes).forEach((scope) => scope.abort());
+  Object.values(viewLoaders).forEach((loader) => loader.stop());
   reportsController?.clear();
   currentPlanFactPayload = null;
   hiddenPlanMetricCodes = new Set();
@@ -710,8 +724,18 @@ function requestScopeForStaff(filter) {
 
 function beginViewRequest(view) {
   const request = viewRequestScopes[view].start();
-  setApiStatus(viewsWithData.has(view) ? 'refreshing' : 'loading');
-  return request;
+  const hasData = viewsWithData.has(view);
+  setApiStatus(hasData ? 'refreshing' : 'loading');
+  viewLoaders[view]?.start(hasData ? 'refresh' : 'first');
+  // A successful load lifts the loader at its render point (markViewLoaded), before it waits for sync_status. Every
+  // other way a current request ends — error, superseded error, early return — passes through finish().
+  return stopLoaderWithRequest(request, () => viewLoaders[view]?.stop());
+}
+
+// The view's data is on screen: later loads refresh over it, and its loader stops.
+function markViewLoaded(view) {
+  viewsWithData.add(view);
+  viewLoaders[view]?.stop();
 }
 
 function setLoadedApiState(data, { empty = false } = {}) {
@@ -2188,7 +2212,7 @@ async function loadPlanSettings({ month = els.planSettingsMonth.value, copyFrom 
     if (!request.isCurrent()) return false;
     renderPlanSettings(payload.data, { updateSnapshot: !copyFrom, dirty });
     if (!copyFrom) restorePlanSettingsDraft();
-    viewsWithData.add('planSettings');
+    markViewLoaded('planSettings');
     clearError();
     setLoadedApiState(payload.data, {
       empty: !(payload.data?.branches?.length || payload.data?.staff?.length),
@@ -2424,7 +2448,7 @@ async function loadServiceManagement() {
     });
     if (!request.isCurrent()) return;
     renderServiceManagement(payload.data);
-    viewsWithData.add('serviceManagement');
+    markViewLoaded('serviceManagement');
     clearError();
     setLoadedApiState(payload.data, {
       empty: !payload.data?.rows?.length,
@@ -2773,7 +2797,9 @@ function setActiveView(view) {
   view = accessibleView(view);
   const previousView = activeView;
   Object.entries(viewRequestScopes).forEach(([requestView, scope]) => {
-    if (requestView !== 'branches' && requestView !== 'syncStatus' && requestView !== view) scope.abort();
+    if (requestView === 'branches' || requestView === 'syncStatus' || requestView === view) return;
+    scope.abort();
+    viewLoaders[requestView]?.stop();
   });
   // An aborted load never reaches its own finally, which would leave Save disabled for good.
   if (view !== 'planSettings' && planSettingsLoading && !planSettingsSaving) setPlanSettingsLoading(false);
@@ -2830,7 +2856,7 @@ async function loadPlanFact() {
     currentPlanFactPayload = payload.data;
     renderPlanColumnPicker();
     renderCurrentPlanFact();
-    viewsWithData.add('plan');
+    markViewLoaded('plan');
     clearError();
     setLoadedApiState(payload.data, { empty: !payload.data?.groups?.length });
     await syncStatus;
@@ -2863,7 +2889,7 @@ async function loadDashboard() {
     });
     if (!request.isCurrent()) return;
     renderBundle(payload.data);
-    viewsWithData.add('overview');
+    markViewLoaded('overview');
     clearError();
     setLoadedApiState(payload.data, { empty: !payload.data?.summary });
     await syncStatus;
@@ -3053,8 +3079,15 @@ async function startSession() {
   // also resolves to '' on a cold start. Give loadBranches() a preselected branch — a
   // restored selection, a single-branch tenant — and that later read becomes a
   // network-timing race. Re-check it before adding any such preselection.
-  await Promise.all([loadBranches(), ensureStaffForView(activeView)]);
-  await loadCurrentView();
+  // The first paint waits for the branch and staff lists before the view's own request begins.
+  viewLoaders[activeView]?.start('first');
+  try {
+    await Promise.all([loadBranches(), ensureStaffForView(activeView)]);
+    await loadCurrentView();
+  } catch (error) {
+    viewLoaders[activeView]?.stop();
+    throw error;
+  }
 }
 
 async function init() {

@@ -710,6 +710,17 @@
     "text": "Because of inactivity your session will end in {time}. Unsaved input in plans, reviews, OPZ and Yandex Pay will be kept as a draft.",
     "continue": "Yes, continue"
   },
+  "loader": {
+    "trim": "Trimming the excess…",
+    "columns": "Lining up the columns…",
+    "numbers": "Evening out the numbers…",
+    "contours": "Shaping the chart outlines…",
+    "tables": "Combing the tables…",
+    "styling": "Styling the results…",
+    "totals": "Setting the totals…",
+    "shine": "Adding the shine…",
+    "touches": "A couple of final touches…"
+  },
   "reports": {
     "groups": {
       "finance": "Finance",
@@ -758,7 +769,6 @@
     "notFound": "No reports found",
     "removeFavorite": "Remove from favorites",
     "addFavorite": "Add to favorites",
-    "loadingReport": "Loading report",
     "loadFailed": "Could not load report"
   },
   "demo": {

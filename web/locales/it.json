@@ -710,6 +710,17 @@
     "text": "Per inattività la sessione terminerà tra {time}. Le modifiche non salvate in piani, recensioni, OPZ e Yandex Pay verranno conservate come bozza.",
     "continue": "Sì, continua"
   },
+  "loader": {
+    "trim": "Togliamo il superfluo…",
+    "columns": "Allineiamo le colonne…",
+    "numbers": "Pareggiamo i numeri…",
+    "contours": "Rifiniamo il contorno dei grafici…",
+    "tables": "Pettiniamo le tabelle…",
+    "styling": "Mettiamo in piega i risultati…",
+    "totals": "Fissiamo i totali…",
+    "shine": "Diamo lucentezza…",
+    "touches": "Ancora un paio di ritocchi…"
+  },
   "reports": {
     "groups": {
       "finance": "Finanze",
@@ -758,7 +769,6 @@
     "notFound": "Nessun report trovato",
     "removeFavorite": "Rimuovi dai preferiti",
     "addFavorite": "Aggiungi ai preferiti",
-    "loadingReport": "Caricamento report",
     "loadFailed": "Impossibile caricare il report"
   },
   "demo": {

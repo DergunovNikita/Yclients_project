@@ -1,0 +1,207 @@
+/* Loading indicator (loader.js). The placeholder is a direct child of a view, after its controls: every data block
+   that follows it is a sibling, so the sibling rules below hide or dim exactly the data. No overflow, transform or
+   filter on hosts: sticky table heads and the sticky report filter row depend on that.
+   Light-only, like the dashboard. Palette: a brand pole is a two-line change of --pole-a / --pole-b. */
+
+.view-loader {
+  --pole-a: #c8102e;
+  --pole-b: #1f3a93;
+  --pole-c: #ffffff;
+  --stripe-gap: #eef2f7;
+  --chrome: #cbd5e1;
+  --chrome-dark: #64748b;
+  --w: 9px;
+  --p: calc(var(--w) * 5.656854);
+  position: relative;
+}
+
+.view-loader[hidden] {
+  display: none !important;
+}
+
+/* Siblings are dimmed with a fade; zero specificity so a block's own transition wins. */
+:where(.view-loader) ~ * {
+  transition: opacity 0.2s ease;
+}
+
+/* visibility, not display: chart canvases keep their size while the loader covers them. */
+.view-loader[data-mode="first"]:not([hidden]) ~ * {
+  visibility: hidden;
+}
+
+.view-loader[data-mode="refresh"]:not([hidden]) ~ * {
+  opacity: 0.45;
+}
+
+.view-loader__status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* First load: pole and caption in the place of the content. */
+.view-loader[data-mode="first"] {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 14px;
+  min-height: 240px;
+  padding: 20px 16px;
+  text-align: center;
+}
+
+.view-loader[data-mode="first"] .view-loader__stripe {
+  display: none;
+}
+
+.view-loader__caption {
+  margin: 0;
+  min-height: 1.45em;
+  font-size: 15px;
+  font-weight: 600;
+  color: #172033;
+}
+
+.view-loader__caption.is-changing {
+  animation: view-loader-caption 0.18s ease;
+}
+
+@keyframes view-loader-caption {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+/* Barber pole: the stripes are one repeating gradient taller than the glass by exactly one vertical period, slid up
+   by that period and looped. 4 stripes of --w along the 135deg line repeat every 4*w*sqrt(2) vertically. */
+.view-loader__pole {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.view-loader__ball {
+  width: 18px;
+  height: 18px;
+  margin-bottom: -4px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fff, var(--chrome) 55%, var(--chrome-dark));
+}
+
+.view-loader__cap {
+  position: relative;
+  z-index: 1;
+  width: 46px;
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--chrome-dark), #f8fafc 38%, var(--chrome) 62%, var(--chrome-dark));
+}
+
+.view-loader__glass {
+  position: relative;
+  width: 34px;
+  height: 112px;
+  margin-block: -2px;
+  overflow: hidden;
+  background: var(--pole-c);
+}
+
+.view-loader__glass::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: calc(100% + var(--p));
+  background: repeating-linear-gradient(
+    135deg,
+    var(--pole-a) 0 var(--w),
+    var(--pole-c) var(--w) calc(2 * var(--w)),
+    var(--pole-b) calc(2 * var(--w)) calc(3 * var(--w)),
+    var(--pole-c) calc(3 * var(--w)) calc(4 * var(--w))
+  );
+  animation: view-loader-pole-rise 1.2s linear infinite;
+}
+
+.view-loader__glass::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    rgb(15 23 42 / 30%),
+    rgb(255 255 255 / 45%) 30%,
+    rgb(255 255 255 / 0%) 52%,
+    rgb(15 23 42 / 6%) 75%,
+    rgb(15 23 42 / 34%)
+  );
+}
+
+@keyframes view-loader-pole-rise {
+  to {
+    transform: translateY(calc(-1 * var(--p)));
+  }
+}
+
+/* Refresh: zero layout height, so nothing jumps; the 4px stripe sits in the gap above the content. Every host has the
+   same gap there (the 16px margin-bottom of its toolbar, filter row or compare note), and the zero-height box sits at
+   the content's top edge, so -10px centres the stripe in it: 6px clear of the controls and of the content. A host
+   with another gap needs its own `top`. */
+.view-loader[data-mode="refresh"] {
+  height: 0;
+}
+
+.view-loader[data-mode="refresh"] .view-loader__pole,
+.view-loader[data-mode="refresh"] .view-loader__caption {
+  display: none;
+}
+
+.view-loader__stripe {
+  position: absolute;
+  top: -10px;
+  right: 0;
+  left: 0;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+}
+
+.view-loader__stripe::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: calc(-1 * var(--p));
+  background: repeating-linear-gradient(
+    45deg,
+    var(--pole-a) 0 var(--w),
+    var(--stripe-gap) var(--w) calc(2 * var(--w)),
+    var(--pole-b) calc(2 * var(--w)) calc(3 * var(--w)),
+    var(--stripe-gap) calc(3 * var(--w)) calc(4 * var(--w))
+  );
+  animation: view-loader-stripe-run 0.9s linear infinite;
+}
+
+@keyframes view-loader-stripe-run {
+  to {
+    transform: translateX(var(--p));
+  }
+}
+
+/* Reduced motion: everything holds still, captions still change. */
+@media (prefers-reduced-motion: reduce) {
+  .view-loader__glass::before,
+  .view-loader__stripe::before,
+  .view-loader__caption.is-changing {
+    animation: none;
+  }
+
+  :where(.view-loader) ~ * {
+    transition: none;
+  }
+}
