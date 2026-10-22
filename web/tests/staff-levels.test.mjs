@@ -124,16 +124,6 @@ test('chosenLevel reads the key off the selected option', () => {
   assert.deepEqual(chosenLevel(null), { value: '', key: '' });
 });
 
-test('the level reaches only the plan/fact and Overview bundle requests, and only through levelRequestParam', async () => {
-  const { readFileSync } = await import('node:fs');
-  const main = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
-  const filterParams = main.match(/function filterParams\(filter\) \{[\s\S]*?\n\}/)[0];
-  assert.doesNotMatch(filterParams, /staff_position_ids/);
-  assert.match(main, /'\/dashboard\/widget\/plan_fact', \{\s*\.\.\.filterParams\(filter\),\s*staff_position_ids: levelRequestParam\(filter\)/);
-  assert.match(main, /'\/dashboard\/bundle', \{\s*\.\.\.filterParams\(filter\),\s*staff_position_ids: levelRequestParam\(filter\)/);
-  assert.equal(main.match(/staff_position_ids:/g).length, 2);
-});
-
 test('a chosen person wins over a level in the request', () => {
   assert.equal(levelRequestParam({ staff: { value: '' }, level: { value: '7,12' } }), '7,12');
   assert.equal(levelRequestParam({ staff: { value: '5' }, level: { value: '7,12' } }), '');

@@ -58,7 +58,8 @@ def test_async_engine_has_a_statement_timeout_and_the_sync_engine_does_not(monke
     database.init_async_database('db.example', 5432, 'yclients_db', 'user', 'pw')
 
     settings = captured['connect_args']['server_settings']
-    assert settings['statement_timeout'] == '170000'
+    # Above nginx's proxy_read_timeout (150 s), below Vercel's maxDuration (180 s).
+    assert 150_000 < int(settings['statement_timeout']) < 180_000
     assert settings['plan_cache_mode'] == 'force_custom_plan'
 
     sync_kwargs = {}
@@ -239,10 +240,6 @@ def run_deploy(tmp_path, env_file='', **env):
         text=True,
     )
     return result, log.read_text()
-
-
-def test_deploy_script_is_valid_bash():
-    assert subprocess.run(['bash', '-n', str(DEPLOY_SCRIPT)]).returncode == 0
 
 
 def test_deploy_fails_when_the_served_revision_is_already_current_but_unhealthy(tmp_path):

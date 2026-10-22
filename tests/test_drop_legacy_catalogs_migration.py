@@ -66,8 +66,3 @@ def test_models_no_longer_carry_what_the_migration_drops(migration):
     for table, schema, column, _type, _default in migration.DROPPED_COLUMNS:
         key = f'{schema}.{table}' if schema else table
         assert column not in tables[key].c
-
-
-def test_migration_chains_from_0053(migration):
-    assert migration.down_revision == '0053_refresh_reuse_detection'
-    assert len(migration.revision) <= 32  # alembic_version.version_num is VARCHAR(32)

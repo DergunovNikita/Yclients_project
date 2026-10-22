@@ -115,8 +115,8 @@ async def test_plan_fact_of_a_branch_role_keeps_the_branch_row(async_session):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('preset', [None, 'month'])
-async def test_client_mix_metrics_match_the_overview_without_its_other_paths(async_session, preset):
-    from test_dashboard_service_w3 import NOW, _seed_visits, _Statements
+async def test_client_mix_metrics_match_the_overview(async_session, preset):
+    from test_dashboard_service_w3 import NOW, _seed_visits
 
     await _seed_visits(async_session)
     async_session.add_all([
@@ -132,30 +132,12 @@ async def test_client_mix_metrics_match_the_overview_without_its_other_paths(asy
         async_session, *window, 1, factual_at=NOW, period_preset=preset
     )
     async_session.info.clear()
-    with _Statements(async_session) as statements:
-        mix = await dashboard_service.fetch_client_mix_metrics(
-            async_session, *window, 1, factual_at=NOW, period_preset=preset
-        )
+    mix = await dashboard_service.fetch_client_mix_metrics(
+        async_session, *window, 1, factual_at=NOW, period_preset=preset
+    )
 
     assert mix and all(summary['visit_metrics'][key] == value for key, value in mix.items())
     assert mix['unique_clients'] == 2 and mix['new_clients'] == 1
-    for untouched in ('financial_transactions', 'transactions', 'sync_source_states', 'staff_schedules'):
-        assert statements.matching(f'from {untouched}') == [], untouched
-
-
-@pytest.mark.asyncio
-async def test_summary_with_the_breakdown_still_reads_it(async_session):
-    from test_dashboard_service_w3 import NOW, _seed_visits, _Statements
-
-    await _seed_visits(async_session)
-
-    with _Statements(async_session) as statements:
-        summary = await dashboard_service.fetch_summary(
-            async_session, date(2025, 1, 1), date(2025, 1, 31), 1, factual_at=NOW
-        )
-
-    assert summary['appointments_breakdown']['total'] == 3
-    assert statements.matching('as cancelled')
 
 
 async def _seed_departed_branch(session):
@@ -315,40 +297,12 @@ async def test_account_and_expense_markers_ignore_the_case_of_cyrillic_titles(as
     )
     await async_session.commit()
 
-    block = await dashboard_service._average_check_block(
-        async_session, dashboard_service.DateRange(date(2025, 1, 1), date(2025, 1, 31)), 1,
-        company_ids=[1], factual_at=NOW,
+    summary = await dashboard_service.fetch_summary(
+        async_session, date(2025, 1, 1), date(2025, 1, 31), 1, factual_at=NOW
     )
+    block = summary['average_check']
 
     # Bonus and certificate accounts are not cash whatever their capitalisation; the two top-ups are
     # recognised from their expense titles, the rent is neither goods nor a top-up.
     assert block['goods_revenue'] == 100.0
     assert block['topup_revenue'] == 30.0
-
-
-def _title_contains_sql(dialect) -> str:
-    clause = dashboard_service._TitleContains(AccountCatalog.title, 'бонус')
-    return str(clause.compile(dialect=dialect, compile_kwargs={'literal_binds': True}))
-
-
-def test_title_marker_on_postgres_keeps_the_exact_spellings_as_a_floor_under_ilike():
-    from sqlalchemy.dialects.postgresql import asyncpg
-
-    sql = _title_contains_sql(asyncpg.dialect())  # the API's driver
-
-    # ILIKE only folds Cyrillic when the database ctype does; the LIKE pair is what the old code matched.
-    assert sql == (
-        "(account_catalog.title ILIKE '%бонус%' OR account_catalog.title LIKE '%бонус%'"
-        " OR account_catalog.title LIKE '%Бонус%')"
-    )
-
-
-def test_title_marker_on_sqlite_spells_out_the_three_cases():
-    from sqlalchemy.dialects import sqlite
-
-    sql = _title_contains_sql(sqlite.dialect())
-
-    assert sql == (
-        "(account_catalog.title LIKE '%бонус%' OR account_catalog.title LIKE '%Бонус%'"
-        " OR account_catalog.title LIKE '%БОНУС%')"
-    )

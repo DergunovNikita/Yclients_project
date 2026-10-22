@@ -1,10 +1,15 @@
 """Tests for sync_worker.py's own orchestration loop (job claiming, engine lifecycle)."""
 import types
 from contextlib import contextmanager
+from datetime import datetime
 
 import pytest
 
 import sync_worker
+from helpers import sqlite_session_with_system as _sqlite_session
+from models import SyncJob, SyncRun
+from sync_control import SyncControlService
+from sync_jobs import SyncJobService
 
 
 class _FakeSession:
@@ -101,21 +106,6 @@ def test_main_builds_database_once_across_several_idle_ticks(monkeypatch):
     assert len(_FakeJobs.purge_sessions) == 5
 
 
-def test_process_next_job_builds_its_own_database_when_called_standalone(monkeypatch):
-    """process_next_job() keeps working with no arguments (tests, one-off invocations) by
-    falling back to init_database() when main() hasn't handed it a shared instance.
-    """
-    _FakeDatabase.instances = 0
-    monkeypatch.setattr(sync_worker, 'init_database', lambda *a, **k: _FakeDatabase())
-    monkeypatch.setattr(sync_worker, 'SyncJobService', _FakeJobs)
-    monkeypatch.setattr(sync_worker, 'SyncControlService', _FakeControl)
-
-    processed = sync_worker.process_next_job()
-
-    assert processed is False
-    assert _FakeDatabase.instances == 1
-
-
 class _ExplodingSession(_FakeSession):
     """A session whose rollback() fails too — the dead-connection case.
 
@@ -172,10 +162,16 @@ class _FailingControl(_FakeControl):
 
 def _run_worker_ticks(monkeypatch, database_class, jobs_class, control_class, ticks=3):
     database_class.instances = 0
+    enqueued = {'n': 0}
+
+    def counting_enqueue(db, *a, **k):
+        enqueued['n'] += 1
+        return {'enqueued': 0}
+
     monkeypatch.setattr(sync_worker, 'init_database', lambda *a, **k: database_class())
     monkeypatch.setattr(sync_worker, 'SyncJobService', jobs_class)
     monkeypatch.setattr(sync_worker, 'SyncControlService', control_class)
-    monkeypatch.setattr(sync_worker, 'enqueue_auto_sync_jobs_if_due', lambda db, *a, **k: {'enqueued': 0})
+    monkeypatch.setattr(sync_worker, 'enqueue_auto_sync_jobs_if_due', counting_enqueue)
     monkeypatch.setattr(sync_worker, 'parse_args', lambda: types.SimpleNamespace(once=False))
 
     seen = {'n': 0}
@@ -190,11 +186,12 @@ def _run_worker_ticks(monkeypatch, database_class, jobs_class, control_class, ti
         sync_worker.main()
     except _StopWorker:
         pass
-    return seen['n']
+    return seen['n'], enqueued['n']
 
 
-def test_a_failing_retention_sweep_does_not_stop_the_worker(monkeypatch):
-    """Both sweeps raising must not kill main() nor skip a tick.
+@pytest.mark.parametrize('session_class', [_RollbackRecordingSession, _ExplodingSession])
+def test_a_failing_retention_sweep_does_not_stop_the_worker_or_its_auto_enqueue(monkeypatch, session_class):
+    """Both sweeps raising (and, for a dead connection, the rollback raising too) must not kill main().
 
     main() has no except of its own, so an escaping sweep exception ends the process. The
     container restarts it, lands in the same idle branch, and fails again — the sync cadence
@@ -202,143 +199,92 @@ def test_a_failing_retention_sweep_does_not_stop_the_worker(monkeypatch):
     """
     _FailingJobs.sweeps = 0
     _FailingControl.sweeps = 0
+    monkeypatch.setattr(_ExplodingDatabase, 'session_class', session_class)
 
-    ticks = _run_worker_ticks(monkeypatch, _ExplodingDatabase, _FailingJobs, _FailingControl)
+    ticks, enqueued = _run_worker_ticks(monkeypatch, _ExplodingDatabase, _FailingJobs, _FailingControl)
 
     assert ticks == 3
-    # Every tick attempted both sweeps and survived both.
+    assert enqueued == 3
     assert _FailingControl.sweeps == 3
     assert _FailingJobs.sweeps == 3
-    # And each failure was rolled back — once per failing sweep, per tick.
-    assert _ExplodingDatabase.session.rollbacks == 6
+    # Every failed sweep is rolled back, or the next statement on the shared session would fail too.
+    assert _ExplodingDatabase.session.rollbacks == _FailingJobs.sweeps + _FailingControl.sweeps
 
 
-def test_a_failing_rollback_after_a_failing_sweep_does_not_stop_the_worker(monkeypatch):
-    """The dead-connection case: the sweep raises AND the rollback raises."""
-    _FailingJobs.sweeps = 0
-    _FailingControl.sweeps = 0
-    monkeypatch.setattr(_ExplodingDatabase, 'session_class', _ExplodingSession)
+class _ProbeControl(SyncControlService):
+    """Real control service whose lock is replaced: pg_try_advisory_lock does not exist on SQLite."""
 
-    ticks = _run_worker_ticks(monkeypatch, _ExplodingDatabase, _FailingJobs, _FailingControl)
-
-    assert ticks == 3
-    assert _FailingJobs.sweeps == 3
-    assert _ExplodingDatabase.session.rollbacks == 6
-
-
-def test_auto_enqueue_still_runs_when_a_retention_sweep_fails(monkeypatch):
-    """A failing sweep must not cost the tick its auto-enqueue.
-
-    Note what this does NOT pin: because each sweep is individually wrapped, moving them
-    back above enqueue_auto_sync_jobs_if_due would still leave this green. The ordering
-    itself is only enforced by reading the code; what the sibling above pins is that the
-    loop survives at all. Kept because the guarantee users actually care about is that the
-    sync cadence continues, and that is what this asserts directly.
-    """
-    _FailingJobs.sweeps = 0
-    _FailingControl.sweeps = 0
-    monkeypatch.setattr(_ExplodingDatabase, 'session_class', _RollbackRecordingSession)
-    enqueued = {'n': 0}
-
-    def counting_enqueue(db, *a, **k):
-        enqueued['n'] += 1
-        return {'enqueued': 0}
-
-    _ExplodingDatabase.instances = 0
-    monkeypatch.setattr(sync_worker, 'init_database', lambda *a, **k: _ExplodingDatabase())
-    monkeypatch.setattr(sync_worker, 'SyncJobService', _FailingJobs)
-    monkeypatch.setattr(sync_worker, 'SyncControlService', _FailingControl)
-    monkeypatch.setattr(sync_worker, 'enqueue_auto_sync_jobs_if_due', counting_enqueue)
-    monkeypatch.setattr(sync_worker, 'parse_args', lambda: types.SimpleNamespace(once=False))
-
-    seen = {'n': 0}
-
-    def fake_sleep(_seconds):
-        seen['n'] += 1
-        if seen['n'] >= 3:
-            raise _StopWorker()
-
-    monkeypatch.setattr(sync_worker.time, 'sleep', fake_sleep)
-    try:
-        sync_worker.main()
-    except _StopWorker:
-        pass
-
-    assert enqueued['n'] == 3
-
-
-class _ProbeControl:
-    """Control double: whether a run is 'running' and whether the lock is free are set per test."""
-
-    def __init__(self, running_run, lock_free):
-        self.running_run = running_run
+    def __init__(self, lock_free):
+        super().__init__()
         self.lock_free = lock_free
         self.probed = 0
-        self.cleaned = 0
-
-    def get_running_run(self, db):
-        return object() if self.running_run else None
 
     @contextmanager
     def probe_idle_lock(self, engine):
         self.probed += 1
         yield self.lock_free
 
-    def cleanup_stale_runs(self, db):
-        self.cleaned += 1
-        return 1
+
+def _orphans(session):
+    session.add(SyncRun(mode='full', trigger_type='queued', status='running', initiator='x',
+                        started_at=datetime(2026, 1, 1)))
+    session.add(SyncJob(mode='full', initiator='x', status='running', portal_account_id=7, company_ids=[],
+                        progress_pct=10, current_stage='running', step_results=[],
+                        requested_at=datetime(2026, 1, 1), started_at=datetime(2026, 1, 1)))
+    session.commit()
 
 
-class _ProbeJobs:
-    def __init__(self, running_job=False):
-        self.running_job = running_job
-        self.reaped = 0
-
-    def has_running_job(self, db):
-        return self.running_job
-
-    def reap_stale_jobs(self, db, max_running_minutes=None):
-        self.reaped += 1
-        return 1
+def _statuses(session):
+    return session.query(SyncRun).one().status, session.query(SyncJob).one().status
 
 
-def _reap(control, jobs):
-    sync_worker.reap_orphans_if_no_sync_running(types.SimpleNamespace(engine=object()), object(), control, jobs)
+def _reap(session, control):
+    sync_worker.reap_orphans_if_no_sync_running(
+        types.SimpleNamespace(engine=object()), session, control, SyncJobService(),
+    )
 
 
 def test_orphans_are_closed_when_the_lock_is_free():
-    control, jobs = _ProbeControl(running_run=True, lock_free=True), _ProbeJobs(running_job=True)
+    with _sqlite_session([SyncRun.__table__, SyncJob.__table__]) as session:
+        _orphans(session)
 
-    _reap(control, jobs)
+        _reap(session, _ProbeControl(lock_free=True))
 
-    assert (control.cleaned, jobs.reaped) == (1, 1)
+        assert _statuses(session) == ('abandoned', 'failed')
 
 
 def test_nothing_is_closed_while_a_sync_holds_the_lock():
     """A held lock means the 'running' run and job belong to a live sync, however old they are."""
-    control, jobs = _ProbeControl(running_run=True, lock_free=False), _ProbeJobs(running_job=True)
+    with _sqlite_session([SyncRun.__table__, SyncJob.__table__]) as session:
+        _orphans(session)
+        control = _ProbeControl(lock_free=False)
 
-    _reap(control, jobs)
+        _reap(session, control)
 
-    assert control.probed == 1
-    assert (control.cleaned, jobs.reaped) == (0, 0)
+        assert control.probed == 1
+        assert _statuses(session) == ('running', 'running')
 
 
 def test_the_lock_is_not_probed_when_nothing_is_running():
     """An idle tick must not take the lock needlessly: a CLI sync starting then would bounce."""
-    control, jobs = _ProbeControl(running_run=False, lock_free=True), _ProbeJobs(running_job=False)
+    with _sqlite_session([SyncRun.__table__, SyncJob.__table__]) as session:
+        control = _ProbeControl(lock_free=True)
 
-    _reap(control, jobs)
+        _reap(session, control)
 
-    assert control.probed == 0
+        assert control.probed == 0
 
 
 def test_a_running_job_alone_is_enough_to_probe():
-    control, jobs = _ProbeControl(running_run=False, lock_free=True), _ProbeJobs(running_job=True)
+    with _sqlite_session([SyncRun.__table__, SyncJob.__table__]) as session:
+        session.add(SyncJob(mode='full', initiator='x', status='running', portal_account_id=7, company_ids=[],
+                            progress_pct=10, current_stage='running', step_results=[],
+                            requested_at=datetime(2026, 1, 1), started_at=datetime(2026, 1, 1)))
+        session.commit()
 
-    _reap(control, jobs)
+        _reap(session, _ProbeControl(lock_free=True))
 
-    assert (control.cleaned, jobs.reaped) == (1, 1)
+        assert session.query(SyncJob).one().status == 'failed'
 
 
 def test_process_next_job_hands_its_database_to_run_sync_job(monkeypatch):
@@ -368,20 +314,19 @@ def test_process_next_job_hands_its_database_to_run_sync_job(monkeypatch):
 
 
 def test_process_next_job_leaves_the_queue_alone_while_a_sync_is_running(monkeypatch):
-    claimed = []
+    with _sqlite_session([SyncRun.__table__, SyncJob.__table__]) as session:
+        session.add(SyncRun(mode='full', trigger_type='cli', status='running', initiator='x',
+                            started_at=datetime(2026, 5, 1)))
+        session.add(SyncJob(mode='incremental', initiator='x', status='queued', portal_account_id=7,
+                            company_ids=[], progress_pct=0, current_stage='queued', step_results=[],
+                            requested_at=datetime(2026, 5, 1)))
+        session.commit()
 
-    class QueuedJobs(_FakeJobs):
-        def claim_next_job(self, db):
-            claimed.append(db)
-            return types.SimpleNamespace(id=1)
+        class Database:
+            def get_db(self):
+                return session
 
-    class BusyControl(_FakeControl):
-        def get_running_run(self, db):
-            return object()
+        monkeypatch.setattr(sync_worker, 'run_sync_job', lambda **kwargs: pytest.fail('a job was started'))
 
-    monkeypatch.setattr(sync_worker, 'SyncJobService', QueuedJobs)
-    monkeypatch.setattr(sync_worker, 'SyncControlService', BusyControl)
-    monkeypatch.setattr(sync_worker, 'run_sync_job', lambda **kwargs: pytest.fail('a job was started'))
-
-    assert sync_worker.process_next_job(_FakeDatabase()) is False
-    assert claimed == []
+        assert sync_worker.process_next_job(Database()) is False
+        assert session.query(SyncJob).one().status == 'queued'

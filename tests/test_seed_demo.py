@@ -1,5 +1,6 @@
 from argparse import Namespace
 from datetime import date
+from unittest.mock import patch
 
 from sqlalchemy import func, select
 
@@ -79,17 +80,27 @@ def demo_args(**overrides):
     return Namespace(**values)
 
 
+class _BoundDatabase:
+    def __init__(self, db):
+        self._db = db
+
+    def test_connection(self):
+        return True
+
+    def get_db(self):
+        return self._db
+
+
 def provision_demo(db, args=None):
-    args = args or demo_args()
-    account = seed_demo.get_or_create_demo_account(db)
-    db.flush()
-    company_ids = seed_demo._demo_company_ids(db, account.id)
-    if not company_ids:
-        company_ids = seed_demo.generate_demo_data(db, args, account.id)
-    seed_demo.ensure_branches(db, account.id, company_ids)
-    user = seed_demo.ensure_demo_user(db, account.id)
-    db.commit()
-    return account, user, company_ids
+    """Run the real `seed_demo.main()` against `db`; it closes the session, so the rows are read back."""
+    with (
+        patch.object(seed_demo, 'init_database', lambda *_args: _BoundDatabase(db)),
+        patch.object(seed_demo, 'parse_args', lambda: args or demo_args()),
+    ):
+        assert seed_demo.main() == 0
+    account = db.execute(select(PortalAccount).where(PortalAccount.is_demo.is_(True))).scalar_one()
+    user = db.execute(select(PortalUser).where(PortalUser.email == seed_demo.DEMO_EMAIL)).scalar_one()
+    return account, user, seed_demo._demo_company_ids(db, account.id)
 
 
 def seed_real_tenant_with_overlapping_external_ids(db):
@@ -265,28 +276,18 @@ def test_seed_demo_child_primary_keys_do_not_scale_from_large_company_ids():
 
         demo_company_id = company_ids[0]
         assert demo_company_id < 0
-        assert db.scalar(select(func.max(Client.id)).where(Client.company_id == demo_company_id)) < 0
-        assert db.scalar(select(func.max(Staff.id)).where(Staff.company_id == demo_company_id)) < 0
-        assert db.scalar(select(func.max(GoodCatalog.good_id)).where(GoodCatalog.company_id == demo_company_id)) < 0
-        assert db.scalar(select(func.max(Appointment.id)).where(Appointment.company_id == demo_company_id)) < 0
-        assert db.scalar(select(func.max(Transaction.id)).where(Transaction.company_id == demo_company_id)) < 0
-        assert db.scalar(select(func.max(StaffSchedule.id)).where(StaffSchedule.company_id == demo_company_id)) < 0
-        assert (
-            db.scalar(select(func.max(ServiceCatalog.service_id)).where(ServiceCatalog.company_id == demo_company_id))
-            < 0
-        )
-        assert (
-            db.scalar(
-                select(func.count(FinancialTransaction.id))
-                .join(
-                    Appointment,
-                    (FinancialTransaction.company_id == Appointment.company_id)
-                    & (FinancialTransaction.record_id == Appointment.external_id),
-                )
-                .where(FinancialTransaction.company_id == demo_company_id)
-            )
-            > 0
-        )
+        # Real ids are positive: a demo row with a positive key could collide with one a later sync brings.
+        for model, column in (
+            (Client, Client.id),
+            (Staff, Staff.id),
+            (GoodCatalog, GoodCatalog.good_id),
+            (Appointment, Appointment.id),
+            (Transaction, Transaction.id),
+            (StaffSchedule, StaffSchedule.id),
+            (ServiceCatalog, ServiceCatalog.service_id),
+        ):
+            highest = db.scalar(select(func.max(column)).where(model.company_id == demo_company_id))
+            assert highest is not None and highest < 0, model.__name__
 
 
 def test_seed_demo_catalog_ids_do_not_collide_with_later_real_sync_ids():

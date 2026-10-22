@@ -1,5 +1,4 @@
 """The Overview of a selected administrator shows his own Plan/fact row, his OPZ by day, and the money gates hold."""
-import logging
 from datetime import date, datetime
 
 import pytest
@@ -20,6 +19,7 @@ from models import (
     PortalAccount,
     PortalBranch,
     PortalUser,
+    PlanMetric,
     PortalUserBranch,
     ServiceLabel,
     Staff,
@@ -151,8 +151,33 @@ async def test_the_block_compares_with_the_previous_window_and_its_own_manual_to
     assert metrics['opz_pct']['previous_value'] == 300.0
     assert summary['visit_metrics']['opz_qty_change_pct'] == pytest.approx(66.67, abs=0.01)
     # The cards cannot tell "no such visits last month" from 0 % without the previous values: the summary carries them.
-    for part in ('first', 'repeat'):
-        assert f'opz_{part}_visit_pct_previous' in summary['visit_metrics']
+    visit_metrics = summary['visit_metrics']
+    # The split of the previous window is read for its own days: February had a repeat event and no first visits.
+    assert visit_metrics['opz_first_visit_pct_previous'] is None
+    assert visit_metrics['opz_repeat_visit_pct_previous'] == 100.0
+    assert visit_metrics['opz_repeat_visit_qty_change_pct'] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_the_previous_week_inside_the_same_month_is_read_for_its_own_days(async_session):
+    await _seed(async_session, manual=[])
+    # A saved monthly plan makes both weeks share one plan period, so only the window tells them apart.
+    async_session.add(PlanMetric(
+        period_start=MARCH[0], period_end=MARCH[1], company_id=1, staff_id=ADMIN_ID,
+        staff_category='administrator', metric_code='clients', value=5.0, updated_at=datetime(2025, 3, 1),
+    ))
+    await async_session.commit()
+
+    summary = await dashboard_service.fetch_summary(
+        async_session, date(2025, 3, 17), date(2025, 3, 23), company_id=1, staff_id=ADMIN_ID, factual_at=NOW,
+        period_preset='week',
+    )
+
+    visit_metrics = summary['visit_metrics']
+    # The 20th is a repeat visit that was rebooked; the week before it (10-16 March) has no visits at all.
+    assert (visit_metrics['opz_repeat_visit_qty'], visit_metrics['opz_first_visit_qty']) == (1.0, 0.0)
+    assert visit_metrics['opz_repeat_visit_pct_previous'] is None
+    assert visit_metrics['opz_repeat_visit_qty_change_pct'] is None
 
 
 @pytest.mark.asyncio
@@ -266,81 +291,3 @@ async def test_the_administrator_himself_sees_no_money_by_default(async_session,
     assert 'revenue' not in data['summary']
     assert all('revenue' not in row for row in data['revenue_daily'])
     assert sum(row['opz_qty'] for row in data['revenue_daily']) == 2
-
-
-@pytest.mark.asyncio
-async def test_a_plan_fact_below_the_overview_calculation_is_clamped_and_logged(async_session):
-    await _seed(async_session, manual=[_manual(3, 3.0)])
-    async_session.info.clear()
-    current_dr = dashboard_service.DateRange(*MARCH)
-    previous_dr = dashboard_service.DateRange(date(2025, 2, 1), date(2025, 2, 28))
-
-    records = []
-
-    class Collect(logging.Handler):
-        def emit(self, record):
-            records.append(record)
-
-    # The app logger does not propagate to the root, where caplog listens.
-    logger = logging.getLogger('yclients.dashboard')
-    handler = Collect(level=logging.DEBUG)
-    logger.addHandler(handler)
-    try:
-        # The truthful calculation (2 and 1 events) leaves the top-up as is and logs nothing.
-        block, current_manual, _ = await dashboard_service._administrator_personal_block(
-            async_session, current_dr, previous_dr, 1, ADMIN_ID, NOW, (2.0, 1.0),
-        )
-        assert (current_manual, block['opz_manual_qty']) == (3.0, 3.0)
-        assert not records
-
-        async_session.info.clear()
-        # An overview that counted more OPZ than Plan/fact: no negative top-up on screen, but a warning.
-        block, current_manual, previous_manual = await dashboard_service._administrator_personal_block(
-            async_session, current_dr, previous_dr, 1, ADMIN_ID, NOW, (99.0, 99.0),
-        )
-    finally:
-        logger.removeHandler(handler)
-
-    assert (current_manual, previous_manual, block['opz_manual_qty']) == (0.0, 0.0, 0.0)
-    assert [(record.levelno, record.name) for record in records] == [(logging.WARNING, 'yclients.dashboard')]
-    assert f'staff={ADMIN_ID}' in records[0].getMessage()
-
-
-@pytest.mark.asyncio
-async def test_the_administrator_attribution_is_computed_once_per_request_and_keyed_by_every_argument(async_session):
-    await _seed(async_session, manual=[])
-    async_session.info.clear()
-    plan_start, plan_end = await dashboard_service._resolve_plan_period(async_session, *MARCH, [1])
-
-    first = await dashboard_service._staff_opz_segments(
-        async_session, *MARCH, plan_start, plan_end, 1, ADMIN_ID, NOW,
-    )
-    again = await dashboard_service._staff_opz_segments(
-        async_session, *MARCH, plan_start, plan_end, 1, ADMIN_ID, NOW,
-    )
-    other_window = await dashboard_service._staff_opz_segments(
-        async_session, date(2025, 2, 1), date(2025, 2, 28), plan_start, plan_end, 1, ADMIN_ID, NOW,
-    )
-
-    assert again is first
-    assert other_window is not first
-    assert isinstance(first, tuple) and all(isinstance(segment.events, tuple) for segment in first)
-
-    users = {1: None, 2: None, ADMIN_ID: None}
-    kwargs = {'factual_at': NOW, 'with_first_visits': True}
-    records = await dashboard_service._admin_assigned_records(
-        async_session, *MARCH, 1, [ADMIN_ID], users, [1, 2], **kwargs,
-    )
-    assert await dashboard_service._admin_assigned_records(
-        async_session, *MARCH, 1, [ADMIN_ID], users, [2, 1], **kwargs,
-    ) is records
-    # A cached answer that carries the first-visit flag serves a caller that does not need it, not the reverse.
-    assert await dashboard_service._admin_assigned_records(
-        async_session, *MARCH, 1, [ADMIN_ID], users, [1, 2], factual_at=NOW,
-    ) is records
-    narrower = await dashboard_service._admin_assigned_records(
-        async_session, *MARCH, 1, [ADMIN_ID], users, [1], **kwargs,
-    )
-    assert narrower is not records
-    assert len(narrower[ADMIN_ID]) < len(records[ADMIN_ID])
-    assert all(hasattr(row, 'is_first_visit') for row in records[ADMIN_ID])

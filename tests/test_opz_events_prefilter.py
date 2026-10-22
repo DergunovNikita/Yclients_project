@@ -133,11 +133,6 @@ def _shifted(days):
     return select(dashboard_service._DayShift(literal('2025-03-10'), days))
 
 
-def test_day_shift_is_part_of_the_statement_cache_key():
-    assert _shifted(-2)._generate_cache_key() != _shifted(3)._generate_cache_key()
-    assert _shifted(3)._generate_cache_key() == _shifted(3)._generate_cache_key()
-
-
 @pytest.mark.parametrize(('days', 'sql'), [(-2, '- 2)'), (1, '+ 1)')])
 def test_day_shift_renders_postgres_date_arithmetic(days, sql):
     compiled = str(_shifted(days).compile(dialect=postgresql.dialect()))

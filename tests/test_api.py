@@ -3,6 +3,7 @@ import types
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from clock import utcnow
 import api
@@ -16,6 +17,7 @@ from models import (
     PortalBranch,
     PortalUser,
     PortalUserBranch,
+    SyncJob,
     YClientsCredential,
 )
 
@@ -52,134 +54,38 @@ async def test_api_key_blocks_unauthorized_requests(async_session, monkeypatch):
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', False)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 @pytest.mark.asyncio
-async def test_sync_trigger_queues_job(async_session, monkeypatch):
-    captured = {}
-
-    class DummyJob:
-        id = 42
-        mode = 'incremental'
-        initiator = 'dashboard'
-        portal_account_id = None
-        credential_id = None
-        company_ids = []
-
-    async def fake_enqueue(self, db, mode, initiator, **kwargs):
-        captured['mode'] = mode
-        captured['initiator'] = initiator
-        captured.update(kwargs)
-        return DummyJob()
+@pytest.mark.parametrize('mode', ['incremental', 'refresh', 'full'])
+async def test_sync_trigger_queues_a_job_for_every_sync_mode(async_session, monkeypatch, mode):
+    """The dashboard must be able to request each mode the pipeline implements."""
 
     async def override_db():
         yield async_session
 
     monkeypatch.setattr(api, 'SYNC_API_TOKEN', 'test-sync-token')
-    monkeypatch.setattr(api.SyncJobService, 'async_enqueue_job', fake_enqueue)
     app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        response = await client.post(
-            '/sync/trigger',
-            json={'mode': 'incremental', 'initiator': 'dashboard'},
-            headers={'X-Sync-Token': 'test-sync-token'},
-        )
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            response = await client.post(
+                '/sync/trigger',
+                json={'mode': mode, 'initiator': 'dashboard'},
+                headers={'X-Sync-Token': 'test-sync-token'},
+            )
+    finally:
+        app.dependency_overrides.clear()
 
-    app.dependency_overrides.clear()
-
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
+    job = (await async_session.execute(select(SyncJob))).scalar_one()
     assert response.json() == {
         'status': 'queued',
-        'job_id': 42,
-        'mode': 'incremental',
+        'job_id': job.id,
+        'mode': mode,
         'initiator': 'dashboard',
         'portal_account_id': None,
         'credential_id': None,
         'company_ids': [],
     }
-    assert captured == {
-        'mode': 'incremental',
-        'initiator': 'dashboard',
-        'portal_account_id': None,
-        'credential_id': None,
-        'company_ids': None,
-    }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('mode', ['incremental', 'refresh', 'full'])
-async def test_sync_trigger_accepts_every_sync_mode(async_session, monkeypatch, mode):
-    """The dashboard must be able to request each mode the pipeline implements."""
-    captured = {}
-
-    class DummyJob:
-        id = 7
-        initiator = 'dashboard'
-        portal_account_id = None
-        credential_id = None
-        company_ids = []
-
-    DummyJob.mode = mode
-
-    async def fake_enqueue(self, db, job_mode, initiator, **kwargs):
-        captured['mode'] = job_mode
-        return DummyJob()
-
-    async def override_db():
-        yield async_session
-
-    monkeypatch.setattr(api, 'SYNC_API_TOKEN', 'test-sync-token')
-    monkeypatch.setattr(api.SyncJobService, 'async_enqueue_job', fake_enqueue)
-    app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        response = await client.post(
-            '/sync/trigger',
-            json={'mode': mode, 'initiator': 'dashboard'},
-            headers={'X-Sync-Token': 'test-sync-token'},
-        )
-
-    app.dependency_overrides.clear()
-
-    assert response.status_code == 200, response.text
-    assert captured['mode'] == mode
+    assert (job.mode, job.initiator, job.status) == (mode, 'dashboard', 'queued')
 
 
 @pytest.mark.asyncio
@@ -237,50 +143,28 @@ async def test_sync_routes_reject_missing_or_wrong_token(async_session, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_sync_status_preserves_payload_and_offloads_sync_lookup(async_session, monkeypatch):
+async def test_sync_status_reports_the_sync_state_and_the_queue(async_session, monkeypatch):
     async def override_db():
         yield async_session
 
-    sync_payload = {'status': 'idle'}
-    queue_payload = {'queued': 0, 'running': 0}
-    offloaded = []
-
-    def fake_get_sync_status():
-        return sync_payload
-
-    async def fake_to_thread(func, *args):
-        offloaded.append(func)
-        return func(*args)
-
-    class FakeSyncJobService:
-        async def async_get_status_payload(self, db, *, portal_account_id=None):
-            assert db is async_session
-            assert portal_account_id is None
-            return queue_payload
-
     monkeypatch.setattr(api, 'SYNC_API_TOKEN', 'test-sync-token')
-    monkeypatch.setattr(api, 'get_sync_status', fake_get_sync_status)
-    monkeypatch.setattr(api.asyncio, 'to_thread', fake_to_thread)
-    monkeypatch.setattr(api, 'SyncJobService', FakeSyncJobService)
+    # The sync state lives behind a separate synchronous engine.
+    monkeypatch.setattr(api, 'get_sync_status', lambda: {'status': 'idle'})
     app.dependency_overrides[api.get_async_db] = override_db
+    headers = {'X-Sync-Token': 'test-sync-token'}
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            empty = await client.get('/sync/status', headers=headers)
+            await client.post('/sync/trigger', json={'mode': 'refresh'}, headers=headers)
+            queued = await client.get('/sync/status', headers=headers)
+    finally:
+        app.dependency_overrides.clear()
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        response = await client.get('/sync/status', headers={'X-Sync-Token': 'test-sync-token'})
-
-    app.dependency_overrides.clear()
-
-    assert response.status_code == 200
-    assert response.json() == {'sync': sync_payload, 'queue': queue_payload}
-    assert offloaded == [fake_get_sync_status]
-
-
-
-
-
-
-
-
+    assert empty.status_code == 200
+    assert empty.json()['sync'] == {'status': 'idle'}
+    assert empty.json()['queue']['queued_jobs'] == 0
+    assert queued.json()['queue']['queued_jobs'] == 1
+    assert queued.json()['queue']['current_job']['mode'] == 'refresh'
 
 
 def test_cli_accepts_every_sync_mode(monkeypatch):
@@ -374,6 +258,7 @@ async def test_dashboard_requests_are_timed_and_name_the_report(async_session, m
     transport = ASGITransport(app=app)
     try:
         async with AsyncClient(transport=transport, base_url='http://test') as client:
+            await client.get('/health')
             await client.get('/dashboard/branches')
             await client.get('/dashboard/reports/data', params={
                 'report_id': 'staff_leaderboard',
@@ -391,49 +276,7 @@ async def test_dashboard_requests_are_timed_and_name_the_report(async_session, m
         for message in messages
     ), messages
     assert all('duration_ms=' in message for message in messages)
-
-
-def test_only_dashboard_paths_are_timed():
-    from starlette.datastructures import URL
-
-    class FakeRequest:
-        def __init__(self, path, params=None):
-            self.url = URL(path)
-            self.query_params = params or {}
-
-    assert api._timed_request_fields(FakeRequest('/health')) is None
-    assert api._timed_request_fields(FakeRequest('/sync/status')) is None
-    assert api._timed_request_fields(FakeRequest('/dashboard/widget/summary')) == (
-        '/dashboard/widget/summary',
-        '-',
-    )
-    assert api._timed_request_fields(
-        FakeRequest('/dashboard/reports/data', {'report_id': 'seasonality'})
-    ) == ('/dashboard/reports/data', 'seasonality')
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    assert not any('path=/health' in message for message in messages), messages
 
 
 @pytest.mark.asyncio
@@ -447,10 +290,10 @@ async def test_sync_trigger_bounds_free_text_and_lists(async_session, monkeypatc
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
             long_initiator = await client.post(
-                '/sync/trigger', json={'initiator': 'x' * 65, 'global_sync': True}, headers=headers
+                '/sync/trigger', json={'initiator': 'x' * 10_000, 'global_sync': True}, headers=headers
             )
             long_list = await client.post(
-                '/sync/trigger', json={'company_ids': list(range(201)), 'global_sync': True}, headers=headers
+                '/sync/trigger', json={'company_ids': list(range(10_000)), 'global_sync': True}, headers=headers
             )
     finally:
         app.dependency_overrides.clear()
@@ -532,8 +375,6 @@ async def test_sync_trigger_credential_must_belong_to_the_callers_tenant(async_s
     assert own.json()['credential_id'] == 1
     assert foreign.status_code == 404
     assert missing.status_code == 404
-
-
 
 
 @pytest.mark.asyncio

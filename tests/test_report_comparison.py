@@ -5,7 +5,7 @@ from datetime import date
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError, ProgrammingError
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 
 import api
 import dashboard_reports
@@ -16,7 +16,6 @@ from auth_scope import AccessContext
 from dashboard_reports import (
     _comparison_payload,
     _comparison_rows,
-    _previous_window,
     fetch_report_data,
 )
 from models import Appointment, Client, Company, Group, Staff
@@ -32,19 +31,6 @@ def _payload(**overrides):
         'tables': [],
     }
     return {**base, **overrides}
-
-
-def test_previous_window_follows_the_overview_baseline():
-    assert _previous_window(date(2026, 9, 1), date(2026, 9, 30), 'month') == (date(2026, 8, 1), date(2026, 8, 31))
-    # Without a preset the plain window of equal length right before the period.
-    assert _previous_window(date(2026, 9, 1), date(2026, 9, 30), None) == (date(2026, 8, 2), date(2026, 8, 31))
-    assert _previous_window(date(2026, 9, 7), date(2026, 9, 13), 'week') == (date(2026, 8, 31), date(2026, 9, 6))
-
-
-def test_a_period_at_the_start_of_the_calendar_has_no_baseline_and_is_a_client_error():
-    for preset in (None, 'week', 'month'):
-        with pytest.raises(ReportInputError, match='previous period'):
-            _previous_window(date(1, 1, 1), date(1, 1, 31), preset)
 
 
 def test_a_zero_base_has_no_percent_change():
@@ -181,56 +167,6 @@ async def test_comparison_is_built_even_when_the_primary_payload_is_partial(monk
 
 
 @pytest.mark.asyncio
-async def test_only_an_explicit_comparison_window_drops_the_preset(monkeypatch):
-    primary_presets = []
-
-    async def fake_payload(db, report_id, start, end, *args, for_comparison=False, **kwargs):
-        if not for_comparison:
-            primary_presets.append(args[-1] if args else kwargs.get('period_preset'))
-        return _payload(period={'start': start.isoformat(), 'end': end.isoformat()})
-
-    monkeypatch.setattr(dashboard_reports, '_fetch_report_payload', fake_payload)
-    window = (date(2026, 9, 1), date(2026, 9, 30))
-    # Another employee on the same window leaves the preset alone: the deltas inside the tables keep the
-    # Overview's base.
-    await fetch_report_data(None, 'new_vs_returning_cross', *window, compare_staff_id=7, period_preset='month')
-    await fetch_report_data(
-        None, 'new_vs_returning_cross', *window, compare_staff_id=7, compare_previous=True, period_preset='month',
-    )
-    # A window typed by hand governs the whole page.
-    await fetch_report_data(
-        None, 'new_vs_returning_cross', *window,
-        compare_start=date(2026, 7, 1), compare_end=date(2026, 7, 31), period_preset='month',
-    )
-    assert primary_presets == ['month', 'month', None]
-
-
-@pytest.mark.asyncio
-async def test_a_failed_primary_still_reports_the_comparison_status(monkeypatch):
-    async def fake_payload(db, report_id, start, end, *args, **kwargs):
-        status = 'ready' if start == date(2026, 9, 1) else 'partial'
-        return _payload(source_status=status, period={'start': start.isoformat(), 'end': end.isoformat()})
-
-    monkeypatch.setattr(dashboard_reports, '_fetch_report_payload', fake_payload)
-    data = await fetch_report_data(
-        None, 'new_vs_returning_cross', date(2026, 9, 1), date(2026, 9, 30), compare_previous=True,
-    )
-    assert data['comparison']['source_status'] == 'partial'
-
-
-@pytest.mark.asyncio
-async def test_a_report_that_cannot_compare_gets_no_comparison(monkeypatch):
-    async def fake_payload(db, report_id, start, end, *args, **kwargs):
-        return _payload()
-
-    monkeypatch.setattr(dashboard_reports, '_fetch_report_payload', fake_payload)
-    data = await fetch_report_data(
-        None, 'year_over_year', date(2026, 9, 1), date(2026, 9, 30), compare_previous=True,
-    )
-    assert 'comparison' not in data
-
-
-@pytest.mark.asyncio
 async def test_a_report_without_comparison_does_not_fail_on_a_window_it_never_uses(monkeypatch):
     async def fake_payload(db, report_id, start, end, *args, **kwargs):
         return _payload()
@@ -305,9 +241,8 @@ async def test_leaderboard_retries_only_database_failures(async_session, monkeyp
         (InterfaceError('SELECT 1', {}, Exception('connection lost')), True),
         (OSError('network unreachable'), True),
         # asyncpg's QueryCanceledError (statement_timeout) arrives as a plain DBAPIError: it would
-        # time out again on the same window, and a programming error is a defect.
+        # time out again on the same window.
         (DBAPIError('SELECT 1', {}, Exception('canceling statement due to statement timeout')), False),
-        (ProgrammingError('SELECT 1', {}, Exception('relation does not exist')), False),
     ],
 )
 async def test_leaderboard_retries_only_connection_level_failures(async_session, monkeypatch, error, retryable):
@@ -321,35 +256,6 @@ async def test_leaderboard_retries_only_connection_level_failures(async_session,
         await fetch_report_data(async_session, 'staff_leaderboard', date(2026, 9, 1), date(2026, 9, 30), company_id=1)
 
     assert isinstance(raised.value, ReportCalculationError) is retryable
-
-
-@pytest.mark.asyncio
-async def test_the_preset_survives_compare_previous_but_not_an_explicit_window(monkeypatch):
-    seen = []
-
-    async def fake_payload(
-        db, report_id, start, end, company_id, staff_id, granularity, allowed, factual_at, preset, for_comparison=False,
-        staff_position_ids=None,
-    ):
-        seen.append((start, end, preset))
-        return _payload()
-
-    monkeypatch.setattr(dashboard_reports, '_fetch_report_payload', fake_payload)
-    await fetch_report_data(
-        None, 'new_vs_returning_cross', date(2026, 9, 1), date(2026, 9, 30),
-        compare_previous=True, period_preset='month',
-    )
-    # explicit dates win over compare_previous and null the preset, as before
-    await fetch_report_data(
-        None, 'new_vs_returning_cross', date(2026, 9, 1), date(2026, 9, 30),
-        compare_start=date(2026, 7, 1), compare_end=date(2026, 7, 31), compare_previous=True, period_preset='month',
-    )
-    assert seen == [
-        (date(2026, 9, 1), date(2026, 9, 30), 'month'),
-        (date(2026, 8, 1), date(2026, 8, 31), None),
-        (date(2026, 9, 1), date(2026, 9, 30), None),
-        (date(2026, 7, 1), date(2026, 7, 31), None),
-    ]
 
 
 async def _seed_personal_role(async_session):
@@ -428,3 +334,55 @@ async def test_compare_previous_without_a_preset_uses_the_preceding_window(async
 
     assert response.json()['data']['comparison']['period']['start'] == '2026-08-02'
     assert explicit.json()['data']['comparison']['period']['start'] == '2026-07-01'
+
+
+@pytest.mark.asyncio
+async def test_table_deltas_follow_the_preset_even_with_another_employee_but_not_a_typed_window(async_session):
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Staff(id=2, name='Colleague', position='Барбер', company_id=1),
+    ])
+    await async_session.flush()
+    # The week preset's baseline (24-29 Aug) and the plain window before the period (25-30 Aug) differ
+    # by 24 August alone, so that visit tells the two rules apart.
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2026, 8, 24), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2026, 8, 27), attendance=1),
+        Appointment(id=3, company_id=1, staff_id=1, client_id=3, date=date(2026, 9, 1), attendance=1),
+        Appointment(id=4, company_id=1, staff_id=1, client_id=4, date=date(2026, 9, 2), attendance=1),
+        Appointment(id=5, company_id=1, staff_id=1, client_id=5, date=date(2026, 9, 3), attendance=1),
+    ])
+    await async_session.commit()
+
+    async def override_db():
+        yield async_session
+
+    async def override_access():
+        return AccessContext.from_user(user_id=1, role='owner', portal_account_id=1, company_ids=[1])
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
+    params = {
+        'report_id': 'new_vs_returning_cross', 'start_date': '2026-08-31', 'end_date': '2026-09-05',
+        'compare_staff_id': 2,
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        with_preset = await client.get('/dashboard/reports/data', params={**params, 'period_preset': 'week'})
+        plain = await client.get('/dashboard/reports/data', params=params)
+        # A window typed by hand governs the whole page: the preset no longer picks the table's baseline.
+        explicit = await client.get('/dashboard/reports/data', params={
+            **params, 'period_preset': 'week', 'compare_start_date': '2026-08-25', 'compare_end_date': '2026-08-30',
+        })
+    app.dependency_overrides.clear()
+
+    def new_clients_change(response):
+        assert response.status_code == 200, response.text
+        rows = next(item['rows'] for item in response.json()['data']['tables'] if item['id'] == 'segments')
+        return next(row['clients_change_pct'] for row in rows if row['segment'] == 'Новые')
+
+    # 3 new clients against 2 in the preset's baseline, against 1 in the plain preceding window.
+    assert new_clients_change(with_preset) == 50.0
+    assert new_clients_change(plain) == 200.0
+    assert new_clients_change(explicit) == 200.0

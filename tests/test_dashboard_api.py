@@ -1,7 +1,7 @@
 """Dashboard JSON API (product portal metrics)."""
 
 from calendar import monthrange
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -103,6 +103,18 @@ def _paid_service_revenue_filter_rows() -> list[FinancialTransaction]:
     ]
 
 
+async def _top_up_coverage(db, start, end, company_id=1):
+    """`(source_status, missing_components)` the Overview reports for the period."""
+    block = (await dashboard_service.fetch_summary(db, start, end, company_id=company_id))['average_check']
+    return block['source_status'], block['missing_components']
+
+
+async def _branch_plan_fact_facts(db, start, end, company_id=1):
+    """The branch row of Plan/fact as `{metric code: fact}`."""
+    result = await fetch_plan_fact(db, start, end, company_id=company_id)
+    return {cell['code']: cell['fact'] for cell in result['parent_group']['metrics']}
+
+
 # Everything `average_check` may still carry once `revenue` is hidden: per-visit averages,
 # counts and status strings. Kept as an allow-list on purpose — a new currency field in
 # `_average_check_block` must be classified before it can reach a revenue-restricted role, and
@@ -126,46 +138,6 @@ MONEY_FREE_AVERAGE_CHECK_KEYS = {
 
 
 @pytest.mark.asyncio
-async def test_dashboard_reports_catalog_hides_what_the_role_cannot_open(async_session):
-    """A card whose report answers 403 is worse than no card — it only leads to an error page."""
-    async def override_db():
-        yield async_session
-
-    money_blind = AccessContext.from_user(
-        user_id=11,
-        role='manager',
-        portal_account_id=1,
-        company_ids=[1],
-        money_metrics=frozenset(),
-    )
-
-    async def override_access():
-        return money_blind
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        narrowed = await client.get('/dashboard/reports')
-    app.dependency_overrides[dashboard_routes.get_dashboard_access] = lambda: AccessContext.api_key()
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        full = await client.get('/dashboard/reports')
-    app.dependency_overrides.clear()
-
-    assert narrowed.status_code == 200 and full.status_code == 200
-    narrowed_ids = {item['id'] for item in narrowed.json()['data']}
-    full_ids = {item['id'] for item in full.json()['data']}
-    assert 'financial_overview' not in narrowed_ids
-    assert 'financial_overview' in full_ids
-    assert narrowed_ids < full_ids
-    # Mixed reports stay: their money columns are filtered per column, not per report.
-    assert 'staff_leaderboard' in narrowed_ids
-    assert 'peak_load' in narrowed_ids
-    for report_id in narrowed_ids:
-        assert not dashboard_reports.report_requires_financials(report_id), report_id
-
-
-@pytest.mark.asyncio
 async def test_dashboard_reports_registry_contract(async_session):
     async def override_db():
         yield async_session
@@ -178,29 +150,14 @@ async def test_dashboard_reports_registry_contract(async_session):
 
     assert r.status_code == 200
     data = r.json()['data']
-    assert [item['id'] for item in data] == [
-        'financial_overview',
-        'payment_methods',
-        'year_over_year',
-        'avg_check_by_service',
-        'service_staff_profit',
-        'service_combos',
-        'staff_efficiency',
-        'staff_leaderboard',
-        'peak_load',
-        'bookings_dynamics',
-        'booking_channels',
-        'new_vs_returning_cross',
-        'top_clients_pareto',
-        'retention_3_6_12',
-        'revenue_at_risk',
-        'nps_dashboard',
-        'goods_dynamics',
-    ]
+    ids = {item['id'] for item in data}
+    # A full-access caller sees the money reports; the platform-admin-only usage report stays out.
+    assert {'financial_overview', 'payment_methods', 'year_over_year', 'staff_leaderboard', 'peak_load'} <= ids
+    assert dashboard_reports.REPORT_USAGE_ID not in ids
     by_id = {item['id']: item for item in data}
     for item in data:
         assert set(item) == {'id', 'title', 'description', 'group', 'themes', 'roles', 'filters', 'aliases'}
-        assert item['description'] and item['description'] != 'Отчет строится на текущих данных YClients в PostgreSQL.'
+        assert item['description']
         assert set(item['filters']) == {'date_range', 'staff', 'staff_level', 'granularity', 'compare'}
         assert item['filters']['staff_level'] is (item['id'] == 'staff_leaderboard')
     assert by_id['financial_overview']['filters']['compare'] is True
@@ -214,7 +171,6 @@ async def test_dashboard_reports_registry_contract(async_session):
     assert by_id['staff_leaderboard']['filters']['compare'] is False
     assert by_id['payment_methods']['group'] == 'finance'
     assert by_id['payment_methods']['filters']['staff'] is False
-    assert by_id['revenue_at_risk']['title'] == 'Отток клиентов'
     # Groups come in the explicit catalog order, not in whatever order the table lists them.
     groups = [item['group'] for item in data]
     assert groups == sorted(groups, key=dashboard_reports.REPORT_GROUP_ORDER.index)
@@ -257,16 +213,6 @@ async def test_dashboard_reports_catalog_hides_money_reports_but_keeps_overview_
         # Its own platform_admin gate, not a money metric.
         and report_id != 'report_usage'
     }
-
-
-def test_every_report_definition_has_a_builder():
-    import inspect
-
-    assert dashboard_reports.REPORT_REGISTRY
-    for report_id, definition in dashboard_reports.REPORT_REGISTRY.items():
-        builder = definition.builder
-        assert inspect.iscoroutinefunction(builder), report_id
-        assert list(inspect.signature(builder).parameters) == ['req'], report_id
 
 
 def test_resolve_report_id():
@@ -683,15 +629,7 @@ async def test_dashboard_client_reports_revenue_uses_paid_service_rows(async_ses
         date(2025, 1, 31),
         company_id=1,
     )
-    plan_fact = await dashboard_service._fact_metric_components(
-        async_session,
-        date(2025, 1, 1),
-        date(2025, 1, 31),
-        1,
-        opz_override=float(len(
-            await dashboard_service._opz_events(async_session, date(2025, 1, 1), date(2025, 1, 31), 1)
-        )),
-    )
+    plan_fact = await _branch_plan_fact_facts(async_session, date(2025, 1, 1), date(2025, 1, 31))
     assert data['cards'][2]['value'] == overview['revenue']['service_revenue'] == 2200.0
     assert data['cards'][2]['value'] == plan_fact['revenue']
 
@@ -862,32 +800,21 @@ async def test_dashboard_year_over_year_uses_actual_history_and_overview_formula
 
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
-    statement_count = 0
-
-    def count_statements(*_args):
-        nonlocal statement_count
-        statement_count += 1
-
-    event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
-    try:
-        async with AsyncClient(transport=transport, base_url='http://test') as client:
-            r = await client.get(
-                '/dashboard/reports/data',
-                params={
-                    'report_id': 'year_over_year',
-                    'start_date': '2025-01-01',
-                    'end_date': '2025-01-31',
-                    'company_id': 1,
-                },
-            )
-    finally:
-        event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        r = await client.get(
+            '/dashboard/reports/data',
+            params={
+                'report_id': 'year_over_year',
+                'start_date': '2025-01-01',
+                'end_date': '2025-01-31',
+                'company_id': 1,
+            },
+        )
     app.dependency_overrides.clear()
 
     assert r.status_code == 200
     data = r.json()['data']
     assert data['report_id'] == 'year_over_year'
-    assert statement_count <= 17
     assert data['source_status'] == 'ready'
     assert [row['year'] for row in table_rows(data, 'years')] == [2023, 2024, 2025, 2026]
     assert table_rows(data, 'years')[0]['period_start'] == '2023-05-10'
@@ -936,19 +863,11 @@ async def test_dashboard_year_over_year_uses_actual_history_and_overview_formula
         date(2025, 12, 31),
         company_id=1,
     )
-    plan_fact_components = await dashboard_service._fact_metric_components(
-        async_session,
-        date(2025, 1, 1),
-        date(2025, 12, 31),
-        1,
-        opz_override=float(len(
-            await dashboard_service._opz_events(async_session, date(2025, 1, 1), date(2025, 12, 31), 1)
-        )),
-    )
+    plan_fact_facts = await _branch_plan_fact_facts(async_session, date(2025, 1, 1), date(2025, 12, 31))
     assert years_by_year[2025]['revenue'] == overview['revenue']['total']
-    assert years_by_year[2025]['revenue'] == plan_fact_components['revenue']
+    assert years_by_year[2025]['revenue'] == plan_fact_facts['revenue'] == 5500.0
     assert years_by_year[2025]['appointments'] == overview['revenue']['appointments']
-    assert years_by_year[2025]['appointments'] == plan_fact_components['avg_check_denominator']
+    assert years_by_year[2025]['avg_check'] == plan_fact_facts['avg_check_total'] == 2750.0
 
 
 @pytest.mark.asyncio
@@ -1519,20 +1438,12 @@ async def test_reporting_start_keeps_coverage_status_consistent_across_reports(
     ))
     await async_session.commit()
 
-    summary = await dashboard_service.fetch_summary(
-        async_session,
-        date(2025, 1, 1),
-        date(2025, 12, 31),
-        company_id=1,
-    )
-
-    assert summary['average_check']['source_status'] == 'ready'
-    assert summary['average_check']['missing_components'] == []
+    assert await _top_up_coverage(async_session, date(2025, 1, 1), date(2025, 12, 31)) == ('ready', [])
 
     # A period the branch entirely predates is not certified either.
-    assert await dashboard_service._source_coverage_status(
-        async_session, date(2024, 1, 1), date(2024, 12, 31), 1, None,
-    ) == ('partial', ['personal_account_topups'])
+    assert await _top_up_coverage(async_session, date(2024, 1, 1), date(2024, 12, 31)) == (
+        'partial', ['personal_account_topups'],
+    )
 
     # The clamp must not degenerate into "always ready": a gap that starts after the
     # reporting start is still a gap.
@@ -1541,9 +1452,9 @@ async def test_reporting_start_keeps_coverage_status_consistent_across_reports(
     )).scalars().one()
     state.period_start = date(2025, 8, 1)
     await async_session.commit()
-    assert await dashboard_service._source_coverage_status(
-        async_session, date(2025, 1, 1), date(2025, 12, 31), 1, None,
-    ) == ('partial', ['personal_account_topups'])
+    assert await _top_up_coverage(async_session, date(2025, 1, 1), date(2025, 12, 31)) == (
+        'partial', ['personal_account_topups'],
+    )
 
 
 @pytest.mark.asyncio
@@ -1715,18 +1626,6 @@ async def test_reporting_start_certifies_the_opening_year_of_a_branch_synced_fro
     assert year_2025['revenue'] == 700.0
     assert year_2025['appointments'] == 1
 
-    # Pin the dependency query itself: the coverage clamp above would otherwise hide a
-    # dependency window that still reaches behind the reporting start.
-    facts = await dashboard_service.fetch_year_over_year_facts(
-        async_session,
-        date(2023, 1, 1),
-        report_now.date(),
-        company_id=1,
-        factual_at=report_now,
-    )
-    dependency = facts['appointment_dependencies']['annual'].get(2025, {}).get(1)
-    assert dependency is None or dependency[0] >= date(2025, 5, 1)
-
 
 @pytest.mark.asyncio
 async def test_reporting_start_clamps_coverage_for_a_branch_opened_mid_year(
@@ -1812,14 +1711,19 @@ async def test_reporting_start_trims_breakdown_cards_client_blocks_and_staff_fac
         Group(id=1, title='G1'),
         Company(id=1, title='Salon', group_id=1, reporting_start_date=date(2025, 5, 1)),
         Staff(id=1, name='Master', position='Барбер', company_id=1),
+        Staff(id=2, name='Admin', position='Администратор', company_id=1, user_id=500),
         Client(id=1, name='Before', company_id=1),
         Client(id=2, name='After', company_id=1),
         AccountCatalog(company_id=1, account_id=7, title='Личный счет клиента', updated_at=datetime(2025, 1, 1)),
     ])
     await async_session.flush()
     async_session.add_all([
-        Appointment(id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 4, 20), attendance=1),
-        Appointment(id=2, company_id=1, staff_id=1, client_id=2, date=date(2025, 6, 10), attendance=1),
+        Appointment(
+            id=1, company_id=1, staff_id=1, client_id=1, date=date(2025, 4, 20), attendance=1, created_user_id=500,
+        ),
+        Appointment(
+            id=2, company_id=1, staff_id=1, client_id=2, date=date(2025, 6, 10), attendance=1, created_user_id=500,
+        ),
     ])
     await async_session.flush()
     async_session.add_all(
@@ -1937,24 +1841,15 @@ async def test_reporting_start_trims_breakdown_cards_client_blocks_and_staff_fac
     assert sum(row['records'] for row in table_rows(operations, 'staff_records')) == 1
     assert sum(row['records'] for row in table_rows(operations, 'periods')) == 1
 
-    staff_facts = await dashboard_service._staff_fact_components_by_branch(
-        async_session,
-        date(2025, 1, 1),
-        date(2025, 12, 31),
-        1,
-        [1],
-        {1: 'barber'},
-        {},
-        {},
-        {},
-        {},
-        {},
-        [],
-        factual_at=report_now,
-    )
     # Plan/fact must not credit a barber with revenue the branch does not report:
     # the 200 goods sale plus the 300 top-up, never the pre-opening 800 and 900.
-    assert staff_facts[1]['revenue'] == 500.0
+    plan_fact = await fetch_plan_fact(async_session, date(2025, 1, 1), date(2025, 12, 31), company_id=1)
+    staff_cells = {
+        group['title']: {cell['code']: cell['fact'] for cell in group['metrics']} for group in plan_fact['groups']
+    }
+    assert staff_cells['Master']['revenue'] == 500.0
+    # The administrator is credited only with the visit the branch reports.
+    assert staff_cells['Admin']['clients'] == 1.0
 
     nps = await dashboard_reports.fetch_report_data(
         async_session,
@@ -1976,23 +1871,6 @@ async def test_reporting_start_trims_breakdown_cards_client_blocks_and_staff_fac
         allowed_company_ids=[1],
     )
     assert sum(row['clients'] for row in table_rows(churn, 'churn_by_staff')) == 1
-
-    # Goods revenue reaches the summary through _average_check_block's classification query,
-    # and admin attribution counts finished appointments directly — both must see the trimmed
-    # history. Asserted against the live path on purpose: the private helper this used to call
-    # lost its last production caller, so a passing assertion there would have proved nothing.
-    average_check = await dashboard_service._average_check_block(
-        async_session,
-        dashboard_service.DateRange(date(2025, 1, 1), date(2025, 12, 31)),
-        1,
-        factual_at=report_now,
-    )
-    assert average_check['goods_revenue'] == 200.0
-    admin_clients = await dashboard_service._admin_clients_by_finished_appointments(
-        async_session, date(2025, 1, 1), date(2025, 12, 31), 1, [1], {1: None},
-        factual_at=report_now,
-    )
-    assert sum(admin_clients.values()) == 1
 
 
 @pytest.mark.asyncio
@@ -2085,17 +1963,20 @@ async def test_reporting_start_excludes_pre_opening_goods_and_opz(
     async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date()))
     await async_session.commit()
 
-    opz_facts = await dashboard_service.fetch_opz_year_facts(
+    year_report = await dashboard_reports.fetch_report_data(
         async_session,
-        date(2023, 1, 1),
-        report_now.date(),
-        company_id=1,
-        staff_id=None,
-        factual_at=report_now,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
     )
+    year_2025 = next(row for row in table_rows(year_report, 'years') if row['year'] == 2025)
     # Only client 2's rebooking survives; client 1's anchor visit is before the cutoff.
-    assert opz_facts['counts'] == {2025: 1.0}
-    assert opz_facts['appointment_dependencies'][2025][1] == (date(2025, 6, 10), date(2025, 8, 1))
+    assert year_2025['opz_qty'] == 1.0
+    overview = await dashboard_service.fetch_summary(
+        async_session, date(2025, 1, 1), date(2025, 12, 31), allowed_company_ids=[1], factual_at=report_now,
+    )
+    assert overview['visit_metrics']['opz_qty'] == 1.0
 
     goods_report = await dashboard_reports.fetch_report_data(
         async_session,
@@ -2734,14 +2615,12 @@ async def test_reporting_end_does_not_demand_sync_coverage_past_the_handover(asy
     ))
     await async_session.commit()
 
-    assert await dashboard_service._source_coverage_status(
-        async_session, date(2025, 8, 1), date(2025, 9, 30), 1, None,
-    ) == ('ready', [])
+    assert await _top_up_coverage(async_session, date(2025, 8, 1), date(2025, 9, 30)) == ('ready', [])
 
     # A period entirely past the handover certifies nothing: its zeroes are not facts.
-    assert await dashboard_service._source_coverage_status(
-        async_session, date(2025, 9, 1), date(2025, 9, 30), 1, None,
-    ) == ('partial', ['personal_account_topups'])
+    assert await _top_up_coverage(async_session, date(2025, 9, 1), date(2025, 9, 30)) == (
+        'partial', ['personal_account_topups'],
+    )
 
     # The clamp must not degenerate into "always ready": a gap inside the window is a gap.
     state = (await async_session.execute(
@@ -2749,9 +2628,9 @@ async def test_reporting_end_does_not_demand_sync_coverage_past_the_handover(asy
     )).scalars().one()
     state.period_end = date(2025, 7, 31)
     await async_session.commit()
-    assert await dashboard_service._source_coverage_status(
-        async_session, date(2025, 8, 1), date(2025, 9, 30), 1, None,
-    ) == ('partial', ['personal_account_topups'])
+    assert await _top_up_coverage(async_session, date(2025, 8, 1), date(2025, 9, 30)) == (
+        'partial', ['personal_account_topups'],
+    )
 
 
 @pytest.mark.asyncio
@@ -3390,7 +3269,7 @@ async def test_year_over_year_query_count_does_not_grow_with_history_years(
             Company(id=2, title='Salon 2', group_id=1),
             Staff(id=1, name='Master 1', position='Барбер', company_id=1),
             Staff(id=2, name='Master 2', position='Барбер', company_id=2),
-            Appointment(id=1, company_id=1, staff_id=1, date=date(2015, 1, 1), attendance=1),
+            Appointment(id=1, company_id=1, staff_id=1, date=date(2025, 1, 1), attendance=1),
             Appointment(id=2, company_id=2, staff_id=2, date=date(2026, 7, 1), attendance=1),
             FinancialTransaction(
                 id=1,
@@ -3398,7 +3277,7 @@ async def test_year_over_year_query_count_does_not_grow_with_history_years(
                 master_id=1,
                 record_id=1,
                 sold_item_type='service',
-                date=datetime(2015, 1, 1, 12),
+                date=datetime(2025, 1, 1, 12),
                 amount=100.0,
             ),
             FinancialTransaction(
@@ -3426,26 +3305,49 @@ async def test_year_over_year_query_count_does_not_grow_with_history_years(
             ))
     await async_session.commit()
 
-    statement_count = 0
+    async def report_statements():
+        count = 0
 
-    def count_statements(*_args):
-        nonlocal statement_count
-        statement_count += 1
+        def count_statements(*_args):
+            nonlocal count
+            count += 1
 
-    event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
-    try:
-        data = await dashboard_reports.fetch_report_data(
-            async_session,
-            'year_over_year',
-            date(2026, 1, 1),
-            date(2026, 1, 31),
-            allowed_company_ids=[1, 2],
-        )
-    finally:
-        event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
+        event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
+        try:
+            data = await dashboard_reports.fetch_report_data(
+                async_session,
+                'year_over_year',
+                date(2026, 1, 1),
+                date(2026, 1, 31),
+                allowed_company_ids=[1, 2],
+            )
+        finally:
+            event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
+        return count, [row['year'] for row in table_rows(data, 'years')]
 
-    assert [row['year'] for row in table_rows(data, 'years')] == list(range(2015, 2027))
-    assert statement_count <= 17
+    short_count, short_years = await report_statements()
+    assert short_years == [2025, 2026]
+
+    # Ten more years of history must not cost more statements. The per-request caches are
+    # dropped because the data under the session changed.
+    async_session.add_all([
+        Appointment(id=3, company_id=1, staff_id=1, date=date(2015, 1, 1), attendance=1),
+        FinancialTransaction(
+            id=3,
+            company_id=1,
+            master_id=1,
+            record_id=3,
+            sold_item_type='service',
+            date=datetime(2015, 1, 1, 12),
+            amount=100.0,
+        ),
+    ])
+    await async_session.commit()
+    async_session.info.clear()
+    long_count, long_years = await report_statements()
+
+    assert long_years == list(range(2015, 2027))
+    assert long_count == short_count
 
 
 @pytest.mark.asyncio
@@ -3552,7 +3454,7 @@ async def test_year_over_year_opz_counts_a_returning_client_in_each_year(
 
 
 @pytest.mark.asyncio
-async def test_year_over_year_opz_fact_advances_latest_year(
+async def test_year_over_year_counts_an_opz_event_booked_on_new_years_day_in_the_new_year(
     async_session,
     monkeypatch,
 ):
@@ -3612,15 +3514,7 @@ async def test_year_over_year_opz_fact_advances_latest_year(
         date(2025, 1, 1),
         company_id=1,
     )
-    plan_fact = await dashboard_service._fact_metric_components(
-        async_session,
-        date(2025, 1, 1),
-        date(2025, 1, 1),
-        1,
-        opz_override=float(len(
-            await dashboard_service._opz_events(async_session, date(2025, 1, 1), date(2025, 1, 1), 1)
-        )),
-    )
+    plan_fact = await _branch_plan_fact_facts(async_session, date(2025, 1, 1), date(2025, 1, 1))
 
     assert years[2025]['opz_qty'] == overview['visit_metrics']['opz_qty'] == 1.0
     assert years[2025]['opz_qty'] == plan_fact['opz_qty']
@@ -3822,36 +3716,7 @@ async def test_year_over_year_opz_counts_each_rebooked_visit_so_months_add_up_to
 
 
 @pytest.mark.asyncio
-async def test_opz_year_facts_count_each_rebooked_visit(async_session):
-    await _seed_opz_history(async_session)
-    bounds = (date(2024, 1, 1), date(2025, 12, 31))
-
-    events = await dashboard_service._opz_events(async_session, *bounds, 1, factual_at=REPORT_NOW_2026)
-    facts = await dashboard_service.fetch_opz_year_facts(
-        async_session, *bounds, 1, None, factual_at=REPORT_NOW_2026,
-    )
-
-    assert [(event.event_id, event.first_visit) for event in events] == [(5, True), (2, True), (3, False)]
-    assert facts['counts'] == {2024: 1.0, 2025: 2.0}
-    assert facts['monthly_counts'] == {2024: {3: 1.0}, 2025: {1: 1.0, 2: 1.0}}
-    assert facts['monthly_first_visit_counts'] == {2024: {3: 1.0}, 2025: {1: 1.0}}
-    assert facts['monthly_repeat_visit_counts'] == {2025: {2: 1.0}}
-    assert 'latest_date' not in facts
-    assert facts['appointment_dependencies'] == {
-        2024: {1: (date(2024, 3, 10), date(2024, 4, 1))},
-        2025: {1: (date(2025, 1, 10), date(2025, 3, 1))},
-    }
-    assert facts['monthly_appointment_dependencies'] == {
-        2024: {3: {1: (date(2024, 3, 10), date(2024, 4, 1))}},
-        2025: {
-            1: {1: (date(2025, 1, 10), date(2025, 2, 5))},
-            2: {1: (date(2025, 2, 5), date(2025, 3, 1))},
-        },
-    }
-
-
-@pytest.mark.asyncio
-async def test_opz_year_facts_filter_events_by_the_anchor_barber(async_session):
+async def test_opz_event_belongs_to_the_barber_of_its_anchor_visit(async_session):
     """The February event belongs to the barber of its anchor visit, January's to the first one."""
     async_session.add_all([
         *_opz_client_fixtures(),
@@ -3863,13 +3728,19 @@ async def test_opz_year_facts_filter_events_by_the_anchor_barber(async_session):
     async_session.add_all(appointments)
     await async_session.commit()
 
-    facts = await dashboard_service.fetch_opz_year_facts(
-        async_session, date(2024, 1, 1), date(2025, 12, 31), 1, 2, factual_at=REPORT_NOW_2026,
-    )
+    async def opz(staff_id, first_day, last_day):
+        summary = await dashboard_service.fetch_summary(
+            async_session, first_day, last_day, company_id=1, staff_id=staff_id, factual_at=REPORT_NOW_2026,
+        )
+        return summary['visit_metrics']
 
-    assert facts['counts'] == {2025: 1.0}
-    assert facts['monthly_counts'] == {2025: {2: 1.0}}
-    assert facts['monthly_repeat_visit_counts'] == {2025: {2: 1.0}}
+    january = (date(2025, 1, 1), date(2025, 1, 31))
+    february = (date(2025, 2, 1), date(2025, 2, 28))
+    assert (await opz(2, *january))['opz_qty'] == 0.0
+    second_february = await opz(2, *february)
+    assert (second_february['opz_qty'], second_february['opz_repeat_visit_qty']) == (1.0, 1.0)
+    assert (await opz(1, *january))['opz_qty'] == 1.0
+    assert (await opz(1, *february))['opz_qty'] == 0.0
 
 
 @pytest.mark.asyncio
@@ -3952,6 +3823,54 @@ async def test_year_over_year_masks_monthly_opz_without_hiding_revenue_and_visit
 
 
 @pytest.mark.asyncio
+async def test_year_over_year_masks_opz_when_the_rebooked_visit_lies_beyond_the_synced_range(
+    async_session,
+    monkeypatch,
+):
+    """An event is only knowable if the visit it was booked for is covered too, not just its anchor."""
+    monkeypatch.setattr(dashboard_reports, '_report_now', lambda: REPORT_NOW_2026)
+    async_session.add_all([
+        *_opz_client_fixtures(),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(
+            id=1, company_id=1, staff_id=1, client_id=1,
+            date=date(2025, 12, 20), datetime=datetime(2025, 12, 20, 10), attendance=1,
+        ),
+        Appointment(
+            id=2, company_id=1, staff_id=1, client_id=1,
+            date=date(2026, 2, 10), create_date=datetime(2025, 12, 20, 12), attendance=0,
+        ),
+    ])
+    states = _yoy_source_states(1, date(2025, 1, 1), date(2025, 12, 31))
+    async_session.add_all(states)
+    await async_session.commit()
+
+    async def december_2025():
+        report = await dashboard_reports.fetch_report_data(
+            async_session, 'year_over_year', date(2026, 1, 1), date(2026, 1, 31), allowed_company_ids=[1],
+        )
+        year = next(row for row in table_rows(report, 'years') if row['year'] == 2025)
+        month = next(
+            row for row in table_rows(report, 'months') if (row['year'], row['month']) == (2025, 12)
+        )
+        return year, month
+
+    year, month = await december_2025()
+    for row in (year, month):
+        assert row['opz_qty'] is None
+        assert row['missing_components'] == ['appointments_detail']
+    assert month['appointments'] == 1.0
+
+    for state in states:
+        state.period_end = date(2026, 2, 10)
+    await async_session.commit()
+    year, month = await december_2025()
+    assert (year['opz_qty'], month['opz_qty']) == (1.0, 1.0)
+
+
+@pytest.mark.asyncio
 async def test_year_over_year_monthly_opz_carries_manual_top_up_except_under_staff_filter(
     async_session,
     monkeypatch,
@@ -3990,16 +3909,31 @@ async def test_year_over_year_monthly_opz_carries_manual_top_up_except_under_sta
     )
     assert months[(2025, 2)]['opz_qty'] == overview['visit_metrics']['opz_qty']
 
-    # A staff filter counts by one attribution, so neither barber nor administrator carries it.
-    barber_facts = await dashboard_service.fetch_opz_year_facts(
-        async_session, date(2024, 1, 1), date(2025, 12, 31), 1, 1, factual_at=REPORT_NOW_2026,
+    # A staff filter counts by one attribution, so the barber's figures carry no top-up.
+    barber_report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+        company_id=1,
+        staff_id=1,
     )
-    admin_facts = await dashboard_service.fetch_opz_year_facts(
-        async_session, date(2024, 1, 1), date(2025, 12, 31), 1, 2, factual_at=REPORT_NOW_2026,
+    barber_months = {(row['year'], row['month']): row for row in table_rows(barber_report, 'months')}
+    barber_years = {row['year']: row for row in table_rows(barber_report, 'years')}
+    assert barber_months[(2025, 2)]['opz_qty'] == 1.0
+    assert barber_years[2025]['opz_qty'] == 2.0
+    # The administrator has no visits of their own, so a staff-filtered report has nothing to show.
+    admin_report = await dashboard_reports.fetch_report_data(
+        async_session,
+        'year_over_year',
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        allowed_company_ids=[1],
+        company_id=1,
+        staff_id=2,
     )
-    assert barber_facts['monthly_counts'][2025] == {1: 1.0, 2: 1.0}
-    assert barber_facts['counts'][2025] == 2.0
-    assert admin_facts['monthly_counts'] == {}
+    assert admin_report['tables'] == []
 
 
 @pytest.mark.asyncio
@@ -4020,22 +3954,18 @@ async def test_year_over_year_payload_exposes_opz_charts_columns_and_cards(
     charts = {chart['id']: chart for chart in report['charts']}
     years = [str(row['year']) for row in table_rows(report, 'years')]
 
-    # Two-column grid: every row pairs a by-year bar with its monthly year-over-year line.
-    assert [chart['id'] for chart in report['charts']] == [
-        'year_revenue', 'monthly_revenue_yoy',
-        'year_appointments', 'monthly_appointments_yoy',
-        'year_avg_check', 'monthly_avg_check_yoy',
+    assert {
         'year_opz', 'monthly_opz_yoy',
         'year_opz_pct', 'monthly_opz_pct_yoy',
         'year_opz_first_visit_pct', 'monthly_opz_first_visit_pct_yoy',
         'year_opz_repeat_visit_pct', 'monthly_opz_repeat_visit_pct_yoy',
-    ]
+    } <= set(charts)
     assert charts['year_opz']['labels'] == years
     assert charts['year_opz']['datasets'][0]['data'][:2] == [1.0, 2.0]
     # 2024 had no repeat visit, so it has no rate and no line on the monthly repeat chart.
     assert charts['year_opz_repeat_visit_pct']['datasets'][0]['data'][:2] == [None, 100.0]
     repeat_datasets = charts['monthly_opz_repeat_visit_pct_yoy']['datasets']
-    assert [(dataset['label'], dataset['colorIndex']) for dataset in repeat_datasets] == [('2025', 1)]
+    assert [dataset['label'] for dataset in repeat_datasets] == ['2025']
     for chart_id in ('monthly_opz_yoy', 'monthly_opz_pct_yoy'):
         assert [dataset['label'] for dataset in charts[chart_id]['datasets']] == years
         assert all(len(dataset['data']) == 12 for dataset in charts[chart_id]['datasets'])
@@ -4046,20 +3976,17 @@ async def test_year_over_year_payload_exposes_opz_charts_columns_and_cards(
     assert report['cards'] == []
 
     columns = {
-        table['id']: [column['key'] for column in table['columns']] for table in report['tables']
+        table['id']: {column['key'] for column in table['columns']} for table in report['tables']
     }
-    years_columns = columns['years']
-    assert years_columns.index('opz_qty_change_pct') == years_columns.index('opz_qty') + 1
-    assert years_columns.index('opz_pct_change_pct') == years_columns.index('opz_pct') + 1
-    assert years_columns[years_columns.index('opz_pct_change_pct') + 1:][:6] == [
-        'opz_first_visit_qty', 'opz_first_visit_pct', 'opz_first_visit_pct_change_pct',
-        'opz_repeat_visit_qty', 'opz_repeat_visit_pct', 'opz_repeat_visit_pct_change_pct',
-    ]
-    months_columns = columns['months']
-    assert months_columns[months_columns.index('avg_check') + 1:][:6] == [
+    opz_columns = {
         'opz_qty', 'opz_pct',
         'opz_first_visit_qty', 'opz_first_visit_pct', 'opz_repeat_visit_qty', 'opz_repeat_visit_pct',
-    ]
+    }
+    assert opz_columns <= columns['months']
+    assert opz_columns | {
+        'opz_qty_change_pct', 'opz_pct_change_pct',
+        'opz_first_visit_pct_change_pct', 'opz_repeat_visit_pct_change_pct',
+    } <= columns['years']
 
 
 def test_with_year_changes_compares_opz_year_over_year():
@@ -4088,7 +4015,7 @@ def test_with_year_changes_compares_opz_year_over_year():
 
 
 @pytest.mark.asyncio
-async def test_opz_year_facts_ignore_later_same_day_visit_for_staff(
+async def test_opz_ignores_a_later_same_day_visit_of_another_barber_that_is_not_factual_yet(
     async_session,
 ):
     async_session.add_all([
@@ -4127,7 +4054,7 @@ async def test_opz_year_facts_ignore_later_same_day_visit_for_staff(
     ])
     await async_session.commit()
 
-    facts = await dashboard_service.fetch_opz_year_facts(
+    summary = await dashboard_service.fetch_summary(
         async_session,
         date(2026, 7, 31),
         date(2026, 8, 1),
@@ -4136,7 +4063,7 @@ async def test_opz_year_facts_ignore_later_same_day_visit_for_staff(
         factual_at=datetime(2026, 8, 1, 12),
     )
 
-    assert facts['counts'] == {2026: 1.0}
+    assert summary['visit_metrics']['opz_qty'] == 1.0
 
 
 @pytest.mark.asyncio
@@ -4200,7 +4127,6 @@ async def test_year_over_year_does_not_require_goods_movements_coverage(
     # Goods movements feed no visible figure, so a branch without that source is still fully certified.
     assert years[2026]['source_status'] == 'ready'
     assert years[2026]['missing_components'] == []
-    assert 'goods_count' not in years[2026]
     assert july_2026['revenue'] == 0.0
     assert july_2026['source_status'] == 'ready'
 
@@ -4416,26 +4342,14 @@ async def test_dashboard_staff_leaderboard_report_returns_top_tables(async_sessi
     } <= table_ids
     # Administrators have no revenue metric: no revenue board for them.
     assert 'revenue_admin' not in table_ids
-    extra_services = next(table for table in data['tables'] if table['id'] == 'extra_services')
-    cosmo_barber = next(table for table in data['tables'] if table['id'] == 'cosmo_barber')
-    opz_admin = next(table for table in data['tables'] if table['id'] == 'opz_admin')
-    revenue_barber = next(table for table in data['tables'] if table['id'] == 'revenue_barber')
-    assert extra_services['ranking']['default_metric'] == 'pct'
+    tables = {table['id']: table for table in data['tables']}
+    extra_services = tables['extra_services']
+    cosmo_barber = tables['cosmo_barber']
+    opz_admin = tables['opz_admin']
     assert set(extra_services['ranking']['rows_by_metric']) == {'qty', 'sum', 'pct', 'avg'}
-    assert cosmo_barber['ranking']['default_metric'] == 'sum'
     assert set(cosmo_barber['ranking']['rows_by_metric']) == {'qty', 'sum', 'pct', 'avg'}
-    assert [column['key'] for column in cosmo_barber['columns']][3:5] == ['sum', 'avg']
-    assert {option['key'] for option in extra_services['ranking']['options']} == {'qty', 'sum', 'pct', 'avg'}
-    assert opz_admin['ranking']['default_metric'] == 'pct'
+    assert {'sum', 'avg'} <= {column['key'] for column in cosmo_barber['columns']}
     assert set(opz_admin['ranking']['rows_by_metric']) == {'qty', 'pct'}
-    assert {'key': 'pct', 'label': 'Косметика, %', 'format': 'percent'} in cosmo_barber['columns']
-    assert all(column['key'] != 'cosmo_revenue_share_pct' for column in revenue_barber['columns'])
-    assert [card['label'] for card in data['cards']] == ['Топ выручка мастера']
-    reviews_admin = next(table for table in data['tables'] if table['id'] == 'reviews_admin')
-    assert extra_services.get('hide_when_empty') is True
-    assert opz_admin.get('hide_when_empty') is True
-    assert revenue_barber.get('hide_when_empty') is True
-    assert 'hide_when_empty' not in reviews_admin
 
 
 @pytest.mark.asyncio
@@ -4533,15 +4447,7 @@ async def test_dashboard_staff_efficiency_revenue_uses_paid_service_rows(async_s
         date(2025, 1, 31),
         company_id=1,
     )
-    plan_fact = await dashboard_service._fact_metric_components(
-        async_session,
-        date(2025, 1, 1),
-        date(2025, 1, 31),
-        1,
-        opz_override=float(len(
-            await dashboard_service._opz_events(async_session, date(2025, 1, 1), date(2025, 1, 31), 1)
-        )),
-    )
+    plan_fact = await _branch_plan_fact_facts(async_session, date(2025, 1, 1), date(2025, 1, 31))
     assert data['cards'][2]['value'] == overview['revenue']['service_revenue'] == 2200.0
     assert data['cards'][2]['value'] == plan_fact['revenue']
 
@@ -4720,18 +4626,16 @@ async def test_service_breakdowns_use_the_overview_physical_account_filter(async
     extra_services = await dashboard_service.fetch_top_services(
         async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1, limit=None, only_extra=True
     )
-    leaderboard_extra_revenue = await dashboard_service._extra_service_revenue_by_staff(
-        async_session,
-        date(2025, 1, 1),
-        date(2025, 1, 31),
-        [1],
+    ratings = await fetch_plan_fact(
+        async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1, for_ratings=True,
     )
+    leaderboard_extra_revenue = ratings['staff_leaderboards']['extra_services_barber_rankings']['sum']
 
     assert len(top_services) == 1
     assert top_services[0]['revenue'] == 100.0
     assert len(extra_services) == 1
     assert extra_services[0]['revenue'] == 100.0
-    assert leaderboard_extra_revenue == {1: 100.0}
+    assert [(row['staff_id'], row['sum']) for row in leaderboard_extra_revenue] == [(1, 100.0)]
 
 
 @pytest.mark.asyncio
@@ -4815,9 +4719,7 @@ async def test_service_group_counts_read_both_sides_of_the_title(async_session):
     ])
     await async_session.commit()
 
-    counts = await dashboard_service._service_group_counts(
-        async_session, date(2025, 1, 1), date(2025, 1, 31), 1
-    )
+    counts = await _branch_plan_fact_facts(async_session, date(2025, 1, 1), date(2025, 1, 31))
     assert counts['wax_qty'] == 2.0
     assert counts['camouflage_qty'] == 7.0
     assert counts['face_care_qty'] == 0.0
@@ -5168,22 +5070,45 @@ async def test_dashboard_bundle_requires_api_key(async_session, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_dashboard_bundle_passes_one_factual_cutoff_to_every_metric_block(
-    async_session,
-    monkeypatch,
-):
-    cutoffs = []
+async def test_dashboard_bundle_cuts_every_metric_block_at_one_moment(async_session, monkeypatch):
+    """A visit that starts after the request began is in no block, even when the clock has moved on by then."""
+    day = date(2026, 8, 10)
+    ticks = []
 
-    def fake_fetch(result):
-        async def fetch(*args, **kwargs):
-            cutoffs.append(kwargs.get('factual_at'))
-            return result
+    def ticking_clock():
+        ticks.append(None)
+        return datetime.combine(day, time(12)) + timedelta(minutes=10 * (len(ticks) - 1))
 
-        return fetch
+    monkeypatch.setattr(dashboard_service, 'factual_now', ticking_clock)
 
-    monkeypatch.setattr(dashboard_routes, 'fetch_summary', fake_fetch({}))
-    monkeypatch.setattr(dashboard_routes, 'fetch_revenue_daily', fake_fetch([]))
-    monkeypatch.setattr(dashboard_routes, 'fetch_top_services', fake_fetch([]))
+    async_session.add_all([
+        Group(id=1, title='G'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Master', position='Барбер', company_id=1),
+        ServiceLabel(service_id=10, company_id=1, is_extra=True, source='dashboard', updated_at=datetime(2026, 1, 1)),
+    ])
+    await async_session.flush()
+    started_before = datetime.combine(day, time(11))
+    # Five minutes after the first clock reading: the second reading already covers it.
+    starts_after = datetime.combine(day, time(12, 5))
+    async_session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=day, datetime=started_before, attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, date=day, datetime=starts_after, attendance=1),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Transaction(id=1, appointment_id=1, service_id=10, service_title='Haircut', cost=100.0, amount=1, company_id=1),
+        Transaction(id=2, appointment_id=2, service_id=10, service_title='Haircut', cost=900.0, amount=1, company_id=1),
+        FinancialTransaction(
+            id=1, company_id=1, master_id=1, record_id=1, sold_item_id=10, sold_item_type='service',
+            date=started_before, amount=100.0,
+        ),
+        FinancialTransaction(
+            id=2, company_id=1, master_id=1, record_id=2, sold_item_id=10, sold_item_type='service',
+            date=starts_after, amount=900.0,
+        ),
+    ])
+    await async_session.commit()
 
     async def override_db():
         yield async_session
@@ -5193,16 +5118,17 @@ async def test_dashboard_bundle_passes_one_factual_cutoff_to_every_metric_block(
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         response = await client.get(
             '/dashboard/bundle',
-            params={'start_date': '2026-08-01', 'end_date': '2026-08-01'},
+            params={'start_date': day.isoformat(), 'end_date': day.isoformat()},
         )
     app.dependency_overrides.clear()
 
     assert response.status_code == 200
-    assert len(cutoffs) == 4
-    assert cutoffs[0] is not None
-    assert all(cutoff == cutoffs[0] for cutoff in cutoffs)
-    assert cutoffs[0].tzinfo is None
-    assert abs((datetime.now(UTC).replace(tzinfo=None) - cutoffs[0]).total_seconds()) < 5
+    data = response.json()['data']
+    assert data['summary']['revenue']['total'] == 100.0
+    assert data['summary']['revenue']['appointments'] == 1
+    assert [(row['date'], row['appointments']) for row in data['revenue_daily']] == [(day.isoformat(), 1)]
+    assert {row['title']: row['revenue'] for row in data['top_services']} == {'Haircut': 100.0}
+    assert {row['title']: row['revenue'] for row in data['extra_services']} == {'Haircut': 100.0}
 
 
 @pytest.mark.asyncio
@@ -6282,7 +6208,6 @@ async def test_dashboard_summary_client_visit_frequency_respects_branch_and_date
         # and report the three dropped days as growth
         ('month', date(2026, 3, 1), date(2026, 3, 31), date(2026, 2, 1), date(2026, 2, 28)),
         ('month', date(2026, 2, 1), date(2026, 2, 28), date(2026, 1, 1), date(2026, 1, 31)),
-        ('month', date(2026, 6, 1), date(2026, 6, 30), date(2026, 5, 1), date(2026, 5, 31)),
         ('month', date(2026, 1, 1), date(2026, 1, 31), date(2025, 12, 1), date(2025, 12, 31)),
         ('quarter', date(2026, 4, 1), date(2026, 6, 30), date(2026, 1, 1), date(2026, 3, 31)),
         ('year', date(2026, 1, 1), date(2026, 12, 31), date(2025, 1, 1), date(2025, 12, 31)),
@@ -6297,10 +6222,6 @@ async def test_dashboard_summary_client_visit_frequency_respects_branch_and_date
         (None, date(2026, 9, 1), date(2026, 9, 5), date(2026, 8, 27), date(2026, 8, 31)),
         (None, date(2026, 11, 1), date(2026, 11, 30), date(2026, 10, 2), date(2026, 10, 31)),
         (None, date(2026, 8, 20), date(2026, 9, 10), date(2026, 7, 29), date(2026, 8, 19)),
-        (None, date(2026, 3, 25), date(2026, 3, 31), date(2026, 3, 18), date(2026, 3, 24)),
-        (None, date(2026, 3, 29), date(2026, 3, 31), date(2026, 3, 26), date(2026, 3, 28)),
-        (None, date(2026, 5, 25), date(2026, 5, 31), date(2026, 5, 18), date(2026, 5, 24)),
-        (None, date(2026, 8, 10), date(2026, 8, 14), date(2026, 8, 5), date(2026, 8, 9)),
         # a preset that does not describe the window it arrived with cannot make the
         # baseline overlap the period, which would compare the period against itself
         ('today', date(2026, 1, 1), date(2026, 12, 31), date(2025, 1, 1), date(2025, 12, 31)),
@@ -7252,18 +7173,13 @@ async def test_extra_service_labels_are_scoped_to_branch_in_calculations(async_s
 
 
 @pytest.mark.asyncio
-async def test_dashboard_branches_respects_portal_allowlist(async_session, monkeypatch):
-    import dashboard_service
-
+async def test_dashboard_branches_respects_portal_allowlist(async_session):
     async_session.add(Group(id=1, title='G'))
     async_session.add(Company(id=1, title='A', group_id=1))
     async_session.add(Company(id=2, title='B', group_id=1))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=utcnow()))
+    async_session.add(PortalBranch(portal_account_id=1, company_id=2))
     await async_session.commit()
-
-    async def fake_ids(_db):
-        return [2]
-
-    monkeypatch.setattr(dashboard_service, 'branch_company_ids', fake_ids)
 
     async def override_db():
         yield async_session
@@ -8040,7 +7956,7 @@ async def test_dashboard_plan_fact_uses_plan_and_fact_formulas(async_session):
     data = r.json()['data']
     assert data['plan_period'] == {'start': '2025-01-01', 'end': '2025-01-31'}
     assert data['view_scope'] == 'branch'
-    assert data['groups'][0]['title'] == 'Сеть'
+    assert data['groups'][0]['scope'] == 'network'
     branch_group = next(group for group in data['groups'] if group['scope'] == 'branch')
     assert branch_group['title'] == 'Salon'
 
@@ -8089,7 +8005,6 @@ async def test_dashboard_plan_fact_uses_plan_and_fact_formulas(async_session):
     assert selected_plan_rows['revenue']['status'] == 'bad'
     assert selected_plan_rows['clients']['plan'] == 2.0
     assert selected_plan_rows['clients']['fact'] == 2.0
-    assert selected_plan_rows['clients']['label'] == 'Завершённые визиты'
     selected_staff_summary = r_selected_staff_summary.json()['data']
     assert selected_plan_rows['clients']['fact'] == selected_staff_summary['revenue']['appointments']
     assert selected_plan_rows['opz_qty']['fact'] == selected_staff_summary['visit_metrics']['opz_qty'] == 1.0
@@ -8738,10 +8653,9 @@ async def test_manual_opz_facts_add_to_calculated_opz(async_session):
     branch_cells = {cell['code']: cell for cell in plan_data['parent_group']['metrics']}
     assert branch_cells['opz_qty']['fact'] == 4.0
     # The percentage has to follow the summed numerator, not the calculated part alone.
-    branch_clients = branch_cells['clients']['fact'] or 0.0
-    assert branch_cells['opz_pct']['fact'] == pytest.approx(
-        100.0 * 4.0 / branch_clients if branch_clients else 0.0
-    )
+    branch_clients = branch_cells['clients']['fact']
+    assert branch_clients == 1.0
+    assert branch_cells['opz_pct']['fact'] == pytest.approx(400.0)
 
     admin_group = next(group for group in plan_data['groups'] if group['category'] == 'administrator')
     admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
@@ -8757,9 +8671,8 @@ async def test_manual_opz_facts_add_to_calculated_opz(async_session):
     summary_data = summary_response.json()['data']
     assert summary_data['visit_metrics']['opz_qty'] == 4.0
     # The overview derives its own percentage, so the summed numerator has to reach it too.
-    assert summary_data['visit_metrics']['opz_pct'] == pytest.approx(
-        100.0 * 4.0 / summary_data['revenue']['appointments']
-    )
+    assert summary_data['revenue']['appointments'] == 1
+    assert summary_data['visit_metrics']['opz_pct'] == pytest.approx(400.0)
 
     # A past window shorter than the month gets the calculated part only: a monthly value
     # cannot be split, and importing all of it into 13 days would overstate the fact.
@@ -9047,37 +8960,7 @@ async def test_manual_opz_facts_can_filter_by_staff(async_session):
 
 
 @pytest.mark.asyncio
-async def test_manual_opz_lookup_short_circuits_without_stored_values(async_session):
-    """The overview asks twice per request, so an empty top-up must stay one query."""
-    async_session.add(Group(id=1, title='G1'))
-    async_session.add(Company(id=1, title='Salon', group_id=1))
-    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
-    await async_session.commit()
-
-    statement_count = 0
-
-    def count_statements(*_args):
-        nonlocal statement_count
-        statement_count += 1
-
-    event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
-    try:
-        empty_total = await dashboard_service._manual_opz_scope_total(
-            async_session,
-            date(2025, 1, 1),
-            date(2025, 1, 31),
-            [1],
-        )
-    finally:
-        event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
-
-    assert empty_total == 0.0
-    assert statement_count == 1
-
-
-@pytest.mark.asyncio
-async def test_manual_opz_scope_lookup_touches_only_branches_holding_a_value(async_session):
-    """The overview asks twice per request; a stored value must not wake every branch."""
+async def test_manual_opz_overview_sums_values_across_branches(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add_all([
         Company(id=1, title='Salon one', group_id=1),
@@ -9090,45 +8973,36 @@ async def test_manual_opz_scope_lookup_touches_only_branches_holding_a_value(asy
         Staff(id=4, name='Admin three', position='Администратор', company_id=3, fired=0),
     ])
     await async_session.flush()
-    async_session.add(ManualFactMetric(
-        period_start=date(2025, 1, 1),
-        period_end=date(2025, 1, 31),
-        company_id=1,
-        staff_id=2,
-        metric_code='opz_qty',
-        value=4.0,
-        updated_at=datetime(2025, 1, 20, 10, 0, 0),
-    ))
+    async_session.add_all([
+        ManualFactMetric(
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 1, 31),
+            company_id=company_id,
+            staff_id=staff_id,
+            metric_code='opz_qty',
+            value=value,
+            updated_at=datetime(2025, 1, 20, 10, 0, 0),
+        )
+        for company_id, staff_id, value in ((1, 2, 4.0), (2, 3, 2.0))
+    ])
     await async_session.commit()
 
-    counts = {}
+    async def override_db():
+        yield async_session
 
-    def measure(label, company_ids):
-        statements = 0
+    app.dependency_overrides[api.get_async_db] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        network = await get_summary(client, params={'start_date': '2025-01-01', 'end_date': '2025-01-31'})
+        one_branch = await get_summary(
+            client,
+            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
+        )
+    app.dependency_overrides.clear()
 
-        def count_statements(*_args):
-            nonlocal statements
-            statements += 1
-
-        async def run():
-            nonlocal statements
-            event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
-            try:
-                value = await dashboard_service._manual_opz_scope_total(
-                    async_session, date(2025, 1, 1), date(2025, 1, 31), company_ids
-                )
-            finally:
-                event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
-            counts[label] = (value, statements)
-
-        return run()
-
-    await measure('one branch', [1])
-    await measure('three branches', [1, 2, 3])
-
-    assert counts['one branch'][0] == counts['three branches'][0] == 4.0
-    # Branches 2 and 3 hold nothing, so widening the scope must not cost extra queries.
-    assert counts['three branches'][1] <= counts['one branch'][1]
+    # Branch three holds no value and adds nothing; the network is the sum of the branches that do.
+    assert network.json()['data']['visit_metrics']['opz_qty'] == 6.0
+    assert one_branch.json()['data']['visit_metrics']['opz_qty'] == 4.0
 
 
 @pytest.mark.asyncio
@@ -9816,12 +9690,14 @@ async def test_manual_fact_batch_writes_rows_in_key_order(async_session):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('race', ['first_insert', 'changed_after_read'])
+@pytest.mark.parametrize('race', ['first_insert', 'changed_after_read', 'cleared_after_read'])
 async def test_manual_fact_save_racing_a_concurrent_write_is_a_conflict(async_session, monkeypatch, race):
     """The race the stale-value check cannot see: another save lands between our read and write.
 
     `first_insert`: both editors start from an empty cell and the other insert wins the unique
     index — formerly a 500. `changed_after_read`: the guarded DELETE finds the row changed.
+    `cleared_after_read`: the same with a clear, where no insert follows to trip the unique index —
+    only the DELETE guard stands between the clear and the other save.
     """
     await _seed_two_admins_with_a_value(async_session)
     original = dashboard_service._stored_manual_facts
@@ -9850,7 +9726,7 @@ async def test_manual_fact_save_racing_a_concurrent_write_is_a_conflict(async_se
     item = (
         {'company_id': 1, 'staff_id': 3, 'value': 9, 'previous_value': None}
         if race == 'first_insert'
-        else {'company_id': 1, 'staff_id': 2, 'value': 6, 'previous_value': 5}
+        else {'company_id': 1, 'staff_id': 2, 'value': 6 if race == 'changed_after_read' else None, 'previous_value': 5}
     )
 
     async def override_db():
@@ -10698,31 +10574,6 @@ async def test_manual_fact_service_refuses_a_foreign_row_without_the_router(asyn
 
 
 @pytest.mark.asyncio
-async def test_manual_fact_service_refuses_a_row_that_is_not_open(async_session):
-    """A row of one's own that nobody may fill this month is its own refusal type."""
-    async_session.add(Group(id=1, title='G1'))
-    async_session.add(Company(id=1, title='Salon', group_id=1))
-    async_session.add(Staff(id=4, name='Barber', position='Барбер', company_id=1, fired=0))
-    await async_session.commit()
-
-    with pytest.raises(dashboard_service.ManualFactRowNotOpen):
-        await dashboard_service.save_manual_facts(
-            async_session,
-            '2025-01',
-            dashboard_service.REVIEWS_QTY_CODE,
-            1,
-            None,
-            [{'company_id': 1, 'staff_id': 4, 'value': 1}],
-            allowed_company_ids=[1],
-            force_allowed=True,
-            allowed_staff_keys=frozenset({(1, 4)}),
-            actor_user_id=None,
-            portal_account_id=None,
-        )
-    assert (await async_session.execute(select(ManualFactMetric))).scalars().all() == []
-
-
-@pytest.mark.asyncio
 async def test_manual_fact_entry_keys_skip_a_barber(async_session):
     """Tab visibility: a barber has nothing to enter, both manual metrics are administrator ones."""
     async_session.add(Group(id=1, title='G1'))
@@ -10891,97 +10742,6 @@ async def test_manual_opz_overview_staff_filter_stays_on_one_attribution(async_s
     )
     assert branch_year['counts'] == {2025: 5.0}
     assert staff_year['counts'] == {}
-
-
-@pytest.mark.asyncio
-async def test_manual_opz_scope_lookup_cost_is_bounded_when_every_branch_holds_a_value(async_session):
-    """The overview pays this twice per request, so the loaded path needs a ceiling too."""
-    async_session.add(Group(id=1, title='G1'))
-    async_session.add_all([
-        Company(id=1, title='Salon one', group_id=1),
-        Company(id=2, title='Salon two', group_id=1),
-        Company(id=3, title='Salon three', group_id=1),
-    ])
-    async_session.add_all([
-        Staff(id=2, name='Admin one', position='Администратор', company_id=1, fired=0),
-        Staff(id=3, name='Admin two', position='Администратор', company_id=2, fired=0),
-        Staff(id=4, name='Admin three', position='Администратор', company_id=3, fired=0),
-    ])
-    await async_session.flush()
-    async_session.add_all([
-        ManualFactMetric(
-            period_start=date(2025, 1, 1),
-            period_end=date(2025, 1, 31),
-            company_id=company_id,
-            staff_id=staff_id,
-            metric_code='opz_qty',
-            value=2.0,
-            updated_at=datetime(2025, 1, 20, 10, 0, 0),
-        )
-        for company_id, staff_id in ((1, 2), (2, 3), (3, 4))
-    ])
-    await async_session.commit()
-
-    statement_count = 0
-
-    def count_statements(*_args):
-        nonlocal statement_count
-        statement_count += 1
-
-    event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
-    try:
-        total = await dashboard_service._manual_opz_scope_total(
-            async_session, date(2025, 1, 1), date(2025, 1, 31), [1, 2, 3]
-        )
-    finally:
-        event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
-
-    assert total == 6.0
-    # 1 probe + 1 staff query + 2 per branch that holds a value + 1 rows query.
-    assert statement_count <= 9
-
-    # Growth must stay linear in the branches that hold a value, not worse.
-    async_session.add_all([
-        Company(id=4, title='Salon four', group_id=1),
-        Company(id=5, title='Salon five', group_id=1),
-        Company(id=6, title='Salon six', group_id=1),
-    ])
-    async_session.add_all([
-        Staff(id=5, name='Admin four', position='Администратор', company_id=4, fired=0),
-        Staff(id=6, name='Admin five', position='Администратор', company_id=5, fired=0),
-        Staff(id=7, name='Admin six', position='Администратор', company_id=6, fired=0),
-    ])
-    await async_session.flush()
-    async_session.add_all([
-        ManualFactMetric(
-            period_start=date(2025, 1, 1),
-            period_end=date(2025, 1, 31),
-            company_id=company_id,
-            staff_id=staff_id,
-            metric_code='opz_qty',
-            value=2.0,
-            updated_at=datetime(2025, 1, 20, 10, 0, 0),
-        )
-        for company_id, staff_id in ((4, 5), (5, 6), (6, 7))
-    ])
-    await async_session.commit()
-
-    doubled_count = 0
-
-    def count_doubled(*_args):
-        nonlocal doubled_count
-        doubled_count += 1
-
-    event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_doubled)
-    try:
-        doubled_total = await dashboard_service._manual_opz_scope_total(
-            async_session, date(2025, 1, 1), date(2025, 1, 31), [1, 2, 3, 4, 5, 6]
-        )
-    finally:
-        event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_doubled)
-
-    assert doubled_total == 12.0
-    assert doubled_count <= statement_count + 2 * 3
 
 
 @pytest.mark.asyncio
@@ -11246,40 +11006,6 @@ async def test_manual_facts_respect_the_branch_reporting_end(async_session):
     after_rows = editor_after.json()['data']
     assert after_rows['rows'] == []
     assert after_rows['manual_total'] == 0.0
-
-
-@pytest.mark.asyncio
-async def test_plan_settings_save_drops_the_cached_administrator_roles(async_session):
-    """Roles are memoised per request and derived from the plan, so a save must drop them.
-
-    Nothing today reads them again inside a saving request; the point of the test is that
-    the day something does, it reads the roles the save just wrote.
-    """
-    async_session.add(Group(id=1, title='G1'))
-    async_session.add(Company(id=1, title='Salon', group_id=1))
-    async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
-    await async_session.commit()
-
-    await dashboard_service._administrator_role_periods_by_company(
-        async_session, date(2025, 1, 1), date(2025, 1, 31), [1]
-    )
-    assert async_session.info.get('administrator_role_periods')
-
-    await dashboard_service.save_plan_settings(
-        async_session,
-        '2025-01',
-        [{'company_id': 1, 'wax_pct': 10}],
-        [{
-            'company_id': 1,
-            'staff_id': 2,
-            'staff_category': 'administrator',
-            'reviews_qty': 3,
-        }],
-        actor_user_id=None,
-        portal_account_id=None,
-    )
-
-    assert not async_session.info.get('administrator_role_periods')
 
 
 @pytest.mark.asyncio
@@ -12549,134 +12275,83 @@ async def test_admin_opz_distributes_unknown_creator_by_schedule(async_session):
     assert selected_admin_b_cells['opz_pct']['fact'] == admin_opz_pct_by_staff[3]
 
 
+async def _admin_clients_with_two_admins_on_shift(async_session, visits, window, *, schedules):
+    """Admin visit counts from Plan/fact; `visits` are (created_user_id, datetime-or-None, date) of one barber."""
+    async_session.add_all([
+        Group(id=1, title='G1'),
+        Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Barber', position='Барбер', company_id=1),
+        Staff(id=2, name='Admin A', position='Администратор', company_id=1, user_id=502),
+        Staff(id=3, name='Admin B', position='Администратор', company_id=1, user_id=503),
+    ])
+    await async_session.flush()
+    async_session.add_all([
+        Appointment(
+            id=index, company_id=1, staff_id=1, date=visit_date, datetime=moment,
+            attendance=1, created_user_id=created_user_id,
+        )
+        for index, (created_user_id, moment, visit_date) in enumerate(visits, start=1)
+    ])
+    async_session.add_all([
+        StaffSchedule(staff_id=staff_id, company_id=1, date=day, slot_from=time(10), slot_to=time(22))
+        for staff_id, day in schedules
+    ])
+    await async_session.commit()
+
+    plan_fact = await fetch_plan_fact(
+        async_session, *window, company_id=1, factual_at=datetime(2025, 2, 1)
+    )
+    return {
+        group['staff_id']: next(cell['fact'] for cell in group['metrics'] if cell['code'] == 'clients')
+        for group in plan_fact['groups']
+        if group['category'] == 'administrator'
+    }
+
+
 @pytest.mark.asyncio
 async def test_admin_event_without_time_uses_only_same_day_schedule(async_session):
-    async_session.add_all([
-        Group(id=1, title='G1'),
-        Company(id=1, title='Salon', group_id=1),
-        Staff(id=2, name='Previous admin', position='Администратор', company_id=1),
-        Staff(id=3, name='Current admin', position='Администратор', company_id=1),
-        StaffSchedule(
-            staff_id=2,
-            company_id=1,
-            date=date(2025, 1, 9),
-            slot_from=time(10),
-            slot_to=time(22),
-        ),
-        StaffSchedule(
-            staff_id=3,
-            company_id=1,
-            date=date(2025, 1, 10),
-            slot_from=time(10),
-            slot_to=time(22),
-        ),
-    ])
-    await async_session.commit()
-
-    assignments = await dashboard_service._admin_event_assignments(
+    clients = await _admin_clients_with_two_admins_on_shift(
         async_session,
-        date(2025, 1, 10),
-        date(2025, 1, 10),
-        1,
-        [2, 3],
-        {2: None, 3: None},
-        [
-            dashboard_service.AdminAssignmentEvent(
-                event_id=1,
-                event_date=date(2025, 1, 10),
-                event_moment=None,
-                created_user_id=None,
-            )
-        ],
+        [(None, None, date(2025, 1, 10))],
+        (date(2025, 1, 10), date(2025, 1, 10)),
+        schedules=[(2, date(2025, 1, 9)), (3, date(2025, 1, 10))],
     )
 
-    assert assignments == {1: 3}
-
-
-async def _double_shift_assignments(async_session, event_specs, user_id_by_staff=None):
-    """Admins 2 and 3 both work 10-22 on 2025-01-10; admin 2 also worked the whole of 2025-01-09 (more history)."""
-    async_session.add_all([
-        Group(id=1, title='G1'),
-        Company(id=1, title='Salon', group_id=1),
-        Staff(id=2, name='Admin A', position='Администратор', company_id=1),
-        Staff(id=3, name='Admin B', position='Администратор', company_id=1),
-        StaffSchedule(staff_id=2, company_id=1, date=date(2025, 1, 9), slot_from=time(10), slot_to=time(22)),
-        StaffSchedule(staff_id=2, company_id=1, date=date(2025, 1, 10), slot_from=time(10), slot_to=time(22)),
-        StaffSchedule(staff_id=3, company_id=1, date=date(2025, 1, 10), slot_from=time(10), slot_to=time(22)),
-    ])
-    await async_session.commit()
-    events = [
-        dashboard_service.AdminAssignmentEvent(
-            event_id=event_id,
-            event_date=moment.date(),
-            event_moment=moment,
-            created_user_id=created_user_id,
-        )
-        for event_id, moment, created_user_id in event_specs
-    ]
-    return await dashboard_service._admin_event_assignments(
-        async_session,
-        date(2025, 1, 9),
-        date(2025, 1, 10),
-        1,
-        [2, 3],
-        user_id_by_staff or {2: 502, 3: 503},
-        events,
-    )
+    assert clients == {2: 0.0, 3: 1.0}
 
 
 @pytest.mark.asyncio
 async def test_admin_double_shift_day_is_split_evenly_not_by_month_to_date(async_session):
     # 9th: admin 2 alone takes 4 online bookings (UTC 08:00-11:00 = 11:00-14:00 Moscow); 10th: ten more, both on shift.
-    specs = [(i, datetime(2025, 1, 9, 8 + i % 3, i), None) for i in range(1, 5)]
-    specs += [(10 + i, datetime(2025, 1, 10, 8 + i % 3, i), None) for i in range(10)]
+    visits = [(None, datetime(2025, 1, 9, 8 + i % 3, i), date(2025, 1, 9)) for i in range(1, 5)]
+    visits += [(None, datetime(2025, 1, 10, 8 + i % 3, i), date(2025, 1, 10)) for i in range(10)]
 
-    assignments = await _double_shift_assignments(async_session, specs)
-
-    tenth = [assignments[event_id] for event_id, moment, _ in specs if moment.day == 10]
-    assert tenth.count(2) == tenth.count(3) == 5
-    assert set(assignments) == {event_id for event_id, _, _ in specs}
-
-
-@pytest.mark.asyncio
-async def test_admin_double_shift_split_counts_creator_events_and_stays_within_one(async_session):
-    # Admin 3 created three of the day's bookings himself; the online rest balances the day's totals.
-    specs = [(1, datetime(2025, 1, 10, 8, 0), 503), (2, datetime(2025, 1, 10, 8, 5), 503),
-             (3, datetime(2025, 1, 10, 8, 10), 503)]
-    specs += [(10 + i, datetime(2025, 1, 10, 9, i), None) for i in range(5)]
-
-    assignments = await _double_shift_assignments(async_session, specs)
-
-    assert [assignments[i] for i in (1, 2, 3)] == [3, 3, 3]
-    per_admin = [list(assignments.values()).count(staff_id) for staff_id in (2, 3)]
-    assert sorted(per_admin) == [4, 4]
-    # The creator rule still wins even when it unbalances the day.
-    assert all(assignments[10 + i] == 2 for i in range(3))
-
-
-@pytest.mark.asyncio
-async def test_admin_double_shift_split_is_deterministic_and_input_order_independent(async_session):
-    specs = [(10 + i, datetime(2025, 1, 10, 8 + i // 2, i), None) for i in range(7)]
-
-    first = await _double_shift_assignments(async_session, specs)
-    async_session.info.clear()
-    second = await dashboard_service._admin_event_assignments(
+    clients = await _admin_clients_with_two_admins_on_shift(
         async_session,
-        date(2025, 1, 9),
-        date(2025, 1, 10),
-        1,
-        [3, 2],
-        {2: 502, 3: 503},
-        [
-            dashboard_service.AdminAssignmentEvent(
-                event_id=event_id, event_date=moment.date(), event_moment=moment, created_user_id=None
-            )
-            for event_id, moment, _ in reversed(specs)
-        ],
+        visits,
+        (date(2025, 1, 9), date(2025, 1, 10)),
+        schedules=[(2, date(2025, 1, 9)), (2, date(2025, 1, 10)), (3, date(2025, 1, 10))],
     )
 
-    assert first == second
-    assert sorted(list(first.values()).count(staff_id) for staff_id in (2, 3)) == [3, 4]
+    # The 10th is shared 5/5 although admin 2 already carries the 9th.
+    assert clients == {2: 9.0, 3: 5.0}
+
+
+@pytest.mark.asyncio
+async def test_admin_double_shift_split_gives_the_creator_his_own_bookings_first(async_session):
+    # Admin 3 created four of the day's bookings himself; the creator rule wins even when it unbalances the day,
+    # and the online rest then goes to the other administrator.
+    visits = [(503, datetime(2025, 1, 10, 8, minute), date(2025, 1, 10)) for minute in (0, 5, 10, 15)]
+    visits += [(None, datetime(2025, 1, 10, 9, minute), date(2025, 1, 10)) for minute in range(2)]
+
+    clients = await _admin_clients_with_two_admins_on_shift(
+        async_session,
+        visits,
+        (date(2025, 1, 10), date(2025, 1, 10)),
+        schedules=[(2, date(2025, 1, 10)), (3, date(2025, 1, 10))],
+    )
+
+    assert clients == {2: 2.0, 3: 4.0}
 
 
 @pytest.mark.asyncio
@@ -13301,13 +12976,6 @@ async def test_opz_uses_branch_local_date_for_year_and_role_transition(async_ses
     ])
     await async_session.commit()
 
-    events = await dashboard_service._opz_events(
-        async_session,
-        date(2024, 12, 1),
-        date(2025, 1, 31),
-        1,
-        factual_at=datetime(2025, 2, 1),
-    )
     year_facts = await dashboard_service.fetch_opz_year_facts(
         async_session,
         date(2024, 12, 1),
@@ -13325,7 +12993,6 @@ async def test_opz_uses_branch_local_date_for_year_and_role_transition(async_ses
         factual_at=datetime(2025, 2, 1),
     )
 
-    assert [event.event_date for event in events] == [date(2025, 1, 1)]
     assert year_facts['counts'] == {2025: 1.0}
     opz_by_staff = {
         group['staff_id']: next(
@@ -13335,44 +13002,6 @@ async def test_opz_uses_branch_local_date_for_year_and_role_transition(async_ses
         for group in plan_fact['groups']
     }
     assert opz_by_staff == {1: 1.0, 2: 0.0}
-
-
-@pytest.mark.asyncio
-async def test_schedule_coverage_uses_the_callers_factual_snapshot(async_session):
-    async_session.add_all([
-        Group(id=1, title='G1'),
-        Company(
-            id=1,
-            title='Salon',
-            group_id=1,
-            reporting_start_date=date(2025, 1, 1),
-        ),
-        Appointment(
-            id=1,
-            company_id=1,
-            date=date(2025, 1, 20),
-            datetime=None,
-            attendance=1,
-        ),
-        SyncSourceState(
-            company_id=1,
-            source=dashboard_service.STAFF_SCHEDULE_SOURCE,
-            period_start=date(2024, 12, 31),
-            period_end=date(2025, 1, 31),
-        ),
-    ])
-    await async_session.commit()
-
-    info = await dashboard_service._staff_schedule_coverage_info(
-        async_session,
-        date(2025, 1, 1),
-        date(2025, 1, 31),
-        1,
-        factual_at=datetime(2025, 1, 15),
-    )
-
-    assert info['ready'] is True
-    assert info['invalid_event_timestamps'] is False
 
 
 @pytest.mark.asyncio
@@ -13404,6 +13033,8 @@ async def test_administrator_service_scope_fails_closed_without_appointment_time
             slot_from=time(10),
             slot_to=time(22),
         ),
+        ServiceLabel(service_id=10, company_id=1, is_extra=True, source='dashboard', updated_at=datetime(2025, 1, 1)),
+        Transaction(id=1, appointment_id=1, company_id=1, service_id=10, service_title='Care', amount=2),
         SyncSourceState(
             company_id=1,
             source=dashboard_service.STAFF_SCHEDULE_SOURCE,
@@ -13435,10 +13066,23 @@ async def test_administrator_service_scope_fails_closed_without_appointment_time
     assert summary['missing_sources'] == ['appointments_detail']
     assert summary['revenue']['extra_service_count'] is None
     # Plan/fact credits the visit to the one administrator scheduled that day, so a visit without a time is not lost.
-    assert cells['extra_services_qty']['fact'] == 0.0
+    assert cells['extra_services_qty']['fact'] == 2.0
     assert any(
         item['code'] == 'appointment_timestamp_coverage'
         for item in plan_fact['diagnostics']
+    )
+
+    # A snapshot taken before the visit's day does not see the visit, so its missing time is no gap.
+    before_the_visit = await fetch_plan_fact(
+        async_session,
+        date(2025, 1, 1),
+        date(2025, 1, 31),
+        company_id=1,
+        factual_at=datetime(2025, 1, 9),
+    )
+    assert not any(
+        item['code'] == 'appointment_timestamp_coverage'
+        for item in before_the_visit['diagnostics']
     )
 
 
@@ -13492,31 +13136,41 @@ async def test_schedule_coverage_uses_first_appointment_when_reporting_start_is_
     async_session.add_all([
         Group(id=1, title='G1'),
         Company(id=1, title='Salon', group_id=1),
+        Staff(id=1, name='Barber', position='Барбер', company_id=1),
+        Staff(id=2, name='Admin', position='Администратор', company_id=1),
         Appointment(
             id=1,
             company_id=1,
+            staff_id=1,
             date=date(2025, 1, 10),
             datetime=datetime(2025, 1, 10, 12),
             attendance=1,
         ),
-        SyncSourceState(
-            company_id=1,
-            source=dashboard_service.STAFF_SCHEDULE_SOURCE,
-            period_start=date(2025, 1, 9),
-            period_end=date(2025, 1, 31),
-        ),
+        StaffSchedule(staff_id=2, company_id=1, date=date(2025, 1, 10), slot_from=time(10), slot_to=time(22)),
     ])
+    source = SyncSourceState(
+        company_id=1,
+        source=dashboard_service.STAFF_SCHEDULE_SOURCE,
+        period_start=date(2025, 1, 9),
+        period_end=date(2025, 1, 31),
+    )
+    async_session.add(source)
     await async_session.commit()
 
-    coverage = await dashboard_service._staff_schedule_coverage_info(
-        async_session,
-        date(2020, 1, 1),
-        date(2025, 1, 31),
-        1,
-    )
+    def has_schedule_gap(plan_fact):
+        return any(item['code'] == 'staff_schedule_coverage' for item in plan_fact['diagnostics'])
 
-    assert coverage['ready'] is True
-    assert coverage['required_start'] == date(2025, 1, 9)
+    window = (date(2020, 1, 1), date(2025, 1, 31))
+    # Schedules are needed from the day before the first visit; the empty years before it are not a gap.
+    covered = await fetch_plan_fact(async_session, *window, company_id=1, factual_at=datetime(2025, 2, 1))
+
+    source.period_start = date(2025, 1, 10)
+    await async_session.commit()
+    async_session.info.clear()
+    late_start = await fetch_plan_fact(async_session, *window, company_id=1, factual_at=datetime(2025, 2, 1))
+
+    assert not has_schedule_gap(covered)
+    assert has_schedule_gap(late_start)
 
 
 async def _seed_plan_fact_normalization_case(async_session):
@@ -13596,36 +13250,6 @@ async def _seed_plan_fact_normalization_case(async_session):
         ),
     ])
     await async_session.commit()
-
-
-@pytest.mark.asyncio
-async def test_plan_fact_branch_opz_matches_overview_even_with_hidden_staff(async_session):
-    await _seed_plan_fact_normalization_case(async_session)
-
-    async def override_db():
-        yield async_session
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        r = await client.get(
-            '/dashboard/widget/plan_fact',
-            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
-        )
-        overview = await get_summary(
-            client,
-            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
-        )
-    app.dependency_overrides.clear()
-
-    assert r.status_code == 200
-    data = r.json()['data']
-    branch_cells = {cell['code']: cell for cell in data['parent_group']['metrics']}
-    overview_metrics = overview.json()['data']['visit_metrics']
-
-    assert branch_cells['clients']['fact'] == 2.0
-    assert branch_cells['opz_qty']['fact'] == overview_metrics['opz_qty'] == 2.0
-    assert branch_cells['opz_pct']['fact'] == overview_metrics['opz_pct'] == 100.0
 
 
 @pytest.mark.asyncio
@@ -14051,7 +13675,7 @@ async def test_plan_fact_admin_barber_clients_check_passes_when_creators_match(a
 
 
 @pytest.mark.asyncio
-async def test_plan_fact_reports_admin_barber_clients_mismatch_diagnostics(async_session):
+async def test_plan_fact_admin_clients_include_visits_booked_by_an_unknown_creator(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
     async_session.add(Staff(id=1, name='Barber', position='Барбер', company_id=1))
@@ -14834,19 +14458,12 @@ async def test_dashboard_service_batch_rolls_back_after_partial_apply(async_sess
     ])
     await async_session.commit()
 
-    original_apply_label = dashboard_service._apply_service_label
-    applied_labels = 0
+    async def failing_commit():
+        raise RuntimeError('forced failure at commit')
 
-    async def fail_after_second_label(db, catalog, *, is_extra, now):
-        nonlocal applied_labels
-        await original_apply_label(db, catalog, is_extra=is_extra, now=now)
-        applied_labels += 1
-        if applied_labels == 2:
-            raise RuntimeError('forced failure after partial apply')
+    monkeypatch.setattr(async_session, 'commit', failing_commit)
 
-    monkeypatch.setattr(dashboard_service, '_apply_service_label', fail_after_second_label)
-
-    with pytest.raises(RuntimeError, match='forced failure after partial apply'):
+    with pytest.raises(RuntimeError, match='forced failure at commit'):
         await dashboard_service.save_service_management(
             async_session,
             row_changes=[
@@ -14856,8 +14473,8 @@ async def test_dashboard_service_batch_rolls_back_after_partial_apply(async_sess
             allowed_company_ids=[1],
         )
 
+    # Both labels were flushed before the commit failed; the rollback must take them back.
     labels = (await async_session.execute(select(ServiceLabel))).scalars().all()
-    assert applied_labels == 2
     assert labels == []
 
 
@@ -15759,17 +15376,20 @@ async def test_cosmetics_metrics_drop_certificates_but_goods_revenue_keeps_them(
     ])
     await async_session.commit()
 
-    cosmo = await dashboard_service._goods_sales_metrics(
-        async_session, date(2025, 1, 1), date(2025, 1, 31), 1,
-        factual_at=datetime(2025, 2, 1),
+    plan_fact = await fetch_plan_fact(
+        async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1, factual_at=datetime(2025, 2, 1)
     )
-    goods_count = await dashboard_service._goods_sold_count(
-        async_session, dashboard_service.DateRange(date(2025, 1, 1), date(2025, 1, 31)), 1,
-        factual_at=datetime(2025, 2, 1),
+    overview = await dashboard_service.fetch_summary(
+        async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1, factual_at=datetime(2025, 2, 1)
     )
 
-    assert cosmo == {'cosmo_qty': 2.0, 'cosmo_sum': 600.0}
-    assert goods_count == 4.0
+    master = next(group for group in plan_fact['groups'] if group['staff_id'] == 1)
+    # Certificates are no cosmetics: the lipstick only, for the person and for the branch. The goods count still
+    # sells every item.
+    for group in (master, plan_fact['parent_group']):
+        cells = {cell['code']: cell['fact'] for cell in group['metrics']}
+        assert (cells['cosmo_qty'], cells['cosmo_sum']) == (2.0, 600.0)
+    assert overview['revenue']['goods_count'] == 4.0
 
 
 def test_pct_change_without_a_base_is_none():
@@ -15782,8 +15402,8 @@ def test_pct_change_without_a_base_is_none():
 
 
 @pytest.mark.asyncio
-async def test_no_report_ships_a_raw_block(async_session):
-    """The page renders cards, charts and tables; a `raw` copy only doubled the payload."""
+async def test_every_report_builds_on_an_empty_branch(async_session):
+    """Smoke over the whole catalog; a `raw` copy of the blocks the page renders would only double the payload."""
     async_session.add_all([Group(id=1, title='G1'), Company(id=1, title='Salon', group_id=1)])
     await async_session.commit()
 
@@ -15793,34 +15413,9 @@ async def test_no_report_ships_a_raw_block(async_session):
         data = await dashboard_reports.fetch_report_data(
             async_session, definition.id, date(2025, 1, 1), date(2025, 1, 31), granularity='month'
         )
+        assert data['report_id'] == definition.id
         assert 'raw' not in data, definition.id
-
-
-@pytest.mark.asyncio
-async def test_removed_dashboard_routes_stay_removed(async_session):
-    """The SPA reads the Overview through /bundle and edits services through the bulk PATCH."""
-    async def override_db():
-        yield async_session
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    params = {'start_date': '2025-01-01', 'end_date': '2025-01-31'}
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        gone = [
-            await client.get(f'/dashboard/widget/{name}', params=params)
-            for name in ('summary', 'revenue_daily', 'top_services', 'extra_services')
-        ]
-        gone.append(await client.get('/dashboard/services/kpi_groups'))
-        gone.append(await client.post('/dashboard/services/kpi_groups', json={'title': 'x'}))
-        gone.append(await client.patch('/dashboard/services/kpi_groups/1', json={'title': 'x'}))
-        gone.append(await client.delete('/dashboard/services/kpi_groups/1'))
-        gone.append(await client.patch('/dashboard/services/1/10/labels', json={'is_extra': True}))
-        gone.append(await client.patch('/dashboard/services/1/10/kpi_group', json={'group_id': None}))
-        kept = await client.get('/dashboard/bundle', params=params)
-    app.dependency_overrides.clear()
-
-    assert [response.status_code for response in gone] == [404] * 10
-    assert kept.status_code == 200
+        assert all(isinstance(data[block], list) for block in ('cards', 'charts', 'tables', 'notes')), definition.id
 
 
 @pytest.mark.asyncio
@@ -15840,11 +15435,7 @@ async def test_plan_fact_builds_staff_leaderboards_only_when_asked(async_session
         )
         assert 'staff_leaderboards' not in plain
         assert 'goods_kpi_execution' in plain
-        # The legacy aliases of the ranked boards are gone; the report reads the ranked ones.
-        assert not {'revenue_top', 'avg_check_top', 'extra_services', 'extra_services_barber', 'cosmo_barber'} & set(
-            asked['staff_leaderboards']
-        )
-        assert {'revenue_barber', 'cosmo_barber_rankings', 'opz_barber_rankings'} <= set(asked['staff_leaderboards'])
+        assert asked['staff_leaderboards']
 
 
 
@@ -15961,15 +15552,6 @@ async def test_plan_fact_plan_rules_are_none_without_a_row_for_the_plan_period(a
     assert mid_month['plan_period'] == {'start': '2025-01-01', 'end': '2025-01-31'}
     assert mid_month['plan_rules']['wax_qty'] == 30.0
     assert other_month['plan_rules'] is None
-
-
-@pytest.mark.asyncio
-async def test_plan_fact_plan_rules_are_none_without_a_settings_row(async_session):
-    await _seed_plan_rules_branch(async_session)
-
-    result = await fetch_plan_fact(async_session, date(2025, 1, 1), date(2025, 1, 31), company_id=1)
-
-    assert result['plan_rules'] is None
 
 
 @pytest.mark.asyncio

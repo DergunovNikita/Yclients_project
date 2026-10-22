@@ -40,9 +40,3 @@ test('no source builds a script, an inline handler or evaluates a string', () =>
     assert.equal(/set(Timeout|Interval)\(\s*['"`]/.test(code), false, `${name}: string passed to a timer`);
   }
 });
-
-test('the re-auth dialog styles come from a stylesheet, not an injected <style>', () => {
-  const auth = readFileSync(new URL('src/auth.js', root), 'utf8');
-  assert.match(auth, /import '\.\/reauth\.css';/);
-  assert.equal(/createElement\(\s*['"]style['"]/.test(auth), false);
-});

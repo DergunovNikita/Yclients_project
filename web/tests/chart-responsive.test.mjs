@@ -36,7 +36,7 @@ test('narrowChartOverrides is a pure width -> decision function', () => {
 
 /** A line chart shaped like renderRevenueChart in main.js: only `scales.y` in its own config. */
 function buildDateLineChart(width) {
-  const canvas = stubCanvas({ width, height: 260 });
+  const { canvas } = stubCanvas({ width, height: 260 });
   return new Chart(canvas, {
     type: 'line',
     data: {
@@ -53,58 +53,55 @@ function buildDateLineChart(width) {
 
 test('a narrow canvas gets a flat, auto-skipped x axis and a smaller legend', () => {
   const chart = buildDateLineChart(321);
+  const expected = narrowChartOverrides(321);
   try {
     // The chart's own config never mentions scales.x at all — it only exists via the
     // line controller's defaults — so finding it here proves the plugin discovers scales
     // a chart never configured itself, not just the ones already sitting in its options.
-    assert.equal(chart.options.scales.x.ticks.maxRotation, 0);
-    assert.equal(chart.options.scales.x.ticks.minRotation, 0);
-    assert.equal(chart.options.scales.x.ticks.autoSkip, true);
-    assert.equal(chart.options.scales.x.ticks.autoSkipPadding, 12);
+    const ticks = chart.options.scales.x.ticks;
+    assert.equal(ticks.maxRotation, expected.ticks.maxRotation);
+    assert.equal(ticks.minRotation, expected.ticks.minRotation);
+    assert.equal(ticks.autoSkip, expected.ticks.autoSkip);
+    assert.equal(ticks.autoSkipPadding, expected.ticks.autoSkipPadding);
     // The y axis's own formatter must survive untouched.
     assert.equal(typeof chart.options.scales.y.ticks.callback, 'function');
-    assert.equal(chart.options.plugins.legend.labels.boxWidth, 10);
-    assert.equal(chart.options.plugins.legend.labels.padding, 8);
-    assert.equal(chart.options.plugins.legend.labels.font.size, 10);
-  } finally {
-    chart.destroy();
-  }
-});
-
-test('a wide canvas keeps Chart.js defaults untouched (desktop stays desktop)', () => {
-  const chart = buildDateLineChart(1146);
-  try {
-    assert.equal(chart.options.scales.x.ticks.maxRotation, 50, 'Chart.js default category rotation');
-    assert.equal(chart.options.scales.x.ticks.autoSkipPadding, 3, 'Chart.js default autoSkipPadding');
-    assert.equal(chart.options.plugins.legend.labels.boxWidth, 40, 'Chart.js default legend boxWidth');
-    assert.equal(chart.options.plugins.legend.labels.padding, 10, 'Chart.js default legend padding');
+    const labels = chart.options.plugins.legend.labels;
+    assert.equal(labels.boxWidth, expected.legend.boxWidth);
+    assert.equal(labels.padding, expected.legend.padding);
+    assert.equal(labels.font.size, expected.legend.fontSize);
   } finally {
     chart.destroy();
   }
 });
 
 test('resizing the same instance follows, with no sticky state either way', () => {
+  const wide = buildDateLineChart(1146);
+  const wideTicks = wide.options.scales.x.ticks.maxRotation;
+  const wideBox = wide.options.plugins.legend.labels.boxWidth;
+  wide.destroy();
+  const narrow = narrowChartOverrides(321);
   const chart = buildDateLineChart(321);
   try {
-    assert.equal(chart.options.scales.x.ticks.maxRotation, 0, 'starts narrow');
+    assert.equal(chart.options.scales.x.ticks.maxRotation, narrow.ticks.maxRotation, 'starts narrow');
+    assert.notEqual(wideTicks, narrow.ticks.maxRotation);
 
     chart.resize(1280, 260);
-    assert.equal(chart.options.scales.x.ticks.maxRotation, 50, 'widening restores the default');
-    assert.equal(chart.options.plugins.legend.labels.boxWidth, 40);
+    assert.equal(chart.options.scales.x.ticks.maxRotation, wideTicks, 'widening restores the default');
+    assert.equal(chart.options.plugins.legend.labels.boxWidth, wideBox);
 
     chart.resize(360, 812);
-    assert.equal(chart.options.scales.x.ticks.maxRotation, 0, 'narrowing again re-applies the override');
-    assert.equal(chart.options.plugins.legend.labels.boxWidth, 10);
+    assert.equal(chart.options.scales.x.ticks.maxRotation, narrow.ticks.maxRotation, 'narrowing again re-applies the override');
+    assert.equal(chart.options.plugins.legend.labels.boxWidth, narrow.legend.boxWidth);
 
     chart.resize(1280, 900);
-    assert.equal(chart.options.scales.x.ticks.maxRotation, 50, 'and widening again restores it a second time');
+    assert.equal(chart.options.scales.x.ticks.maxRotation, wideTicks, 'and widening again restores it a second time');
   } finally {
     chart.destroy();
   }
 });
 
 test('a chart that set its own tick options on purpose gets those back, not the library default', () => {
-  const canvas = stubCanvas({ width: 321, height: 260 });
+  const { canvas } = stubCanvas({ width: 321, height: 260 });
   const chart = new Chart(canvas, {
     type: 'bar',
     data: { labels: ['a', 'b'], datasets: [{ label: 'x', data: [1, 2] }] },
@@ -115,7 +112,11 @@ test('a chart that set its own tick options on purpose gets those back, not the 
     },
   });
   try {
-    assert.equal(chart.options.scales.x.ticks.autoSkipPadding, 12, 'narrow overrides it same as any other chart');
+    assert.equal(
+      chart.options.scales.x.ticks.autoSkipPadding,
+      narrowChartOverrides(321).ticks.autoSkipPadding,
+      'narrow overrides it same as any other chart',
+    );
     chart.resize(1280, 260);
     assert.equal(
       chart.options.scales.x.ticks.autoSkipPadding,
@@ -129,7 +130,7 @@ test('a chart that set its own tick options on purpose gets those back, not the 
 
 test('a horizontal bar chart with its legend deliberately off is not broken', () => {
   // Shaped like renderServicesChart: indexAxis 'y', legend.display explicitly false.
-  const canvas = stubCanvas({ width: 300, height: 260 });
+  const { canvas } = stubCanvas({ width: 300, height: 260 });
   const chart = new Chart(canvas, {
     type: 'bar',
     data: {
@@ -155,17 +156,18 @@ test('a horizontal bar chart with its legend deliberately off is not broken', ()
 });
 
 test('a doughnut chart (no scales at all) still gets a smaller legend and does not crash', () => {
-  const canvas = stubCanvas({ width: 280, height: 260 });
+  const { canvas } = stubCanvas({ width: 280, height: 260 });
   const chart = new Chart(canvas, {
     type: 'doughnut',
     data: { labels: ['Новые', 'Повторные'], datasets: [{ label: 'Клиенты', data: [40, 60] }] },
     options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } },
   });
   try {
-    assert.equal(chart.options.plugins.legend.labels.boxWidth, 10);
+    const narrowBox = narrowChartOverrides(280).legend.boxWidth;
+    assert.equal(chart.options.plugins.legend.labels.boxWidth, narrowBox);
     assert.equal(chart.options.plugins.legend.position, 'bottom', 'unrelated legend options are untouched');
     chart.resize(900, 260);
-    assert.equal(chart.options.plugins.legend.labels.boxWidth, 40);
+    assert.ok(chart.options.plugins.legend.labels.boxWidth > narrowBox, 'widening restores a larger legend box');
   } finally {
     chart.destroy();
   }

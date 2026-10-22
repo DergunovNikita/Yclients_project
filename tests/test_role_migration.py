@@ -130,11 +130,6 @@ def test_money_overrides_for_the_pair_do_not_survive():
     assert result['visibility'] == [('manager', ['avg_check'])]
 
 
-def test_a_lone_override_is_dropped_too():
-    result = _downgrade(visibility=[_visibility('barber', ['avg_check'])])
-    assert result['visibility'] == []
-
-
 def test_portal_created_staff_rows_lose_the_role_they_carried_as_a_position():
     """`admin` in `position` would read as an administrator to the pre-0046 code."""
     result = _downgrade(

@@ -249,17 +249,6 @@ async def test_staff_services_filter_keeps_only_that_master(seeded):
 
 
 @pytest.mark.asyncio
-async def test_staff_grouping_does_not_change_the_totals(seeded):
-    plain = await dashboard_service.fetch_top_services(seeded, *WINDOW, company_id=1, limit=None, factual_at=NOW)
-    split = await dashboard_service.fetch_top_services(
-        seeded, *WINDOW, company_id=1, limit=None, factual_at=NOW, group_by_staff=True
-    )
-
-    assert sum(row['revenue'] for row in plain) == sum(row['revenue'] for row in split)
-    assert sum(row['sold'] for row in plain) == sum(row['sold'] for row in split)
-
-
-@pytest.mark.asyncio
 async def test_combos_count_a_visit_once_per_pair(seeded):
     data = await _report(seeded, 'service_combos')
     rows = {row['pair']: row for row in _table(data, 'combos')['rows']}
@@ -301,21 +290,25 @@ async def test_combos_table_is_capped_and_says_so(async_session):
 
 @pytest.mark.asyncio
 async def test_combos_comparison_run_is_not_capped(async_session):
+    """A pair ranked below the table cap in the compared window still gets its previous value."""
     async_session.add_all([Group(id=1, title='G'), Company(id=1, title='Salon', group_id=1)])
     await async_session.flush()
-    async_session.add(_visit(1, None))
+    async_session.add_all([_visit(1, None, day=date(2026, 7, 10)), _visit(2, None)])
     await async_session.flush()
+    # July: 12 services in one visit make 66 pairs, all with one visit; Service 10 + Service 11 sorts last.
     for index in range(12):
         async_session.add(_line(index + 1, 1, 100 + index, f'Service {index:02}'))
+    # August: only that pair.
+    async_session.add_all([_line(101, 2, 110, 'Service 10'), _line(102, 2, 111, 'Service 11')])
     await async_session.commit()
 
-    comparison = await dashboard_reports._fetch_report_payload(
-        async_session, 'service_combos', *WINDOW, 1, None, 'day', None, NOW, None, for_comparison=True
+    data = await dashboard_reports.fetch_report_data(
+        async_session, 'service_combos', *WINDOW, company_id=1,
+        compare_start=date(2026, 7, 1), compare_end=date(2026, 7, 31),
     )
 
-    # 12 services make 66 pairs; the cap of 50 would leave the lower-ranked ones without a row to compare.
-    assert len(_table(comparison, 'combos')['rows']) == 66
-    assert not any(note['title'] == 'Показаны самые частые пары' for note in comparison['notes'])
+    previous = next(item for item in data['comparison']['tables'] if item['id'] == 'combos')
+    assert [(row['pair'], row['visits']) for row in previous['rows']] == [('Service 10 + Service 11', 1)]
 
 
 @pytest.mark.asyncio

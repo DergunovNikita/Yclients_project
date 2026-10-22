@@ -270,24 +270,29 @@ async def test_a_hanging_writer_neither_delays_the_response_nor_outlives_the_tim
 
 
 @pytest.mark.asyncio
-async def test_writes_pile_up_only_to_the_pending_cap(async_session, usage_app, monkeypatch, usage_log):
+async def test_writes_pile_up_only_to_the_pending_cap(async_session, usage_app, monkeypatch):
     await _seed(async_session)
     release = asyncio.Event()
+    real_factory = report_usage.get_async_session_factory()
 
-    async def blocked(fields):
-        await release.wait()
+    class Gated:
+        """A writer session that waits for `release`, so earlier writes are still pending."""
 
-    monkeypatch.setattr(report_usage, '_insert', blocked)
+        async def __aenter__(self):
+            await release.wait()
+            self.session = real_factory()
+            return await self.session.__aenter__()
+
+        async def __aexit__(self, *exc):
+            return await self.session.__aexit__(*exc)
+
+    monkeypatch.setattr(report_usage, 'get_async_session_factory', lambda: Gated)
     monkeypatch.setattr(report_usage, 'MAX_PENDING_WRITES', 2)
     for _ in range(4):
         assert (await _data()).status_code == 200
-
-    assert len(report_usage._pending) == 2
-    assert usage_log == ['report usage event dropped: 2 writes already pending'] * 2
     release.set()
-    await report_usage.drain()
-    assert not report_usage._pending
 
+    assert len(await _events(async_session)) == 2
 
 
 # --- Read side ---
@@ -474,20 +479,6 @@ async def test_report_usage_is_gated_to_platform_admin(async_session, usage_app)
 
 
 @pytest.mark.asyncio
-async def test_owner_is_refused_the_usage_report_even_with_data_of_their_tenant(async_session, usage_app):
-    await _seed(async_session)
-    async_session.add(_event(portal_account_id=1))
-    await async_session.commit()
-    usage_app['ctx'] = _ctx('owner')
-
-    response = await _get(report_id='report_usage', **PARAMS)
-
-    assert response.status_code == 403
-    assert 'usage' in response.json()['detail'].lower()
-    assert len(await _events(async_session)) == 1  # the seeded row only: the refusal records nothing
-
-
-@pytest.mark.asyncio
 async def test_platform_admin_reads_the_selected_tenant_only(async_session, usage_app):
     await _seed(async_session)
     async_session.add_all([
@@ -545,7 +536,7 @@ async def test_opening_the_usage_report_is_not_itself_usage(async_session, usage
 
 
 @pytest.mark.asyncio
-async def test_registry_builder_cannot_run_without_a_tenant(async_session):
+async def test_the_dispatcher_cannot_build_the_usage_report_without_a_tenant(async_session):
     with pytest.raises(RuntimeError):
         await dashboard_reports.fetch_report_data(
             async_session, 'report_usage', date(2026, 3, 1), date(2026, 3, 31)

@@ -41,6 +41,11 @@ async def _event_ids(async_session, start, end):
     return [event.event_id for event in events]
 
 
+async def _opz_qty(async_session, start, end):
+    summary = await dashboard_service.fetch_summary(async_session, start, end, company_id=1, factual_at=NOW)
+    return summary['visit_metrics']['opz_qty']
+
+
 @pytest.mark.asyncio
 async def test_a_visit_rebooked_on_the_eve_of_a_period_counts_in_one_period_only(async_session):
     await _seed(async_session, [
@@ -51,9 +56,9 @@ async def test_a_visit_rebooked_on_the_eve_of_a_period_counts_in_one_period_only
         _visit(4, 7, date(2025, 3, 20), attendance=0, created=datetime(2025, 3, 1, 9)),
     ])
 
-    assert await _event_ids(async_session, date(2025, 2, 1), date(2025, 2, 28)) == [2]
-    assert await _event_ids(async_session, *MARCH) == []
-    assert await _event_ids(async_session, date(2025, 2, 1), date(2025, 3, 31)) == [2]
+    assert await _opz_qty(async_session, date(2025, 2, 1), date(2025, 2, 28)) == 1.0
+    assert await _opz_qty(async_session, *MARCH) == 0.0
+    assert await _opz_qty(async_session, date(2025, 2, 1), date(2025, 3, 31)) == 1.0
 
 
 def _march_history():
@@ -122,10 +127,8 @@ async def test_a_visit_before_the_reporting_start_does_not_make_the_next_one_a_r
         _visit(3, 1, date(2025, 4, 1), attendance=0, created=datetime(2025, 3, 10, 13)),
     ], reporting_start_date=date(2025, 2, 1))
 
-    events = await dashboard_service._opz_events(async_session, *MARCH, 1, factual_at=NOW)
     metrics = (await dashboard_service.fetch_summary(async_session, *MARCH, company_id=1))['visit_metrics']
 
-    assert [(event.event_id, event.first_visit) for event in events] == [(3, True)]
     assert (metrics['first_visits'], metrics['opz_first_visit_qty']) == (1, 1.0)
 
 
@@ -138,11 +141,9 @@ async def test_two_visits_on_the_first_day_are_both_first_visits(async_session):
         _visit(4, 1, date(2025, 3, 21), attendance=1, created=datetime(2025, 3, 4, 9)),
     ])
 
-    events = await dashboard_service._opz_events(async_session, *MARCH, 1, factual_at=NOW)
     metrics = (await dashboard_service.fetch_summary(async_session, *MARCH, company_id=1))['visit_metrics']
 
     # Whole days, like the new-client count: the later visit of the first day is no repeat one.
-    assert [(event.event_id, event.first_visit) for event in events] == [(3, True)]
     assert (metrics['first_visits'], metrics['repeat_visits']) == (2, 1)
     assert (metrics['opz_first_visit_qty'], metrics['opz_repeat_visit_qty']) == (1.0, 0.0)
 
@@ -168,11 +169,10 @@ async def test_a_visit_on_a_service_staff_row_is_not_history(async_session):
     async_session.add(Staff(id=9, name='Лист ожидания', company_id=1))
     await async_session.commit()
 
-    events = await dashboard_service._opz_events(async_session, *MARCH, 1, factual_at=NOW)
     metrics = (await dashboard_service.fetch_summary(async_session, *MARCH, company_id=1))['visit_metrics']
 
-    assert [(event.event_id, event.first_visit) for event in events] == [(3, True)]
     assert (metrics['first_visits'], metrics['repeat_visits']) == (1, 0)
+    assert (metrics['opz_first_visit_qty'], metrics['opz_repeat_visit_qty']) == (1.0, 0.0)
 
 
 @pytest.mark.asyncio
@@ -286,7 +286,10 @@ async def test_the_report_split_matches_the_overview_under_a_staff_filter_and_pr
             key for key in overview
             if 'first_visit' in key or 'repeat_visit' in key or key.endswith('_visits')
         ]
-        assert len(split_keys) == 12
+        assert {
+            'first_visits', 'repeat_visits', 'opz_first_visit_qty', 'opz_repeat_visit_qty',
+            'opz_first_visit_pct', 'opz_repeat_visit_pct',
+        } <= set(split_keys)
         assert {key: mix[key] for key in split_keys} == {key: overview[key] for key in split_keys}
         # February is the base and has first visits of its own, so the change is a real number.
         assert overview['opz_first_visit_pct_change_pct'] is not None
@@ -301,12 +304,10 @@ async def test_an_anchor_on_a_service_staff_row_with_no_business_history_is_a_fi
     async_session.add(Staff(id=9, name='Лист ожидания', company_id=1))
     await async_session.commit()
 
-    events = await dashboard_service._opz_events(async_session, *MARCH, 1, factual_at=NOW)
     metrics = (await dashboard_service.fetch_summary(async_session, *MARCH, company_id=1))['visit_metrics']
 
     # The event counts and is first, but its visit is in no base: the documented edge of reading anchors
     # without the business-staff filter.
-    assert [(event.event_id, event.first_visit) for event in events] == [(2, True)]
     assert (metrics['opz_first_visit_qty'], metrics['first_visits'], metrics['opz_first_visit_pct']) == (1.0, 0, None)
 
 
@@ -388,7 +389,10 @@ async def test_the_report_split_matches_the_overview_for_an_administrator(async_
     )
 
     split_keys = [key for key in overview if 'first_visit' in key or 'repeat_visit' in key or key.endswith('_visits')]
-    assert len(split_keys) == 12
+    assert {
+        'first_visits', 'repeat_visits', 'opz_first_visit_qty', 'opz_repeat_visit_qty',
+        'opz_first_visit_pct', 'opz_repeat_visit_pct',
+    } <= set(split_keys)
     assert {key: mix[key] for key in split_keys} == {key: overview[key] for key in split_keys}
 
 

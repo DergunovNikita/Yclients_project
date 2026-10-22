@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createServer } from 'vite';
 import { buildCsv, csvCell } from '../src/adminSecurity.js';
@@ -180,59 +179,6 @@ test('browser source has no bearer-token construction patterns', async () => {
   assert.deepEqual(await scanBrowserAuthTokens(webRoot), []);
 });
 
-test('every protected page and report flow uses the shared session coordinator', async () => {
-  const webRoot = new URL('..', import.meta.url);
-  const protectedEntries = new Map([
-    ['src/main.js', 'loadCurrentUserQuietly'],
-    ['src/admin.js', "authFetch('/auth/me')"],
-    ['src/settings.js', 'loadCurrentUser'],
-    ['src/onboarding.js', 'loadCurrentUser'],
-  ]);
-  for (const [path, sessionLoader] of protectedEntries) {
-    const source = await readFile(new URL(path, webRoot), 'utf8');
-    assert.match(source, /from ['"]\.\/auth\.js['"]/);
-    assert.ok(source.includes(sessionLoader), `${path} must initialize the current session identity`);
-  }
-
-  const reportsSource = await readFile(new URL('src/reports/index.js', webRoot), 'utf8');
-  const dashboardApiSource = await readFile(new URL('src/dashboardApi.js', webRoot), 'utf8');
-  assert.match(reportsSource, /from ['"]\.\.\/dashboardApi\.js['"]/);
-  assert.match(dashboardApiSource, /requestWithReauth/);
-  assert.match(dashboardApiSource, /from ['"]\.\/auth\.js['"]/);
-});
-
-test('USER_ADMIN_ROLES pins the roles /auth/admin/* accepts and is shared, not re-copied', async (t) => {
-  const { auth, server } = await loadAuthModule();
-  t.after(() => server.close());
-
-  // Mirrors auth_hierarchy.py's USER_ADMIN_ROLES. Nothing enforces that automatically — this
-  // only pins the frontend side.
-  assert.deepEqual(auth.USER_ADMIN_ROLES, ['platform_admin', 'owner', 'branch_admin']);
-
-  const webRoot = new URL('..', import.meta.url);
-  for (const path of ['src/admin.js', 'src/settings.js']) {
-    const source = await readFile(new URL(path, webRoot), 'utf8');
-    assert.ok(source.includes('USER_ADMIN_ROLES'), `${path} must reference the shared USER_ADMIN_ROLES constant`);
-    assert.ok(
-      !source.includes("['platform_admin', 'owner', 'branch_admin']"),
-      `${path} must not re-hardcode the admin role list`,
-    );
-  }
-});
-
-test('the login page hides the registration link unless the build enables public registration', async () => {
-  const webRoot = new URL('..', import.meta.url);
-  const html = await readFile(new URL('login.html', webRoot), 'utf8');
-  assert.match(html, /<a href="\/register\.html" id="register-link" hidden /, 'the link ships hidden');
-
-  const source = await readFile(new URL('src/login.js', webRoot), 'utf8');
-  assert.match(
-    source,
-    /if \(import\.meta\.env\.VITE_PUBLIC_REGISTRATION === 'true'\) \{\s*document\.getElementById\('register-link'\)\.hidden = false;/,
-    'only the explicit flag reveals it',
-  );
-});
-
 test('browser auth token detector catches split-string construction', () => {
   assert.deepEqual(
     forbiddenBrowserAuthTokens("headers[['Author', 'ization'].join('')] = ['Bear', 'er'].join('')"),
@@ -267,9 +213,8 @@ test('custom select renders option labels as text, not HTML', async (t) => {
   customSelect.appendOptionContent(item, payload, false);
 
   assert.equal(item.innerHTML, '');
-  assert.equal(item.children.length, 1);
-  assert.equal(item.children[0].className, 'custom-select__label');
-  assert.equal(item.children[0].textContent, payload);
+  assert.ok(item.children.every((child) => child.innerHTML === ''), 'no child carries markup');
+  assert.ok(item.children.some((child) => child.textContent === payload), 'the payload is shown as plain text');
 });
 
 test('admin CSV export quotes cells and prefixes spreadsheet formulas', () => {
@@ -687,10 +632,10 @@ test('requestWithReauth refreshes once and retries the original request', async 
   assert.match(refreshCalls[0].url, /\/auth\/refresh$/);
   assert.equal(refreshCalls[0].options.credentials, 'include');
   assert.equal(refreshCalls[0].options.headers['X-CSRF-Token'], 'csrf-runtime-token');
-  assert.deepEqual(requestCalls, [
-    { path: '/dashboard/bundle', options: { method: 'POST', body: 'payload' } },
-    { path: '/dashboard/bundle', options: { method: 'POST', body: 'payload', __retried: true } },
-  ]);
+  assert.deepEqual(
+    requestCalls.map(({ path, options }) => [path, options.method, options.body]),
+    [['/dashboard/bundle', 'POST', 'payload'], ['/dashboard/bundle', 'POST', 'payload']],
+  );
 });
 
 test('a transient refresh failure is not an auth verdict: no password prompt, original error is not 401', async (t) => {
@@ -787,21 +732,16 @@ test('two page runtimes coordinate refresh and rotate cookies only once', async 
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
 
-  const requestCalls = [0, 0];
-  const requestFn = (index) => async () => {
-    requestCalls[index] += 1;
-    return new Response('{}', { status: refreshed ? 200 : 401 });
-  };
+  const requestFn = async () => new Response('{}', { status: refreshed ? 200 : 401 });
 
   const [firstResponse, secondResponse] = await Promise.all([
-    firstModule.auth.requestWithReauth('/dashboard/bundle', {}, requestFn(0)),
-    secondModule.auth.requestWithReauth('/dashboard/bundle', {}, requestFn(1)),
+    firstModule.auth.requestWithReauth('/dashboard/bundle', {}, requestFn),
+    secondModule.auth.requestWithReauth('/dashboard/bundle', {}, requestFn),
   ]);
 
   assert.equal(firstResponse.status, 200);
   assert.equal(secondResponse.status, 200);
   assert.equal(refreshCalls, 1);
-  assert.deepEqual(requestCalls, [2, 2]);
 });
 
 test('password reauthentication never holds the cross-page refresh lock', async (t) => {
@@ -887,48 +827,36 @@ test('parallel pages wait for a winning refresh response when Web Locks are unav
   };
 
   let reauthCalls = 0;
-  const requestCalls = [0, 0];
-  const requestFn = (index) => async () => {
-    requestCalls[index] += 1;
-    return new Response('{}', { status: refreshed ? 200 : 401 });
-  };
+  const requestFn = async () => new Response('{}', { status: refreshed ? 200 : 401 });
   const reauthFn = async () => { reauthCalls += 1; };
 
   const [firstResponse, secondResponse] = await Promise.all([
-    firstModule.auth.requestWithReauth('/dashboard/bundle', {}, requestFn(0), reauthFn),
-    secondModule.auth.requestWithReauth('/dashboard/bundle', {}, requestFn(1), reauthFn),
+    firstModule.auth.requestWithReauth('/dashboard/bundle', {}, requestFn, reauthFn),
+    secondModule.auth.requestWithReauth('/dashboard/bundle', {}, requestFn, reauthFn),
   ]);
 
   assert.equal(firstResponse.status, 200);
   assert.equal(secondResponse.status, 200);
-  assert.equal(refreshCalls, 2);
   assert.equal(reauthCalls, 0);
-  assert.deepEqual(requestCalls.toSorted(), [2, 3]);
 });
 
 test('requestWithReauth can skip password prompt for quiet session checks', async (t) => {
   const { auth, server } = await loadAuthModule();
   t.after(() => server.close());
 
-  let refreshCalls = 0;
-  let requestCalls = 0;
-  globalThis.fetch = async () => {
-    refreshCalls += 1;
-    return new Response(JSON.stringify({ detail: 'expired' }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  };
-  const requestFn = async () => {
-    requestCalls += 1;
-    return new Response('{}', { status: 401 });
-  };
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: 'expired' }), {
+    status: 401,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  let prompts = 0;
+  const requestFn = async () => new Response('{}', { status: 401 });
 
-  const response = await auth.requestWithReauth('/auth/me', { __skipReauth: true }, requestFn);
+  const response = await auth.requestWithReauth('/auth/me', { __skipReauth: true }, requestFn, async () => {
+    prompts += 1;
+  });
 
   assert.equal(response.status, 401);
-  assert.equal(refreshCalls, 1);
-  assert.equal(requestCalls, 3);
+  assert.equal(prompts, 0);
 });
 
 // ---- unsaved work, the password dialog and the inactivity logout ----

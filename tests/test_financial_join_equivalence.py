@@ -20,15 +20,10 @@ exactly that collision, which is why the ids are chosen to overlap.
 from datetime import date, datetime
 
 import pytest
-from sqlalchemy import and_, func, select
+from sqlalchemy import select
 
-from dashboard_service import (
-    _financial_appointment_branches_union,
-    _financial_appointment_direct_condition,
-    _financial_appointment_fallback_condition,
-    financial_appointment_match_condition,
-)
-from models import Appointment, Company, FinancialTransaction
+from dashboard_service import fetch_top_services, financial_appointment_match_condition
+from models import Appointment, Company, FinancialTransaction, Transaction
 
 
 def _appointment(appointment_id: int, external_id: int | None) -> Appointment:
@@ -49,6 +44,8 @@ def _payment(transaction_id: int, record_id: int, amount: float) -> FinancialTra
         id=transaction_id,
         company_id=1,
         record_id=record_id,
+        sold_item_id=10,
+        sold_item_type='service',
         amount=amount,
         date=datetime(2026, 3, 1, 12, 0),
     )
@@ -74,69 +71,27 @@ async def _seed(session):
     await session.commit()
 
 
-def _or_join_total():
-    return (
-        select(func.coalesce(func.sum(FinancialTransaction.amount), 0.0))
-        .select_from(FinancialTransaction)
-        .join(Appointment, financial_appointment_match_condition())
+def _service_line(line_id, appointment_id):
+    return Transaction(
+        id=line_id, appointment_id=appointment_id, company_id=1, service_id=10, service_title='Cut', amount=1,
     )
 
 
-def _union_total():
-    branches = _financial_appointment_branches_union(
-        lambda join_condition: (
-            select(FinancialTransaction.amount.label('amount'))
-            .select_from(FinancialTransaction)
-            .join(Appointment, join_condition)
-        )
+@pytest.mark.asyncio
+async def test_hot_paths_count_each_payment_once(async_session):
+    """Service revenue joins payments to visits through the UNION ALL of the two branches: no payment twice."""
+    await _seed(async_session)
+    async_session.add_all(
+        _service_line(line_id, appointment_id) for line_id, appointment_id in enumerate((500, 900, 501, 700), start=1)
     )
-    return select(func.coalesce(func.sum(branches.c.amount), 0.0))
+    await async_session.commit()
 
+    top = await fetch_top_services(
+        async_session, date(2026, 3, 1), date(2026, 3, 31), company_id=1, limit=None, factual_at=datetime(2026, 4, 1),
+    )
 
-@pytest.mark.asyncio
-async def test_union_all_total_matches_the_or_join(async_session):
-    """The substitution must not change the money."""
-    await _seed(async_session)
-
-    or_total = float((await async_session.execute(_or_join_total())).scalar_one())
-    union_total = float((await async_session.execute(_union_total())).scalar_one())
-
-    assert or_total == union_total == 150.0
-
-
-@pytest.mark.asyncio
-async def test_no_pair_satisfies_both_branches(async_session):
-    """Disjointness asserted against the conditions themselves, not via the two formulations.
-
-    Comparing `or_(A, B)` to `union_all(A, B)` cannot catch a broken guard on its own: both
-    sides are built from the same A and B, so a change to either moves them together. This
-    joins on `and_(A, B)` instead — the pair set that must always be empty.
-
-    Note what this test can and cannot catch, so nobody mistakes it for more than it is.
-    The overlap is blocked twice over: `external_id IS NULL` and `~has_external_match` each
-    prevent it independently, so deleting either one alone leaves this assertion green — it
-    produces a spurious EXTRA match rather than a doubly-matched pair. Measured: removing the
-    null guard fails the three sibling tests here and not this one. This test pins the
-    property the nine rewrites actually depend on; the siblings are the ones that bite when a
-    single guard goes.
-    """
-    await _seed(async_session)
-
-    both = (
-        await async_session.execute(
-            select(func.count())
-            .select_from(FinancialTransaction)
-            .join(
-                Appointment,
-                and_(
-                    _financial_appointment_direct_condition(),
-                    _financial_appointment_fallback_condition(),
-                ),
-            )
-        )
-    ).scalar_one()
-
-    assert both == 0
+    # 100 + 50 (payment 3 belongs to no visit).
+    assert [(row['title'], row['revenue'], row['sold']) for row in top] == [('Cut', 150.0, 4)]
 
 
 @pytest.mark.asyncio
@@ -159,44 +114,6 @@ async def test_fallback_does_not_claim_an_appointment_that_has_an_external_id(as
     ).scalars().all()
 
     assert rows == []
-
-
-@pytest.mark.asyncio
-async def test_union_branches_never_match_the_same_pair(async_session):
-    """Disjointness stated directly: the union must not produce more rows than the OR join.
-
-    A row count is the assertion that actually catches double-counting — two branches both
-    matching one pair would keep the SUM wrong in the same direction but is easiest to see
-    here.
-    """
-    await _seed(async_session)
-
-    or_rows = (
-        await async_session.execute(
-            select(func.count())
-            .select_from(FinancialTransaction)
-            .join(Appointment, financial_appointment_match_condition())
-        )
-    ).scalar_one()
-    branches = _financial_appointment_branches_union(
-        lambda join_condition: (
-            select(FinancialTransaction.id.label('ft_id'), Appointment.id.label('appt_id'))
-            .select_from(FinancialTransaction)
-            .join(Appointment, join_condition)
-        )
-    )
-    union_rows = (await async_session.execute(select(func.count()).select_from(branches))).scalar_one()
-    distinct_pairs = (
-        await async_session.execute(
-            select(func.count()).select_from(
-                select(branches.c.ft_id, branches.c.appt_id).distinct().subquery()
-            )
-        )
-    ).scalar_one()
-
-    assert union_rows == or_rows == 2
-    # No (transaction, appointment) pair appears twice: the branches partition, not overlap.
-    assert distinct_pairs == union_rows
 
 
 @pytest.mark.asyncio

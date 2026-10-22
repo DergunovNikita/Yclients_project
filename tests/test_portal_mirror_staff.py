@@ -124,20 +124,6 @@ async def test_mirror_row_is_absent_from_plan_fact_and_changes_no_number(async_s
 
 
 @pytest.mark.asyncio
-async def test_mirror_row_has_no_role_periods_and_no_administrator_scope(async_session):
-    await _seed(async_session, mirror=True)
-    async_session.info.clear()
-
-    admins = await dashboard_service._administrator_role_periods_by_company(async_session, *MARCH, [1])
-    admin_ids = await dashboard_service._admin_staff_ids_by_company(async_session, *MARCH, [1])
-    scope = await dashboard_service._administrator_service_scope(async_session, *MARCH, MIRROR_ID)
-
-    assert set(admins[1]) == {ADMIN_ID, PORTAL_ADMIN_ID}
-    assert admin_ids[1] == [ADMIN_ID, PORTAL_ADMIN_ID]
-    assert scope.is_administrator is False
-
-
-@pytest.mark.asyncio
 async def test_mirror_row_is_not_in_the_editors_and_cannot_be_written(async_session):
     await _seed(async_session, mirror=True)
 

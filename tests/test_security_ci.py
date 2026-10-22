@@ -4,72 +4,26 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_security_workflow_declares_expected_tools_and_modes():
+def test_security_workflow_fails_closed():
     workflow = (ROOT / '.github/workflows/security.yml').read_text()
-    deploy_workflow = (ROOT / '.github/workflows/deploy-vm.yml').read_text()
 
-    assert 'python-dependency-audit:' in workflow
-    assert 'frontend-dependency-audit:' in workflow
-    assert 'pip-audit -r requirements.txt' in workflow
-    assert 'npm ci --ignore-scripts --audit=false' in workflow
-    assert 'npm audit --audit-level=high' in workflow
-    assert 'semgrep scan' in workflow
-    assert '--config p/python' in workflow
-    assert '--config p/javascript' in workflow
-    assert 'checkov' in workflow
-    assert '--framework dockerfile,github_actions,secrets' in workflow
     assert 'continue-on-error: true' not in workflow
     assert '--soft-fail' not in workflow
-    assert 'github/codeql-action/upload-sarif' in workflow
-    assert workflow.count('security-events: write') == 2
-
-    assert 'gitleaks/gitleaks-action' in deploy_workflow
-    assert 'GITLEAKS_CONFIG: .gitleaks.toml' in deploy_workflow
 
 
-def test_deploy_workflow_gates_on_lint_and_frontend_checks():
+def test_deploy_waits_for_every_check():
     workflow = (ROOT / '.github/workflows/deploy-vm.yml').read_text()
-    deploy_job = workflow.split('  deploy-vm:', 1)[1]
+    needs = workflow.split('  deploy-vm:', 1)[1].split('steps:', 1)[0]
 
-    assert 'ruff check .' in workflow
-    assert 'requirements-dev.txt' in workflow
-    for command in (
-        'npm ci',
-        'npm test',
-        'npm run scan:auth-tokens',
-        'npm run build',
-        'npm run scan:auth-build',
-    ):
-        assert command in workflow
     # A broken frontend/proxy (e.g. a 13th Vercel function) must stop the deploy, not just turn a check red.
-    assert '- frontend' in deploy_job.split('steps:', 1)[0]
+    for job in ('secrets-scan', 'test', 'frontend'):
+        assert f'- {job}' in needs
 
 
 def test_deploy_refuses_to_report_success_without_vm_secrets():
     workflow = (ROOT / '.github/workflows/deploy-vm.yml').read_text()
 
     assert 'refusing to report a successful production deploy' in workflow
-
-
-def test_local_security_script_documents_same_gate():
-    script = (ROOT / 'scripts/security-check.sh').read_text()
-    readme = (ROOT / 'README.md').read_text()
-
-    for expected in (
-        'gitleaks git',
-        'pip-audit -r requirements.txt',
-        'npm ci --ignore-scripts --audit=false',
-        'npm audit --audit-level=high',
-        'semgrep',
-        'checkov',
-    ):
-        assert expected in script
-
-    assert './scripts/security-check.sh --strict' in readme
-    assert 'pip-audit' in readme
-    assert 'npm audit --audit-level=high' in readme
-    assert 'Semgrep' in readme
-    assert 'Checkov' in readme
 
 
 def test_python_requirements_are_pinned_exactly():

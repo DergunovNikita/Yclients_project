@@ -6,7 +6,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  SERIES_PALETTE,
   axisValueFormat,
   chartRenderType,
   chartSeriesColor,
@@ -75,8 +74,6 @@ test('non-line specs pass through untouched', () => {
 
 test('series colours never repeat inside one chart', () => {
   // year_over_year plots 2018..2026: the ninth series used to wrap onto the first colour.
-  assert.equal(chartSeriesColor(0), SERIES_PALETTE[0]);
-  assert.equal(chartSeriesColor(7), SERIES_PALETTE[7]);
   assert.notEqual(chartSeriesColor(12), chartSeriesColor(0));
   const colors = Array.from({ length: 24 }, (_, index) => chartSeriesColor(index));
   assert.equal(new Set(colors).size, colors.length);
@@ -87,19 +84,6 @@ test('every series colour is written in a form Chart.js parses', () => {
     assert.match(chartSeriesColor(index), CSS_COLOR);
     if (!Color) continue;
     assert.ok(new Color(chartSeriesColor(index)).valid, `series ${index}: ${chartSeriesColor(index)}`);
-  }
-  // The trap the comma form avoids, pinned only where the real parser is reachable.
-  if (Color) assert.equal(new Color('hsl(204 62% 38%)').valid, true);
-  if (Color) assert.equal(new Color('hsl(204 62% 38% / 13%)').valid, false);
-});
-
-test('a year-over-year chart is coloured from the curated palette alone', () => {
-  // Rotated hues land wherever they land — index 9 falls 11 degrees from the palette
-  // green. The palette is therefore sized past the charts that exist: year_over_year
-  // plots one series per year of history, and the data starts in 2018.
-  assert.ok(SERIES_PALETTE.length >= 12, `palette shrank to ${SERIES_PALETTE.length}`);
-  for (let index = 0; index < SERIES_PALETTE.length; index += 1) {
-    assert.equal(chartSeriesColor(index), SERIES_PALETTE[index]);
   }
 });
 

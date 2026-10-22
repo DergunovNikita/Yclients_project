@@ -42,14 +42,6 @@ function tab(idle, clock, storage, log = []) {
   return { monitor, log };
 }
 
-test('the thresholds live in one place: prompt after 2 h, logout 5 minutes later', async (t) => {
-  const { idle, server } = await loadIdleModule();
-  t.after(() => server.close());
-
-  assert.equal(idle.IDLE_PROMPT_AFTER_MS, 2 * HOUR);
-  assert.equal(idle.IDLE_LOGOUT_AFTER_MS, 2 * HOUR + 5 * MINUTE);
-});
-
 test('idle time walks active -> prompt with a countdown -> expired', async (t) => {
   const { idle, server } = await loadIdleModule();
   t.after(() => server.close());

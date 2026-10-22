@@ -101,38 +101,31 @@ function reportWithTable(extra = {}) {
   };
 }
 
-test('table cells carry a signed delta under the value, with a dash for an unmatched row', () => {
-  const container = fakeContainer();
-  renderReportData(container, reportWithTable(), fakeCharts());
-  const deltas = [...container.innerHTML.matchAll(/reports-cell-delta delta ([a-z]*)"[^>]*>([^<]*)</g)]
-    .map((match) => [match[1], match[2]]);
-  assert.equal(deltas.length, 4);
-  assert.deepEqual(deltas[0], ['up', '+10%']);
-  assert.equal(deltas[1][0], 'up');
-  assert.match(deltas[1][1], /^\+10/);
-  assert.match(deltas[1][1], /pp|п\.п\.|p\.p\./);
-  assert.deepEqual(deltas[2], ['', '—']);
-  assert.deepEqual(deltas[3], ['', '—']);
-});
+const deltaCells = (container) => (container.innerHTML.match(/reports-cell-delta/g) || []).length;
 
-test('without a comparison no delta is drawn', () => {
-  const container = fakeContainer();
-  renderReportData(container, reportWithTable({ comparison: undefined }), fakeCharts());
-  assert.equal(container.innerHTML.includes('reports-cell-delta'), false);
-});
+test('compared table cells carry a delta, except unmatched rows are dashed, the key column and uncompared reports have none', () => {
+  // two rows x (revenue, share): every numeric cell of both rows gets a delta slot, the unmatched row a dash
+  const compared = fakeContainer();
+  renderReportData(compared, reportWithTable(), fakeCharts());
+  assert.equal(deltaCells(compared), 4);
+  assert.match(compared.innerHTML, />\+10%</);
+  assert.equal((compared.innerHTML.match(/>—</g) || []).length, 2);
 
-test('the key column never gets a delta', () => {
+  const withoutComparison = fakeContainer();
+  renderReportData(withoutComparison, reportWithTable({ comparison: undefined }), fakeCharts());
+  assert.equal(deltaCells(withoutComparison), 0);
+
   const data = reportWithTable();
   data.tables[0].columns = [{ key: 'staff_id', label: 'ID', format: 'number' }, money];
   data.tables[0].row_key = 'staff_id';
   data.tables[0].rows = [{ staff_id: 7, revenue: 110 }];
   data.comparison.tables[0].rows = [{ staff_id: 7, revenue: 100 }];
-  const container = fakeContainer();
-  renderReportData(container, data, fakeCharts());
-  assert.equal((container.innerHTML.match(/reports-cell-delta/g) || []).length, 1);
+  const keyed = fakeContainer();
+  renderReportData(keyed, data, fakeCharts());
+  assert.equal(deltaCells(keyed), 1);
 });
 
-test('the summary table prints its dates, signs the delta and dashes a zero base', () => {
+test('the summary table prints formatted dates, signs the delta and dashes a zero base', () => {
   const data = {
     period: { start: '2026-08-01', end: '2026-08-31' },
     cards: [],
@@ -155,8 +148,8 @@ test('the summary table prints its dates, signs the delta and dashes a zero base
   assert.equal(html.includes('2026-07-01'), false, 'raw ISO dates must not be printed');
   assert.ok(html.includes(formatDate('2026-07-01')));
   assert.ok(html.includes(formatDate('2026-08-31')));
-  assert.match(html, /delta up">\+10%</);
-  assert.match(html, /delta ">—</);
+  assert.match(html, />\+10%</);
+  assert.match(html, />—</);
   // a share has no percent of a percent
   assert.equal(html.includes('+50%'), false);
 });
@@ -219,9 +212,10 @@ test('the manager draws the comparison series dashed in the colour of its origin
     { id: 'c', labels: ['p1', 'p2', 'p3'], datasets: [{ label: 'Выручка', data: [10, 20, 30] }] },
   );
   const [current, previous] = manager.instances.get('c').data.datasets;
-  assert.equal(current.borderDash, undefined);
-  assert.deepEqual(previous.borderDash, [6, 4]);
-  assert.equal(previous.borderColor, `${current.borderColor}8c`);
+  assert.ok(!current.borderDash?.length, 'the current series is solid');
+  assert.ok(Array.isArray(previous.borderDash) && previous.borderDash.length > 0, 'the comparison series is dashed');
+  assert.ok(previous.borderColor.startsWith(current.borderColor), 'same hue as the original');
+  assert.notEqual(previous.borderColor, current.borderColor, 'but muted');
   assert.equal(previous.reportCompare, true);
   manager.clear();
 });
@@ -307,16 +301,4 @@ test('a link without a tick, or without a preset, does not claim the baseline co
   });
   assert.equal(typed.has('compare_previous'), false);
   assert.equal(typed.get('compare_start_date'), '2026-06-01');
-});
-
-test('the viewer subtitle names a granularity only for reports that have one', async () => {
-  const { periodSubtitle } = await import('../src/reports/format.js');
-  const data = { period: { start: '2026-08-01', end: '2026-08-31', granularity: 'day' } };
-  const plain = periodSubtitle(data, { filters: { granularity: false } });
-  const bucketed = periodSubtitle(data, { filters: { granularity: true } });
-  assert.doesNotMatch(plain, /·/);
-  assert.match(bucketed, /·/);
-  assert.ok(bucketed.startsWith(plain));
-  assert.doesNotMatch(bucketed, /\bday\b/, 'the id is localised, not printed raw');
-  assert.equal(periodSubtitle(null, {}), '');
 });

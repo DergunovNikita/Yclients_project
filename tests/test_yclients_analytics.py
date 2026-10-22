@@ -226,9 +226,12 @@ class CountingClient(FakeAsyncClient):
     async def get(self, url, *, headers, params):
         self.tokens_seen.append(headers['Authorization'])
         status = self.statuses.pop(0) if self.statuses else 200
+        retry_after = '1'
+        if isinstance(status, tuple):
+            status, retry_after = status
         if status != 200:
             response = FakeResponse({}, status_code=status)
-            response.headers = {'Retry-After': '1'} if status == 429 else {}
+            response.headers = {'Retry-After': retry_after} if status == 429 else {}
             return response
         return await super().get(url, headers=headers, params=params)
 
@@ -313,12 +316,7 @@ async def test_rate_limited_request_is_retried_after_the_advertised_wait(async_s
 @pytest.mark.asyncio
 async def test_retry_after_longer_than_a_page_load_can_wait_fails_fast(async_session, monkeypatch):
     await _seed_db_credentials(async_session, monkeypatch, company_ids=(1,))
-    clients = _use_counting_client(monkeypatch, script=[429])
-
-    def too_long(response, attempt):
-        return None
-
-    monkeypatch.setattr(yclients_analytics, '_retry_delay', too_long)
+    clients = _use_counting_client(monkeypatch, script=[(429, '600')])
 
     with pytest.raises(yclients_analytics.YClientsAnalyticsError):
         await _record_stats(async_session)

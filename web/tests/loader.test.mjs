@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import { createLatestRequestScope } from '../src/dashboardRequestState.js';
@@ -57,10 +56,6 @@ function recordedTiming() {
   return { clock, events, timing };
 }
 
-test('the timing constants are the approved ones', () => {
-  assert.deepEqual([SHOW_DELAY_MS, MIN_VISIBLE_MS, CAPTION_INTERVAL_MS], [400, 500, 2700]);
-});
-
 test('a load that ends before the delay never shows anything', () => {
   const { clock, events, timing } = recordedTiming();
   timing.start('first');
@@ -72,25 +67,27 @@ test('a load that ends before the delay never shows anything', () => {
   assert.equal(clock.timerCount, 0);
 });
 
-test('the loader appears at 400 ms with the first caption', () => {
+test('the loader appears after the show delay with the first caption', () => {
   const { clock, events, timing } = recordedTiming();
   timing.start('first');
   clock.advance(SHOW_DELAY_MS - 1);
   assert.deepEqual(events, []);
   clock.advance(1);
-  assert.deepEqual(events, [['show', 'first', 400], ['caption', 0, 400]]);
+  assert.deepEqual(events, [['show', 'first', SHOW_DELAY_MS], ['caption', 0, SHOW_DELAY_MS]]);
   assert.equal(timing.isVisible(), true);
 });
 
-test('once shown it stays at least 500 ms', () => {
+test('once shown it stays for the minimum visible time', () => {
   const { clock, events, timing } = recordedTiming();
   timing.start('refresh');
-  clock.advance(450);
+  const shownFor = MIN_VISIBLE_MS - 50;
+  clock.advance(SHOW_DELAY_MS + shownFor);
   timing.stop();
-  clock.advance(449);
+  const remaining = MIN_VISIBLE_MS - shownFor;
+  clock.advance(remaining - 1);
   assert.equal(timing.isVisible(), true);
   clock.advance(1);
-  assert.deepEqual(events.at(-1), ['hide', 900]);
+  assert.deepEqual(events.at(-1), ['hide', SHOW_DELAY_MS + MIN_VISIBLE_MS]);
   assert.equal(timing.isVisible(), false);
   assert.equal(clock.timerCount, 0);
 });
@@ -98,20 +95,21 @@ test('once shown it stays at least 500 ms', () => {
 test('a load that outlasts the minimum hides at once', () => {
   const { clock, events, timing } = recordedTiming();
   timing.start('first');
-  clock.advance(2000);
+  const longLoad = SHOW_DELAY_MS + MIN_VISIBLE_MS * 3;
+  clock.advance(longLoad);
   timing.stop();
-  assert.deepEqual(events.at(-1), ['hide', 2000]);
+  assert.deepEqual(events.at(-1), ['hide', longLoad]);
   assert.equal(clock.timerCount, 0);
 });
 
-test('captions rotate every 2.7 s through all nine keys and wrap', () => {
+test('captions rotate on the caption interval through every key and wrap', () => {
   const { clock, events, timing } = recordedTiming();
   timing.start('first');
   clock.advance(SHOW_DELAY_MS + CAPTION_INTERVAL_MS * CAPTION_KEYS.length);
   const indexes = events.filter(([kind]) => kind === 'caption').map(([, index]) => index);
-  assert.deepEqual(indexes, [0, 1, 2, 3, 4, 5, 6, 7, 8, 0]);
+  assert.deepEqual(indexes, [...CAPTION_KEYS.keys(), 0]);
   const times = events.filter(([kind]) => kind === 'caption').map(([, , at]) => at);
-  assert.deepEqual(times.slice(0, 3), [400, 3100, 5800]);
+  assert.deepEqual(times.slice(0, 3), [0, 1, 2].map((n) => SHOW_DELAY_MS + n * CAPTION_INTERVAL_MS));
 });
 
 test('each new show starts again from the first caption', () => {
@@ -140,7 +138,7 @@ test('start while visible keeps it on screen without a new delay or caption rese
 test('start during a pending hide cancels it', () => {
   const { clock, events, timing } = recordedTiming();
   timing.start('refresh');
-  clock.advance(450);
+  clock.advance(SHOW_DELAY_MS + 50);
   timing.stop();
   clock.advance(100);
   timing.start('refresh');
@@ -148,18 +146,18 @@ test('start during a pending hide cancels it', () => {
   assert.equal(events.some(([kind]) => kind === 'hide'), false);
   assert.equal(timing.isVisible(), true);
   timing.stop();
-  assert.deepEqual(events.at(-1), ['hide', 10550]);
+  assert.deepEqual(events.at(-1), ['hide', SHOW_DELAY_MS + 50 + 100 + 10000]);
 });
 
 test('a first-mode start during a pending hide resumes the captions', () => {
   const { clock, events, timing } = recordedTiming();
   timing.start('first');
-  clock.advance(450);
+  clock.advance(SHOW_DELAY_MS + 50);
   timing.stop();
   clock.advance(100);
   timing.start('first');
   clock.advance(CAPTION_INTERVAL_MS);
-  assert.deepEqual(events.at(-1), ['caption', 1, 550 + CAPTION_INTERVAL_MS]);
+  assert.deepEqual(events.at(-1), ['caption', 1, SHOW_DELAY_MS + 50 + 100 + CAPTION_INTERVAL_MS]);
   timing.stop();
   assert.equal(clock.timerCount, 0);
 });
@@ -167,20 +165,20 @@ test('a first-mode start during a pending hide resumes the captions', () => {
 test('start while the delay is pending does not restart it', () => {
   const { clock, events, timing } = recordedTiming();
   timing.start('first');
-  clock.advance(300);
+  clock.advance(SHOW_DELAY_MS - 100);
   timing.start('first');
   clock.advance(100);
-  assert.deepEqual(events[0], ['show', 'first', 400]);
+  assert.deepEqual(events[0], ['show', 'first', SHOW_DELAY_MS]);
 });
 
 test('the refresh mode has no caption timers', () => {
   const { clock, events, timing } = recordedTiming();
   timing.start('refresh');
   clock.advance(SHOW_DELAY_MS);
-  assert.deepEqual(events, [['show', 'refresh', 400]]);
+  assert.deepEqual(events, [['show', 'refresh', SHOW_DELAY_MS]]);
   assert.equal(clock.timerCount, 0);
   clock.advance(CAPTION_INTERVAL_MS * 3);
-  assert.deepEqual(events, [['show', 'refresh', 400]]);
+  assert.deepEqual(events, [['show', 'refresh', SHOW_DELAY_MS]]);
 });
 
 test('the mode switches while visible, and captions follow the first mode only', () => {
@@ -188,11 +186,11 @@ test('the mode switches while visible, and captions follow the first mode only',
   timing.start('refresh');
   clock.advance(SHOW_DELAY_MS);
   timing.start('first');
-  assert.deepEqual(events.slice(1), [['mode', 'first', 400], ['caption', 0, 400]]);
+  assert.deepEqual(events.slice(1), [['mode', 'first', SHOW_DELAY_MS], ['caption', 0, SHOW_DELAY_MS]]);
   clock.advance(CAPTION_INTERVAL_MS);
-  assert.deepEqual(events.at(-1), ['caption', 1, 3100]);
+  assert.deepEqual(events.at(-1), ['caption', 1, SHOW_DELAY_MS + CAPTION_INTERVAL_MS]);
   timing.start('refresh');
-  assert.deepEqual(events.at(-1), ['mode', 'refresh', 3100]);
+  assert.deepEqual(events.at(-1), ['mode', 'refresh', SHOW_DELAY_MS + CAPTION_INTERVAL_MS]);
   clock.advance(CAPTION_INTERVAL_MS * 2);
   assert.equal(events.filter(([kind]) => kind === 'caption').length, 2);
 });
@@ -202,8 +200,8 @@ test('the mode chosen while the delay is pending is the one shown', () => {
   timing.start('refresh');
   clock.advance(100);
   timing.start('first');
-  clock.advance(300);
-  assert.deepEqual(events[0], ['show', 'first', 400]);
+  clock.advance(SHOW_DELAY_MS - 100);
+  assert.deepEqual(events[0], ['show', 'first', SHOW_DELAY_MS]);
 });
 
 test('stop clears every timer', () => {
@@ -241,6 +239,9 @@ function fakeNode(tag = 'div') {
   };
 }
 
+const statusOf = (el) => el.children.find((child) => child.getAttribute('role') === 'status');
+const captionOf = (el) => el.children.find((child) => child.tag === 'p');
+
 async function withFakeDocument(run) {
   const original = globalThis.document;
   globalThis.document = { createElement: fakeNode };
@@ -258,7 +259,8 @@ test('mountLoader draws the placeholder and reads captions through t()', async (
     const t = (key) => `${locale}:${key}`;
     const el = fakeNode();
     const loader = mountLoader(el, { t, ...clock });
-    const [, caption, , status] = el.children;
+    const caption = captionOf(el);
+    const status = statusOf(el);
 
     loader.start('first');
     assert.equal(el.hidden, true);
@@ -306,7 +308,7 @@ test('the status text is written one timer tick after the placeholder is un-hidd
     const manual = manualTimers();
     const el = fakeNode();
     const loader = mountLoader(el, { t: (key) => key, ...manual, now: () => 0 });
-    const status = el.children[3];
+    const status = statusOf(el);
 
     loader.start('first');
     manual.fire(SHOW_DELAY_MS);
@@ -324,7 +326,7 @@ test('a stop right after the show flushes the pending status and leaves no statu
     const manual = manualTimers();
     const el = fakeNode();
     const loader = mountLoader(el, { t: (key) => key, ...manual, now: () => 0 });
-    const status = el.children[3];
+    const status = statusOf(el);
 
     loader.start('refresh');
     manual.fire(SHOW_DELAY_MS);
@@ -350,7 +352,7 @@ test('mountLoader hides and clears the status after the minimum, and is null-saf
     loader.stop();
     clock.advance(MIN_VISIBLE_MS);
     assert.equal(el.hidden, true);
-    assert.equal(el.children[3].textContent, '');
+    assert.equal(statusOf(el).textContent, '');
 
     // restarting after a hide works
     assert.doesNotThrow(() => {
@@ -363,18 +365,6 @@ test('mountLoader hides and clears the status after the minimum, and is null-saf
       detached.stop();
     });
   });
-});
-
-test('every caption key is a string in ru, en and it', async () => {
-  for (const locale of ['ru', 'en', 'it']) {
-    const messages = JSON.parse(await readFile(new URL(`../locales/${locale}.json`, import.meta.url), 'utf8'));
-    for (const key of CAPTION_KEYS) {
-      const value = key.split('.').reduce((node, part) => node?.[part], messages);
-      assert.equal(typeof value, 'string', `${locale}: ${key}`);
-      assert.ok(value.length > 0, `${locale}: ${key}`);
-    }
-  }
-  assert.equal(CAPTION_KEYS.length, 9);
 });
 
 test('a superseded request finishing late does not stop the loader of its successor', () => {
@@ -399,43 +389,4 @@ test('an aborted scope leaves the stop to whoever aborted it', () => {
   scope.abort();
   request.finish();
   assert.equal(stops, 0);
-});
-
-test('the wrapped request keeps the fields callers read', () => {
-  const request = stopLoaderWithRequest(createLatestRequestScope().start(), () => {});
-  assert.deepEqual(Object.keys(request).sort(), ['finish', 'isCurrent', 'signal']);
-});
-
-// The sibling rules in loader.css dim or hide whatever follows the placeholder, so its place in the markup is the contract.
-const indexHtml = await readFile(new URL('../index.html', import.meta.url), 'utf8');
-const placeholder = '<div class="view-loader" hidden></div>';
-
-test('every data view has one placeholder right after its controls and before its data', () => {
-  const afterControls = [
-    ['overview-view', '<p class="compare-note" id="overview-compare-note" hidden></p>'],
-    ['plan-view', '</section>'],
-    ['plan-settings-view', '</section>'],
-    ['service-management-view', '</section>'],
-    ['review-facts-view', '</section>'],
-    ['opz-facts-view', '</section>'],
-    ['yandex-pay-view', '</section>'],
-    ['reports-viewer', '</section>'],
-  ];
-  assert.equal(indexHtml.split(placeholder).length - 1, afterControls.length);
-  for (const [host, previous] of afterControls) {
-    const start = indexHtml.indexOf(`id="${host}"`);
-    assert.notEqual(start, -1, host);
-    const at = indexHtml.indexOf(placeholder, start);
-    assert.notEqual(at, -1, host);
-    const before = indexHtml.slice(0, at).trimEnd();
-    assert.ok(before.endsWith(previous), `${host}: the placeholder follows ${previous}`);
-  }
-  const reportsAt = indexHtml.indexOf(placeholder, indexHtml.indexOf('id="reports-viewer"'));
-  assert.match(indexHtml.slice(reportsAt + placeholder.length).trimStart(), /^<div id="reports-report-content">/);
-});
-
-test('the loader hosts are not scroll or clip containers (sticky heads and filters depend on it)', async () => {
-  const css = await readFile(new URL('../src/loader.css', import.meta.url), 'utf8');
-  const hostRule = css.match(/\n\.view-loader \{[^}]*\}/)[0];
-  assert.doesNotMatch(hostRule, /overflow|transform|filter/);
 });

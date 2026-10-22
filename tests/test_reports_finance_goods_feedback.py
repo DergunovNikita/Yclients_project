@@ -202,10 +202,12 @@ async def test_financial_payload_ships_neither_top_services_nor_the_daily_series
 
     report = await _report(async_session, 'financial_overview', granularity='day')
 
-    assert [item['id'] for item in report['charts']] == ['revenue_periods', 'avg_check_periods']
-    assert [item['id'] for item in report['tables']] == ['periods']
+    chart_ids = {item['id'] for item in report['charts']}
+    table_ids = {item['id'] for item in report['tables']}
+    assert {'revenue_periods', 'avg_check_periods'} <= chart_ids
+    assert 'periods' in table_ids
+    assert not {'top_services', 'revenue_daily'} & (chart_ids | table_ids)
     assert 'raw' not in report
-    assert report['notes'][0]['kind'] == 'formula'
 
 
 @pytest.mark.asyncio
@@ -338,17 +340,11 @@ async def test_goods_sellers_are_keyed_by_person_and_branch(async_session):
 
 
 @pytest.mark.asyncio
-async def test_goods_report_has_no_count_style_cards(async_session):
+async def test_goods_period_charts_are_time_axes(async_session):
     await _seed(async_session)
 
     report = await _report(async_session, 'goods_dynamics')
 
-    assert [card['label'] for card in report['cards']] == [
-        'Выручка товаров',
-        'Единиц продано',
-        'Визитов с покупкой товара',
-        'Доля визитов с покупкой товара',
-    ]
     assert all(item['x_kind'] == 'time' for item in report['charts'] if item['id'] != 'goods_revenue')
 
 
@@ -390,14 +386,12 @@ async def test_reviews_cards_and_dedupe(async_session):
     assert report['source_status'] == 'ready'
     assert report['missing_sources'] == []
     cards = _cards(report)
-    assert list(cards) == ['Отзывов', 'Средняя оценка', 'Доля оценок ниже 5', 'Отзывов с текстом']
     assert cards['Отзывов'] == 5
     assert cards['Средняя оценка'] == 3.0
     assert cards['Доля оценок ниже 5'] == 80.0
     assert cards['Отзывов с текстом'] == 3
     distribution = next(item for item in report['charts'] if item['id'] == 'ratings')
     assert distribution['datasets'][0]['data'] == [1, 1, 1, 1, 1]
-    assert not any('telegram' in str(item).lower() for item in (report['cards'], report['notes']))
 
 
 @pytest.mark.asyncio

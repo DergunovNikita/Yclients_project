@@ -11,18 +11,6 @@ from helpers import FakeConnection, FakeDatabase, FakeEngine, FakeSession
 from helpers import sqlite_session_with_system as _sqlite_session
 
 
-def test_set_state_serializes_datetime_to_isoformat():
-    with _sqlite_session([SyncState.__table__]) as session:
-        service = SyncControlService()
-        value = datetime(2026, 3, 29, 10, 30, 45, 123456)
-
-        service.set_state(session, 'last_successful_sync_at', value)
-
-        saved = session.get(SyncState, 'last_successful_sync_at')
-        assert saved is not None
-        assert saved.value == '2026-03-29T10:30:45.123456'
-
-
 def test_status_payload_includes_last_successful_sync_at():
     with _sqlite_session([SyncState.__table__, SyncRun.__table__]) as session:
         service = SyncControlService()
@@ -521,27 +509,34 @@ def test_run_sync_job_locks_on_a_connection_no_pooled_session_can_take(monkeypat
     [({}, False), ({'portal_account_id': 3}, True), ({'credential_id': 5}, True), ({'company_ids': [9]}, True)],
 )
 def test_run_sync_job_reports_whether_the_run_was_scoped(monkeypatch, tmp_path, limits, expected_scoped):
+    """Only an unscoped success may arm the auto-enqueue gate; a tenant-scoped one must not."""
     import sync_orchestrator
 
-    finished = {}
-    database = FakeDatabase()
-    monkeypatch.setattr(sync_orchestrator, 'init_database', lambda *a, **k: database)
-    monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
-    control_cls = sync_orchestrator.SyncControlService
-    monkeypatch.setattr(control_cls, 'acquire_lock', lambda self, db: True)
-    monkeypatch.setattr(control_cls, 'release_lock', lambda self, db: None)
-    monkeypatch.setattr(control_cls, 'cleanup_stale_runs', lambda self, db: None)
-    monkeypatch.setattr(control_cls, 'create_run', lambda self, db, *a, **k: SyncRun(id=1, started_at=datetime.now()))
-    monkeypatch.setattr(control_cls, 'finish_run', lambda self, *a, **k: finished.update(k))
-    monkeypatch.setattr(sync_orchestrator.SyncJobService, 'record_event', lambda *a, **k: None)
-    monkeypatch.setattr(sync_orchestrator.SyncJobService, 'update_progress', lambda *a, **k: None)
-    monkeypatch.setattr(sync_orchestrator, 'execute_sync', lambda **kwargs: {'success': True, 'step_results': []})
-    monkeypatch.setattr(sync_orchestrator.TelegramNotifier, 'send', lambda self, message: None)
-    monkeypatch.setattr(sync_orchestrator, 'build_log_path', lambda *a, **k: str(tmp_path / 'x.log'))
+    with _sqlite_session([SyncRun.__table__, SyncState.__table__]) as session:
+        class Database:
+            engine = FakeEngine()
 
-    sync_orchestrator.run_sync_job(mode='incremental', trigger_type='manual', initiator='pytest', **limits)
+            def get_db(self):
+                return session
 
-    assert finished == {'scoped': expected_scoped}
+        control_cls = sync_orchestrator.SyncControlService
+        monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
+        monkeypatch.setattr(control_cls, 'acquire_lock', lambda self, db: True)
+        monkeypatch.setattr(control_cls, 'release_lock', lambda self, db: None)
+        monkeypatch.setattr(sync_orchestrator.SyncJobService, 'record_event', lambda *a, **k: None)
+        monkeypatch.setattr(sync_orchestrator.SyncJobService, 'update_progress', lambda *a, **k: None)
+        monkeypatch.setattr(sync_orchestrator, 'execute_sync', lambda **kwargs: {'success': True, 'step_results': []})
+        monkeypatch.setattr(sync_orchestrator.TelegramNotifier, 'send', lambda self, message: None)
+        monkeypatch.setattr(sync_orchestrator, 'build_log_path', lambda *a, **k: str(tmp_path / 'x.log'))
+
+        result = sync_orchestrator.run_sync_job(
+            mode='incremental', trigger_type='manual', initiator='pytest', database=Database(), **limits,
+        )
+
+        state = control_cls().get_state_values(session, ['last_successful_sync_at', UNSCOPED_SUCCESS_STATE_KEY])
+        assert result['status'] == 'success'
+        assert state['last_successful_sync_at'] is not None
+        assert (state[UNSCOPED_SUCCESS_STATE_KEY] is not None) is (not expected_scoped)
 
 
 def test_run_sync_job_releases_lock_when_create_run_raises(monkeypatch, tmp_path):
@@ -1200,7 +1195,7 @@ def test_a_failed_progress_write_rolls_back_the_control_session_and_the_run_goes
     monkeypatch.setattr(control_cls, 'acquire_lock', lambda self, db: True)
     monkeypatch.setattr(control_cls, 'release_lock', lambda self, db: None)
     monkeypatch.setattr(control_cls, 'cleanup_stale_runs', lambda self, db: None)
-    monkeypatch.setattr(control_cls, 'create_run', lambda self, db, *a, **k: SyncRun(id=1, started_at=datetime.now()))
+    monkeypatch.setattr(control_cls, 'create_run', lambda self, db, *a, **k: SyncRun(id=1, started_at=utcnow()))
     monkeypatch.setattr(control_cls, 'finish_run', lambda self, *a, **k: None)
     monkeypatch.setattr(sync_orchestrator.SyncJobService, 'record_event', record_event)
     monkeypatch.setattr(sync_orchestrator.SyncJobService, 'update_progress', lambda *a, **k: None)

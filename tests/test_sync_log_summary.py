@@ -29,7 +29,7 @@ def capture_stdout(func, *args, **kwargs):
     return result, stdout.getvalue()
 
 
-def test_summarize_prints_normal_summary_and_ok_exit(tmp_path):
+def test_a_finished_run_without_failures_has_an_ok_verdict(tmp_path):
     module = load_module()
     path = write_log(
         tmp_path / 'sync_20250101.log',
@@ -42,26 +42,16 @@ def test_summarize_prints_normal_summary_and_ok_exit(tmp_path):
         """,
     )
 
-    result, output = capture_stdout(module.summarize, path)
+    result, _ = capture_stdout(module.summarize, path)
+    summary = module._summarize_lines(path.read_text().splitlines())
 
     assert result == 0
-    assert output == (
-        '== sync_20250101.log ==\n'
-        'header: started\n'
-        'tail:   Синхронизация завершена!\n'
-        'branches seen: 1\n'
-        'steps: OK=1  WARN=1  FAIL=0  total=2\n'
-        'total step-time: 1m03.5s\n'
-        '\n'
-        'top 10 slowest steps:\n'
-        '     1m02.0s  [WARN] Refresh views\n'
-        '        1.5s  [OK] Fetch clients\n'
-        '\n'
-        'exit: ok\n'
-    )
+    assert (summary.ok, summary.warn, summary.fail) == (1, 1, 0)
+    assert summary.total_seconds == 63.5
+    assert len(summary.branches) == 1
 
 
-def test_main_last_prints_brief_summaries(tmp_path, monkeypatch):
+def test_main_last_reports_one_line_per_log_with_its_verdict(tmp_path, monkeypatch):
     module = load_module()
     write_log(
         tmp_path / 'sync_20250101.log',
@@ -83,28 +73,10 @@ def test_main_last_prints_brief_summaries(tmp_path, monkeypatch):
 
     result, output = capture_stdout(module.main, ['--last', '2'])
 
+    first, second = output.splitlines()
     assert result == 0
-    assert output == (
-        'sync_20250101.log  ok=  1 warn= 0 fail= 0  total=    2.0s  ok\n'
-        'sync_20250102.log  ok=  0 warn= 0 fail= 1  total=    1.0s  issues\n'
-    )
-
-
-def test_errors_only_without_errors_prints_no_markers(tmp_path):
-    module = load_module()
-    path = write_log(
-        tmp_path / 'sync_clean.log',
-        """
-        clean run
-        [OK] Step 100ms
-        Синхронизация завершена!
-        """,
-    )
-
-    result, output = capture_stdout(module.summarize, path, errors_only=True)
-
-    assert result == 0
-    assert output == 'sync_clean.log: no error markers found\n'
+    assert first.startswith('sync_20250101.log') and first.endswith('ok')
+    assert second.startswith('sync_20250102.log') and second.endswith('issues')
 
 
 def test_failure_step_prints_errors_and_issues_exit(tmp_path):

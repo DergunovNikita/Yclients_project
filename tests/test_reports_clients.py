@@ -6,9 +6,7 @@ from datetime import date, datetime
 
 import pytest
 
-import dashboard_reports
 import dashboard_service
-from dashboard_service import DateRange
 from report_helpers import cards, table_rows
 from models import Appointment, Company, FinancialTransaction, Group, Staff
 from report_payload import ReportRequest
@@ -105,15 +103,14 @@ async def test_cohort_size_equals_overview_new_clients_for_each_month(async_sess
     sizes = {row['cohort_month']: row['size'] for row in table_rows(payload, 'retention_cohorts')}
     assert sizes == {'2025-01': 5, '2025-02': 1, '2025-03': 0}
     for month in (1, 2, 3):
-        overview = await dashboard_service._client_recency_block(
+        overview = await dashboard_service.fetch_summary(
             async_session,
-            DateRange(date(2025, month, 1), date(2025, month, monthrange(2025, month)[1])),
-            None,
-            None,
-            [1],
-            NOW,
+            date(2025, month, 1),
+            date(2025, month, monthrange(2025, month)[1]),
+            allowed_company_ids=[1],
+            factual_at=NOW,
         )
-        assert sizes[f'2025-{month:02d}'] == overview['new_clients']
+        assert sizes[f'2025-{month:02d}'] == overview['visit_metrics']['new_clients']
 
 
 @pytest.mark.asyncio
@@ -194,8 +191,6 @@ async def test_retention_payload_carries_no_money(async_session):
     async_session.add_all(seed.rows)
     await async_session.commit()
     payload = await build_retention_3_6_12(request(async_session, date(2025, 1, 1), date(2025, 12, 31)))
-    assert dashboard_reports.report_requires_financials('client_cohorts') is False
-    assert dashboard_reports.REPORT_REGISTRY['retention_3_6_12'].requires_financials is False
     serialized = json.dumps(payload)
     assert '"format": "money"' not in serialized
     assert 'revenue' not in serialized and '5000' not in serialized
@@ -371,9 +366,10 @@ async def test_pareto_frequency_matches_overview_and_drops_degenerate_blocks(asy
 
     start, end = date(2025, 3, 1), date(2025, 3, 31)
     payload = await build_top_clients_pareto(request(async_session, start, end))
-    overview = await dashboard_service._client_visit_frequency_block(
-        async_session, DateRange(start, end), None, None, [1], NOW
+    summary = await dashboard_service.fetch_summary(
+        async_session, start, end, allowed_company_ids=[1], factual_at=NOW
     )
+    overview = summary['visit_metrics']['client_visit_frequency']
     frequency = {row['bucket']: row for row in table_rows(payload, 'visit_frequency')}
     assert frequency['1 визит']['clients'] == overview['one_visit']['count'] == 1
     assert frequency['2-3 визита']['clients'] == overview['two_to_three_visits']['count'] == 1

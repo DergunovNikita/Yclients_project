@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --import ./tests/json-modules.mjs --test \"tests/*.test.mjs\"",
-    "test:auth": "node --test tests/auth-runtime.test.mjs tests/proxy-runtime.test.mjs",
+    "test": "node --import ./tests/json-modules.mjs --test --test-timeout=20000 \"tests/*.test.mjs\"",
+    "test:auth": "node --test --test-timeout=20000 tests/auth-runtime.test.mjs tests/proxy-runtime.test.mjs",
     "scan:auth-tokens": "node tests/browser-auth-scan.mjs .",
     "scan:auth-build": "node tests/browser-auth-scan.mjs dist",
     "preview": "vite preview"

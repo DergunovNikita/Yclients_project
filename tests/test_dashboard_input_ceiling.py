@@ -4,7 +4,6 @@ from datetime import datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.dialects import postgresql
 
 import api
 import auth_deps
@@ -118,17 +117,3 @@ async def test_dashboard_staff_lists_only_the_own_row_for_a_personal_role(async_
     assert [row['name'] for row in branch.json()['data']] == ['Colleague', 'Linked']
     assert all('user_id' not in row for row in branch.json()['data'])
     assert no_row.status_code == 403
-
-
-def test_company_scope_clause_requires_the_branch_to_be_allowed():
-    def sql(company_id, allowed):
-        clause = dashboard_service._company_scope_clause(Staff.company_id, company_id, allowed)
-        if clause is None:
-            return None
-        return str(clause.compile(dialect=postgresql.dialect(), compile_kwargs={'literal_binds': True}))
-
-    assert sql(None, None) is None
-    assert sql(3, None) == 'staff.company_id = 3'
-    assert sql(None, [1, 2]) == 'staff.company_id IN (1, 2)'
-    assert sql(3, [1, 2]) == 'staff.company_id = 3 AND staff.company_id IN (1, 2)'
-    assert sql(3, []).startswith('staff.company_id = 3 AND staff.company_id IN (')

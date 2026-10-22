@@ -1,10 +1,9 @@
-"""Pin the rows the sync load helpers write.
+"""Pin the rows the sync loaders write.
 
-The loaders were rewritten from one SELECT per row to chunked set queries. These tests run
-every loader through a fixture that exercises adoption of legacy rows, primary keys that
+Every loader runs through a fixture that exercises adoption of legacy rows, primary keys that
 collide with another tenant's rows, ids that collide with a key the database itself handed
-out, duplicates inside one payload and a purge-and-reload window, and compare the complete
-resulting tables with a snapshot captured from the per-row implementation.
+out, duplicates inside one payload and a purge-and-reload window. Rows are compared by what
+a branch owns: (company, YClients id) -> values, never by the surrogate primary key.
 """
 from contextlib import redirect_stdout
 import io
@@ -130,15 +129,39 @@ def date_of(value):
     return parse_date(value)
 
 
-def _dump(db):
-    snapshot = {}
-    for model in (Client, Staff, Appointment, Transaction, FinancialTransaction, GoodTransaction, Comment):
-        columns = [column.key for column in model.__table__.columns]
-        rows = db.query(model).order_by(model.id).all()
-        snapshot[model.__tablename__] = [
-            '|'.join(str(getattr(row, column)) for column in columns) for row in rows
-        ]
-    return snapshot
+def _by_external_id(rows, value):
+    """{(company_id, external_id): value(row)}; a duplicated key fails the comparison instead of hiding."""
+    keyed = [((row.company_id, row.external_id), value(row)) for row in rows if row.external_id is not None]
+    assert len({key for key, _ in keyed}) == len(keyed), 'a YClients id was stored twice for one branch'
+    return dict(keyed)
+
+
+def _facts(db):
+    services = {}
+    for item in db.query(Transaction).all():
+        services.setdefault(item.appointment_id, set()).add(item.service_title)
+    appointments = db.query(Appointment).all()
+    return {
+        'staff': _by_external_id(db.query(Staff), lambda row: (row.name, row.fired)),
+        'clients': _by_external_id(db.query(Client), lambda row: row.name),
+        'appointments': _by_external_id(db.query(Appointment), lambda row: services.get(row.id, set())),
+        'financial': _by_external_id(db.query(FinancialTransaction), lambda row: row.amount),
+        'goods': _by_external_id(db.query(GoodTransaction), lambda row: row.cost),
+        'comments': _by_external_id(db.query(Comment), lambda row: row.text),
+        # Rows of the other tenant that carry no YClients id must come through untouched.
+        'other_tenant_unlinked': {
+            (model.__tablename__, row.id): getattr(row, column)
+            for model, column in ((FinancialTransaction, 'amount'), (GoodTransaction, 'cost'), (Comment, 'text'))
+            for row in db.query(model).filter(model.company_id == 2, model.external_id.is_(None))
+        },
+        # Pre-migration rows of the branch are adopted by the payload's ids, never left beside a twin.
+        'unadopted': sorted(
+            (model.__tablename__, row.id)
+            for model in (Staff, Client, Appointment, FinancialTransaction, GoodTransaction, Comment)
+            for row in db.query(model).filter(model.company_id == 1, model.external_id.is_(None))
+        ),
+        'appointment_ids': {row.external_id: row.id for row in appointments},
+    }
 
 
 def run_scenario(db):
@@ -177,7 +200,7 @@ def run_scenario(db):
             assert sync_financial_transactions(api, db, '1', db_company_id=1, full_refresh=full_refresh, **WINDOW)
             assert sync_goods_transactions(api, db, '1', db_company_id=1, full_refresh=full_refresh, **WINDOW)
             assert sync_comments(api, db, '1', db_company_id=1, full_refresh=full_refresh, **WINDOW)
-            snapshots.append(_dump(db))
+            snapshots.append(_facts(db))
     return snapshots
 
 
@@ -187,107 +210,59 @@ def make_session():
     return engine, sessionmaker(bind=engine)()
 
 
-# Captured by running `run_scenario` against the per-row `db.get` implementation.
-EXPECTED = [{'clients': ['42|42|yclients|Client 42|None|None|None|0|None|0.0|1',
-              '43|43|yclients|Client 43|None|None|None|0|None|0.0|1',
-              '44|44|yclients|Client 44|None|None|None|0|None|0.0|1'],
-  'staff': ['7|7|yclients|Legacy staff renamed|None|None|None|None|None|None|True|0|None|None|1',
-            '8|8|yclients|Other tenant staff|None|None|None|None|None|None|True|0|None|None|2',
-            '9|8|yclients|Staff of salon 1|None|None|None|None|None|None|True|0|None|None|1',
-            '10|9|yclients|New staff|None|None|None|None|None|None|True|0|None|None|1'],
-  'appointments': ['500|500|yclients|1|7|42|None|2025-01-10|2025-01-10 07:00:00|None|None|0|None',
-                   '501|501|yclients|1|7|43|None|2025-01-10|2025-01-10 07:00:00|None|None|0|None',
-                   '502|502|yclients|1|7|44|None|2025-01-10|2025-01-10 07:00:00|None|None|0|None'],
-  'transactions': ['1|500|10|Cut|100.0|None|1|1',
-                   '2|500|11|Beard|200.0|None|1|1',
-                   '3|501|10|Cut|100.0|None|1|1',
-                   '4|501|10|Cut|100.0|None|1|1',
-                   '5|501|11|Wax|200.0|None|1|1'],
-  'financial_transactions': ['5|5|yclients|None|None|None|2025-01-10 '
-                             '12:00:00|5.0|None|None|None|None|None|None|None|None|1',
-                             '6|6|yclients|None|None|None|2025-01-10 '
-                             '12:00:00|6.0|None|None|None|None|None|None|None|None|1',
-                             '7|None|yclients|None|None|None|2025-01-07 '
-                             '12:00:00|3.0|None|None|None|None|None|None|None|None|2',
-                             '100|100|yclients|None|None|None|2025-01-08 '
-                             '12:00:00|4.0|None|None|None|None|None|None|None|None|2',
-                             '101|7|yclients|None|None|None|2025-01-10 '
-                             '12:00:00|7.0|None|None|None|None|None|None|None|None|1',
-                             '102|100|yclients|None|None|None|2025-01-10 '
-                             '12:00:00|100.0|None|None|None|None|None|None|None|None|1',
-                             '103|101|yclients|None|None|None|2025-01-10 '
-                             '12:00:00|101.0|None|None|None|None|None|None|None|None|1',
-                             '104|102|yclients|None|None|None|2025-01-10 '
-                             '12:00:00|102.0|None|None|None|None|None|None|None|None|1',
-                             '105|103|yclients|None|None|None|2025-01-10 '
-                             '12:00:00|103.0|None|None|None|None|None|None|None|None|1'],
-  'goods_transactions': ['5|5|yclients|None|None|1|Wax|None|None|None|None|5.0|None|None|None|1|2025-01-10 12:00:00',
-                         '7|None|yclients|None|None|None|None|None|None|None|None|3.0|None|None|None|2|2025-01-07 '
-                         '12:00:00',
-                         '8|7|yclients|None|None|1|Wax|None|None|None|None|7.0|None|None|None|1|2025-01-10 12:00:00',
-                         '9|8|yclients|None|None|1|Wax|None|None|None|None|8.0|None|None|None|1|2025-01-10 12:00:00',
-                         '10|9|yclients|None|None|1|Wax|None|None|None|None|9.0|None|None|None|1|2025-01-10 12:00:00',
-                         '11|10|yclients|None|None|1|Wax|None|None|None|None|10.0|None|None|None|1|2025-01-10 '
-                         '12:00:00',
-                         '12|11|yclients|None|None|1|Wax|None|None|None|None|11.0|None|None|None|1|2025-01-10 '
-                         '12:00:00'],
-  'comments': ['5|5|yclients|None|7|c5|2025-01-10 12:00:00|5.0|None|None|None|1',
-               '7|None|yclients|None|None|other tenant|2025-01-07 12:00:00|None|None|None|None|2',
-               '8|7|yclients|None|7|c7|2025-01-10 12:00:00|5.0|None|None|None|1',
-               '9|8|yclients|None|7|c8|2025-01-10 12:00:00|5.0|None|None|None|1',
-               '10|9|yclients|None|7|c9|2025-01-10 12:00:00|5.0|None|None|None|1',
-               '11|10|yclients|None|7|c10|2025-01-10 12:00:00|5.0|None|None|None|1']},
- {'clients': ['42|42|yclients|Client 42|None|None|None|0|None|0.0|1',
-              '43|43|yclients|Client 43|None|None|None|0|None|0.0|1',
-              '44|44|yclients|Client 44|None|None|None|0|None|0.0|1',
-              '45|45|yclients|Client 45|None|None|None|0|None|0.0|1'],
-  'staff': ['7|7|yclients|Legacy staff renamed|None|None|None|None|None|None|True|0|None|None|1',
-            '8|8|yclients|Other tenant staff|None|None|None|None|None|None|True|0|None|None|2',
-            '9|8|yclients|Staff of salon 1|None|None|None|None|None|None|True|0|None|None|1',
-            '10|9|yclients|New staff|None|None|None|None|None|None|True|0|None|None|1',
-            '11|11|yclients|Later staff|None|None|None|None|None|None|True|1|None|None|1'],
-  'appointments': ['1|500|yclients|1|7|42|None|2025-01-10|2025-01-10 07:00:00|None|None|0|None',
-                   '2|503|yclients|1|7|45|None|2025-01-10|2025-01-10 07:00:00|None|None|0|None'],
-  'transactions': ['1|1|10|Cut|100.0|None|1|1',
-                   '2|2|10|Dye|100.0|None|1|1',
-                   '3|2|11|Cut|200.0|None|1|1',
-                   '4|2|12|Wax|300.0|None|1|1'],
-  'financial_transactions': ['5|5|yclients|None|None|None|2025-01-11 '
-                             '12:00:00|50.0|None|None|None|None|None|None|None|None|1',
-                             '6|6|yclients|None|None|None|2025-01-11 '
-                             '12:00:00|60.0|None|None|None|None|None|None|None|None|1',
-                             '7|None|yclients|None|None|None|2025-01-07 '
-                             '12:00:00|3.0|None|None|None|None|None|None|None|None|2',
-                             '100|100|yclients|None|None|None|2025-01-08 '
-                             '12:00:00|4.0|None|None|None|None|None|None|None|None|2',
-                             '101|7|yclients|None|None|None|2025-01-11 '
-                             '12:00:00|70.0|None|None|None|None|None|None|None|None|1',
-                             '102|101|yclients|None|None|None|2025-01-11 '
-                             '12:00:00|1010.0|None|None|None|None|None|None|None|None|1',
-                             '104|104|yclients|None|None|None|2025-01-11 '
-                             '12:00:00|1040.0|None|None|None|None|None|None|None|None|1',
-                             '105|105|yclients|None|None|None|2025-01-11 '
-                             '12:00:00|1050.0|None|None|None|None|None|None|None|None|1'],
-  'goods_transactions': ['5|5|yclients|None|None|1|Wax|None|None|None|None|50.0|None|None|None|1|2025-01-11 12:00:00',
-                         '7|None|yclients|None|None|None|None|None|None|None|None|3.0|None|None|None|2|2025-01-07 '
-                         '12:00:00',
-                         '8|7|yclients|None|None|1|Wax|None|None|None|None|70.0|None|None|None|1|2025-01-11 12:00:00',
-                         '9|8|yclients|None|None|1|Wax|None|None|None|None|80.0|None|None|None|1|2025-01-11 12:00:00',
-                         '12|12|yclients|None|None|1|Wax|None|None|None|None|120.0|None|None|None|1|2025-01-11 '
-                         '12:00:00',
-                         '13|13|yclients|None|None|1|Wax|None|None|None|None|130.0|None|None|None|1|2025-01-11 '
-                         '12:00:00'],
-  'comments': ['5|5|yclients|None|7|d5|2025-01-11 12:00:00|5.0|None|None|None|1',
-               '7|None|yclients|None|None|other tenant|2025-01-07 12:00:00|None|None|None|None|2',
-               '8|7|yclients|None|7|d7|2025-01-11 12:00:00|5.0|None|None|None|1',
-               '9|8|yclients|None|7|d8|2025-01-11 12:00:00|5.0|None|None|None|1',
-               '14|14|yclients|None|7|d14|2025-01-11 12:00:00|5.0|None|None|None|1']}]
+def _c1(mapping):
+    return {(1, external_id): value for external_id, value in mapping.items()}
 
 
-def test_loaders_write_the_rows_the_per_row_implementation_wrote():
+FIRST_PASS = {
+    'staff': {
+        **_c1({7: ('Legacy staff renamed', 0), 8: ('Staff of salon 1', 0), 9: ('New staff', 0)}),
+        (2, 8): ('Other tenant staff', 0),
+    },
+    'clients': _c1({42: 'Client 42', 43: 'Client 43', 44: 'Client 44'}),
+    # 501 is listed twice in the payload and is stored as one appointment. Its lines are compared as a set on
+    # purpose: a repeat inside one payload keeps the first occurrence's lines too; dated fetches de-duplicate by id
+    # before the loader sees them, so production never feeds it a repeat.
+    'appointments': _c1({500: {'Cut', 'Beard'}, 501: {'Cut', 'Wax'}, 502: set()}),
+    'financial': {
+        **_c1({5: 5.0, 6: 6.0, 7: 7.0, 100: 100.0, 101: 101.0, 102: 102.0, 103: 103.0}),
+        (2, 100): 4.0,
+    },
+    'goods': _c1({5: 5.0, 7: 7.0, 8: 8.0, 9: 9.0, 10: 10.0, 11: 11.0}),
+    'comments': _c1({5: 'c5', 7: 'c7', 8: 'c8', 9: 'c9', 10: 'c10'}),
+    'other_tenant_unlinked': {
+        ('financial_transactions', 7): 3.0,
+        ('goods_transactions', 7): 3.0,
+        ('comments', 7): 'other tenant',
+    },
+    'unadopted': [],
+}
+SECOND_PASS = {
+    'staff': {**FIRST_PASS['staff'], (1, 11): ('Later staff', 1)},
+    'clients': _c1({42: 'Client 42', 43: 'Client 43', 44: 'Client 44', 45: 'Client 45'}),
+    # The purge-and-reload window drops what the payload no longer lists (501, 502).
+    'appointments': _c1({500: {'Cut'}, 503: {'Dye', 'Cut', 'Wax'}}),
+    'financial': {**_c1({5: 50.0, 6: 60.0, 7: 70.0, 101: 1010.0, 104: 1040.0, 105: 1050.0}), (2, 100): 4.0},
+    'goods': _c1({5: 50.0, 7: 70.0, 8: 80.0, 12: 120.0, 13: 130.0}),
+    'comments': _c1({5: 'd5', 7: 'd7', 8: 'd8', 14: 'd14'}),
+    'other_tenant_unlinked': FIRST_PASS['other_tenant_unlinked'],
+    'unadopted': [],
+}
+
+
+def _check(snapshots):
+    first, second = snapshots
+    # Compared without surrogate keys; `appointment_ids` is checked separately below.
+    assert {key: value for key, value in first.items() if key != 'appointment_ids'} == FIRST_PASS
+    assert {key: value for key, value in second.items() if key != 'appointment_ids'} == SECOND_PASS
+    # Pre-migration rows are adopted in place: the primary key that doubled as the YClients id survives.
+    assert first['appointment_ids'][500] == 500
+
+
+def test_loaders_adopt_isolate_and_reload_the_rows_of_one_branch():
     engine, db = make_session()
     try:
-        assert run_scenario(db) == EXPECTED
+        _check(run_scenario(db))
     finally:
         db.close()
         engine.dispose()
@@ -299,13 +274,13 @@ def test_loaders_write_the_same_rows_when_the_id_sets_span_several_chunks(monkey
     monkeypatch.setattr(sync_pipeline, 'DB_BATCH_SIZE', 2)
     engine, db = make_session()
     try:
-        assert run_scenario(db) == EXPECTED
+        _check(run_scenario(db))
     finally:
         db.close()
         engine.dispose()
 
 
-def _count_statements(engine, run):
+def _count_selects(engine, run):
     statements = []
 
     def record(conn, cursor, statement, *_args):
@@ -316,14 +291,14 @@ def _count_statements(engine, run):
         run()
     finally:
         event.remove(engine, 'before_cursor_execute', record)
-    return statements
+    return sum(statement.lstrip().upper().startswith('SELECT') for statement in statements)
 
 
-def test_statement_count_does_not_grow_with_the_number_of_new_rows():
+def _selects_for_new_rows(row_count):
     engine, db = make_session()
     try:
         _seed(db)
-        ids = range(1000, 1060)
+        ids = range(1000, 1000 + row_count)
         api = FakeAPI(
             financial=[_financial(tid, 10, 1.0) for tid in ids],
             goods=[_goods(tid, 10, 1.0) for tid in ids],
@@ -338,39 +313,14 @@ def test_statement_count_does_not_grow_with_the_number_of_new_rows():
                 assert sync_comments(api, db, '1', db_company_id=1, **WINDOW)
                 assert sync_records(api, db, '1', db_company_id=1, **WINDOW)
 
-        appointment_flushes = []
-        event.listen(
-            db,
-            'before_flush',
-            lambda session, *_args: appointment_flushes.append(
-                sum(isinstance(obj, Appointment) for obj in session.new)
-            ),
-        )
-        statements = _count_statements(engine, run)
-        selects = [statement for statement in statements if statement.lstrip().upper().startswith('SELECT')]
-        # 60 new rows per table used to cost two single-row SELECTs each and one flush per appointment.
-        assert len(selects) < 40
-        assert [count for count in appointment_flushes if count] == [60]
-        assert db.query(Transaction).count() == 60
+        selects = _count_selects(engine, run)
+        assert db.query(Transaction).count() == row_count
+        return selects
     finally:
         db.close()
         engine.dispose()
 
 
-def test_adoption_works_when_ids_arrive_as_a_generator():
-    """The fact syncs pass a generator; it used to be drained by the first lookup, so adoption never ran."""
-    from sync_pipeline import load_existing_or_adopt_legacy_source_map
-
-    engine, db = make_session()
-    try:
-        _seed(db)
-        found = load_existing_or_adopt_legacy_source_map(
-            db, FinancialTransaction, 1, (tid for tid in (5, 6, 7)), FinancialTransaction.external_id
-        )
-        # 5 is a legacy row of this company, 6 is matched by external id, 7 belongs to another tenant.
-        assert sorted(found) == [5, 6]
-        assert found[5].external_id == 5
-        assert db.query(FinancialTransaction).filter_by(id=7).one().external_id is None
-    finally:
-        db.close()
-        engine.dispose()
+def test_select_count_does_not_grow_with_the_number_of_new_rows():
+    """The loaders look rows up in chunked set queries, not one SELECT per row."""
+    assert _selects_for_new_rows(60) <= _selects_for_new_rows(6) + 2

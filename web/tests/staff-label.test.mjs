@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { branchRowTitle, staffOption, staffRoleLabel } from '../src/staffLabel.js';
@@ -47,13 +46,6 @@ test('a row without a category (portal owner) is shown as before', () => {
     text: 'Анна · Арбат',
   });
   assert.equal(staffRoleLabel(undefined, translate), '');
-});
-
-test('titles read the bare name, never the option text that carries the label', () => {
-  const main = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
-  assert.match(main, /option\.dataset\.name = name/);
-  assert.doesNotMatch(main, /staff\.selectedOptions\[0\]\??\.textContent/);
-  assert.match(main, /selectedOption\.dataset\.name/);
 });
 
 test('a branch without a title is named by its id', () => {

@@ -1,8 +1,7 @@
 """Migration 0057 drops six fact-table indexes production never scans, and downgrade recreates them."""
 
-import io
-
 import pytest
+import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
@@ -24,23 +23,41 @@ def migration():
     return load_migration('0057_drop_unused_fact_indexes.py', 'migration_0057')
 
 
-def _statements(fn) -> list[str]:
-    buffer = io.StringIO()
-    context = MigrationContext.configure(dialect_name='postgresql', opts={'as_sql': True, 'output_buffer': buffer})
-    with Operations.context(context):
-        fn()
-    return [' '.join(part.split()) for part in buffer.getvalue().split(';') if part.strip()]
+def _run(engine, fn):
+    with engine.begin() as conn:
+        with Operations.context(MigrationContext.configure(conn)):
+            fn()
 
 
-def test_upgrade_drops_exactly_the_six_indexes_if_present(migration):
-    assert _statements(migration.upgrade) == [f'DROP INDEX IF EXISTS {name}' for name in DROPPED]
+def _indexes(engine) -> dict[str, tuple[str, str]]:
+    """{index name: (table, column)} of every single-column index in the database."""
+    inspector = sa.inspect(engine)
+    return {
+        ix['name']: (table, ix['column_names'][0])
+        for table in inspector.get_table_names()
+        for ix in inspector.get_indexes(table)
+    }
 
 
-def test_downgrade_recreates_each_index_as_it_was(migration):
-    expected = [
-        f'CREATE INDEX IF NOT EXISTS {name} ON {table} ({column})' for name, (table, column) in DROPPED.items()
-    ]
-    assert _statements(migration.downgrade) == expected
+def test_downgrade_recreates_the_indexes_and_upgrade_drops_them(migration):
+    engine = sa.create_engine('sqlite:///:memory:', poolclass=sa.pool.StaticPool)
+    columns = {}
+    for table, column in DROPPED.values():
+        columns.setdefault(table, []).append(column)
+    with engine.begin() as conn:
+        for table, table_columns in columns.items():
+            conn.execute(sa.text(
+                f'CREATE TABLE {table} (id INTEGER PRIMARY KEY, {", ".join(f"{c} INTEGER" for c in table_columns)})'
+            ))
+
+    _run(engine, migration.downgrade)
+    assert _indexes(engine) == DROPPED
+
+    _run(engine, migration.upgrade)
+    assert _indexes(engine) == {}
+
+    # A database bootstrapped from the models never had them: dropping what is gone must not fail.
+    _run(engine, migration.upgrade)
 
 
 def test_models_no_longer_declare_the_dropped_indexes():
@@ -48,16 +65,3 @@ def test_models_no_longer_declare_the_dropped_indexes():
         index.name for table in models.Base.metadata.tables.values() for index in table.indexes
     }
     assert not declared & set(DROPPED)
-
-
-def test_the_heavily_used_neighbours_keep_their_indexes():
-    def single_column_indexed(table: str, column: str) -> bool:
-        return models.Base.metadata.tables[table].c[column].index is True
-
-    assert single_column_indexed('appointments', 'client_id')
-    assert single_column_indexed('financial_transactions', 'record_id')
-
-
-def test_migration_chains_from_0056(migration):
-    assert migration.down_revision == '0056_drop_unused_service_sync'
-    assert len(migration.revision) <= 32  # alembic_version.version_num is VARCHAR(32)

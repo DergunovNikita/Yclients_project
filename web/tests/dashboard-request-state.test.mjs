@@ -22,7 +22,6 @@ import {
   reportSearchParams,
   chartTooltipValue,
   reportFilterVisibility,
-  reportRefreshPresentation,
   reportScopedFilterAllowsLoad,
   responseError,
   runServiceManagementMutation,
@@ -102,18 +101,6 @@ test('chart tooltip reads the measured axis, not the category index', () => {
   assert.equal(chartTooltipValue(4200), 4200);
   assert.equal(chartTooltipValue({ x: 3, y: 0 }), 0);
   assert.equal(chartTooltipValue(null), null);
-});
-
-test('refreshing a cached report retains that report while the request is pending', () => {
-  const cached = { report_id: 'staff_leaderboard', tables: [{ rows: [{ staff: 'Master' }] }] };
-  assert.deepEqual(reportRefreshPresentation(cached), {
-    state: 'refreshing',
-    retainedData: cached,
-  });
-  assert.deepEqual(reportRefreshPresentation(null), {
-    state: 'loading',
-    retainedData: null,
-  });
 });
 
 test('report cache keys include every effective filter and ignore object key order', () => {

@@ -67,9 +67,7 @@ def test_downgrade_restores_plain_foreign_keys_and_the_columns(migration):
     assert 'ALTER TABLE system.yclients_credentials ADD COLUMN credential_fingerprint VARCHAR(64)' in statements
 
 
-def test_migration_matches_the_models_and_chains_from_0054(migration):
-    assert migration.down_revision == '0054_drop_legacy_catalogs'
-    assert len(migration.revision) <= 32  # alembic_version.version_num is VARCHAR(32)
+def test_models_match_the_migration():
     for model, column in (
         (PortalAuditEvent, 'actor_user_id'),
         (SyncJob, 'credential_id'),

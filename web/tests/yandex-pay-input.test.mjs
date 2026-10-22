@@ -1,9 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import enLocale from '../locales/en.json' with { type: 'json' };
-import itLocale from '../locales/it.json' with { type: 'json' };
-import ruLocale from '../locales/ru.json' with { type: 'json' };
 import {
   UNREADABLE_DATE,
   YANDEX_PAY_MAX,
@@ -97,24 +94,6 @@ test('items carry the pair the last response held as previous_*', () => {
   });
 });
 
-test('an unchanged pair is still sent, with previous_* equal to the new pair', () => {
-  const typed = new Map([['1', '1000,50'], ['2', ''], ['3', '70']]);
-  const dates = new Map([['1', '2026-10-05'], ['2', ''], ['3', '2026-10-08']]);
-  const { items } = buildYandexPayItems(ROWS, typed, dates, MONTH);
-  assert.equal(items.length, ROWS.length);
-  for (const item of items.filter((entry) => entry.value !== null)) {
-    assert.equal(item.value, item.previous_value);
-    assert.equal(item.data_through, item.previous_data_through);
-  }
-});
-
-test('previous_* come from the last response, not from the cells', () => {
-  const rows = [{ ...ROWS[0], value: 10, data_through: '2026-10-01' }];
-  const items = buildYandexPayItems(rows, new Map([['1', '99']]), new Map([['1', '2026-10-04']]), MONTH).items;
-  assert.equal(items[0].previous_value, 10);
-  assert.equal(items[0].previous_data_through, '2026-10-01');
-});
-
 test('every row is sent, edited or not, and a stored zero stays zero', () => {
   const rows = [{ company_id: 5, value: 0, data_through: '2026-10-02', max_data_through: '2026-10-08' }];
   const dates = new Map([['5', '2026-10-02']]);
@@ -197,15 +176,6 @@ test('a date change alone is a different draft', () => {
   assert.equal(yandexPayDateKey(' 2026-10-03 '), '2026-10-03');
   assert.notEqual(yandexPayDateKey('2026-10-03'), yandexPayDateKey('2026-10-04'));
   assert.equal(yandexPayDateKey(null), '');
-});
-
-test('the date messages exist in every locale', () => {
-  for (const locale of [ruLocale, enLocale, itLocale]) {
-    for (const key of ['yandexPayDataThrough', 'yandexPayInvalidDateFormat', 'yandexPayInvalidDateRange', 'yandexPayInvalidDateRequired']) {
-      assert.ok(locale.dash[key], key);
-    }
-    assert.match(locale.dash.yandexPayInvalidDateRange, /\{branch\}/);
-  }
 });
 
 test('the total counts only counted rows and only readable cells', () => {

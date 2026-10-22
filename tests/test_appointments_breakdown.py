@@ -7,11 +7,7 @@ import api
 import dashboard_service
 from api import app
 from report_helpers import table_rows
-from dashboard_service import (
-    _appointment_company_ids,
-    _fetch_appointments_breakdown,
-    _ready_appointments_breakdown,
-)
+from dashboard_service import _ready_appointments_breakdown, fetch_appointments_breakdown
 from models import (
     Appointment,
     Company,
@@ -20,6 +16,31 @@ from models import (
     Staff,
     Transaction,
 )
+
+JUNE = (date(2026, 6, 1), date(2026, 6, 30))
+
+
+async def _seed_two_branches(session):
+    """Branch 1: three June visits (completed, no-show, pending) and one in July; branch 2: one June visit."""
+    session.add_all([
+        Group(id=1, title='G'),
+        Company(id=1, title='One', group_id=1),
+        Company(id=2, title='Two', group_id=1),
+    ])
+    await session.flush()
+    session.add_all([
+        Staff(id=1, name='Master', company_id=1, fired=0),
+        Staff(id=22, name='Other master', company_id=2, fired=0),
+    ])
+    await session.flush()
+    session.add_all([
+        Appointment(id=1, company_id=1, staff_id=1, date=date(2026, 6, 10), attendance=1),
+        Appointment(id=2, company_id=1, staff_id=1, date=date(2026, 6, 10), attendance=-1),
+        Appointment(id=3, company_id=1, staff_id=1, date=date(2026, 6, 10), attendance=2),
+        Appointment(id=4, company_id=1, staff_id=1, date=date(2026, 7, 10), attendance=1),
+        Appointment(id=5, company_id=2, staff_id=22, date=date(2026, 6, 10), attendance=1),
+    ])
+    await session.commit()
 
 
 def test_appointment_shares_are_integer_and_sum_to_100():
@@ -69,81 +90,6 @@ def test_appointment_breakdown_rejects_inconsistent_totals():
 
     assert data['source_status'] == 'unavailable'
     assert data['total'] is None
-
-
-@pytest.mark.asyncio
-async def test_appointment_breakdown_maps_counts_and_compatibility_aliases(async_session, monkeypatch):
-    async def fake_record_stats(company_ids, start, end, staff_id, db=None):
-        assert company_ids == [1, 2]
-        assert start == date(2026, 6, 1)
-        assert end == date(2026, 6, 30)
-        assert staff_id is None
-        return {'total': 20, 'cancelled': 5, 'completed': 12, 'incomplete': 3}
-
-    monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', fake_record_stats)
-    data = await _fetch_appointments_breakdown(
-        async_session,
-        [1, 2],
-        date(2026, 6, 1),
-        date(2026, 6, 30),
-        None,
-    )
-
-    assert data['source_status'] == 'ready'
-    assert data['total'] == 20
-    assert data['cancelled'] == 5
-    assert data['completed'] == 12
-    assert data['incomplete'] == 3
-
-
-@pytest.mark.asyncio
-async def test_appointment_breakdown_falls_back_to_local_appointments(async_session, monkeypatch):
-    async_session.add(Group(id=1, title='G'))
-    async_session.add(Company(id=1, title='One', group_id=1))
-    async_session.add(Staff(id=1, name='Master', company_id=1, fired=0))
-    await async_session.flush()
-    async_session.add_all([
-        Appointment(id=1, company_id=1, staff_id=1, date=date(2026, 6, 10), attendance=1),
-        Appointment(id=2, company_id=1, staff_id=1, date=date(2026, 6, 10), attendance=-1),
-        Appointment(id=3, company_id=1, staff_id=1, date=date(2026, 6, 10), attendance=2),
-        Appointment(id=4, company_id=1, staff_id=1, date=date(2026, 7, 10), attendance=1),
-    ])
-    await async_session.commit()
-
-    async def fail_record_stats(*args, **kwargs):
-        raise dashboard_service.yclients_analytics.YClientsAnalyticsError('timeout')
-
-    monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', fail_record_stats)
-    data = await _fetch_appointments_breakdown(
-        async_session,
-        [1],
-        date(2026, 6, 1),
-        date(2026, 6, 30),
-        None,
-    )
-
-    assert data['source_status'] == 'local'
-    # The one reason that is a degradation, and so the one the page warns about.
-    assert data['local_reason'] == 'upstream_error'
-    assert data['total'] == 3
-    assert data['completed'] == 1
-    assert data['cancelled'] == 1
-    assert data['incomplete'] == 1
-
-
-@pytest.mark.asyncio
-async def test_appointment_scope_uses_all_branches_or_staff_company(async_session):
-    async_session.add(Group(id=1, title='G'))
-    async_session.add_all([
-        Company(id=1, title='One', group_id=1),
-        Company(id=2, title='Two', group_id=1),
-    ])
-    async_session.add(Staff(id=22, name='Master', company_id=2, fired=0))
-    await async_session.commit()
-
-    assert await _appointment_company_ids(async_session, None, None) == [1, 2]
-    assert await _appointment_company_ids(async_session, 1, None) == [1]
-    assert await _appointment_company_ids(async_session, None, 22) == [2]
 
 
 @pytest.mark.asyncio
@@ -344,18 +290,51 @@ async def test_cancellation_report_uses_exact_aggregate_counts(async_session, mo
 
 
 @pytest.mark.asyncio
+async def test_appointment_breakdown_falls_back_to_local_appointments(async_session, monkeypatch):
+    await _seed_two_branches(async_session)
+
+    async def fail_record_stats(*args, **kwargs):
+        raise dashboard_service.yclients_analytics.YClientsAnalyticsError('timeout')
+
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', fail_record_stats)
+    data = await fetch_appointments_breakdown(async_session, *JUNE, company_id=1)
+
+    assert data['source_status'] == 'local'
+    # The one reason that is a degradation, and so the one the page warns about.
+    assert data['local_reason'] == 'upstream_error'
+    assert (data['total'], data['completed'], data['cancelled'], data['incomplete']) == (3, 1, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_appointment_scope_is_all_branches_one_branch_or_the_staffs_branch(async_session, monkeypatch):
+    await _seed_two_branches(async_session)
+
+    async def fail_record_stats(*args, **kwargs):
+        raise dashboard_service.yclients_analytics.YClientsAnalyticsError('timeout')
+
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', fail_record_stats)
+
+    assert (await fetch_appointments_breakdown(async_session, *JUNE))['total'] == 4
+    assert (await fetch_appointments_breakdown(async_session, *JUNE, company_id=1))['total'] == 3
+    assert (await fetch_appointments_breakdown(async_session, *JUNE, staff_id=22))['total'] == 1
+
+
+@pytest.mark.asyncio
 async def test_appointment_breakdown_treats_the_branch_day_as_today(async_session, monkeypatch):
     """21:00-24:00 UTC is already tomorrow in the branch: yesterday is a closed period, served upstream."""
+    async_session.add_all([Group(id=1, title='G'), Company(id=1, title='One', group_id=1)])
+    await async_session.commit()
+
     async def fake_record_stats(company_ids, start, end, staff_id, db=None):
         return {'total': 4, 'cancelled': 1, 'completed': 3, 'incomplete': 0}
 
     monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', fake_record_stats)
     late_evening_utc = datetime(2026, 6, 30, 22, 0)
-    closed = await _fetch_appointments_breakdown(
-        async_session, [1], date(2026, 6, 1), date(2026, 6, 30), None, late_evening_utc
+    closed = await fetch_appointments_breakdown(
+        async_session, date(2026, 6, 1), date(2026, 6, 30), company_id=1, factual_at=late_evening_utc
     )
-    still_open = await _fetch_appointments_breakdown(
-        async_session, [1], date(2026, 6, 1), date(2026, 7, 1), None, late_evening_utc
+    still_open = await fetch_appointments_breakdown(
+        async_session, date(2026, 6, 1), date(2026, 7, 1), company_id=1, factual_at=late_evening_utc
     )
 
     assert closed['source_status'] == 'ready'
@@ -366,17 +345,24 @@ async def test_appointment_breakdown_treats_the_branch_day_as_today(async_sessio
 
 @pytest.mark.asyncio
 async def test_a_reporting_window_is_a_local_reason_of_its_own(async_session, monkeypatch):
-    async_session.add(Group(id=1, title='G'))
-    async_session.add(Company(id=1, title='One', group_id=1, reporting_start_date=date(2026, 6, 5)))
+    async_session.add_all([
+        Group(id=1, title='G'),
+        Company(id=1, title='One', group_id=1, reporting_start_date=date(2026, 6, 5)),
+        Staff(id=1, name='Master', company_id=1, fired=0),
+    ])
+    await async_session.flush()
+    async_session.add(Appointment(id=1, company_id=1, staff_id=1, date=date(2026, 6, 10), attendance=1))
     await async_session.commit()
 
-    async def no_call(*args, **kwargs):
-        raise AssertionError('YClients must not be asked for a scope with a reporting window')
+    async def upstream(*args, **kwargs):
+        return {'total': 99, 'cancelled': 0, 'completed': 99, 'incomplete': 0}
 
-    monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', no_call)
-    data = await _fetch_appointments_breakdown(
-        async_session, [1], date(2026, 6, 1), date(2026, 6, 30), None, datetime(2026, 7, 15, 12, 0)
+    monkeypatch.setattr(dashboard_service.yclients_analytics, 'fetch_record_stats', upstream)
+    data = await fetch_appointments_breakdown(
+        async_session, *JUNE, company_id=1, factual_at=datetime(2026, 7, 15, 12, 0)
     )
 
+    # YClients knows nothing about the reporting window, so its counts are not used for such a scope.
     assert data['source_status'] == 'local'
     assert data['local_reason'] == 'reporting_window'
+    assert data['total'] == 1

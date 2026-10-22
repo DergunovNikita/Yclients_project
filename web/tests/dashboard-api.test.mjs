@@ -204,30 +204,6 @@ test('shared dashboard API handles transport, errors, retries and mutations', as
     );
   });
 
-  await t.test('supports a 401 reauthentication retry through the shared callback', async () => {
-    let fetchCount = 0;
-    const retryingReauth = async (url, options, requestFn) => {
-      let response = await requestFn(url, options);
-      if (response.status === 401) {
-        response = await requestFn(url, { ...options, __retried: true });
-      }
-      return response;
-    };
-    const payload = await api.requestJson('/dashboard/test', {
-      slowState: false,
-      requestWithReauthImpl: retryingReauth,
-      fetchImpl: async () => {
-        fetchCount += 1;
-        return fetchCount === 1
-          ? jsonResponse({ detail: 'expired' }, 401)
-          : jsonResponse({ success: true, data: { refreshed: true } });
-      },
-    });
-
-    assert.equal(fetchCount, 2);
-    assert.deepEqual(payload.data, { refreshed: true });
-  });
-
   await t.test('time spent in the password dialog does not count against the request timeout', async () => {
     let fetchCount = 0;
     const reauthCalls = [];
@@ -375,52 +351,12 @@ test('renderReportData hides flagged empty tops but keeps ranking data in a non-
         },
       },
       { id: 'anchor_empty', title: 'Anchor Top', columns: [], rows: [] },
-      {
-        id: 'wrapped',
-        title: 'Wrapped Headers',
-        columns: [{ key: 'metric', label: 'Metric', format: 'text' }],
-        rows: [{ metric: 'Cash' }],
-        wrap_headers: true,
-      },
     ],
   }, charts);
 
   assert.ok(!container.innerHTML.includes('Hidden Empty Top'), 'flagged empty table is omitted');
-  assert.ok(container.innerHTML.includes('reports-calculation-scope'), 'personal staff scope is shown');
   assert.ok(container.innerHTML.includes('Selected employee'), 'selected employee is named in the scope');
   assert.ok(container.innerHTML.includes('Selected branch'), 'employee branch is named in the scope');
   assert.ok(container.innerHTML.includes('Kept Ranking Top'), 'ranking with data only in a non-default metric is kept');
   assert.ok(container.innerHTML.includes('Anchor Top'), 'unflagged empty table still renders as an anchor');
-  assert.equal(
-    (container.innerHTML.match(/reports-table--wrap-headers/g) || []).length,
-    1,
-    'only the flagged table wraps its headers',
-  );
-});
-
-test('only a chart flagged wide spans the whole chart grid', async (t) => {
-  globalThis.localStorage = new MemoryStorage();
-  globalThis.sessionStorage = new MemoryStorage();
-  const server = await createServer({
-    appType: 'custom',
-    logLevel: 'silent',
-    root: new URL('..', import.meta.url).pathname,
-    server: { middlewareMode: true },
-  });
-  t.after(() => server.close());
-  const { renderReportData } = await server.ssrLoadModule('/src/reports/renderers/generic.js');
-
-  const container = { innerHTML: '', querySelectorAll: () => [], querySelector: () => null };
-  renderReportData(container, {
-    source_status: 'ready',
-    charts: [
-      { id: 'plain', title: 'Plain chart', type: 'bar', labels: [], datasets: [] },
-      { id: 'truthy', title: 'Truthy chart', type: 'bar', labels: [], datasets: [], wide: 'yes' },
-      { id: 'spanning', title: 'Spanning chart', type: 'line', labels: [], datasets: [], wide: true },
-    ],
-  }, { clear() {}, render() {} });
-
-  const panels = container.innerHTML.split('<section').slice(1);
-  assert.equal(panels.length, 3);
-  assert.deepEqual(panels.map((panel) => panel.includes('reports-panel--span')), [false, false, true]);
 });

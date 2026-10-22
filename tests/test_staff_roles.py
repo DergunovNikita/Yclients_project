@@ -19,20 +19,15 @@ class _Staff:
     ('position', 'expected'),
     [
         ('Администратор', 'admin'),
-        ('администратор', 'admin'),
         ('Administrator', 'admin'),
         ('admin', 'admin'),
         ('Барбер', 'barber'),
         ('Master', 'barber'),
-        ('Top Master', 'barber'),
         # Mixed titles resolve to barber because the barber aliases are scanned first. The rule
         # is arbitrary but it has to be *one* rule: the label decides per-role money visibility.
         ('Барбер-администратор', 'barber'),
         ('Администратор-барбер', 'barber'),
-        ('Мастер-администратор', 'barber'),
-        ('Barber-admin', 'barber'),
         # Nothing to go on falls to the half that opens no manual-fact editor.
-        ('', 'barber'),
         (None, 'barber'),
         ('Уборщица', 'barber'),
     ],

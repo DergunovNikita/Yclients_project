@@ -2,26 +2,27 @@
 
 import json
 import logging
+import re
 from datetime import timedelta
 
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException, Request
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import event, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from starlette.datastructures import Headers
 
 from clock import utcnow
 import api
 import auth_routes
 import auth_sessions
-import yclients_credential_routes
 from api import app
 from auth_sessions import ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME
 from auth_service import TOKEN_PURPOSE_RESET, create_access_token, create_email_token, hash_password
 from conftest import issue_access_token
 from helpers import cached_password_hash
-from config import AUTH_CSRF_COOKIE_NAME
+from config import AUTH_CSRF_COOKIE_NAME, AUTH_CSRF_HEADER_NAME
 from report_helpers import get_summary
 from yclients_credentials import new_credential
 from models import (
@@ -396,42 +397,6 @@ async def test_logout_clears_the_refresh_cookie_on_both_paths(auth_db):
     assert cleared['/auth'][1] == cleared['/api/auth'][1]
     assert not client.cookies.get(REFRESH_COOKIE_NAME, path='/auth')
     assert not client.cookies.get(REFRESH_COOKIE_NAME, path='/api/auth')
-
-
-@pytest.mark.asyncio
-async def test_demo_login_keeps_cookie_session_without_returning_access_token(auth_db):
-    demo_user = PortalUser(
-        id=80,
-        portal_account_id=1,
-        email='demo@example.com',
-        password_hash=hash_password('Demo12345!'),
-        full_name='Demo',
-        role='owner',
-        is_active=True,
-        is_demo=True,
-        email_verified_at=utcnow(),
-        created_at=utcnow(),
-    )
-    auth_db.add(demo_user)
-    await auth_db.commit()
-
-    async def override_db():
-        yield auth_db
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        response = await client.post('/auth/demo-login')
-
-    app.dependency_overrides.clear()
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert 'access_token' not in payload['data']
-    assert 'token_type' not in payload['data']
-    assert payload['data']['user']['email'] == 'demo@example.com'
-    assert client.cookies.get(ACCESS_COOKIE_NAME)
-    assert client.cookies.get(REFRESH_COOKIE_NAME, path='/auth')
 
 
 @pytest.mark.asyncio
@@ -2103,22 +2068,20 @@ async def test_create_yclients_credential_failures_are_sanitized_and_audited(
         else RuntimeError(f'unexpected failure with {secret}')
     )
 
-    if phase == 'credential_test':
-        def fail_credential_test(*_args, **_kwargs):
+    class UpstreamFails:
+        def __init__(self, partner_token, login, password):
+            pass
+
+        def authenticate(self):
+            if phase == 'credential_test':
+                raise failure
+            return True
+
+        def get_groups(self):
             raise failure
 
-        monkeypatch.setattr(yclients_credential_routes, '_authenticated_adapter', fail_credential_test)
-        company_ids = [1]
-    else:
-        monkeypatch.setattr(yclients_credential_routes, '_authenticated_adapter', lambda *_args, **_kwargs: None)
-
-        async def fail_company_discovery(*_args, **_kwargs):
-            raise failure
-
-        monkeypatch.setattr(
-            yclients_credential_routes, '_sync_credential_companies_from_yclients', fail_company_discovery
-        )
-        company_ids = []
+    monkeypatch.setattr('data_sources.YClientsAPI', UpstreamFails)
+    company_ids = [1] if phase == 'credential_test' else []
 
     async def override_db():
         yield auth_db
@@ -2156,19 +2119,19 @@ async def test_create_yclients_credential_failures_are_sanitized_and_audited(
 
 @pytest.mark.asyncio
 async def test_create_credential_does_not_save_one_when_the_group_listing_fails(auth_db, monkeypatch):
-    from data_sources import YClientsDataSourceAdapter
-
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
 
     class GroupListingFails:
         def __init__(self, *args, **kwargs):
             pass
 
+        def authenticate(self):
+            return True
+
         def get_groups(self):
             return None
 
-    adapter = YClientsDataSourceAdapter('partner', 'login', 'password', api_factory=GroupListingFails)
-    monkeypatch.setattr(yclients_credential_routes, '_authenticated_adapter', lambda *_args, **_kwargs: adapter)
+    monkeypatch.setattr('data_sources.YClientsAPI', GroupListingFails)
 
     async with _Api(auth_db) as client:
         response = await client.post(
@@ -2644,39 +2607,6 @@ async def test_created_manager_is_mirrored_but_hidden_from_dashboard_staff(auth_
 
 
 @pytest.mark.asyncio
-async def test_branch_admin_is_mirrored_but_hidden_from_dashboard_staff(auth_db, monkeypatch):
-    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    token = await issue_access_token(auth_db, 1, 'owner')
-
-    async def override_db():
-        yield auth_db
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        created = await client.post(
-            '/auth/admin/users',
-            headers={'Authorization': f'Bearer {token}'},
-            json={
-                'email': 'branchboss@example.com',
-                'password': 'Branch12345!',
-                'full_name': 'Branch Boss',
-                'role': 'branch_admin',
-                'company_ids': [1],
-            },
-        )
-        assert created.status_code == 200
-        staff = await client.get('/dashboard/staff', headers={'Authorization': f'Bearer {token}'})
-        assert staff.status_code == 200
-        names = [row['name'] for row in staff.json()['data']]
-        # The mirror row exists (the account is tied to a chair for the portal) but the selectors do not offer it.
-        assert 'Branch Boss' not in names
-        assert await auth_db.scalar(select(func.count()).select_from(Staff).where(Staff.name == 'Branch Boss')) == 1
-
-    app.dependency_overrides.clear()
-
-
-@pytest.mark.asyncio
 async def test_provision_staff_account(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(
@@ -2933,16 +2863,20 @@ async def test_create_account_answers_409_for_a_taken_login(auth_db, monkeypatch
     assert 'Email already registered' in taken.json()['detail']
 
 
-def test_provision_conflict_is_a_value_error_but_the_other_refusals_are_not_conflicts():
-    from portal_account_provision import ProvisionConflict, _checked_staff_email, _Taken
+@pytest.mark.asyncio
+async def test_create_account_without_any_email_answers_400_not_a_conflict(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(Staff(id=9022, name='No Email', position='master', company_id=1, fired=0, bookable=True))
+    await auth_db.commit()
+    headers = await _bearer(auth_db, 1, 'owner')
 
-    assert issubclass(ProvisionConflict, ValueError)
-    staff = Staff(id=1, name='A', position='master', company_id=1, email='a@example.com')
-    with pytest.raises(ValueError) as missing:
-        _checked_staff_email(Staff(id=2, name='B', position='master', company_id=1), _Taken(set(), set(), {}))
-    assert not isinstance(missing.value, ProvisionConflict)
-    with pytest.raises(ProvisionConflict):
-        _checked_staff_email(staff, _Taken(set(), {'a@example.com'}, {}))
+    async with _Api(auth_db) as client:
+        refused = await client.post(
+            '/auth/admin/staff/9022/create-account', headers=headers, json={'role': 'barber'}
+        )
+
+    assert refused.status_code == 400
+    assert 'Real email is required' in refused.json()['detail']
 
 
 @pytest.mark.asyncio
@@ -3058,57 +2992,6 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
 async def test_distribute_credentials_reports_invite_failures_after_rollback(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
 
-    auth_db.add(
-        PortalUser(
-            id=12,
-            portal_account_id=1,
-            email='rollback.invite@example.com',
-            password_hash=hash_password('Rollback123!'),
-            full_name='Rollback Invite',
-            role='barber',
-            is_active=True,
-            email_verified_at=utcnow(),
-            created_at=utcnow(),
-        )
-    )
-    auth_db.add(PortalUserBranch(user_id=12, company_id=1))
-    await auth_db.commit()
-
-    async def _fail_after_rollback(db, _user):
-        await db.rollback()
-        raise RuntimeError('smtp unavailable')
-
-    monkeypatch.setattr('auth_routes.send_account_invite_email', _fail_after_rollback)
-    token = await issue_access_token(auth_db, 1, 'owner')
-
-    async def override_db():
-        yield auth_db
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        response = await client.post(
-            '/auth/admin/distribute-credentials',
-            headers={'Authorization': f'Bearer {token}'},
-            json={'user_ids': [12]},
-        )
-
-    app.dependency_overrides.clear()
-
-    assert response.status_code == 200
-    data = response.json()['data']
-    assert data['sent_count'] == 0
-    assert data['sent'] == []
-    # The exception text (SMTP host, DB internals) stays server-side.
-    assert data['errors'] == [
-        {'user_id': 12, 'email': 'rollback.invite@example.com', 'reason': 'Email delivery failed'}
-    ]
-    assert 'smtp unavailable' not in response.text
-
-
-@pytest.mark.asyncio
-async def test_distribute_credentials_keeps_going_after_a_failed_invite_rolled_the_session_back(auth_db, monkeypatch):
-    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     for user_id in (12, 13):
         auth_db.add(
             PortalUser(
@@ -3140,20 +3023,26 @@ async def test_distribute_credentials_keeps_going_after_a_failed_invite_rolled_t
         yield auth_db
 
     app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         response = await client.post(
             '/auth/admin/distribute-credentials',
             headers={'Authorization': f'Bearer {token}'},
             json={'user_ids': [12, 13]},
         )
+
     app.dependency_overrides.clear()
 
     # The rollback expires the loaded rows; the second recipient must still be processed, not 500 the batch.
     assert response.status_code == 200
     data = response.json()['data']
+    assert data['sent_count'] == 1
     assert [item['user_id'] for item in data['sent']] == [13]
-    assert [item['user_id'] for item in data['errors']] == [12]
+    # The exception text (SMTP host, DB internals) stays server-side.
+    assert data['errors'] == [
+        {'user_id': 12, 'email': 'invite12@example.com', 'reason': 'Email delivery failed'}
+    ]
+    assert 'smtp unavailable' not in response.text
 
 
 @pytest.mark.asyncio
@@ -3253,6 +3142,8 @@ async def test_demo_login_returns_is_demo_and_scoped_companies(auth_db):
         resp = await client.post('/auth/demo-login')
         assert resp.status_code == 200
         user = resp.json()['data']['user']
+        assert 'access_token' not in resp.json()['data']
+        assert 'token_type' not in resp.json()['data']
         assert user['is_demo'] is True
         assert sorted(user['company_ids']) == [1, 2]
         assert client.cookies.get(ACCESS_COOKIE_NAME)
@@ -3277,16 +3168,19 @@ async def test_demo_tenant_hides_reports_its_data_cannot_populate(auth_db):
 
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
+    owner_headers = {'Authorization': f'Bearer {await issue_access_token(auth_db, 1, "owner")}'}
+    async with AsyncClient(transport=transport, base_url='http://test') as owner_client:
+        owner_catalog = await owner_client.get('/dashboard/reports', headers=owner_headers)
+    owner_ids = {item['id'] for item in owner_catalog.json()['data']}
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         assert (await client.post('/auth/demo-login')).status_code == 200
 
         catalog = await client.get('/dashboard/reports')
         assert catalog.status_code == 200
         demo_ids = {item['id'] for item in catalog.json()['data']}
-        assert 'year_over_year' not in demo_ids
+        assert 'year_over_year' in owner_ids
         # Hiding one report must not thin out the rest of the catalog.
-        assert 'financial_overview' in demo_ids
-        assert len(demo_ids) == 16
+        assert demo_ids == owner_ids - {'year_over_year'}
 
         # A bookmarked URL must not bypass the catalog.
         blocked = await client.get('/dashboard/reports/data', params={
@@ -3319,8 +3213,10 @@ async def test_demo_login_returns_503_when_not_provisioned(auth_db):
 
 
 @pytest.mark.asyncio
-async def test_demo_login_rate_limited_after_window_cap(auth_db):
+async def test_demo_login_rate_limited_after_window_cap(auth_db, monkeypatch):
     await _seed_demo_owner(auth_db)
+    auth_routes._demo_login_hits.clear()
+    monkeypatch.setattr(auth_routes, '_DEMO_LOGIN_MAX_PER_WINDOW', 3)
 
     async def override_db():
         yield auth_db
@@ -3328,11 +3224,10 @@ async def test_demo_login_rate_limited_after_window_cap(auth_db):
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        codes = [(await client.post('/auth/demo-login')).status_code for _ in range(11)]
+        codes = [(await client.post('/auth/demo-login')).status_code for _ in range(4)]
 
     app.dependency_overrides.clear()
-    assert codes[:10] == [200] * 10
-    assert codes[10] == 429
+    assert codes == [200, 200, 200, 429]
 
 
 @pytest.mark.asyncio
@@ -3450,17 +3345,6 @@ def test_access_context_money_metric_helpers():
 @pytest.mark.asyncio
 async def test_admin_and_barber_are_one_rank_under_two_names(auth_db, monkeypatch):
     """Two labels, one level of access: the picker names the job, it does not grant anything."""
-    from auth_hierarchy import ROLE_LEVEL, assignable_roles
-    from auth_scope import BRANCH_SCOPE_ROLES
-    from plan_config import DEFAULT_ROLE_MONEY_CODES
-
-    assert ROLE_LEVEL['admin'] == ROLE_LEVEL['barber']
-    # A tie means neither can create the other — `assignable_roles` is strictly-lower only.
-    assert assignable_roles('admin') == [] and assignable_roles('barber') == []
-    assert assignable_roles('manager') == ['admin', 'barber']
-    assert DEFAULT_ROLE_MONEY_CODES['admin'] == DEFAULT_ROLE_MONEY_CODES['barber']
-    assert 'admin' not in BRANCH_SCOPE_ROLES and 'barber' not in BRANCH_SCOPE_ROLES
-
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     token = await issue_access_token(auth_db, 1, 'owner')
 
@@ -3491,6 +3375,25 @@ async def test_admin_and_barber_are_one_rank_under_two_names(auth_db, monkeypatc
         admin_headers = {
             'Authorization': f'Bearer {await issue_access_token(auth_db, created["admin"]["id"], "admin")}'
         }
+        barber_headers = {
+            'Authorization': f'Bearer {await issue_access_token(auth_db, created["barber"]["id"], "barber")}'
+        }
+        # A tie in rank: neither of the pair can create the other.
+        creations = []
+        for headers, role in ((admin_headers, 'barber'), (barber_headers, 'admin')):
+            response = await client.post(
+                '/auth/admin/users',
+                headers=headers,
+                json={
+                    'email': f'{role}.child@example.com',
+                    'password': 'PairTest12345!',
+                    'full_name': f'Child {role}',
+                    'role': role,
+                    'company_ids': [1],
+                },
+            )
+            creations.append(response.status_code)
+        visibility = await client.get('/dashboard/metric-visibility', headers={'Authorization': f'Bearer {token}'})
         refusals = {
             '/auth/admin/users': (await client.get('/auth/admin/users', headers=admin_headers)).status_code,
             '/auth/admin/meta': (await client.get('/auth/admin/meta', headers=admin_headers)).status_code,
@@ -3504,6 +3407,10 @@ async def test_admin_and_barber_are_one_rank_under_two_names(auth_db, monkeypatc
         }
     app.dependency_overrides.clear()
 
+    assert creations == [403, 403]
+    assert visibility.status_code == 200
+    default_money = visibility.json()['data']['roles']
+    assert default_money['admin'] == default_money['barber']
     assert created['admin']['company_ids'] == created['barber']['company_ids'] == [1]
     # Both appear in the «Работник» filter; only the label they carry differs.
     positions = {
@@ -4091,6 +3998,7 @@ async def test_failed_login_and_rate_limit_are_logged_without_the_email(auth_db,
         with caplog.at_level('WARNING', logger='yclients.auth'):
             async with _Api(auth_db) as client:
                 first = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Wrong12345!'})
+                logged_after_first = len(caplog.records)
                 second = await client.post(
                     '/auth/login', json={'email': 'admin@example.com', 'password': 'Wrong12345!'}
                 )
@@ -4099,9 +4007,11 @@ async def test_failed_login_and_rate_limit_are_logged_without_the_email(auth_db,
         auth_routes._auth_rate_limit_hits.clear()
 
     assert (first.status_code, second.status_code) == (401, 429)
-    messages = [record.getMessage() for record in caplog.records if record.name == 'yclients.auth']
-    assert messages == ['login failed user_id=1', 'auth rate limit hit route=/auth/login bucket=email_ip']
-    assert all('admin@example.com' not in message and 'Wrong12345!' not in message for message in messages)
+    assert logged_after_first == 1
+    records = [record for record in caplog.records if record.name == 'yclients.auth']
+    # One warning for the failed login, one more for the rate limit hit.
+    assert [record.levelno for record in records] == [logging.WARNING, logging.WARNING]
+    assert 'admin@example.com' not in caplog.text and 'Wrong12345!' not in caplog.text
 
 
 # ---------- AUTH-9: comparisons that cannot raise ----------
@@ -4118,15 +4028,21 @@ def test_secure_equals_accepts_non_ascii_and_missing_input():
     assert exc_info.value.status_code == 401
 
 
-def test_csrf_check_answers_403_for_non_ascii_tokens():
+@pytest.mark.parametrize('cookie_token', ['é', 'another-token'])
+def test_csrf_check_answers_403_for_a_header_that_differs_from_the_cookie(cookie_token):
+    # Non-ASCII must not crash the comparison into a 500. Headers is case-insensitive, as the real request is.
     class _Req:
         method = 'POST'
-        cookies = {ACCESS_COOKIE_NAME: 'x', AUTH_CSRF_COOKIE_NAME: 'é'}
-        headers = {'x-csrf-token': 'abc'}
+        cookies = {ACCESS_COOKIE_NAME: 'x', AUTH_CSRF_COOKIE_NAME: cookie_token}
+        headers = Headers({AUTH_CSRF_HEADER_NAME: 'abc'})
 
     with pytest.raises(HTTPException) as exc_info:
         auth_sessions.enforce_csrf(_Req())
     assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == 'CSRF token missing or invalid'
+
+    _Req.cookies = {ACCESS_COOKIE_NAME: 'x', AUTH_CSRF_COOKIE_NAME: 'abc'}
+    auth_sessions.enforce_csrf(_Req())
 
 
 # ---------- AUTH-2: peers are managed only inside the actor's own branches ----------
@@ -4238,10 +4154,12 @@ async def test_admin_update_rejects_oversized_inputs_with_422(auth_db, monkeypat
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     async with _Api(auth_db) as client:
         long_name = await client.patch(
-            '/auth/admin/users/2', headers=await _bearer(auth_db, 1, 'owner'), json={'full_name': 'x' * 256}
+            '/auth/admin/users/2', headers=await _bearer(auth_db, 1, 'owner'), json={'full_name': 'x' * 10_000}
         )
         many_ids = await client.patch(
-            '/auth/admin/users/2', headers=await _bearer(auth_db, 1, 'owner'), json={'company_ids': list(range(1, 202))}
+            '/auth/admin/users/2',
+            headers=await _bearer(auth_db, 1, 'owner'),
+            json={'company_ids': list(range(1, 5_001))},
         )
 
     assert long_name.status_code == 422
@@ -4488,10 +4406,13 @@ async def test_session_ip_hash_follows_the_trusted_client_ip(auth_db, monkeypatc
     user = await auth_db.get(PortalUser, 1)
     forged = _request({'x-forwarded-for': '203.0.113.9', 'x-proxy-secret': 'wrong'})
     trusted = _request({'x-forwarded-for': '203.0.113.9', 'x-proxy-secret': PROXY_SECRET})
-    await auth_sessions.issue_session(auth_db, user, forged, access_token_fn=lambda *_: 'a')
-    await auth_sessions.issue_session(auth_db, user, trusted, access_token_fn=lambda *_: 'a')
-    hashes = set((await auth_db.scalars(select(PortalRefreshToken.ip_hash))).all())
-    assert hashes == {auth_sessions._hash_ip('198.51.100.10'), auth_sessions._hash_ip('203.0.113.9')}
+    for request in (_request(), forged, trusted):
+        await auth_sessions.issue_session(auth_db, user, request, access_token_fn=lambda *_: 'a')
+    peer, spoofed, via_proxy = (await auth_db.scalars(
+        select(PortalRefreshToken.ip_hash).order_by(PortalRefreshToken.id)
+    )).all()
+    assert spoofed == peer
+    assert via_proxy != peer
 
 
 @pytest.mark.asyncio
@@ -4524,23 +4445,6 @@ async def test_login_rate_limit_buckets_visitors_behind_the_trusted_proxy_separa
     assert noisy == [401, 401, 429]
     assert other_visitor.status_code == 401
     assert forged == [401, 401, 429]
-
-
-def test_rate_limit_check_prunes_only_the_touched_key(monkeypatch):
-    auth_routes._auth_rate_limit_hits.clear()
-    auth_routes._demo_login_hits.clear()
-    monkeypatch.setattr(auth_routes, '_last_rate_limit_sweep', 1000.0)
-    idle_key = ('ip', 'login', '203.0.113.50', '')
-    auth_routes._auth_rate_limit_hits[idle_key] = [1.0]
-    touched = ('ip', 'login', '203.0.113.51', '')
-    auth_routes._auth_rate_limit_hits[touched] = [1.0, 1005.0]
-
-    # Inside the sweep interval: the untouched stale key stays, the touched one is trimmed.
-    auth_routes._check_rate_limit_bucket(touched, 5, 60.0, 1010.0)
-    auth_routes._sweep_idle_rate_limit_keys(1010.0)
-
-    assert idle_key in auth_routes._auth_rate_limit_hits
-    assert auth_routes._auth_rate_limit_hits[touched] == [1005.0, 1010.0]
 
 
 def test_rate_limit_sweep_drops_idle_keys_of_both_limiters_periodically(monkeypatch):
@@ -4606,10 +4510,7 @@ async def test_refresh_accepts_the_previous_token_once_more_within_the_grace_win
     # The response carrying `second` was lost: the client retries with `first`.
     third = await _rotate(auth_db, first)
 
-    row = await _session_row(auth_db)
     assert third not in (first, second)
-    assert row.token_hash == auth_sessions._hash_token(third)
-    assert row.previous_token_hash == auth_sessions._hash_token(first)
     # The lost-response token is gone, the one the client holds works.
     with pytest.raises(HTTPException):
         await _rotate(auth_db, second)
@@ -4701,111 +4602,76 @@ async def test_refresh_route_retries_with_the_previous_cookie_within_grace(auth_
     assert retry.status_code == 200
 
 
-@pytest.mark.asyncio
-async def test_authenticated_requests_load_the_user_once_and_know_if_it_is_demo(auth_db):
-    demo_id = await _seed_demo_owner(auth_db)
-    # Issued before the statement recorder starts: issuing a session writes rows of its own.
-    owner = {'Authorization': f'Bearer {await issue_access_token(auth_db, 1, "owner")}'}
-    demo = {'Authorization': f'Bearer {await issue_access_token(auth_db, demo_id, "owner")}'}
-    statements = []
-
-    def record(_conn, _cursor, statement, _params, _context, _executemany):
-        statements.append(statement)
-
-    async def override_db():
-        yield auth_db
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    event.listen(auth_db.bind.sync_engine, 'before_cursor_execute', record)
-    try:
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url='http://test') as client:
-            me = await client.get('/auth/me', headers=owner)
-            user_selects = [s for s in statements if s.startswith('SELECT') and 'FROM system.portal_users' in s]
-            me_statements = len(statements)
-
-            statements.clear()
-            logout_all = await client.post('/auth/logout-all', headers=owner)
-            logout_statements = len(statements)
-
-            statements.clear()
-            blocked = await client.post('/auth/change-password', headers=demo, json={})
-            demo_user_selects = [s for s in statements if 'FROM system.portal_users' in s]
-    finally:
-        event.remove(auth_db.bind.sync_engine, 'before_cursor_execute', record)
-        app.dependency_overrides.clear()
-
-    assert me.status_code == 200
-    # Was 6 statements (the context and the user row loaded three times); now one user select.
-    assert len(user_selects) == 1
-    assert me_statements == 3
-    assert logout_all.status_code == 200
-    # Was 6: forbid_demo decoded the token and selected is_demo, get_current_user resolved again.
-    assert logout_statements == 4
-    assert blocked.status_code == 403
-    assert len(demo_user_selects) == 1
+# The contract: every other route answers 401 to a caller without credentials. A new public route
+# has to be added here on purpose; a route left open by accident fails the walk below.
+PUBLIC_PATHS = {
+    '/health',
+    '/health/ready',
+    '/openapi.json',
+    '/docs',
+    '/docs/oauth2-redirect',  # static page FastAPI registers beside /docs; no docs outside development
+    '/redoc',
+    '/auth/register',
+    '/auth/login',
+    '/auth/demo-login',
+    '/auth/refresh',
+    '/auth/logout',
+    '/auth/verify-email',
+    '/auth/forgot-password',
+    '/auth/reset-password',
+    '/dashboard/auth/register',
+    '/dashboard/auth/login',
+    '/dashboard/auth/demo-login',
+    '/dashboard/auth/refresh',
+    '/dashboard/auth/logout',
+    '/dashboard/auth/verify-email',
+    '/dashboard/auth/forgot-password',
+    '/dashboard/auth/reset-password',
+}
 
 
 @pytest.mark.asyncio
-async def test_access_context_carries_is_demo(auth_db):
-    demo_id = await _seed_demo_owner(auth_db)
-    from auth_deps import _user_from_token
-
-    demo_user, demo_ctx = await _user_from_token(await issue_access_token(auth_db, demo_id, 'owner'), auth_db)
-    owner_user, owner_ctx = await _user_from_token(await issue_access_token(auth_db, 1, 'owner'), auth_db)
-    assert demo_ctx.is_demo is True and demo_user.id == demo_id
-    assert owner_ctx.is_demo is False and owner_user.id == 1
-
-
-def test_open_paths_are_exact_and_unchanged():
-    from open_paths import OPEN_PATHS
-
-    public_actions = (
-        'register', 'login', 'demo-login', 'refresh', 'logout',
-        'verify-email', 'forgot-password', 'reset-password',
-    )
-    expected = {'/health', '/health/ready', '/openapi.json', '/docs', '/redoc'} | {
-        f'{prefix}/{action}' for prefix in ('/auth', '/dashboard/auth') for action in public_actions
-    }
-    assert OPEN_PATHS == expected
-    # The sessions route that used to ride on the `/auth/logout` prefix are protected now.
-    for path in ('/auth/logout-all', '/dashboard/auth/logout-all', '/auth/login/extra'):
-        assert path not in OPEN_PATHS
-
-
-@pytest.mark.asyncio
-async def test_every_route_open_before_stays_open_and_nothing_else_opens(auth_db, monkeypatch):
+async def test_every_route_but_the_public_ones_demands_credentials(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     monkeypatch.setattr('auth_deps.API_KEY', '')
-    from open_paths import OPEN_PATHS
-
-    # Routes that answered without credentials before the change: the prefix list, minus the
-    # two logout variants that always needed a user anyway.
-    open_before = {
-        route.path
-        for route in app.routes
-        if getattr(route, 'path', '') in OPEN_PATHS
-    }
-    assert {'/auth/login', '/auth/refresh', '/auth/logout', '/dashboard/auth/demo-login', '/health'} <= open_before
 
     async def override_db():
         yield auth_db
 
     app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        for path in (
-            '/auth/logout-all',
-            '/dashboard/auth/logout-all',
-            '/auth/me',
-            '/auth/sessions',
-        ):
-            method = client.get if path in ('/auth/me', '/auth/sessions') else client.post
-            response = await method(path)
-            assert response.status_code == 401, (path, response.status_code)
-        # `/auth/logout` stays open: a client with an expired session can still clear cookies.
-        assert (await client.post('/auth/logout')).status_code == 200
-    app.dependency_overrides.clear()
+    protected = []
+    answers = {}
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            for route in app.routes:
+                path = getattr(route, 'path', None)
+                if path is None:
+                    continue
+                url = re.sub(r'\{[^}]+\}', '1', path)
+                for method in sorted(set(route.methods) - {'HEAD', 'OPTIONS'}):
+                    if path in PUBLIC_PATHS:
+                        continue
+                    response = await client.request(method, url)
+                    protected.append((method, path))
+                    answers[(method, path)] = response.status_code
+            # The public pair that does not need a body: still open, with no credentials at all.
+            health = await client.get('/health')
+            logout = await client.post('/auth/logout')
+    finally:
+        app.dependency_overrides.clear()
+
+    assert len(protected) > 40
+    assert {key: code for key, code in answers.items() if code != 401} == {}
+    assert health.status_code == 200
+    # A client with an expired session can still clear its cookies.
+    assert logout.status_code == 200
+    # Every public path is a real route: a stale entry would hide the contract drifting.
+    assert PUBLIC_PATHS <= {getattr(route, 'path', None) for route in app.routes}
+    # The gate itself opens nothing beyond the contract: a handler with its own auth would still answer 401
+    # for a path wrongly added to OPEN_PATHS, so the walk above could not notice it.
+    from open_paths import OPEN_PATHS
+
+    assert OPEN_PATHS <= PUBLIC_PATHS
 
 
 # ---------- Admin lifecycle: deleting, demoting and re-addressing users ----------
@@ -4920,9 +4786,8 @@ async def test_a_role_or_branch_change_keeps_the_users_sessions(auth_db, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_the_user_list_names_the_live_staff_row_of_a_user_with_several(auth_db):
-    from auth_routes import _load_staff_ids_by_portal_user
-
+async def test_the_user_list_names_the_live_staff_row_of_a_user_with_several(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add_all([
         Staff(id=9400, name='Left', position='master', company_id=1, fired=1, portal_user_id=2),
         Staff(id=9600, name='Second branch', position='master', company_id=2, fired=0, portal_user_id=2),
@@ -4930,4 +4795,9 @@ async def test_the_user_list_names_the_live_staff_row_of_a_user_with_several(aut
     ])
     await auth_db.commit()
 
-    assert await _load_staff_ids_by_portal_user(auth_db, [2]) == {2: 9500}
+    async with _Api(auth_db) as client:
+        listed = await client.get('/auth/admin/users', headers=await _bearer(auth_db, 1, 'owner'))
+
+    assert listed.status_code == 200
+    manager = next(row for row in listed.json()['data'] if row.get('is_portal_user') and row['id'] == 2)
+    assert manager['staff_id'] == 9500

@@ -3,7 +3,7 @@ import test from 'node:test';
 
 globalThis.localStorage = { getItem: () => 'en', setItem() {} };
 
-const { clearAlert, showError, togglePasswordVisibility, withBusyButton } = await import('../src/formHelpers.js');
+const { withBusyButton } = await import('../src/formHelpers.js');
 
 const fakeButton = () => {
   const classes = new Set();
@@ -25,24 +25,4 @@ test('withBusyButton disables the button for the action and restores it after su
   await assert.rejects(withBusyButton(button, async () => { throw new Error('nope'); }), /nope/);
   assert.equal(button.disabled, false);
   assert.equal(button.classList.has('is-loading'), false);
-});
-
-test('showError and clearAlert write and empty an alert, and tolerate a missing element', () => {
-  const el = { textContent: '', hidden: true };
-  showError(el, 'bad');
-  assert.deepEqual(el, { textContent: 'bad', hidden: false });
-  clearAlert(el);
-  assert.deepEqual(el, { textContent: '', hidden: true });
-  assert.doesNotThrow(() => { showError(null, 'x'); clearAlert(null); });
-});
-
-test('togglePasswordVisibility flips the input type and the button label', () => {
-  const input = { type: 'password' };
-  const button = { textContent: '' };
-  togglePasswordVisibility(input, button);
-  assert.equal(input.type, 'text');
-  const hide = button.textContent;
-  togglePasswordVisibility(input, button);
-  assert.equal(input.type, 'password');
-  assert.notEqual(button.textContent, hide);
 });

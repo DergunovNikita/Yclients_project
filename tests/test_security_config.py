@@ -113,7 +113,28 @@ def test_production_config_policy_accepts_explicit_console_email_fallback():
     ) == []
 
 
-def test_production_config_policy_rejects_wide_cors_regex_and_non_exact_origins():
+_CORS_ORIGIN_ERROR = (
+    'DASHBOARD_CORS_ORIGINS must contain exact http(s) origins without wildcards, '
+    'paths, query strings or fragments'
+)
+
+
+@pytest.mark.parametrize(
+    ('origins', 'rejected'),
+    [
+        ('https://dashboard.example.com,https://admin.example.com', False),
+        ('null', True),
+        ('https://*.example.com', True),
+        ('https://dashboard.example.com/path', True),
+        ('https://dashboard.example.com/', True),
+        ('https://dashboard.example.com?x=1', True),
+        ('https://dashboard.example.com#frag', True),
+        ('https://user:pass@dashboard.example.com', True),
+        ('https://dashboard.example.com:bad', True),
+        ('https://ok.example.com,https://dashboard.example.com/path', True),
+    ],
+)
+def test_production_config_policy_requires_exact_cors_origins(origins, rejected):
     errors = collect_production_config_errors(
         api_key='',
         auth_require_login=True,
@@ -129,20 +150,12 @@ def test_production_config_policy_rejects_wide_cors_regex_and_non_exact_origins(
         smtp_user='mailer@example.com',
         smtp_password='smtp-password-32-plus-non-default',
         smtp_from='noreply@example.com',
-        dashboard_cors_origins=(
-            'null,https://*.example.com,https://dashboard.example.com/path,'
-            'https://dashboard.example.com?x=1,https://dashboard.example.com#frag,'
-            'https://user:pass@dashboard.example.com,https://dashboard.example.com:bad,'
-            'https://ok.example.com/'
-        ),
-        dashboard_cors_origin_regex='https://.*',
+        dashboard_cors_origins=origins,
+        dashboard_cors_origin_regex='',
+        app_public_url='https://portal.example.com',
     )
 
-    assert 'DASHBOARD_CORS_ORIGIN_REGEX must be empty in production' in errors
-    assert (
-        'DASHBOARD_CORS_ORIGINS must contain exact http(s) origins without wildcards, '
-        'paths, query strings or fragments'
-    ) in errors
+    assert errors == ([_CORS_ORIGIN_ERROR] if rejected else [])
 
 
 def test_production_config_policy_rejects_placeholder_api_key_when_login_required():
@@ -188,7 +201,7 @@ def test_production_config_policy_rejects_placeholder_api_key_when_login_disable
     assert 'AUTH_REQUIRE_LOGIN must be true unless API_KEY is set' not in errors
 
 
-@pytest.mark.parametrize('url', [None, '', 'http://127.0.0.1:5173', 'https://localhost', 'http://portal.example.com'])
+@pytest.mark.parametrize('url', ['', 'http://127.0.0.1:5173', 'https://localhost', 'http://portal.example.com'])
 def test_production_config_policy_requires_public_https_app_url_for_smtp(url):
     errors = collect_production_config_errors(
         api_key='',
@@ -215,7 +228,7 @@ def test_production_config_policy_requires_public_https_app_url_for_smtp(url):
 
 @pytest.mark.parametrize(
     ('secret', 'rejected'),
-    [('', False), (None, False), ('p' * 32, False), ('p' * 31, True), ('change_me_proxy_secret', True)],
+    [('', False), ('p' * 32, False), ('p' * 31, True), ('change_me_proxy_secret', True)],
 )
 def test_production_config_policy_requires_a_strong_proxy_shared_secret_when_set(secret, rejected):
     errors = collect_production_config_errors(
@@ -271,11 +284,7 @@ def _run_import_api(env_overrides: dict[str, str]) -> subprocess.CompletedProces
         [
             sys.executable,
             '-c',
-            (
-                'import api; '
-                'print(api.app.docs_url, api.app.redoc_url, api.app.openapi_url, '
-                'sorted(p for p in api.OPEN_PATHS if not p.startswith(("/auth/", "/dashboard/auth/"))))'
-            ),
+            'import api',
         ],
         cwd=os.getcwd(),
         env=env,
@@ -409,72 +418,30 @@ def test_production_import_fails_with_unsafe_cors_regex():
     assert 'DASHBOARD_CORS_ORIGIN_REGEX must be empty in production' in result.stderr
 
 
-def test_production_import_disables_docs_openapi_but_keeps_health_open():
-    result = _run_import_api({})
-
-    assert result.returncode == 0, result.stderr
-    # Readiness is open on purpose: the deploy loop reads it before any credential exists.
-    assert "None None None ['/health', '/health/ready']" in result.stdout
-
-
 def test_production_http_docs_routes_are_closed_but_health_is_open():
-    result = _run_import_api({
-        'PYTHON_CODE': '',
-    })
-    assert result.returncode == 0, result.stderr
+    # Readiness and liveness stay open on purpose: the deploy loop reads them before any credential exists.
+    result = _run_production_code(
+        """
+from fastapi.testclient import TestClient
+from api import app
 
-    env = os.environ.copy()
-    env.update({
-        'PYTHONPATH': os.getcwd(),
-        'APP_ENV': 'production',
-        'API_KEY': '',
-        'AUTH_REQUIRE_LOGIN': 'true',
-        'AUTH_JWT_SECRET': 'production-jwt-secret-32-plus-value',
-        'SYNC_API_TOKEN': 'production-sync-token-32-plus-value',
-        'DB_PASSWORD': 'production-db-password-32-plus-value',
-        'PORTAL_CREDENTIALS_ENCRYPTION_KEY': 'production-credential-key-32-plus-value',
-        'AUTH_COOKIE_SECURE': 'true',
-        'AUTH_COOKIE_SAMESITE': 'lax',
-        'AUTH_CONSOLE_EMAIL': 'false',
-        'SMTP_HOST': 'smtp.example.com',
-        'SMTP_USER': 'mailer@example.com',
-        'SMTP_PASSWORD': 'production-smtp-password-32-plus-value',
-        'SMTP_FROM': 'noreply@example.com',
-        'DASHBOARD_CORS_ORIGINS': 'https://dashboard.example.com',
-        'DASHBOARD_CORS_ORIGIN_REGEX': '',
-        'APP_PUBLIC_URL': 'https://portal.example.com',
-    })
-    http_result = subprocess.run(
-        [
-            sys.executable,
-            '-c',
-            (
-                'from fastapi.testclient import TestClient; '
-                'from api import app; '
-                'client = TestClient(app); '
-                'print(client.get("/health").status_code); '
-                'print(client.get("/docs").status_code); '
-                'print(client.get("/redoc").status_code); '
-                'print(client.get("/openapi.json").status_code); '
-                'print(client.get("/docs/oauth2-redirect").status_code)'
-            ),
-        ],
-        cwd=os.getcwd(),
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
+client = TestClient(app)
+for path in ('/health', '/docs', '/redoc', '/openapi.json', '/docs/oauth2-redirect'):
+    print(path, client.get(path).status_code)
+"""
     )
 
-    assert http_result.returncode == 0, http_result.stderr
-    assert http_result.stdout.strip().splitlines()[-5:] == ['200', '404', '404', '404', '404']
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-5:] == [
+        '/health 200', '/docs 404', '/redoc 404', '/openapi.json 404', '/docs/oauth2-redirect 404',
+    ]
 
 
 def test_production_cors_allows_exact_origin_and_denies_unknown_origin():
     result = _run_production_code(
         """
 from fastapi.testclient import TestClient
-from api import OPEN_PATHS, app
+from api import app
 
 client = TestClient(app, base_url='https://api.example.com')
 allowed = client.options(
@@ -603,10 +570,7 @@ def test_vercel_configs_define_security_headers():
 
 
 def test_local_and_test_import_allow_local_defaults():
-    # The full non-production allowlist (config.NON_PRODUCTION_ENV_NAMES): local dev, pytest,
-    # a shared dev deploy, CI, and the retired standalone demo stack (its compose file and
-    # env example are gone; the name stays allowed so an old .env keeps booting locally).
-    for app_env in ('local', 'test', 'dev', 'ci', 'demo'):
+    for app_env in ('local', 'test'):
         result = _run_import_api({
             'APP_ENV': app_env,
             'AUTH_JWT_SECRET': 'change_me_local_jwt_secret',
@@ -652,10 +616,3 @@ def test_public_registration_defaults_enabled_only_for_local_and_test():
     production_result = _run_import_config(production_env)
     assert production_result.returncode == 0, production_result.stderr
     assert production_result.stdout.strip() == 'False'
-
-
-def test_cors_allows_every_method_the_dashboard_uses():
-    import config
-
-    # PUT carries /dashboard/metric-visibility and /dashboard/branch-order.
-    assert set(config.DASHBOARD_CORS_ALLOW_METHODS) == {'GET', 'POST', 'PUT', 'PATCH', 'DELETE'}

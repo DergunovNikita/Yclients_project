@@ -23,28 +23,6 @@ class FakeYClientsAPI:
         return self.groups
 
 
-def test_yclients_adapter_authenticates_successfully():
-    adapter = YClientsDataSourceAdapter(
-        'partner',
-        'login',
-        'password',
-        api_factory=lambda *args, **kwargs: FakeYClientsAPI(*args, auth=True, **kwargs),
-    )
-
-    assert adapter.authenticate() is True
-
-
-def test_yclients_adapter_authentication_failure():
-    adapter = YClientsDataSourceAdapter(
-        'partner',
-        'login',
-        'wrong',
-        api_factory=lambda *args, **kwargs: FakeYClientsAPI(*args, auth=False, **kwargs),
-    )
-
-    assert adapter.authenticate() is False
-
-
 def test_yclients_adapter_lists_branches_from_groups():
     adapter = YClientsDataSourceAdapter(
         'partner',
@@ -168,21 +146,22 @@ def test_normalize_source_type_rejects_an_unsupported_source():
 
 
 @pytest.mark.asyncio
-async def test_materialize_branches_reuses_a_prefetched_listing(async_session):
+async def test_materialize_branches_uses_the_prefetched_listing_when_given(async_session):
     async_session.add(PortalAccount(id=1, label='Tenant A', created_at=utcnow()))
     await async_session.flush()
-    listings = []
+    listing = [{'id': 10, 'title': 'Network', 'companies': [{'id': 101, 'title': 'Branch A'}]}]
+    branches = YClientsDataSourceAdapter(
+        'partner', 'login', 'password',
+        api_factory=lambda *args, **kwargs: FakeYClientsAPI(*args, groups=listing, **kwargs),
+    ).list_branches()
+    # A second adapter would see an empty network: the company can only come from the prefetched listing.
+    empty = YClientsDataSourceAdapter(
+        'partner', 'login', 'password',
+        api_factory=lambda *args, **kwargs: FakeYClientsAPI(*args, groups=[], **kwargs),
+    )
 
-    class CountingAPI(FakeYClientsAPI):
-        def get_groups(self):
-            listings.append(1)
-            return [{'id': 10, 'title': 'Network', 'companies': [{'id': 101, 'title': 'Branch A'}]}]
+    company_ids = await empty.materialize_branches(async_session, 1, [101], branches)
+    await async_session.commit()
 
-    adapter = YClientsDataSourceAdapter('partner', 'login', 'password', api_factory=CountingAPI)
-    branches = adapter.list_branches()
-
-    await adapter.materialize_branches(async_session, 1, [101], branches)
-    assert len(listings) == 1
-
-    await adapter.materialize_branches(async_session, 1, [101])
-    assert len(listings) == 2
+    company = await async_session.get(Company, company_ids[0])
+    assert (company.external_id, company.title, company.portal_account_id) == (101, 'Branch A', 1)

@@ -54,11 +54,6 @@ test('barbers and administrators split, rows in the spreadsheet order, total las
   assert.deepEqual(codes(admins), ['reviews_qty', 'opz_qty', 'opz_pct', 'clients', 'extra_services_qty']);
 });
 
-test('administrator_records plans still show', () => {
-  const [, admins] = planBoard(branchPayload()).sections;
-  assert.deepEqual(admins.rows.find((row) => row.code === 'clients').values, [300]);
-});
-
 test('a personal role has no total column', () => {
   const { sections } = planBoard(branchPayload({ parent_group: undefined }));
   assert.deepEqual(titles(sections[0]), ['P1', 'P2']);

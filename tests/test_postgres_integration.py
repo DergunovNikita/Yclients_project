@@ -4,11 +4,13 @@ from datetime import date, datetime, time
 
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 import dashboard_service
+from clock import utcnow
 import sync_orchestrator
 import sync_worker
 from database import Database
@@ -20,6 +22,7 @@ from models import (
     Client,
     Company,
     Group,
+    PlanBranchSetting,
     PlanStaffInput,
     PortalAccount,
     PortalAuditEvent,
@@ -76,7 +79,7 @@ def test_bootstrap_stamps_the_database_it_built(pg_session_factory):
     assert stamped == ScriptDirectory.from_config(cfg).get_current_head()
 
 
-def test_bootstrap_creates_sync_jobs_and_typed_columns(pg_session_factory):
+def test_bootstrap_creates_typed_columns(pg_session_factory):
     session = pg_session_factory()
     try:
         result = session.execute(text("""
@@ -92,38 +95,35 @@ def test_bootstrap_creates_sync_jobs_and_typed_columns(pg_session_factory):
             WHERE table_schema = 'public' AND table_name = 'appointments' AND column_name = 'date'
         """)).scalar_one()
         assert result == 'date'
+    finally:
+        session.close()
 
-        plan_settings_tables = session.execute(text("""
-            SELECT table_name
-            FROM information_schema.tables
-            WHERE table_schema = 'public'
-              AND table_name IN ('plan_branch_settings', 'plan_staff_inputs')
-            ORDER BY table_name
-        """)).scalars().all()
-        assert plan_settings_tables == ['plan_branch_settings', 'plan_staff_inputs']
 
-        plan_settings_indexes = session.execute(text("""
-            SELECT indexname
-            FROM pg_indexes
-            WHERE schemaname = 'public'
-              AND indexname IN (
-                'uq_plan_branch_setting_period_company',
-                'uq_plan_staff_input_period_company_staff'
-              )
-            ORDER BY indexname
-        """)).scalars().all()
-        assert plan_settings_indexes == [
-            'uq_plan_branch_setting_period_company',
-            'uq_plan_staff_input_period_company_staff',
-        ]
+def test_bootstrap_enforces_one_plan_row_per_period_and_branch(pg_session_factory):
+    session = pg_session_factory()
+    try:
+        session.add(Group(id=1, title='G1'))
+        session.flush()
+        session.add(Company(id=1, title='Salon', group_id=1))
+        session.flush()
+        session.add(Staff(id=1, name='Barber', position='Барбер', company_id=1))
+        session.flush()
+        period = {'period_start': date(2025, 1, 1), 'period_end': date(2025, 1, 31), 'company_id': 1}
+        now = datetime(2025, 1, 1)
+        session.add_all([
+            PlanBranchSetting(**period, updated_at=now),
+            PlanStaffInput(**period, staff_id=1, staff_category='barber', updated_at=now),
+        ])
+        session.commit()
 
-        schedule_index = session.execute(text("""
-            SELECT indexname
-            FROM pg_indexes
-            WHERE schemaname = 'public'
-              AND indexname = 'ix_staff_schedules_company_staff_date_slots'
-        """)).scalar_one()
-        assert schedule_index == 'ix_staff_schedules_company_staff_date_slots'
+        for duplicate in (
+            PlanBranchSetting(**period, updated_at=now),
+            PlanStaffInput(**period, staff_id=1, staff_category='barber', updated_at=now),
+        ):
+            session.add(duplicate)
+            with pytest.raises(IntegrityError):
+                session.commit()
+            session.rollback()
     finally:
         session.close()
 
@@ -317,7 +317,7 @@ def test_worker_processes_queued_job(pg_session_factory, monkeypatch):
     session = pg_session_factory()
     try:
         # sync_jobs.run_id is a real foreign key: the faked run has to exist.
-        run = SyncRun(trigger_type='pytest', mode='incremental', status='success', started_at=datetime.now())
+        run = SyncRun(trigger_type='pytest', mode='incremental', status='success', started_at=utcnow())
         session.add(run)
         session.commit()
         run_id = run.id
@@ -489,14 +489,11 @@ async def test_postgres_administrator_attribution_uses_local_shifts_and_role_per
             ])
             await db.commit()
 
-            metrics = await dashboard_service._admin_extra_services_by_staff(
+            january = await dashboard_service.fetch_plan_fact(
                 db,
                 date(2025, 1, 1),
                 date(2025, 1, 31),
-                1,
-                [2],
-                {2: None},
-                [1],
+                company_id=1,
                 factual_at=datetime(2026, 1, 1),
             )
             plan_fact = await dashboard_service.fetch_plan_fact(
@@ -508,21 +505,24 @@ async def test_postgres_administrator_attribution_uses_local_shifts_and_role_per
             )
 
             # January: the barber's visit with the extras (2) is credited to him; the other January visit has none.
-            assert metrics == {2: {'extra_services_qty': 2.0}}
+            january_group = next(group for group in january['groups'] if group['staff_id'] == 2)
+            january_cells = {cell['code']: cell for cell in january_group['metrics']}
+            assert january_cells['extra_services_qty']['fact'] == 2.0
             staff_group = next(group for group in plan_fact['groups'] if group['staff_id'] == 2)
             cells = {cell['code']: cell for cell in staff_group['metrics']}
             assert cells['extra_services_qty']['fact'] == 14.0
             # 14 extras over four visits: two credited in January, his own in February, one in March.
             assert cells['extra_services_pct']['fact'] == pytest.approx(350.0)
             assert cells['opz_qty']['fact'] == 0.0
-            opz_events = await dashboard_service._opz_events(
-                db,
-                date(2025, 1, 1),
-                date(2025, 12, 31),
-                1,
-                factual_at=datetime(2026, 1, 1),
-            )
-            assert [event.event_date for event in opz_events] == [date(2025, 2, 1)]
+            # The visit is rebooked at 22:30 UTC on 31 January, which is already 1 February in Moscow.
+            for window, expected in (
+                ((date(2025, 1, 1), date(2025, 1, 31)), 0),
+                ((date(2025, 2, 1), date(2025, 2, 28)), 1),
+            ):
+                summary = await dashboard_service.fetch_summary(
+                    db, *window, company_id=1, factual_at=datetime(2026, 1, 1),
+                )
+                assert summary['visit_metrics']['opz_qty'] == expected, window
 
             db.add(Appointment(
                 id=4,
@@ -536,15 +536,16 @@ async def test_postgres_administrator_attribution_uses_local_shifts_and_role_per
             # The per-session caches in db.info assume a session is one request and facts do not change
             # under it; a new fact means a new request in production, so start from an empty cache.
             db.info.clear()
-            scope = await dashboard_service._administrator_service_scope(
+            summary = await dashboard_service.fetch_summary(
                 db,
                 date(2025, 1, 1),
                 date(2025, 12, 31),
-                2,
+                company_id=1,
+                staff_id=2,
                 factual_at=datetime(2026, 1, 1),
             )
-            assert scope.source_status == 'partial'
-            assert scope.missing_sources == ('appointments_detail',)
+            assert summary['source_status'] == 'partial'
+            assert summary['missing_sources'] == ['appointments_detail']
 
             saved_inputs = (
                 await db.execute(
@@ -656,14 +657,15 @@ async def test_postgres_opz_split_counts_first_visits_per_branch(pg_session_fact
             facts = await dashboard_service.fetch_year_over_year_facts(
                 db, date(2025, 1, 1), date(2025, 12, 31), None, None, [1, 2],
             )
-            events = await dashboard_service._opz_events(
-                db, date(2025, 3, 1), date(2025, 3, 31), 2, factual_at=datetime(2026, 1, 1),
-            )
+            second_branch = (await dashboard_service.fetch_summary(
+                db, date(2025, 3, 1), date(2025, 3, 31), company_id=2, factual_at=datetime(2026, 1, 1),
+            ))['visit_metrics']
 
             assert (metrics['first_visits'], metrics['repeat_visits']) == (2, 2)
             assert (metrics['opz_first_visit_qty'], metrics['opz_repeat_visit_qty']) == (2.0, 1.0)
             assert facts['monthly'][2025][3]['first_visits'] == 2
-            assert [(event.event_id, event.first_visit) for event in events] == [(7, True)]
+            assert (second_branch['first_visits'], second_branch['repeat_visits']) == (1, 0)
+            assert (second_branch['opz_first_visit_qty'], second_branch['opz_repeat_visit_qty']) == (1.0, 0.0)
     finally:
         await engine.dispose()
 

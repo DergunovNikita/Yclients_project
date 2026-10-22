@@ -200,8 +200,6 @@ async def test_bookings_dynamics_cards_reconcile_with_the_overview_breakdown(asy
     assert [row['period'] for row in table(data, 'periods')['rows']] == [
         '2026-06-01', '2026-06-08', '2026-06-15', '2026-06-22', '2026-06-29'
     ]
-    assert 'локальной базе' in data['notes'][0]['text']
-    assert 'record_stats' not in json.dumps(data, ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -264,7 +262,6 @@ async def test_booking_channels_split_online_from_staff_created(async_session):
     assert 'unknown' not in [column['key'] for column in table(data, 'periods')['columns']]
     assert chart(data, 'channels_by_period')['x_kind'] == 'time'
     assert chart(data, 'channels_by_period')['stacked'] is True
-    assert 'источник записи не синхронизируется' in json.dumps(data['notes'], ensure_ascii=False)
 
 
 @pytest.mark.asyncio

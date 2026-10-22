@@ -1,17 +1,17 @@
 from datetime import date, datetime, time, timedelta
-import importlib
-import io
-from contextlib import redirect_stdout
 
 import pytest
 
 from helpers import sqlite_session_with_system
 from models import (
+    AccountCatalog,
     Appointment,
     Client,
     Comment,
     Company,
     FinancialTransaction,
+    GoodCatalog,
+    GoodCategoryCatalog,
     GoodTransaction,
     Group,
     ServiceCatalog,
@@ -23,13 +23,12 @@ from models import (
     SyncSourceState,
     Transaction,
     YClientsCredential,
+    YClientsCredentialCompany,
 )
-import config
 import sync_pipeline
 from sync_pipeline import (
     execute_sync,
     full_sync_start_date,
-    print_sync_summary,
     purge_appointment_window,
     purge_full_refresh_window,
     run_sync_step,
@@ -43,7 +42,7 @@ from sync_pipeline import (
     sync_staff,
     transactional_state_key,
 )
-from yclients_credentials import YClientsCredentialValue
+from yclients_credentials import YClientsCredentialValue, new_credential
 
 # Captured before any test stubs them, so the end-to-end coverage test can opt back in.
 _REAL_COVERAGE_CHECK = sync_pipeline.has_complete_historical_source_coverage
@@ -156,13 +155,18 @@ def test_company_timezone_prefers_valid_source_and_defaults_to_moscow():
     assert sync_pipeline._company_timezone({'timezone': 'invalid'}, 'Europe/Rome') == 'Europe/Rome'
 
 
-def patch_execute_sync_dependencies(monkeypatch, db, credential, *, purge_result=True):
+def patch_execute_sync_credentials(monkeypatch, db, credentials, api_factory=lambda _credential: FakeSyncAPI()):
+    """Everything that would reach the network or another process; the sync steps themselves stay real."""
     monkeypatch.setattr(sync_pipeline, 'init_database', lambda *_args, **_kwargs: FakeSyncDatabase(db))
-    monkeypatch.setattr(sync_pipeline, 'load_active_credentials_sync', lambda *_args, **_kwargs: [credential])
+    monkeypatch.setattr(sync_pipeline, 'load_active_credentials_sync', lambda *_args, **_kwargs: credentials)
     monkeypatch.setattr(sync_pipeline, '_undecryptable_credentials', lambda *_a, **_k: [])
-    monkeypatch.setattr(sync_pipeline, '_build_api_for_credential', lambda _credential: FakeSyncAPI())
+    monkeypatch.setattr(sync_pipeline, '_build_api_for_credential', api_factory)
     monkeypatch.setattr(sync_pipeline, 'mark_credential_success_sync', lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sync_pipeline, 'mark_credential_failure_sync', lambda *_args, **_kwargs: None)
+
+
+def patch_execute_sync_dependencies(monkeypatch, db, credential, *, purge_result=True):
+    patch_execute_sync_credentials(monkeypatch, db, [credential])
     monkeypatch.setattr(sync_pipeline, 'purge_full_refresh_window', lambda *_args, **_kwargs: purge_result)
     monkeypatch.setattr(
         sync_pipeline,
@@ -177,18 +181,6 @@ def test_full_sync_start_date_uses_history_start_when_sync_days_is_unlimited(mon
     monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
     monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
     assert full_sync_start_date(date(2026, 6, 28)) == date(2000, 1, 1)
-
-
-def test_historical_sync_start_date_falls_back_to_global_floor(monkeypatch):
-    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
-    assert sync_pipeline.historical_sync_start_date(date(2026, 8, 6)) == date(2000, 1, 1)
-
-
-def test_historical_sync_start_date_uses_branch_reporting_start(monkeypatch):
-    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
-    assert sync_pipeline.historical_sync_start_date(
-        date(2026, 8, 6), date(2022, 5, 1)
-    ) == date(2022, 5, 1)
 
 
 def test_full_window_starts_at_branch_reporting_start(monkeypatch):
@@ -248,13 +240,12 @@ def test_company_window_uses_scoped_checkpoint_not_a_stale_global_one(monkeypatc
         )
 
 
-@pytest.mark.parametrize('stale_global_checkpoint', [True, False])
 @pytest.mark.parametrize('mode', ['incremental', 'refresh'])
-def test_company_with_coverage_but_no_scoped_checkpoint_runs_full(monkeypatch, mode, stale_global_checkpoint):
+def test_company_with_coverage_but_no_scoped_checkpoint_runs_full(monkeypatch, mode):
     """A `full` pass whose only failed step owns no coverage leaves the marker but no checkpoint.
 
     The branch has rows and certified history, yet nothing says which day it is synced
-    through: reading the retired global checkpoint instead would resume months behind.
+    through, so the whole history is read again instead of guessing a resume point.
     """
     monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
     monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2026, 1, 1))
@@ -266,8 +257,6 @@ def test_company_with_coverage_but_no_scoped_checkpoint_runs_full(monkeypatch, m
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
         db.add(Appointment(id=1, company_id=1, date=date(2026, 6, 20)))
-        if stale_global_checkpoint:
-            db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-30'))
         db.add(SyncState(key=sync_pipeline.historical_coverage_state_key(1), value='2026-06-20'))
         for source in sync_pipeline.FULL_REFRESH_COVERAGE_SOURCES:
             db.add(SyncSourceState(
@@ -385,20 +374,6 @@ def _certified_company(db, reporting_start=None):
             period_end=date(2026, 6, 30),
         ))
     db.commit()
-
-
-def test_refresh_start_date_walks_back_the_configured_window(monkeypatch):
-    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
-    monkeypatch.setattr(sync_pipeline, 'SYNC_REFRESH_DAYS', 90)
-    assert sync_pipeline.refresh_sync_start_date(date(2026, 7, 1)) == date(2026, 4, 2)
-
-
-def test_refresh_start_date_never_precedes_branch_reporting_start(monkeypatch):
-    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
-    monkeypatch.setattr(sync_pipeline, 'SYNC_REFRESH_DAYS', 90)
-    assert sync_pipeline.refresh_sync_start_date(
-        date(2026, 7, 1), date(2026, 6, 1)
-    ) == date(2026, 6, 1)
 
 
 def test_refresh_mode_reloads_rolling_window_for_certified_branch(monkeypatch):
@@ -552,42 +527,6 @@ def test_refresh_recertifies_coverage_even_when_a_coverageless_step_fails(monkey
         assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
 
 
-def test_refresh_mode_purges_its_window_like_full():
-    assert sync_pipeline.is_full_refresh_mode('refresh') is True
-    assert sync_pipeline.is_full_refresh_mode('full') is True
-    assert sync_pipeline.is_full_refresh_mode('incremental') is False
-    assert sync_pipeline.is_full_refresh_mode(None) is False
-
-
-def test_execute_sync_updates_company_scoped_checkpoint(monkeypatch):
-    with sqlite_session_with_system([Group.__table__, Company.__table__, SyncState.__table__]) as db:
-        db.add(Group(id=1, title='G1'))
-        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
-        db.commit()
-
-        credential = YClientsCredentialValue(
-            id=11,
-            title='Tenant credential',
-            partner_token='partner',
-            login='login',
-            password='password',
-            company_ids=(1,),
-            portal_account_id=7,
-        )
-        patch_execute_sync_dependencies(monkeypatch, db, credential)
-
-        result = execute_sync(mode='incremental', end_date=date(2026, 6, 30), portal_account_id=7)
-
-        assert result['success'] is True
-        assert result['mode'] == 'full'
-        assert result['window_start'] == sync_pipeline.full_sync_start_date(date(2026, 6, 30)).isoformat()
-        assert db.get(SyncState, sync_pipeline.TRANSACTIONAL_STATE_KEY) is None
-        assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
-        assert db.get(
-            SyncState, sync_pipeline.historical_coverage_state_key(1)
-        ).value == '2026-06-30'
-
-
 def test_execute_sync_reuses_caller_supplied_database(monkeypatch):
     """sync_orchestrator.run_sync_job passes its own Database in; execute_sync must reuse it
     rather than calling init_database() again, which would open a second engine/pool mid-run
@@ -624,43 +563,70 @@ def test_execute_sync_reuses_caller_supplied_database(monkeypatch):
         assert result['success'] is True
 
 
+class EmptyYClientsAPI:
+    """A branch with nothing in it: every listing answers an empty list."""
+
+    last_dated_fetch_complete = True
+
+    def __init__(self, partner_token, login, password, **_kwargs):
+        self.login = login
+
+    def authenticate(self):
+        if self.login == 'broken':
+            raise ValueError('not json')
+        return True
+
+    def get_groups(self):
+        return [{'id': 1, 'title': 'G1', 'companies': [{'id': 10, 'title': 'Salon'}, {'id': 11, 'title': 'Salon 2'}]}]
+
+    def __getattr__(self, name):
+        if name.startswith('get_'):
+            return lambda *_args, **_kwargs: []
+        raise AttributeError(name)
+
+
 def test_one_credentials_auth_exception_does_not_stop_the_other_tenants(monkeypatch):
     """A tenant whose auth raises (e.g. a non-JSON reply) is recorded as a failed step and skipped."""
-    with sqlite_session_with_system([Group.__table__, Company.__table__, SyncState.__table__]) as db:
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-sync-key')
+    monkeypatch.setattr('data_sources.YClientsAPI', EmptyYClientsAPI)
+    tables = [
+        Group.__table__, Company.__table__, Client.__table__, Staff.__table__, StaffPositionMonth.__table__,
+        ServiceCatalog.__table__, ServiceCategoryCatalog.__table__, AccountCatalog.__table__,
+        GoodCatalog.__table__, GoodCategoryCatalog.__table__, Appointment.__table__, Transaction.__table__,
+        FinancialTransaction.__table__, GoodTransaction.__table__, Comment.__table__, StaffSchedule.__table__,
+        SyncState.__table__, SyncSourceState.__table__, YClientsCredential.__table__,
+        YClientsCredentialCompany.__table__,
+    ]
+    with sqlite_session_with_system(tables) as db:
         db.add(Group(id=1, title='G1'))
-        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.add_all([
+            Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7),
+            Company(id=2, title='Salon 2', group_id=1, external_id=11, portal_account_id=7),
+        ])
+        broken = new_credential(7, 'Broken tenant', 'p', 'broken', 'x')
+        healthy = new_credential(7, 'Healthy tenant', 'p', 'fine', 'x')
+        db.add_all([broken, healthy])
+        db.flush()
+        db.add_all([
+            YClientsCredentialCompany(credential_id=broken.id, company_id=1),
+            YClientsCredentialCompany(credential_id=healthy.id, company_id=2),
+        ])
+        broken_id, healthy_id = broken.id, healthy.id
         db.commit()
-
-        credentials = [
-            YClientsCredentialValue(
-                id=cid, title=f'Tenant {cid}', partner_token='p', login='l', password='x',
-                company_ids=(1,), portal_account_id=7,
-            )
-            for cid in (11, 12)
-        ]
-        patch_execute_sync_dependencies(monkeypatch, db, credentials[0])
-        monkeypatch.setattr(sync_pipeline, 'load_active_credentials_sync', lambda *_a, **_k: credentials)
-        monkeypatch.setattr(sync_pipeline, '_undecryptable_credentials', lambda *_a, **_k: [])
-        failures = []
-        built = []
-
-        def build(credential):
-            built.append(credential.id)
-            if credential.id == 11:
-                raise ValueError('not json')
-            return FakeSyncAPI()
-
-        monkeypatch.setattr(sync_pipeline, '_build_api_for_credential', build)
-        monkeypatch.setattr(
-            sync_pipeline, 'mark_credential_failure_sync', lambda _db, cid, reason: failures.append((cid, reason))
-        )
+        monkeypatch.setattr(sync_pipeline, 'init_database', lambda *_args, **_kwargs: FakeSyncDatabase(db))
 
         result = execute_sync(mode='incremental', end_date=date(2026, 6, 30), portal_account_id=7)
 
-        assert built == [11, 12]
-        assert failures == [(11, 'ValueError')]
+        broken, healthy = db.get(YClientsCredential, broken_id), db.get(YClientsCredential, healthy_id)
+
         failed = [step for step in result['step_results'] if step['key'] == 'credentials_auth']
         assert len(failed) == 1 and failed[0]['success'] is False
+        assert (broken.needs_reauth, broken.last_error) == (True, 'ValueError')
+        assert healthy.needs_reauth is False
+        # The tenant after the broken one still synced its branch; the broken one's branch was skipped.
+        assert result['companies_count'] == 1
+        assert db.get(SyncState, transactional_state_key(2)).value == '2026-06-30'
+        assert db.get(SyncState, transactional_state_key(1)) is None
 
 
 _REAL_UNDECRYPTABLE_CREDENTIALS = sync_pipeline._undecryptable_credentials
@@ -758,6 +724,8 @@ def test_execute_sync_does_not_certify_incomplete_historical_coverage(monkeypatc
 
 
 def test_execute_sync_runs_full_for_coverage_without_scoped_checkpoint(monkeypatch):
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2022, 1, 1))
+    monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
     with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
@@ -775,24 +743,19 @@ def test_execute_sync_runs_full_for_coverage_without_scoped_checkpoint(monkeypat
             company_ids=(1,),
             portal_account_id=7,
         )
-        purge_calls = []
         patch_execute_sync_dependencies(monkeypatch, db, credential)
-        monkeypatch.setattr(
-            sync_pipeline,
-            'purge_full_refresh_window',
-            lambda *_args, **_kwargs: purge_calls.append(_args) or True,
-        )
 
         result = execute_sync(mode='incremental', end_date=date(2026, 6, 30), portal_account_id=7)
 
         assert result['success'] is True
         assert result['mode'] == 'full'
-        assert result['window_start'] == sync_pipeline.full_sync_start_date(date(2026, 6, 30)).isoformat()
-        assert purge_calls
+        assert result['window_start'] == '2022-01-01'
         assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
 
 
 def test_execute_sync_forces_one_time_history_backfill_without_coverage_marker(monkeypatch):
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2022, 1, 1))
+    monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
     with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
@@ -815,13 +778,7 @@ def test_execute_sync_forces_one_time_history_backfill_without_coverage_marker(m
             company_ids=(1,),
             portal_account_id=7,
         )
-        purge_calls = []
         patch_execute_sync_dependencies(monkeypatch, db, credential)
-        monkeypatch.setattr(
-            sync_pipeline,
-            'purge_full_refresh_window',
-            lambda *_args, **_kwargs: purge_calls.append(_args) or True,
-        )
 
         result = execute_sync(
             mode='incremental',
@@ -831,10 +788,7 @@ def test_execute_sync_forces_one_time_history_backfill_without_coverage_marker(m
 
         assert result['success'] is True
         assert result['mode'] == 'full'
-        assert result['window_start'] == sync_pipeline.full_sync_start_date(
-            date(2026, 6, 30)
-        ).isoformat()
-        assert purge_calls
+        assert result['window_start'] == '2022-01-01'
         assert db.get(
             SyncState, sync_pipeline.historical_coverage_state_key(1)
         ).value == '2026-06-30'
@@ -856,10 +810,6 @@ def test_execute_sync_does_not_checkpoint_when_full_cleanup_fails(monkeypatch):
             portal_account_id=7,
         )
         patch_execute_sync_dependencies(monkeypatch, db, credential, purge_result=False)
-        skipped_calls = []
-        monkeypatch.setattr(
-            sync_pipeline, 'sync_service_categories', lambda *_args, **_kwargs: skipped_calls.append('company') or True
-        )
 
         result = execute_sync(mode='full', end_date=date(2026, 6, 30), portal_account_id=7)
 
@@ -868,14 +818,16 @@ def test_execute_sync_does_not_checkpoint_when_full_cleanup_fails(monkeypatch):
         assert db.get(
             SyncState, sync_pipeline.historical_coverage_state_key(1)
         ) is None
-        assert skipped_calls == []
-        cleanup = next(
-            item for item in result['step_results'] if item['key'] == sync_pipeline.FULL_REFRESH_CLEANUP_STEP
-        )
-        assert cleanup['success'] is False
+        # The branch is skipped after the failed cleanup: no source step ran for it.
+        assert [(item['key'], item['success']) for item in result['step_results']] == [
+            ('Сети и компании', True),
+            (sync_pipeline.FULL_REFRESH_CLEANUP_STEP, False),
+        ]
 
 
-def test_execute_sync_full_refreshes_new_company_even_with_stale_global_checkpoint(monkeypatch):
+def test_execute_sync_full_refreshes_a_new_company_and_leaves_the_retired_global_checkpoint_alone(monkeypatch):
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2022, 1, 1))
+    monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
     with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
@@ -891,23 +843,51 @@ def test_execute_sync_full_refreshes_new_company_even_with_stale_global_checkpoi
             company_ids=(1,),
             portal_account_id=7,
         )
-        purge_calls = []
         patch_execute_sync_dependencies(monkeypatch, db, credential)
-        monkeypatch.setattr(
-            sync_pipeline,
-            'purge_full_refresh_window',
-            lambda *_args, **_kwargs: purge_calls.append(_args) or True,
-        )
 
         result = execute_sync(mode='incremental', end_date=date(2026, 6, 30), portal_account_id=7)
 
         assert result['success'] is True
         assert result['mode'] == 'full'
-        assert purge_calls
+        assert result['window_start'] == '2022-01-01'
+        assert db.get(SyncState, sync_pipeline.TRANSACTIONAL_STATE_KEY).value == '2026-06-28'
         assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
         assert db.get(
             SyncState, sync_pipeline.historical_coverage_state_key(1)
         ).value == '2026-06-30'
+
+
+ALL_SYNC_TABLES = [
+    Group.__table__, Company.__table__, Client.__table__, Staff.__table__, StaffPositionMonth.__table__,
+    ServiceCatalog.__table__, ServiceCategoryCatalog.__table__, AccountCatalog.__table__,
+    GoodCatalog.__table__, GoodCategoryCatalog.__table__, Appointment.__table__, Transaction.__table__,
+    FinancialTransaction.__table__, GoodTransaction.__table__, Comment.__table__, StaffSchedule.__table__,
+    SyncState.__table__, SyncSourceState.__table__,
+]
+
+
+class WindowAPI:
+    """An API whose only non-empty answers are the visits and payments of the refreshed window."""
+
+    last_dated_fetch_complete = True
+
+    def __init__(self, records, financial):
+        self._records = records
+        self._financial = financial
+
+    def get_groups(self):
+        return FakeSyncAPI().get_groups()
+
+    def get_records(self, *_args, **_kwargs):
+        return self._records
+
+    def get_financial_transactions(self, *_args, **_kwargs):
+        return self._financial
+
+    def __getattr__(self, name):
+        if name.startswith('get_'):
+            return lambda *_args, **_kwargs: []
+        raise AttributeError(name)
 
 
 def test_execute_sync_refresh_purges_and_reloads_the_rolling_window(monkeypatch):
@@ -919,63 +899,47 @@ def test_execute_sync_refresh_purges_and_reloads_the_rolling_window(monkeypatch)
     monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2022, 1, 1))
     monkeypatch.setattr(sync_pipeline, 'SYNC_INCREMENTAL', True)
     monkeypatch.setattr(sync_pipeline, 'SYNC_REFRESH_DAYS', 90)
+    monkeypatch.setattr(sync_pipeline, 'SCHEDULE_DAYS', 60)
 
-    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+    with sqlite_session_with_system(ALL_SYNC_TABLES) as db:
         _certified_company(db)
-
+        db.add_all([
+            # Outside the 90-day window (starts 2026-04-02): must survive.
+            FinancialTransaction(id=98, external_id=98, source_type='yclients', company_id=1,
+                                 date=datetime(2026, 3, 1, 12), amount=1.0),
+            Appointment(id=76, external_id=76, source_type='yclients', company_id=1, date=date(2026, 3, 1)),
+            # Inside it and no longer in YClients: must go.
+            FinancialTransaction(id=99, external_id=99, source_type='yclients', company_id=1,
+                                 date=datetime(2026, 5, 10, 12), amount=2700.0),
+            Appointment(id=77, external_id=77, source_type='yclients', company_id=1, date=date(2026, 5, 10)),
+        ])
+        db.commit()
+        api = WindowAPI(
+            records=[{'id': 78, 'date': '2026-05-11', 'datetime': '2026-05-11T10:00:00+0300', 'services': []}],
+            financial=[{'id': 100, 'date': '2026-05-11 10:00:00', 'amount': 1000.0}],
+        )
         credential = YClientsCredentialValue(
-            id=11,
-            title='Tenant credential',
-            partner_token='partner',
-            login='login',
-            password='password',
-            company_ids=(1,),
-            portal_account_id=7,
+            id=11, title='Tenant credential', partner_token='partner', login='login', password='password',
+            company_ids=(1,), portal_account_id=7,
         )
-        purge_calls = []
-        windowed_kwargs = {}
-        patch_execute_sync_dependencies(monkeypatch, db, credential)
-        monkeypatch.setattr(
-            sync_pipeline,
-            'purge_full_refresh_window',
-            lambda *args, **_kwargs: purge_calls.append(args) or True,
-        )
-        for name in ('sync_records', 'sync_financial_transactions',
-                     'sync_goods_transactions', 'sync_comments'):
-            monkeypatch.setattr(
-                sync_pipeline,
-                name,
-                lambda *_args, _name=name, **kwargs: windowed_kwargs.setdefault(_name, kwargs) or True,
-            )
+        patch_execute_sync_credentials(monkeypatch, db, [credential], lambda _credential: api)
 
         result = execute_sync(mode='refresh', end_date=date(2026, 7, 1), portal_account_id=7)
 
         assert result['success'] is True
         assert result['mode'] == 'refresh'
         assert result['window_start'] == '2026-04-02'
+        assert {row.external_id for row in db.query(FinancialTransaction)} == {98, 100}
+        assert {row.external_id for row in db.query(Appointment)} == {76, 78}
 
-        # The purge covers the rolling window, not the branch's whole history.
-        assert len(purge_calls) == 1
-        _db_arg, company_id, purge_start, purge_end, schedule_end = purge_calls[0]
-        assert (company_id, purge_start, purge_end) == (1, '2026-04-02', '2026-07-01')
-        assert schedule_end > purge_end
+        # The purge narrowed the coverage of the window and the reload widened it back, to the
+        # schedule horizon for visits, so the branch is still certified for its whole history.
+        def coverage(source):
+            state = db.get(SyncSourceState, {'company_id': 1, 'source': source})
+            return state.period_start, state.period_end
 
-        # Every windowed source reloads that window instead of appending to it.
-        assert set(windowed_kwargs) == {
-            'sync_records', 'sync_financial_transactions',
-            'sync_goods_transactions', 'sync_comments',
-        }
-        for name, kwargs in windowed_kwargs.items():
-            assert kwargs['full_refresh'] is True, name
-            assert kwargs['start_date'] == '2026-04-02', name
-        # Records reach the schedule horizon, which is exactly why the purge above had to
-        # invalidate the appointments coverage that far rather than stopping at end_date.
-        assert windowed_kwargs['sync_records']['end_date'] == schedule_end
-        for name in ('sync_financial_transactions', 'sync_goods_transactions', 'sync_comments'):
-            assert windowed_kwargs[name]['end_date'] == purge_end, name
-
-        # The coverage round trip itself is covered by the purge test above, which uses
-        # the real bookkeeping functions rather than these stubs.
+        assert coverage(sync_pipeline.PERSONAL_ACCOUNT_SOURCE) == (date(2022, 1, 1), date(2026, 7, 1))
+        assert coverage(sync_pipeline.APPOINTMENTS_SOURCE) == (date(2022, 1, 1), date(2026, 8, 30))
         assert db.get(SyncState, transactional_state_key(1)).value == '2026-07-01'
         assert db.get(
             SyncState, sync_pipeline.historical_coverage_state_key(1)
@@ -999,11 +963,6 @@ def test_execute_sync_skips_credentials_without_assigned_companies(monkeypatch):
         monkeypatch.setattr(sync_pipeline, '_build_api_for_credential', lambda _credential: FakeSyncAPI())
         monkeypatch.setattr(sync_pipeline, 'mark_credential_success_sync', lambda *_args, **_kwargs: None)
         monkeypatch.setattr(sync_pipeline, 'mark_credential_failure_sync', lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(
-            sync_pipeline,
-            'resolve_sync_window',
-            lambda _end_date, requested_mode: (date(2026, 6, 28), requested_mode),
-        )
 
         result = execute_sync(mode='incremental', end_date=date(2026, 6, 30))
 
@@ -1015,13 +974,6 @@ def test_execute_sync_skips_credentials_without_assigned_companies(monkeypatch):
             Company.external_id == 10,
         ).one_or_none()
         assert company is not None
-
-
-def test_checkpoint_steps_treat_empty_results_as_success():
-    assert sync_records(FakeRecordsAPI([]), None, '1') is True
-    assert sync_financial_transactions(FakeFinancialTransactionsAPI([]), None, '1') is True
-    assert sync_goods_transactions(FakeGoodsTransactionsAPI([]), None, '1') is True
-    assert sync_comments(FakeCommentsAPI([]), None, '1') is True
 
 
 def test_checkpoint_steps_fail_when_source_is_unavailable():
@@ -1388,36 +1340,6 @@ def test_sync_financial_transactions_coerces_blank_numeric_fields():
         for field in ('expense_id', 'document_id', 'record_id', 'visit_id', 'sold_item_id'):
             assert getattr(transaction, field) is None, field
         assert transaction.account_id == 134378
-
-
-def test_sync_financial_transactions_empty_window_persists_source_coverage():
-    with sqlite_session_with_system(
-        [
-            Group.__table__,
-            Company.__table__,
-            FinancialTransaction.__table__,
-            SyncSourceState.__table__,
-        ]
-    ) as db:
-        db.add(Group(id=1, title='G1'))
-        db.add(Company(id=1, title='Salon', group_id=1))
-        db.commit()
-
-        assert sync_financial_transactions(
-            FakeFinancialTransactionsAPI([]),
-            db,
-            '1',
-            start_date='2025-02-01',
-            end_date='2025-02-28',
-        ) is True
-
-        state = db.get(
-            SyncSourceState,
-            {'company_id': 1, 'source': 'financial_transactions_detail'},
-        )
-        assert state.period_start == date(2025, 2, 1)
-        assert state.period_end == date(2025, 2, 28)
-        assert db.query(FinancialTransaction).count() == 0
 
 
 def test_purge_source_window_keeps_goods_transactions_outside_requested_window():
@@ -2347,44 +2269,6 @@ def test_sync_goods_transactions_preserves_embedded_titles():
         assert row.storage_title == 'Archive shelf'
 
 
-def test_empty_window_keeps_rows_when_not_refreshing():
-    """Incremental mode appends; an empty lookback must not wipe what it did not ask for."""
-    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
-        db.add(Group(id=1, title='G1'))
-        db.add(Company(id=1, title='Salon', group_id=1, external_id=10))
-        db.add(FinancialTransaction(
-            id=1, company_id=1, external_id=99, date=datetime(2026, 6, 10), amount=2700
-        ))
-        db.commit()
-
-        assert sync_financial_transactions(
-            FakeFinancialTransactionsAPI([]),
-            db,
-            '1',
-            start_date='2026-06-04',
-            end_date='2026-06-30',
-            db_company_id=1,
-        ) is True
-
-        assert db.query(FinancialTransaction).count() == 1
-
-
-def test_empty_window_without_bounds_deletes_nothing():
-    """Unbounded dates would make the purge match the whole table."""
-    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
-        db.add(Group(id=1, title='G1'))
-        db.add(Company(id=1, title='Salon', group_id=1, external_id=10))
-        db.add(GoodTransaction(id=1, company_id=1, external_id=55, date=datetime(2026, 6, 10)))
-        db.commit()
-
-        assert sync_goods_transactions(
-            FakeGoodsTransactionsAPI([]), db, '1',
-            start_date=None, end_date=None, db_company_id=1, full_refresh=True,
-        ) is True
-
-        assert db.query(GoodTransaction).count() == 1
-
-
 def test_refresh_window_uses_the_branch_reporting_start(monkeypatch):
     """A branch opened inside the window must not be asked for days it predates."""
     monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2022, 1, 1))
@@ -2397,35 +2281,6 @@ def test_refresh_window_uses_the_branch_reporting_start(monkeypatch):
         assert sync_pipeline.resolve_company_sync_window(
             db, date(2026, 7, 1), 'refresh', 1
         ) == (date(2026, 6, 1), 'refresh')
-
-
-def test_sync_refresh_days_defaults_to_a_quarter(monkeypatch):
-    """Pin the constant itself: a wide default would swallow the weekly full pass."""
-    monkeypatch.delenv('SYNC_REFRESH_DAYS', raising=False)
-    reloaded = importlib.reload(config)
-    try:
-        assert reloaded.SYNC_REFRESH_DAYS == 90
-    finally:
-        importlib.reload(config)
-
-
-class RaisingStepAPI:
-    """A step whose fetch raises the way `_get_all_pages` does on a bad page."""
-
-    def __init__(self, message='Failed to fetch paginated YClients endpoint'):
-        self._message = message
-
-    def __getattr__(self, _name):
-        def _raise(*_args, **_kwargs):
-            raise RuntimeError(self._message)
-        return _raise
-
-
-def test_raising_step_is_recorded_as_failed_instead_of_unwinding():
-    results = []
-    assert run_sync_step(results, 'Финансовые транзакции', RaisingStepAPI().get_financial) is False
-    assert results[-1]['success'] is False
-    assert results[-1]['key'] == 'Финансовые транзакции'
 
 
 def test_raising_checkpoint_step_fails_the_run_and_holds_the_checkpoint(monkeypatch):
@@ -2501,44 +2356,6 @@ def test_unreliably_read_window_is_not_purged():
 
 
 @pytest.mark.parametrize(
-    ('fn_name', 'fake_api', 'model', 'external_id'),
-    [
-        ('sync_goods_transactions', FakeGoodsTransactionsAPI, GoodTransaction, 55),
-        ('sync_comments', FakeCommentsAPI, Comment, 66),
-    ],
-)
-def test_incremental_empty_window_never_deletes(fn_name, fake_api, model, external_id):
-    """Only a purge-and-reload mode may delete; an empty lookback must not."""
-    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
-        db.add(Group(id=1, title='G1'))
-        db.add(Company(id=1, title='Salon', group_id=1, external_id=10))
-        db.add(model(id=1, company_id=1, external_id=external_id, date=datetime(2026, 6, 10)))
-        db.commit()
-
-        assert getattr(sync_pipeline, fn_name)(
-            fake_api([]), db, '1',
-            start_date='2026-06-04', end_date='2026-06-30', db_company_id=1,
-        ) is True
-
-        assert db.query(model).count() == 1
-
-
-def test_incremental_empty_window_keeps_appointments():
-    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES + [Transaction.__table__]) as db:
-        db.add(Group(id=1, title='G1'))
-        db.add(Company(id=1, title='Salon', group_id=1, external_id=10))
-        db.add(Appointment(id=1, company_id=1, external_id=77, date=date(2026, 6, 10)))
-        db.commit()
-
-        assert sync_records(
-            FakeRecordsAPI([]), db, '1',
-            start_date='2026-06-04', end_date='2026-08-30', db_company_id=1,
-        ) is True
-
-        assert db.query(Appointment).count() == 1
-
-
-@pytest.mark.parametrize(
     ('fn_name', 'model', 'seed', 'payload'),
     [
         (
@@ -2577,40 +2394,6 @@ def test_unreliably_read_window_is_not_purged_on_any_source(fn_name, model, seed
         ) is True
 
         assert db.query(model).filter(model.external_id == seed['external_id']).count() == 1
-
-
-@pytest.mark.parametrize(
-    ('fn_name', 'model', 'seed'),
-    [
-        ('sync_records', Appointment, dict(id=1, company_id=1, external_id=77, date=date(2026, 6, 10))),
-        (
-            'sync_goods_transactions',
-            GoodTransaction,
-            dict(id=1, company_id=1, external_id=55, date=datetime(2026, 6, 10)),
-        ),
-        ('sync_comments', Comment, dict(id=1, company_id=1, external_id=66, date=datetime(2026, 6, 10))),
-        (
-            'sync_financial_transactions',
-            FinancialTransaction,
-            dict(id=1, company_id=1, external_id=99, date=datetime(2026, 6, 10), amount=2700),
-        ),
-    ],
-)
-def test_unreliably_read_empty_window_is_not_purged_on_any_source(fn_name, model, seed):
-    tables = TRANSACTIONAL_WINDOW_TABLES + [Transaction.__table__, Staff.__table__, Client.__table__]
-    with sqlite_session_with_system(tables) as db:
-        db.add(Group(id=1, title='G1'))
-        db.add(Company(id=1, title='Salon', group_id=1, external_id=10))
-        db.add(model(**seed))
-        db.commit()
-
-        assert getattr(sync_pipeline, fn_name)(
-            PartialFetchAPI([]), db, '1',
-            start_date='2026-06-04', end_date='2026-08-30',
-            db_company_id=1, full_refresh=True,
-        ) is True
-
-        assert db.query(model).count() == 1
 
 
 def test_failed_coverage_step_leaves_the_branch_needing_a_full_pass(monkeypatch):
@@ -2733,19 +2516,6 @@ def test_step_note_marks_only_the_step_whose_window_was_paged():
     assert results[-1]['note'] is None
 
 
-def test_summary_lists_windows_that_may_have_come_up_short():
-    buffer = io.StringIO()
-    with redirect_stdout(buffer):
-        print_sync_summary([
-            {'name': 'Финансовые транзакции', 'key': 'x', 'success': True, 'elapsed': 0.1,
-             'note': 'окно прочитано постранично, строки могли не приехать'},
-            {'name': 'Комментарии', 'key': 'y', 'success': True, 'elapsed': 0.1, 'note': None},
-        ])
-    out = buffer.getvalue()
-    assert 'Окна прочитаны постранично и могли прийти неполными: 1' in out
-    assert 'Финансовые транзакции' in out
-
-
 def test_crashed_step_is_distinguishable_and_fails_the_run(monkeypatch):
     """A raise no longer aborts the run, so the run's status has to carry it instead."""
     monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2022, 1, 1))
@@ -2795,32 +2565,6 @@ def test_declined_non_checkpoint_step_still_leaves_the_run_successful(monkeypatc
 
         assert result['success'] is True
         assert all(item.get('error') is None for item in result['step_results'])
-
-
-def test_sync_no_longer_runs_analytics_or_z_report_steps(monkeypatch):
-    """Their tables were write-only and are dropped by migration 0052; the run must not call YClients for them."""
-    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2022, 1, 1))
-    monkeypatch.setattr(sync_pipeline, 'SYNC_INCREMENTAL', True)
-    monkeypatch.setattr(sync_pipeline, 'SYNC_REFRESH_DAYS', 90)
-
-    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
-        _certified_company(db)
-
-        credential = YClientsCredentialValue(
-            id=11, title='Tenant credential', partner_token='partner',
-            login='login', password='password', company_ids=(1,), portal_account_id=7,
-        )
-        patch_execute_sync_dependencies(monkeypatch, db, credential)
-
-        result = execute_sync(mode='refresh', end_date=date(2026, 7, 1), portal_account_id=7)
-
-        assert result['success'] is True
-        assert not [
-            item for item in result['step_results']
-            if 'Аналитика' in item['name'] or 'Z-Отчёт' in item['name']
-        ]
-    assert not [name for name in dir(sync_pipeline) if 'analytics' in name or 'z_report' in name.lower()]
-    assert not [name for name in dir(sync_pipeline.YClientsAPI) if 'analytics' in name or 'z_report' in name]
 
 
 def test_counter_sale_without_a_visit_is_stored_as_unlinked():

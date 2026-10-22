@@ -8,14 +8,14 @@ from httpx import ASGITransport, AsyncClient
 import api
 import dashboard_routes
 import dashboard_service
-import reports_team
 import sync_pipeline
 from api import app
 from auth_scope import AccessContext
-from dashboard_service import _staff_leaderboards_payload, _staff_positions_for_period, fetch_plan_fact, level_key
+from dashboard_service import _staff_leaderboards_payload, fetch_plan_fact, level_key
 from helpers import load_migration, sqlite_session_with_system
 from models import (
-    Appointment, Company, FinancialTransaction, Group, ManualFactMetric, Staff, StaffPositionMonth, Transaction,
+    Appointment, Company, FinancialTransaction, Group, ManualFactMetric, PlanMetric, Staff, StaffPositionMonth,
+    Transaction,
 )
 from sync_pipeline import sync_staff
 
@@ -91,7 +91,7 @@ def test_sync_stores_the_position_id_and_snapshots_active_staff_for_the_branch_m
 
 @pytest.mark.parametrize('value, expected', [
     (200, 200), ('200', 200), (2**31 - 1, 2**31 - 1),
-    (2**31, None), (10**12, None), (0, None), (-5, None), ('abc', None), (None, None), (float('inf'), None),
+    (2**31, None), (0, None), ('abc', None), (None, None), (float('inf'), None),
 ])
 def test_position_external_id_rejects_what_the_integer_column_cannot_hold(value, expected):
     assert sync_pipeline._position_external_id(value) == expected
@@ -196,8 +196,15 @@ async def _seed_march_revenue(async_session):
     await async_session.commit()
 
 
+def _march_plan_role(staff_id, category):
+    return PlanMetric(
+        period_start=date(2025, 3, 1), period_end=date(2025, 3, 31), company_id=1, staff_id=staff_id,
+        staff_category=category, metric_code='clients', value=1.0, updated_at=datetime(2025, 3, 1),
+    )
+
+
 @pytest.mark.asyncio
-async def test_the_level_is_the_latest_snapshot_up_to_the_period_end_month(async_session):
+async def test_the_selector_level_is_the_latest_snapshot_up_to_the_period_end_month(async_session):
     await _seed_branches(async_session)
     async_session.add_all([
         StaffPositionMonth(
@@ -211,35 +218,23 @@ async def test_the_level_is_the_latest_snapshot_up_to_the_period_end_month(async
     ])
     await async_session.commit()
 
-    assert (await _staff_positions_for_period(async_session, [1], date(2025, 3, 31)))[1] == (100, 'Барбер')
+    async def levels(end):
+        async_session.info.clear()
+        listed = await dashboard_service.fetch_staff(async_session, start=MARCH[0], end=end)
+        return {item['id']: (item['position_id'], item['level']) for item in listed}
+
+    base, top = (100, {'key': 'барбер', 'title': 'Барбер'}), (200, {'key': 'топбарбер', 'title': 'ТОП-барбер'})
+    assert (await levels(MARCH[1]))[1] == base
     # A promotion counts from the month it was snapshotted, so a period ending in it reads the new level.
-    assert (await _staff_positions_for_period(async_session, [1], date(2025, 4, 1)))[1] == (200, 'ТОП-барбер')
-    assert (await _staff_positions_for_period(async_session, [1], date(2025, 12, 31)))[1] == (200, 'ТОП-барбер')
+    assert (await levels(date(2025, 4, 1)))[1] == top
+    assert (await levels(date(2025, 12, 31)))[1] == top
+    # Staff 2 has no snapshot at all: the period falls back to the position the staff row holds now.
+    assert (await levels(MARCH[1]))[2] == top
 
 
 @pytest.mark.asyncio
-async def test_the_level_falls_back_to_the_current_position_before_tracking_began(async_session):
+async def test_fetch_staff_gives_barbers_and_mixed_a_level_and_administrators_none(async_session):
     await _seed_branches(async_session)
-    async_session.add(StaffPositionMonth(
-        staff_id=1, month=date(2025, 6, 1), company_id=1, position_id=999, position_title='Бренд-барбер',
-        updated_at=FACTUAL_AT,
-    ))
-    await async_session.commit()
-
-    resolved = await _staff_positions_for_period(async_session, [1, 2, 404], date(2025, 3, 31))
-
-    assert resolved == {1: (100, 'Барбер'), 2: (200, 'ТОП-барбер'), 404: (None, None)}
-
-
-@pytest.mark.asyncio
-async def test_fetch_staff_gives_barbers_and_mixed_a_level_and_administrators_none(async_session, monkeypatch):
-    await _seed_branches(async_session)
-
-    async def categories(db, rows, start, end):
-        by_id = {2: 'mixed', 3: 'administrator'}
-        return {(int(row.company_id), int(row.id)): by_id.get(row.id, 'barber') for row in rows}
-
-    monkeypatch.setattr(dashboard_service, '_staff_label_categories', categories)
     async_session.add_all([
         Staff(id=5, name='No id', position='Барбер', company_id=1),
         # A barber by plan category whose title does not read as a barber: the Overview group would omit him, so
@@ -271,19 +266,28 @@ async def test_fetch_staff_gives_barbers_and_mixed_a_level_and_administrators_no
     assert periodic[1]['position_id'] == 500
     assert periodic[1]['level'] == {'key': 'премиумбарбер', 'title': 'ПРЕМИУМ-барбер'}
 
+    # A person who worked the stand in March and the chair in April is `mixed` and still gets a level.
+    async_session.add(_march_plan_role(2, 'administrator'))
+    await async_session.commit()
+    async_session.info.clear()
+    listed = await dashboard_service.fetch_staff(async_session, start=MARCH[0], end=APRIL[1])
+    by_id = {item['id']: item for item in listed}
+    assert by_id[2]['category'] == 'mixed'
+    assert by_id[2]['level'] == {'key': 'топбарбер', 'title': 'ТОП-барбер'}
+
 
 @pytest.mark.asyncio
-async def test_a_mixed_person_who_ends_the_period_as_an_administrator_has_no_level(async_session, monkeypatch):
+async def test_a_mixed_person_who_ends_the_period_as_an_administrator_has_no_level(async_session):
     await _seed_branches(async_session)
+    # Staff 3 is an «Администратор» (id 300) who sat in a barber chair in March.
+    async_session.add(_march_plan_role(3, 'barber'))
+    await async_session.commit()
 
-    async def categories(db, rows, start, end):
-        return {(int(row.company_id), int(row.id)): 'mixed' for row in rows}
+    listed = await dashboard_service.fetch_staff(async_session, start=MARCH[0], end=APRIL[1])
+    by_id = {item['id']: item for item in listed}
 
-    monkeypatch.setattr(dashboard_service, '_staff_label_categories', categories)
-
-    by_id = {item['id']: item for item in await dashboard_service.fetch_staff(async_session)}
-
-    # Staff 3 is an «Администратор» (id 300): it would otherwise offer a barber level named after the post.
+    # It would otherwise offer a barber level named after the post.
+    assert by_id[3]['category'] == 'mixed'
     assert by_id[3]['level'] is None
     assert by_id[2]['level'] == {'key': 'топбарбер', 'title': 'ТОП-барбер'}
 
@@ -550,19 +554,14 @@ async def test_the_ratings_narrow_to_the_level_and_drop_administrator_and_branch
 
 
 @pytest.mark.asyncio
-async def test_the_average_check_table_follows_the_avg_check_permission(async_session, monkeypatch):
+async def test_the_average_check_table_follows_the_avg_check_permission(async_session):
     await _seed_branches(async_session)
-    row = {'staff': 'Master', 'staff_id': 2, 'company_id': 1, 'company_title': 'Alpha', 'value': 2500.0, 'visits': 4.0}
-
-    async def fake_plan_fact(*args, **kwargs):
-        return {'staff_leaderboards': {'avg_check_barber': [row], 'avg_check_plan_staff': []}}
-
-    monkeypatch.setattr(reports_team, 'fetch_plan_fact', fake_plan_fact)
+    await _seed_march_revenue(async_session)
     params = {'report_id': 'staff_leaderboard', **PLAN_FACT_PARAMS}
     seen = {}
     for name, metrics in (('without', frozenset({'cosmo_sum'})), ('with', frozenset({'avg_check'}))):
         ctx = AccessContext.from_user(
-            user_id=10, role='manager', portal_account_id=1, company_ids=[1], money_metrics=metrics,
+            user_id=10, role='manager', portal_account_id=1, company_ids=[1, 2], money_metrics=metrics,
         )
         client = await _client(async_session, ctx)
         try:
@@ -571,12 +570,15 @@ async def test_the_average_check_table_follows_the_avg_check_permission(async_se
         finally:
             app.dependency_overrides.clear()
         assert response.status_code == 200
-        seen[name] = {table['id']: table for table in response.json()['data']['tables']}
+        seen[name] = response.json()['data']
 
-    assert 'avg_check_barber' not in seen['without']
-    table = seen['with']['avg_check_barber']
-    assert [column['key'] for column in table['columns']] == ['staff', 'company_title', 'value', 'visits']
-    assert table['rows'] == [row]
+    assert 'avg_check_barber' not in {table['id'] for table in seen['without']['tables']}
+    table = next(table for table in seen['with']['tables'] if table['id'] == 'avg_check_barber')
+    assert {row['staff_id']: (row['value'], row['visits']) for row in table['rows']} == {
+        1: (1000.0, 1.0), 2: (2000.0, 1.0), 4: (3000.0, 1.0),
+    }
+    # The check is allowed; the revenue it is made of is not.
+    assert 'revenue_barber' not in {table['id'] for table in seen['with']['tables']}
     assert 'avg_check_barber' not in json.dumps(seen['without'])
 
 

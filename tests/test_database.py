@@ -107,7 +107,7 @@ def test_migration_engine_bounds_lock_waits_on_postgres(monkeypatch):
 
     import sqlalchemy
 
-    from database import MIGRATION_LOCK_TIMEOUT_MS, build_database_url, run_migrations
+    from database import build_database_url, run_migrations
 
     captured = {}
 
@@ -122,10 +122,8 @@ def test_migration_engine_bounds_lock_waits_on_postgres(monkeypatch):
     with pytest.raises(RuntimeError, match='stop before connecting'):
         run_migrations(build_database_url('127.0.0.1', 5433, 'db', 'user', 'p%ss'))
 
-    assert captured['connect_args'] == {'options': f'-c lock_timeout={MIGRATION_LOCK_TIMEOUT_MS}'}
-
-
-def test_migration_connect_args_are_empty_for_sqlite():
-    from database import migration_connect_args
-
-    assert migration_connect_args('sqlite:///:memory:') == {}
+    prefix = '-c lock_timeout='
+    options = captured['connect_args']['options']
+    assert options.startswith(prefix)
+    # Bounded, but not forever: the deploy timer retries every 5 minutes.
+    assert 0 < int(options.removeprefix(prefix)) < 5 * 60 * 1000

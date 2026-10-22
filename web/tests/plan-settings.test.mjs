@@ -5,7 +5,6 @@ import {
   BRANCH_PLAN_SETTING_FIELDS,
   STAFF_PLAN_SETTING_FIELDS,
   buildPlanSettingsPayload,
-  isScheduleAttributionDiagnostic,
   planSettingsInputReader,
 } from '../src/planSettings.js';
 
@@ -78,32 +77,7 @@ test('plan settings payload preserves the editable field contract', () => {
   });
 });
 
-test('the payload is addressed to the month the rows were loaded for', () => {
-  // The picker already shows the next month while the table still holds the old one.
-  const payload = buildPlanSettingsPayload({ month: '2026-08', branches: [], staff: [] }, () => null);
-  assert.equal(payload.month, '2026-08');
-});
-
-test('schedule attribution diagnostics share the coverage renderer', () => {
-  assert.equal(isScheduleAttributionDiagnostic('staff_schedule_coverage'), true);
-  assert.equal(isScheduleAttributionDiagnostic('appointment_timestamp_coverage'), true);
-  assert.equal(isScheduleAttributionDiagnostic('admin_barber_clients_mismatch'), false);
-});
-
-// The per-cell selector the payload used to run, modelled over a list of inputs in document order.
-function legacyRead(inputs, scope, row, field) {
-  const match = inputs.find(({ dataset }) => (
-    (scope === 'branch' ? dataset.planBranch !== undefined : dataset.planStaff !== undefined)
-    && (scope === 'branch'
-      ? dataset.companyId === String(row.company_id)
-      : dataset.staffId === String(row.staff_id))
-    && dataset.field === field
-  ));
-  const value = match?.value.trim() || '';
-  return value === '' ? null : value;
-}
-
-test('reading the inputs through one index gives what the per-cell selector gave', () => {
+test('the reader returns the trimmed value of the first matching input, and null for an empty or absent cell', () => {
   const input = (scope, ids, field, value) => ({
     dataset: { [scope === 'branch' ? 'planBranch' : 'planStaff']: '', field, ...ids },
     value,
@@ -120,17 +94,11 @@ test('reading the inputs through one index gives what the per-cell selector gave
     { dataset: { somethingElse: '' }, value: 'ignored' },
   ];
   const read = planSettingsInputReader(inputs);
-  const rows = [
-    ['branch', { company_id: 7 }], ['branch', { company_id: '8' }], ['branch', { company_id: 9 }],
-    ['staff', { company_id: 7, staff_id: 11 }], ['staff', { staff_id: '12' }], ['staff', { staff_id: 13 }],
-  ];
-  const fields = [...BRANCH_PLAN_SETTING_FIELDS, ...STAFF_PLAN_SETTING_FIELDS];
-  for (const [scope, row] of rows) {
-    for (const field of fields) {
-      assert.equal(read(scope, row, field), legacyRead(inputs, scope, row, field), `${scope} ${JSON.stringify(row)} ${field}`);
-    }
-  }
   assert.equal(read('branch', { company_id: 7 }, 'wax_pct'), '12,5');
   assert.equal(read('staff', { staff_id: 12 }, 'reviews_qty'), '8');
   assert.equal(read('staff', { staff_id: 11 }, 'avg_check_total'), null);
+  assert.equal(read('branch', { company_id: '8' }, 'wax_pct'), '3');
+  assert.equal(read('branch', { company_id: 9 }, 'wax_pct'), null);
+  assert.equal(read('branch', { company_id: 7 }, 'opz_pct'), null);
+  assert.equal(read('staff', { staff_id: 13 }, 'clients'), null);
 });

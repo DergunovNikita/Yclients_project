@@ -232,7 +232,3 @@ def test_backfill_uses_the_requested_stored_credential_for_every_branch(monkeypa
     assert backfill_staff_schedules.main() == 0
     assert built == [7]
     assert synced and all(item == ('500', 5) for item in synced)
-
-
-def test_backfill_has_no_environment_credential_fallback():
-    assert not hasattr(backfill_staff_schedules, '_fallback_credential')

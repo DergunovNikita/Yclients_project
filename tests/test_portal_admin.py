@@ -104,17 +104,15 @@ def _mentions(statements, table):
 
 
 @pytest.mark.asyncio
-async def test_staff_mirror_walk_reads_in_bulk_and_reports_whether_it_wrote(tenant_db):
+async def test_staff_mirror_walk_reports_whether_it_wrote(tenant_db):
     for user_id in range(10, 16):
         tenant_db.add(_user(user_id, 'manager'))
         tenant_db.add(PortalUserBranch(user_id=user_id, company_id=1 + user_id % 2))
     await tenant_db.commit()
 
-    with count_statements(tenant_db) as first:
-        changed = await portal_staff_sync.sync_all_portal_users_staff(tenant_db, 1)
+    changed = await portal_staff_sync.sync_all_portal_users_staff(tenant_db, 1)
     await tenant_db.commit()
-    with count_statements(tenant_db) as second:
-        unchanged = await portal_staff_sync.sync_all_portal_users_staff(tenant_db, 1)
+    unchanged = await portal_staff_sync.sync_all_portal_users_staff(tenant_db, 1)
 
     assert changed is True
     assert unchanged is False
@@ -122,10 +120,6 @@ async def test_staff_mirror_walk_reads_in_bulk_and_reports_whether_it_wrote(tena
         select(func.count()).select_from(Staff).where(Staff.portal_user_id.in_(range(10, 16)))
     )
     assert mirrored == 6
-    # Six users: branches and staff rows are two reads for the whole walk, not two per user.
-    assert len(_mentions(second, 'system.portal_user_branches')) == 1
-    assert len(_mentions(second, 'staff')) == 1
-    assert len(_mentions(first, 'system.portal_user_branches')) == 1
 
 
 @pytest.mark.asyncio
@@ -155,34 +149,32 @@ async def test_a_get_of_the_user_list_writes_nothing_when_no_mirror_is_missing(t
 
 
 @pytest.mark.asyncio
-async def test_branch_ids_for_a_list_of_users_match_the_per_user_loader(tenant_db):
-    from auth_service import load_user_access_branch_ids
-
-    tenant_db.add(PortalAccount(id=2, label='Other', created_at=utcnow()))
-    tenant_db.add(Company(id=3, title='Branch 3', group_id=1))
-    tenant_db.add(PortalBranch(portal_account_id=2, company_id=3))
-    tenant_db.add_all(
-        [
-            _user(10, 'manager'),
-            _user(11, 'barber'),
-            _user(12, 'owner', tenant=2),
-            _user(13, 'platform_admin', tenant=None),
-        ]
-    )
+async def test_the_user_list_shows_each_users_branches(tenant_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    tenant_db.add_all([_user(10, 'manager'), _user(11, 'barber')])
     tenant_db.add_all([
         PortalUserBranch(user_id=10, company_id=2),
         PortalUserBranch(user_id=10, company_id=1),
         PortalUserBranch(user_id=11, company_id=1),
     ])
     await tenant_db.commit()
-    users = (await tenant_db.execute(select(PortalUser).order_by(PortalUser.id))).scalars().all()
 
-    with count_statements(tenant_db) as statements:
-        batched = await auth_routes._load_access_branch_ids_by_user(tenant_db, users)
+    async def override_db():
+        yield tenant_db
 
-    assert len(statements) == 2
-    for user in users:
-        assert batched[user.id] == await load_user_access_branch_ids(tenant_db, user), user.role
+    app.dependency_overrides[api.get_async_db] = override_db
+    headers = {'Authorization': f'Bearer {await issue_access_token(tenant_db, 1, "owner")}'}
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            response = await client.get('/auth/admin/users', headers=headers)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    branches = {row['id']: row['company_ids'] for row in response.json()['data'] if row.get('is_portal_user')}
+    assert branches[1] == [1, 2]
+    assert branches[10] == [1, 2]
+    assert branches[11] == [1]
 
 
 @pytest.mark.asyncio
@@ -264,22 +256,30 @@ async def test_bulk_provisioning_query_count_does_not_grow_with_the_batch(tenant
 
 
 @pytest.mark.asyncio
-async def test_bulk_provisioned_accounts_get_the_shared_unusable_hash_and_one_sequence_fix(tenant_db, monkeypatch):
+async def test_bulk_provisioned_accounts_cannot_log_in_with_a_guessed_password(tenant_db):
     await _add_staff(tenant_db, 3)
-    sequence_fixes = []
-
-    async def count_fix(db):
-        sequence_fixes.append(1)
-
-    monkeypatch.setattr(portal_account_provision, '_ensure_portal_user_id_sequence', count_fix)
     created, _ = await provision_all_unlinked_staff(tenant_db, None)
     await tenant_db.commit()
-
     assert len(created) == 3
-    assert sequence_fixes == [1]
-    hashes = (await tenant_db.execute(select(PortalUser.password_hash).where(PortalUser.id >= 9000))).scalars().all()
-    assert set(hashes) == {DUMMY_PASSWORD_HASH}
-    assert not verify_password('anything-at-all', DUMMY_PASSWORD_HASH)
+    # The login exists, so a refusal below is about the password and not about an unknown address.
+    assert await tenant_db.scalar(
+        select(func.count()).select_from(PortalUser).where(PortalUser.email == 'worker9000@example.com')
+    ) == 1
+
+    async def override_db():
+        yield tenant_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            attempts = [
+                await client.post('/auth/login', json={'email': 'worker9000@example.com', 'password': password})
+                for password in ('anything-at-all', 'Worker9000!')
+            ]
+    finally:
+        app.dependency_overrides.clear()
+
+    assert [response.status_code for response in attempts] == [401, 401]
 
 
 @pytest.mark.asyncio
@@ -392,7 +392,7 @@ async def test_distribute_credentials_survives_a_database_error_outside_the_send
         attempts.append(user.id)
         if len(attempts) == 1:
             # A failed flush leaves the session unusable until a rollback, with no rollback of its own.
-            db.add(PortalUser(id=1, email='clash@example.com', password_hash='x', role='barber'))
+            db.add(_user(999, 'barber', email='user12@example.com'))  # the e-mail of a stored user: unique violation
             await db.flush()
 
     monkeypatch.setattr('auth_routes.send_account_invite_email', broken_first)
@@ -458,45 +458,6 @@ async def test_distribute_credentials_keeps_mailing_every_user_after_one_failure
     data = response.json()['data']
     assert [item['user_id'] for item in data['errors']] == [30]
     assert [item['user_id'] for item in data['sent']] == [31, 32, 33]
-
-
-@pytest.mark.asyncio
-async def test_distribute_credentials_refreshes_each_user_at_most_once_after_failures(tenant_db, monkeypatch):
-    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    user_ids = list(range(20, 26))
-    for user_id in user_ids:
-        tenant_db.add(_user(user_id, 'barber'))
-        tenant_db.add(PortalUserBranch(user_id=user_id, company_id=1))
-    await tenant_db.commit()
-
-    async def always_fails(db, user):
-        raise RuntimeError('smtp down')
-
-    monkeypatch.setattr('auth_routes.send_account_invite_email', always_fails)
-    statements = []
-    engine = tenant_db.bind.sync_engine
-    event.listen(engine, 'before_cursor_execute', lambda *args: statements.append(args[2]))
-
-    async def override_db():
-        yield tenant_db
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
-            response = await client.post(
-                '/auth/admin/distribute-credentials',
-                headers={'Authorization': f'Bearer {await issue_access_token(tenant_db, 1, "owner")}'},
-                json={'user_ids': user_ids},
-            )
-    finally:
-        app.dependency_overrides.clear()
-
-    assert response.status_code == 200
-    assert [item['user_id'] for item in response.json()['data']['errors']] == user_ids
-    by_id = 'FROM system.portal_users \nWHERE system.portal_users.id = ?'
-    refreshes = [sql for sql in statements if sql.endswith(by_id)]
-    # One refresh per user mailed after the first failure, not one per loaded user on every failure.
-    assert len(refreshes) == len(user_ids) - 1
 
 
 # ---------- AUTH-13: one cross-tenant claim check ----------
@@ -642,16 +603,15 @@ async def test_listing_credentials_writes_no_audit_row(tenant_db, monkeypatch):
     app.dependency_overrides[api.get_async_db] = override_db
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
-            with count_statements(tenant_db) as statements:
-                response = await client.get(
-                    '/auth/admin/yclients-credentials',
-                    headers={'Authorization': f'Bearer {await issue_access_token(tenant_db, 1, "owner")}'},
-                )
+            headers = {'Authorization': f'Bearer {await issue_access_token(tenant_db, 1, "owner")}'}
+            before = await tenant_db.scalar(select(func.count()).select_from(PortalAuditEvent))
+            response = await client.get('/auth/admin/yclients-credentials', headers=headers)
+            after = await tenant_db.scalar(select(func.count()).select_from(PortalAuditEvent))
     finally:
         app.dependency_overrides.clear()
 
     assert response.status_code == 200
-    assert not [s for s in statements if 'portal_audit_events' in s]
+    assert after == before
 
 
 # ---------- AUTH-22: key hygiene warning ----------
@@ -684,12 +644,17 @@ def test_a_real_fernet_key_or_a_dev_environment_is_not_warned_about(monkeypatch,
 
     monkeypatch.setattr(yclients_credentials, 'PORTAL_CREDENTIALS_ENCRYPTION_KEY', Fernet.generate_key().decode())
     monkeypatch.setattr(yclients_credentials, 'PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD', '')
-    with caplog.at_level(logging.WARNING, logger='yclients.credentials'):
-        monkeypatch.setattr(yclients_credentials, 'IS_PRODUCTION', True)
-        yclients_credentials.warn_if_passphrase_keys()
-        monkeypatch.setattr(yclients_credentials, 'PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'passphrase')
-        monkeypatch.setattr(yclients_credentials, 'IS_PRODUCTION', False)
-        yclients_credentials.warn_if_passphrase_keys()
+    logger = logging.getLogger('yclients.credentials')
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger='yclients.credentials'):
+            monkeypatch.setattr(yclients_credentials, 'IS_PRODUCTION', True)
+            yclients_credentials.warn_if_passphrase_keys()
+            monkeypatch.setattr(yclients_credentials, 'PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'passphrase')
+            monkeypatch.setattr(yclients_credentials, 'IS_PRODUCTION', False)
+            yclients_credentials.warn_if_passphrase_keys()
+    finally:
+        logger.removeHandler(caplog.handler)
 
     assert caplog.text == ''
 

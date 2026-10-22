@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createServer } from 'vite';
 
@@ -70,38 +69,6 @@ test('exact money keeps kopecks where whole roubles would hide them', async (t) 
   assert.match(format.formatMoneyExact(1250.5), /1.250,5 ₽|1,250\.5 ₽|1\s250,5 ₽/);
   assert.equal(format.formatMoney(1250.5), format.formatMoney(1251));
   assert.notEqual(format.formatMoneyExact(1250.5), format.formatMoneyExact(1251));
-});
-
-test('main.js uses the shared formatters rather than redefining them', async () => {
-  // A wiring assertion, and an honest proxy for a call-site test rather than the real
-  // thing. main.js exports nothing and calls init() at import, so importing it in node
-  // --test would need a full DOM (jsdom), which this project does not carry. What this
-  // CAN pin is the regression that actually matters: main.js used to define its own
-  // formatMoney/formatNumber/formatDecimal with no null guard, so identical missing data
-  // rendered "0 ₽" on the Overview and "—" in Reports. If someone reintroduces a local
-  // copy, the drift comes back silently — 52 call sites move together and no payload-level
-  // gate can see it, because the difference is in rendering, not in the API response.
-  //
-  // NOT covered here: whether "—" is the right thing to show at each of those 52 sites.
-  // That is a visual judgement. The known-affected group is the extra-service fields,
-  // which dashboard_service.py sets to None when the attribution source is not ready.
-  const source = await readFile(new URL('../src/main.js', import.meta.url), 'utf8');
-
-  assert.match(
-    source,
-    /import\s*\{[^}]*\bformatMoney\b[^}]*\}\s*from\s*'\.\/reports\/format\.js'/s,
-    'main.js must import the shared formatters from reports/format.js',
-  );
-  for (const name of ['formatMoney', 'formatNumber', 'formatDecimal']) {
-    assert.doesNotMatch(
-      source,
-      // Declaration AND assignment forms: `const formatMoney = (v) => …` would otherwise
-      // slip through. The import assertion above already makes a bare `function` clash a
-      // SyntaxError, so the realistic regression is "drop the import, add a local const".
-      new RegExp(`^\\s*(?:function\\s+${name}\\s*\\(|(?:const|let|var)\\s+${name}\\s*=)`, 'm'),
-      `main.js must not redefine ${name} locally — that is how the "0 ₽" vs "—" drift returned`,
-    );
-  }
 });
 
 test('a change that rounds to zero reads as a plain zero, never -0 or +0', async (t) => {

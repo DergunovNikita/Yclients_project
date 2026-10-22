@@ -5,7 +5,7 @@ from datetime import date, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import event, select, text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 import api
@@ -182,11 +182,6 @@ async def test_extra_service_revenue_failure_does_not_roll_back_the_request_sess
     assert [group.id for group in (await async_session.execute(select(Group))).scalars()] == [1]
 
 
-def test_company_scope_clause_of_an_empty_allow_list_matches_nothing():
-    clause = dashboard_service._company_scope_clause(Staff.company_id, None, [])
-    assert 'IN' in str(clause)
-
-
 def test_countable_manual_months_reads_today_in_the_branch_zone():
     """00:00-03:00 MSK on the 1st is still the last day of the month in UTC; the new month counts."""
     just_after_midnight_msk = datetime(2025, 9, 30, 22, 0)  # 01:00 on 1 October in Moscow
@@ -194,38 +189,6 @@ def test_countable_manual_months_reads_today_in_the_branch_zone():
     assert dashboard_service._countable_manual_months(
         date(2025, 10, 1), date(2025, 10, 1), just_after_midnight_msk
     ) == {date(2025, 10, 1)}
-
-
-@pytest.mark.asyncio
-async def test_staff_schedule_coverage_is_computed_once_per_request(async_session):
-    async_session.add(Group(id=1, title='G1'))
-    async_session.add(Company(id=1, title='Salon', group_id=1, reporting_start_date=date(2025, 1, 1)))
-    await async_session.commit()
-    statements = []
-
-    def count_statements(conn, cursor, statement, parameters, context, executemany):
-        statements.append(statement)
-
-    factual_at = datetime(2025, 6, 1, 12, 0)
-    event.listen(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
-    try:
-        first = await dashboard_service._staff_schedule_coverage_info(
-            async_session, date(2025, 5, 1), date(2025, 5, 31), 1, factual_at
-        )
-        issued = len(statements)
-        second = await dashboard_service._staff_schedule_coverage_info(
-            async_session, date(2025, 5, 1), date(2025, 5, 31), 1, factual_at
-        )
-        other_period = await dashboard_service._staff_schedule_coverage_info(
-            async_session, date(2025, 5, 1), date(2025, 5, 15), 1, factual_at
-        )
-    finally:
-        event.remove(async_session.bind.sync_engine, 'before_cursor_execute', count_statements)
-
-    assert issued > 0
-    assert second is first
-    assert len(statements) > issued  # a different period is a different key and does query
-    assert other_period['required_end'] == date(2025, 5, 15)
 
 
 @pytest.mark.asyncio

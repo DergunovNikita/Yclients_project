@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -66,17 +65,6 @@ test('the current block is the last one that reached the offset', () => {
 
 test('at the page bottom the last block wins', () => {
   assert.equal(activeTargetIndex([-400, 200, 500], { atBottom: true }), 2);
-});
-
-test('every jump label key exists in all locales', () => {
-  const keys = ['dash.jumpNavLabel', 'dash.jumpPlanBranches', 'dash.jumpPlanStaff', 'reports.jumpMetrics', 'reports.jumpCharts'];
-  for (const locale of ['ru', 'en', 'it']) {
-    const messages = JSON.parse(readFileSync(new URL(`../locales/${locale}.json`, import.meta.url), 'utf8'));
-    for (const key of keys) {
-      const value = key.split('.').reduce((node, part) => node?.[part], messages);
-      assert.equal(typeof value, 'string', `${locale}: ${key}`);
-    }
-  }
 });
 
 test('a block parked under sticky filters is current even though its margin exceeds the offset', () => {

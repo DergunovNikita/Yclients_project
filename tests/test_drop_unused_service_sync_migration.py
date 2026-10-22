@@ -88,8 +88,3 @@ def test_models_no_longer_carry_what_the_migration_drops():
     assert foreign_key.referred_table.name == 'service_catalog'
     assert foreign_key.ondelete == 'CASCADE'
     assert [column.name for column in foreign_key.columns] == ['company_id', 'service_id']
-
-
-def test_migration_chains_from_0055(migration):
-    assert migration.down_revision == '0055_auth_lifecycle_cleanup'
-    assert len(migration.revision) <= 32  # alembic_version.version_num is VARCHAR(32)

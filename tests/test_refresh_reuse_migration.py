@@ -50,9 +50,7 @@ def test_upgrade_adds_the_columns_and_index_and_downgrade_removes_them(migration
     }
 
 
-def test_migration_matches_the_model_and_chains_from_0052(migration):
-    assert migration.down_revision == '0052_drop_analytics_tables'
-    assert len(migration.revision) <= 32  # alembic_version.version_num is VARCHAR(32)
+def test_the_model_matches_the_migration(migration):
     index_names = {index.name for index in PortalRefreshToken.__table__.indexes}
     assert migration.INDEX_NAME in index_names
     assert {'previous_token_hash', 'rotated_at'} <= set(PortalRefreshToken.__table__.columns.keys())
