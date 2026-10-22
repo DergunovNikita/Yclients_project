@@ -1,6 +1,7 @@
 """Report usage analytics: capture around /dashboard/reports/data and the platform-admin report."""
 
 import asyncio
+import dataclasses
 import logging
 import time
 from datetime import date, datetime, timedelta
@@ -63,8 +64,9 @@ def usage_app(async_session, monkeypatch):
         lambda: async_sessionmaker(async_session.bind, expire_on_commit=False),
     )
     app.dependency_overrides[api.get_async_db] = override_db
-    app.dependency_overrides[dashboard_routes.get_dashboard_access] = lambda: state['ctx']
-    app.dependency_overrides[dashboard_routes.is_demo_request] = lambda: state['demo']
+    app.dependency_overrides[dashboard_routes.get_dashboard_access] = lambda: dataclasses.replace(
+        state['ctx'], is_demo=state['demo']
+    )
     yield state
     app.dependency_overrides.clear()
 

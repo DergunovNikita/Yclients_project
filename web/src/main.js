@@ -27,6 +27,7 @@ import {
   registerUnsavedWork,
   requiresLogin,
   setSelectedPortalAccountId,
+  USER_ADMIN_ROLES,
 } from './auth.js';
 import {
   fetchJson as sharedFetchJson,
@@ -101,7 +102,7 @@ import './loader.css';
 import { mountLoader, stopLoaderWithRequest } from './loader.js';
 import { bindDraftFlush, createDraftController, fingerprint } from './editorDrafts.js';
 import { formatBranchDateTime } from './timestamps.js';
-import { staffOption } from './staffLabel.js';
+import { branchRowTitle, staffOption } from './staffLabel.js';
 import {
   chosenLevel,
   levelReportParams,
@@ -409,11 +410,7 @@ function protectedSavePending() {
 }
 
 function discardProtectedChanges() {
-  if (activeView === 'planSettings') {
-    discardPlanSettingsDraft();
-    if (planSettingsSavedData) renderPlanSettings(JSON.parse(JSON.stringify(planSettingsSavedData)));
-    else setPlanSettingsDirty(false);
-  }
+  if (activeView === 'planSettings') resetPlanSettingsToSaved();
   manualEditors.byView[activeView]?.discard();
 }
 
@@ -575,7 +572,7 @@ window.addEventListener('portal:session-transition', () => {
   renderPlanColumnPicker();
 });
 
-const SETTINGS_ADMIN_ROLES = new Set(['platform_admin', 'owner', 'branch_admin']);
+const SETTINGS_ADMIN_ROLES = new Set(USER_ADMIN_ROLES);
 const SETTINGS_VIEWS = new Set(['planSettings', 'serviceManagement']);
 // Manual facts are not settings: a staff member enters their own value and the branch
 // manager corrects it, so these two tabs follow the server-side scope instead of the role.
@@ -848,6 +845,7 @@ function overviewPresetRange(preset) {
 // Kept here rather than read back off the buttons, because a month chosen in the picker
 // keeps the month-over-month baseline while no button is lit: September measured against
 // the 30 days before it would start on 2 August and drop that month's first day.
+// Empty once the dates are edited by hand, and an empty param is dropped from the query.
 let overviewPreset = 'month';
 
 function highlightOverviewPreset(preset) {
@@ -915,7 +913,7 @@ function overviewReportUrl(reportId, levelFilter) {
     granularity: 'month',
     // The report recomputes the same new/repeat deltas, so it has to measure against the
     // same baseline as the card that links to it.
-    period_preset: activeOverviewPreset(),
+    period_preset: overviewPreset,
   });
   return `/reports/${encodeURIComponent(reportId)}?${params.toString()}`;
 }
@@ -1391,13 +1389,12 @@ function planScopeHintHtml(scope) {
   return key ? `<p class="plan-section-hint">${escapeHtml(t(key))}</p>` : '';
 }
 
-function renderPlanSection(title, groups, metrics, meta = '', jump = null) {
+function renderPlanSection(title, groups, metrics, jump = null) {
   if (!groups.length || !metrics.length) return '';
   return `
     <section class="plan-section" ${jump ? jumpAttrs(...jump) : ''}>
       <div class="plan-section-title">
         <h3>${escapeHtml(title)}</h3>
-        <span class="meta">${escapeHtml(meta)}</span>
       </div>
       ${renderPlanTable(groups, metrics)}
     </section>
@@ -1479,14 +1476,14 @@ function renderSelectedStaffPlanTable(staffPlan) {
     );
     if (!metrics.length) return '';
     return `
-      <section class="plan-section selected-staff-plan">
+      <section class="plan-section">
         <div class="plan-section-title">
           <h3>${escapeHtml(`${title} · ${planScopeLabel(scope)}`)}</h3>
           <span class="meta">${escapeHtml(staffPlan.category_label || '')}</span>
         </div>
         ${planScopeHintHtml(scope)}
         <div class="table-scroll staff-plan-scroll">
-          <table class="staff-plan-table">
+          <table>
             <thead>
               <tr>
                 <th>KPI</th>
@@ -1928,7 +1925,6 @@ function renderPlanFact(planFact) {
     renderPlanInsights(null);
     els.planFactTable.innerHTML = `${diagnosticsHtml}<div class="empty">${t('dash.noPlanForPeriod')}</div>`;
     els.planMeta.textContent = '';
-    window.dispatchEvent(new CustomEvent('jump-targets-changed'));
     return;
   }
   // The charts compare plan with fact; the board is plan-only.
@@ -1948,7 +1944,6 @@ function renderPlanFact(planFact) {
           branchTitle,
           [planFact.parent_group],
           metricSets.branch || metrics,
-          '',
           ['plan-branch', 'dash.jumpBranch'],
         ));
       }
@@ -1970,7 +1965,6 @@ function renderPlanFact(planFact) {
     : t('dash.networkAndBranches');
   els.planMeta.textContent = t('dash.planMeta', { scope: scopeText, count: groups.length, period: planPeriodText });
   syncPlanTableStickyOffsets();
-  window.dispatchEvent(new CustomEvent('jump-targets-changed'));
 }
 
 function renderPlanSettingInput(scope, row, field) {
@@ -2007,7 +2001,7 @@ function renderPlanSettingsBranches(rows) {
           ${rows
             .map((row) => `
               <tr>
-                <td>${escapeHtml(row.company_title || t('dash.branchFallbackWithId', { id: row.company_id }))}</td>
+                <td>${escapeHtml(branchRowTitle(row, t))}</td>
                 ${fields.map(([field]) => `<td class="number">${renderPlanSettingInput('branch', row, field)}</td>`).join('')}
               </tr>
             `)
@@ -2041,7 +2035,7 @@ function renderPlanSettingsStaffSection(title, rows, fields) {
             ${rows
               .map((row) => `
                 <tr>
-                  <td>${escapeHtml(row.company_title || t('dash.branchFallbackWithId', { id: row.company_id }))}</td>
+                  <td>${escapeHtml(branchRowTitle(row, t))}</td>
                   <td>${escapeHtml(row.staff_name || t('dash.staffFallback', { id: row.staff_id }))}</td>
                   <td class="number readonly">${escapeHtml(row.staff_id)}</td>
                   <td class="number readonly">${escapeHtml(row.user_id || '')}</td>
@@ -2131,6 +2125,12 @@ function discardPlanSettingsDraft() {
   editorDrafts.hideNotice(planSettingsNoticeAnchor());
 }
 
+function resetPlanSettingsToSaved() {
+  discardPlanSettingsDraft();
+  if (planSettingsSavedData) renderPlanSettings(structuredClone(planSettingsSavedData));
+  else setPlanSettingsDirty(false);
+}
+
 function restorePlanSettingsDraft() {
   const scope = planSettingsDraftScope();
   const stored = editorDrafts.read('planSettings', scope);
@@ -2153,10 +2153,7 @@ function restorePlanSettingsDraft() {
   updatePlanSettingsDirtyFromForm();
   schedulePlanSettingsDraft();
   editorDrafts.showNotice(anchor, 'restored', {
-    onDiscard: () => {
-      discardPlanSettingsDraft();
-      if (planSettingsSavedData) renderPlanSettings(JSON.parse(JSON.stringify(planSettingsSavedData)));
-    },
+    onDiscard: resetPlanSettingsToSaved,
   });
 }
 
@@ -2174,7 +2171,7 @@ function renderPlanSettings(data, { updateSnapshot = true, dirty = false } = {})
     : t('dash.lastSaveNone');
 
   if (updateSnapshot) {
-    planSettingsSavedData = JSON.parse(JSON.stringify(data));
+    planSettingsSavedData = structuredClone(data);
     planSettingsSavedSnapshot = JSON.stringify(collectPlanSettingsPayload());
     setPlanSettingsDirty(false);
   } else {
@@ -2332,7 +2329,7 @@ function renderServiceCatalog(rows) {
         <tbody>
           ${rows.map((row) => `
             <tr>
-              <td>${escapeHtml(row.company_title || t('dash.branchFallbackWithId', { id: row.company_id }))}</td>
+              <td>${escapeHtml(branchRowTitle(row, t))}</td>
               <td>${escapeHtml(row.category_title || '')}</td>
               <td class="number readonly">${escapeHtml(row.service_id)}</td>
               <td>${escapeHtml(row.title)}</td>
@@ -2382,7 +2379,7 @@ function renderServiceManagement(data, { updateSnapshot = true } = {}) {
   renderServiceFilterOptions(serviceManagementData);
   renderServiceCatalog(serviceManagementData.rows || []);
   if (updateSnapshot) {
-    serviceManagementSavedData = JSON.parse(JSON.stringify(serviceManagementData));
+    serviceManagementSavedData = structuredClone(serviceManagementData);
     serviceManagementSavedSnapshot = JSON.stringify(collectServiceManagementPayload());
     setServiceManagementDirty(false);
   } else {
@@ -2665,7 +2662,7 @@ async function loadStaff(filter, { force = false } = {}) {
       const { name, text } = staffOption(staff, {
         branchTitle: filter.branch.value
           ? ''
-          : staff.company_title || t('dash.branchFallbackWithId', { id: staff.company_id }),
+          : branchRowTitle(staff, t),
         translate: t,
       });
       option.textContent = text;
@@ -2716,15 +2713,6 @@ function filterParams(filter) {
     company_id: filter.branch.value,
     staff_id: filter.staff.value,
   };
-}
-
-/**
- * The preset the Overview window came from, for the backend to pick a baseline.
- *
- * Empty once the dates are edited by hand, and an empty param is dropped from the query.
- */
-function activeOverviewPreset() {
-  return overviewPreset;
 }
 
 function setFilterLoading(filter, isLoading) {
@@ -2882,7 +2870,7 @@ async function loadDashboard() {
     const payload = await fetchJson('/dashboard/bundle', {
       ...filterParams(filter),
       staff_position_ids: levelRequestParam(filter),
-      period_preset: activeOverviewPreset(),
+      period_preset: overviewPreset,
     }, {
       retry: () => loadDashboard(),
       signal: request.signal,
@@ -3205,12 +3193,7 @@ els.floatingEditorSaveButton.addEventListener('click', () => {
 els.planSettingsLoad.addEventListener('click', () => reloadPlanSettingsMonth());
 els.planSettingsMonth.addEventListener('change', () => reloadPlanSettingsMonth());
 els.planSettingsCopy.addEventListener('click', () => copyPreviousPlanSettings());
-els.planSettingsReset.addEventListener('click', () => {
-  if (planSettingsSavedData) {
-    discardPlanSettingsDraft();
-    renderPlanSettings(JSON.parse(JSON.stringify(planSettingsSavedData)));
-  }
-});
+els.planSettingsReset.addEventListener('click', resetPlanSettingsToSaved);
 els.planSettingsSave.addEventListener('click', () => savePlanSettings());
 [els.planSettingsBranches, els.planSettingsStaff].forEach((container) => {
   container.addEventListener('input', () => {
@@ -3231,7 +3214,7 @@ els.serviceFilterQuery.addEventListener('keydown', (event) => {
 els.serviceManagementSave.addEventListener('click', () => saveServiceManagement());
 els.serviceManagementReset.addEventListener('click', () => {
   if (serviceManagementSavedData) {
-    renderServiceManagement(JSON.parse(JSON.stringify(serviceManagementSavedData)));
+    renderServiceManagement(structuredClone(serviceManagementSavedData));
   }
 });
 

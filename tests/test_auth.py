@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import pytest
 import pytest_asyncio
@@ -11,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from clock import utcnow
 import api
 import auth_routes
 import auth_sessions
@@ -49,7 +50,7 @@ async def auth_db(async_session, monkeypatch):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Branch 1', group_id=1))
     async_session.add(Company(id=2, title='Branch 2', group_id=1))
-    async_session.add(PortalAccount(id=1, label='Default tenant', created_at=datetime.utcnow()))
+    async_session.add(PortalAccount(id=1, label='Default tenant', created_at=utcnow()))
     async_session.add(PortalBranch(portal_account_id=1, company_id=1))
     async_session.add(PortalBranch(portal_account_id=1, company_id=2))
     await async_session.flush()
@@ -62,8 +63,8 @@ async def auth_db(async_session, monkeypatch):
         full_name='Admin',
         role='owner',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     manager = PortalUser(
         id=2,
@@ -73,8 +74,8 @@ async def auth_db(async_session, monkeypatch):
         full_name='Manager',
         role='manager',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     async_session.add_all([admin, manager])
     async_session.add(PortalUserBranch(user_id=2, company_id=1))
@@ -86,8 +87,8 @@ async def auth_db(async_session, monkeypatch):
         full_name='Branch Admin',
         role='branch_admin',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     async_session.add(branch_admin)
     async_session.add(PortalUserBranch(user_id=3, company_id=1))
@@ -177,9 +178,9 @@ async def test_refresh_rotation_rejects_a_token_preloaded_before_a_competing_rot
     refresh_record = PortalRefreshToken(
         user_id=1,
         token_hash=auth_sessions._hash_token(raw_refresh),
-        expires_at=datetime.utcnow() + timedelta(days=7),
-        last_used_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        expires_at=utcnow() + timedelta(days=7),
+        last_used_at=utcnow(),
+        created_at=utcnow(),
     )
     auth_db.add(refresh_record)
     await auth_db.commit()
@@ -221,7 +222,7 @@ async def test_refresh_rotation_rejects_a_token_preloaded_before_a_competing_rot
 @pytest.mark.asyncio
 async def test_sessions_list_removes_inactive_and_oldest_excess_sessions(auth_db, monkeypatch):
     monkeypatch.setattr(auth_sessions, 'AUTH_MAX_ACTIVE_SESSIONS', 3)
-    now = datetime.utcnow()
+    now = utcnow()
     auth_db.add_all([
         PortalRefreshToken(
             id=100 + offset,
@@ -408,8 +409,8 @@ async def test_demo_login_keeps_cookie_session_without_returning_access_token(au
         role='owner',
         is_active=True,
         is_demo=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     auth_db.add(demo_user)
     await auth_db.commit()
@@ -499,8 +500,8 @@ async def test_platform_admin_me_without_selected_tenant(auth_db, monkeypatch):
         full_name='Platform Admin',
         role='platform_admin',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     auth_db.add(platform_admin)
     await auth_db.commit()
@@ -532,8 +533,8 @@ async def test_platform_admin_lists_portal_accounts(auth_db, monkeypatch):
         full_name='Platform Admin',
         role='platform_admin',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     auth_db.add(platform_admin)
     await auth_db.commit()
@@ -579,8 +580,8 @@ async def test_platform_admin_yclients_payload_test_requires_and_audits_selected
         full_name='Platform Credentials',
         role='platform_admin',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     auth_db.add(platform_admin)
     await auth_db.commit()
@@ -695,8 +696,8 @@ async def test_platform_admin_update_clears_platform_admin_tenant(auth_db, monke
         full_name='Platform Cleaner',
         role='platform_admin',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     dirty_admin = PortalUser(
         id=56,
@@ -706,8 +707,8 @@ async def test_platform_admin_update_clears_platform_admin_tenant(auth_db, monke
         full_name='Dirty Platform',
         role='platform_admin',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     auth_db.add_all([actor, dirty_admin])
     auth_db.add(PortalUserBranch(user_id=56, company_id=1))
@@ -741,7 +742,7 @@ async def test_platform_admin_update_clears_platform_admin_tenant(auth_db, monke
 async def test_platform_admin_filters_yclients_credentials_by_selected_tenant(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
-    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=utcnow()))
     auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
     auth_db.add(
         PortalUser(
@@ -752,8 +753,8 @@ async def test_platform_admin_filters_yclients_credentials_by_selected_tenant(au
             full_name='Platform Admin',
             role='platform_admin',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     auth_db.add_all([
@@ -765,8 +766,8 @@ async def test_platform_admin_filters_yclients_credentials_by_selected_tenant(au
             login_encrypted='login-a',
             password_encrypted='password-a',
             is_active=True,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=utcnow(),
+            updated_at=utcnow(),
         ),
         YClientsCredential(
             id=2,
@@ -776,8 +777,8 @@ async def test_platform_admin_filters_yclients_credentials_by_selected_tenant(au
             login_encrypted='login-b',
             password_encrypted='password-b',
             is_active=True,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=utcnow(),
+            updated_at=utcnow(),
         ),
         YClientsCredentialCompany(credential_id=1, company_id=1),
         YClientsCredentialCompany(credential_id=2, company_id=3),
@@ -836,7 +837,7 @@ async def test_platform_admin_filters_yclients_credentials_by_selected_tenant(au
 async def test_platform_admin_move_yclients_credentials_requires_company_ids(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
-    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=utcnow()))
     auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
     auth_db.add(
         PortalUser(
@@ -847,8 +848,8 @@ async def test_platform_admin_move_yclients_credentials_requires_company_ids(aut
             full_name='Platform Admin',
             role='platform_admin',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     auth_db.add(
@@ -860,8 +861,8 @@ async def test_platform_admin_move_yclients_credentials_requires_company_ids(aut
             login_encrypted='login-a',
             password_encrypted='password-a',
             is_active=True,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=utcnow(),
+            updated_at=utcnow(),
         )
     )
     auth_db.add(YClientsCredentialCompany(credential_id=3, company_id=1))
@@ -907,7 +908,7 @@ async def test_platform_admin_move_yclients_credentials_requires_company_ids(aut
 async def test_platform_admin_move_yclients_credentials_updates_company_bindings(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
-    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=utcnow()))
     auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
     auth_db.add(
         PortalUser(
@@ -918,8 +919,8 @@ async def test_platform_admin_move_yclients_credentials_updates_company_bindings
             full_name='Platform Admin',
             role='platform_admin',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     auth_db.add(
@@ -931,8 +932,8 @@ async def test_platform_admin_move_yclients_credentials_updates_company_bindings
             login_encrypted='login-a',
             password_encrypted='password-a',
             is_active=True,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=utcnow(),
+            updated_at=utcnow(),
         )
     )
     auth_db.add(YClientsCredentialCompany(credential_id=4, company_id=1))
@@ -974,8 +975,8 @@ async def test_platform_admin_create_yclients_credentials_rejects_unknown_tenant
         full_name='Platform Create Credentials',
         role='platform_admin',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     auth_db.add(platform_admin)
     await auth_db.commit()
@@ -1011,7 +1012,7 @@ async def test_platform_admin_create_yclients_credentials_rejects_unknown_tenant
 async def test_platform_admin_user_management_is_scoped_to_selected_tenant(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
-    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=utcnow()))
     auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
     auth_db.add(
         PortalUser(
@@ -1022,8 +1023,8 @@ async def test_platform_admin_user_management_is_scoped_to_selected_tenant(auth_
             full_name='Platform Admin',
             role='platform_admin',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     auth_db.add(
@@ -1035,8 +1036,8 @@ async def test_platform_admin_user_management_is_scoped_to_selected_tenant(auth_
             full_name='Tenant B',
             role='manager',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     auth_db.add(PortalUserBranch(user_id=54, company_id=3))
@@ -1081,7 +1082,6 @@ async def test_platform_admin_user_management_is_scoped_to_selected_tenant(auth_
     for row in tenant_b_passwords.json()['data']:
         assert row['portal_account_id'] == 2
         assert 'initial_password' not in row
-    assert tenant_b_passwords.json()['deprecated'] is True
 
 
 @pytest.mark.asyncio
@@ -1095,8 +1095,8 @@ async def test_platform_admin_creates_tenant_users_in_selected_existing_tenant(a
         full_name='Platform Admin',
         role='platform_admin',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     auth_db.add(platform_admin)
     await auth_db.commit()
@@ -1271,7 +1271,7 @@ async def test_onboarding_credentials_rejects_branch_owned_by_other_tenant(auth_
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
-    auth_db.add(PortalAccount(id=2, label='Other tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalAccount(id=2, label='Other tenant', created_at=utcnow()))
     auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
     auth_db.add(PortalUser(
         id=60,
@@ -1281,8 +1281,8 @@ async def test_onboarding_credentials_rejects_branch_owned_by_other_tenant(auth_
         full_name='Other Owner',
         role='owner',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     ))
     await auth_db.commit()
     token = await issue_access_token(auth_db, 1, 'owner')
@@ -1321,7 +1321,7 @@ async def test_onboarding_claims_branch_from_admin_only_tenant(auth_db, monkeypa
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
-    auth_db.add(PortalAccount(id=2, label='Old platform tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalAccount(id=2, label='Old platform tenant', created_at=utcnow()))
     auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
     auth_db.add(PortalUser(
         id=61,
@@ -1331,8 +1331,8 @@ async def test_onboarding_claims_branch_from_admin_only_tenant(auth_db, monkeypa
         full_name='Old Platform Admin',
         role='platform_admin',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     ))
     await auth_db.commit()
     token = await issue_access_token(auth_db, 1, 'owner')
@@ -1391,7 +1391,7 @@ async def test_onboarding_claims_branch_from_admin_only_tenant_with_active_crede
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
-    auth_db.add(PortalAccount(id=2, label='Prepared tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalAccount(id=2, label='Prepared tenant', created_at=utcnow()))
     auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
     auth_db.add(
         PortalUser(
@@ -1402,8 +1402,8 @@ async def test_onboarding_claims_branch_from_admin_only_tenant_with_active_crede
             full_name='Old Platform Admin',
             role='platform_admin',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     auth_db.add(
@@ -1415,8 +1415,8 @@ async def test_onboarding_claims_branch_from_admin_only_tenant_with_active_crede
             login_encrypted='login',
             password_encrypted='password',
             is_active=True,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=utcnow(),
+            updated_at=utcnow(),
         )
     )
     auth_db.add(YClientsCredentialCompany(credential_id=5, company_id=3))
@@ -1761,8 +1761,8 @@ async def test_onboarding_credentials_creates_tenant_for_new_owner(auth_db, monk
         full_name='New Owner',
         role='owner',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     auth_db.add(owner)
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
@@ -2564,7 +2564,7 @@ async def test_cross_tenant_update_and_delete_match_not_found_response(auth_db, 
     """
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
-    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=utcnow()))
     auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
     auth_db.add(
         PortalUser(
@@ -2575,8 +2575,8 @@ async def test_cross_tenant_update_and_delete_match_not_found_response(auth_db, 
             full_name='Tenant B Target',
             role='manager',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     await auth_db.commit()
@@ -2703,7 +2703,7 @@ async def test_provision_staff_account(auth_db, monkeypatch):
             headers={'Authorization': f'Bearer {token}'},
             json={'role': 'barber'},
         )
-        assert created.status_code == 409
+        assert created.status_code == 400
         assert 'Real email is required' in created.json()['detail']
 
         created = await client.post(
@@ -2831,7 +2831,6 @@ async def test_initial_passwords_endpoint_lists_pending_invites_without_password
         )
         assert pending_invites.status_code == 200
         data = pending_invites.json()['data']
-        assert pending_invites.json()['deprecated'] is True
         emails = {row['email'] for row in data}
         assert 'branch.worker@example.com' in emails
         assert 'other.branch.worker@example.com' not in emails
@@ -2917,6 +2916,36 @@ async def test_create_account_without_a_role_takes_it_from_the_crm_position(auth
 
 
 @pytest.mark.asyncio
+async def test_create_account_answers_409_for_a_taken_login(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(Staff(id=9021, name='Clash', position='master', company_id=1, fired=0, bookable=True))
+    await auth_db.commit()
+    headers = await _bearer(auth_db, 1, 'owner')
+
+    async with _Api(auth_db) as client:
+        taken = await client.post(
+            '/auth/admin/staff/9021/create-account',
+            headers=headers,
+            json={'role': 'barber', 'email': 'admin@example.com'},
+        )
+
+    assert taken.status_code == 409
+    assert 'Email already registered' in taken.json()['detail']
+
+
+def test_provision_conflict_is_a_value_error_but_the_other_refusals_are_not_conflicts():
+    from portal_account_provision import ProvisionConflict, _checked_staff_email, _Taken
+
+    assert issubclass(ProvisionConflict, ValueError)
+    staff = Staff(id=1, name='A', position='master', company_id=1, email='a@example.com')
+    with pytest.raises(ValueError) as missing:
+        _checked_staff_email(Staff(id=2, name='B', position='master', company_id=1), _Taken(set(), set(), {}))
+    assert not isinstance(missing.value, ProvisionConflict)
+    with pytest.raises(ProvisionConflict):
+        _checked_staff_email(staff, _Taken(set(), {'a@example.com'}, {}))
+
+
+@pytest.mark.asyncio
 async def test_mass_provision_requires_real_staff_email(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(
@@ -2982,8 +3011,8 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
             full_name='Real User',
             role='barber',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     auth_db.add(PortalUserBranch(user_id=10, company_id=1))
@@ -2996,8 +3025,8 @@ async def test_distribute_credentials_sends_real_email_only(auth_db, monkeypatch
             full_name='Fake Worker',
             role='barber',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     auth_db.add(PortalUserBranch(user_id=11, company_id=1))
@@ -3038,8 +3067,8 @@ async def test_distribute_credentials_reports_invite_failures_after_rollback(aut
             full_name='Rollback Invite',
             role='barber',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     auth_db.add(PortalUserBranch(user_id=12, company_id=1))
@@ -3090,8 +3119,8 @@ async def test_distribute_credentials_keeps_going_after_a_failed_invite_rolled_t
                 full_name='Invite',
                 role='barber',
                 is_active=True,
-                email_verified_at=datetime.utcnow(),
-                created_at=datetime.utcnow(),
+                email_verified_at=utcnow(),
+                created_at=utcnow(),
             )
         )
         auth_db.add(PortalUserBranch(user_id=user_id, company_id=1))
@@ -3138,7 +3167,7 @@ async def test_distribute_credentials_does_not_leak_cross_tenant_email(auth_db, 
     """
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
-    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=utcnow()))
     auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
     auth_db.add(
         PortalUser(
@@ -3149,8 +3178,8 @@ async def test_distribute_credentials_does_not_leak_cross_tenant_email(auth_db, 
             full_name='Tenant B Secret',
             role='manager',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     await auth_db.commit()
@@ -3203,8 +3232,8 @@ async def _seed_demo_owner(db, user_id: int = 90):
             role='owner',
             is_active=True,
             is_demo=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     await db.commit()
@@ -3551,8 +3580,8 @@ async def test_portal_staff_sync_keeps_yclients_row_of_out_of_scope_branch(auth_
         full_name='Worker',
         role='manager',
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
     )
     auth_db.add(user)
     auth_db.add_all([
@@ -3575,6 +3604,48 @@ async def test_portal_staff_sync_keeps_yclients_row_of_out_of_scope_branch(auth_
 
 
 @pytest.mark.asyncio
+async def test_a_mirror_row_whose_id_collides_with_its_user_is_still_portal_owned(auth_db):
+    """Mirror rows and portal user ids share one number space; only `external_id` tells the CRM row apart."""
+    from portal_staff_sync import detach_portal_user_staff, sync_portal_user_staff
+
+    user = PortalUser(
+        id=9111,
+        portal_account_id=1,
+        email='worker9111@example.com',
+        password_hash=hash_password('Worker12345!'),
+        full_name='Worker',
+        role='manager',
+        is_active=True,
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
+    )
+    auth_db.add(user)
+    # Fresh mirror row that took max(id)+1 and landed on its own user's id: no external_id.
+    auth_db.add(Staff(id=9111, name='Worker', position='manager', company_id=1, fired=0, bookable=True,
+                      portal_user_id=9111))
+    await auth_db.commit()
+
+    user.role = 'branch_admin'
+    assert await sync_portal_user_staff(auth_db, user, [1]) is True
+    await auth_db.commit()
+    assert await auth_db.scalar(select(Staff.position).where(Staff.id == 9111)) == 'branch_admin'
+
+    user.is_active = False
+    assert await sync_portal_user_staff(auth_db, user, [1]) is True
+    await auth_db.commit()
+    auth_db.expire_all()
+    assert await auth_db.scalar(select(Staff.fired).where(Staff.id == 9111)) == 1
+
+    await detach_portal_user_staff(auth_db, 9111)
+    await auth_db.commit()
+    auth_db.expire_all()
+    # Fired, not unlinked: the row is the portal's own, not a CRM record to release.
+    assert tuple((await auth_db.execute(select(Staff.portal_user_id, Staff.fired).where(Staff.id == 9111))).one()) == (
+        9111, 1
+    )
+
+
+@pytest.mark.asyncio
 async def test_me_reports_the_manual_fact_scope(auth_db, monkeypatch):
     """The portal draws the reviews / additional-OPZ tabs from this field alone."""
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
@@ -3588,8 +3659,8 @@ async def test_me_reports_the_manual_fact_scope(auth_db, monkeypatch):
                 full_name=f'Staff {user_id}',
                 role='barber',
                 is_active=True,
-                email_verified_at=datetime.utcnow(),
-                created_at=datetime.utcnow(),
+                email_verified_at=utcnow(),
+                created_at=utcnow(),
             )
         )
         auth_db.add(
@@ -3655,8 +3726,8 @@ async def test_me_ignores_a_staff_row_outside_the_assigned_branches(auth_db, mon
             full_name='Moved administrator',
             role='barber',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     # The CRM row of the branch they left: still an administrator, still not fired.
@@ -3716,8 +3787,8 @@ async def test_unonboarded_owner_sees_no_users_from_other_tenants(auth_db, monke
             full_name='Fresh Owner',
             role='owner',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     auth_db.add(
@@ -3729,8 +3800,8 @@ async def test_unonboarded_owner_sees_no_users_from_other_tenants(auth_db, monke
             full_name='Other Fresh Owner',
             role='owner',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     await auth_db.commit()
@@ -3766,7 +3837,7 @@ async def test_admin_list_users_staff_repair_is_scoped_to_its_own_tenant(auth_db
     """
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(Company(id=3, title='Branch 3', group_id=1))
-    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=datetime.utcnow()))
+    auth_db.add(PortalAccount(id=2, label='Second tenant', created_at=utcnow()))
     auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
     auth_db.add(
         PortalUser(
@@ -3777,8 +3848,8 @@ async def test_admin_list_users_staff_repair_is_scoped_to_its_own_tenant(auth_db
             full_name='Tenant B Owner',
             role='owner',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     auth_db.add(
@@ -3790,8 +3861,8 @@ async def test_admin_list_users_staff_repair_is_scoped_to_its_own_tenant(auth_db
             full_name='Tenant B Manager',
             role='manager',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     # No Staff row yet — the drift `provision_staff_account` leaves behind for a
@@ -3839,7 +3910,7 @@ async def test_admin_list_users_staff_repair_is_scoped_to_its_own_tenant(auth_db
 async def test_delete_session_is_scoped_to_the_owning_user(auth_db, monkeypatch):
     """DELETE /sessions/{id} must not let one user revoke another user's session."""
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    now = datetime.utcnow()
+    now = utcnow()
     victim_session = PortalRefreshToken(
         id=501,
         user_id=1,
@@ -3874,105 +3945,6 @@ async def test_delete_session_is_scoped_to_the_owning_user(auth_db, monkeypatch)
         select(func.count()).select_from(PortalRefreshToken).where(PortalRefreshToken.id == 501)
     )
     assert removed == 0
-
-
-@pytest.mark.asyncio
-async def test_logout_others_revokes_only_the_callers_own_other_sessions(auth_db, monkeypatch):
-    """POST /logout-others must only ever touch the caller's own sessions."""
-    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    now = datetime.utcnow()
-    other_own_session = PortalRefreshToken(
-        id=602,
-        user_id=1,
-        token_hash='other-own-device-hash',
-        expires_at=now + timedelta(days=10),
-        last_used_at=now,
-        created_at=now,
-    )
-    other_users_session = PortalRefreshToken(
-        id=603,
-        user_id=2,
-        token_hash='other-user-hash',
-        expires_at=now + timedelta(days=10),
-        last_used_at=now,
-        created_at=now,
-    )
-    auth_db.add_all([other_own_session, other_users_session])
-    await auth_db.commit()
-
-    async def override_db():
-        yield auth_db
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        login = await client.post('/auth/login', json={'email': 'admin@example.com', 'password': 'Admin12345!'})
-        assert login.status_code == 200
-        csrf = client.cookies.get(AUTH_CSRF_COOKIE_NAME)
-        response = await client.post('/auth/logout-others', headers={'X-CSRF-Token': csrf})
-
-    app.dependency_overrides.clear()
-
-    assert response.status_code == 200
-    remaining_ids = set((await auth_db.scalars(select(PortalRefreshToken.id))).all())
-    # The session /auth/login just created survives (it is "current"); the pre-existing other
-    # device belonging to the same user is revoked; user 2's unrelated session is untouched.
-    assert 602 not in remaining_ids
-    assert 603 in remaining_ids
-    assert len(remaining_ids) == 2
-
-
-@pytest.mark.asyncio
-async def test_resend_verification_only_emails_pending_unverified_accounts(auth_db, monkeypatch):
-    """POST /resend-verification must not leak whether an account exists or is verified."""
-    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    pending = PortalUser(
-        id=70,
-        portal_account_id=1,
-        email='pending@example.com',
-        password_hash=hash_password('Pending12345!'),
-        full_name='Pending User',
-        role='owner',
-        is_active=True,
-        email_verified_at=None,
-        created_at=datetime.utcnow(),
-    )
-    auth_db.add(pending)
-    await auth_db.commit()
-    # The mail goes out on the background task's own session, so the cooldown stamp it writes must be
-    # read back from the database; a copy held by this session would never see it.
-    auth_db.expunge(pending)
-
-    sent = []
-
-    def _capture_email(to_email, subject, body):
-        sent.append(to_email)
-
-    monkeypatch.setattr('auth_service.send_auth_email', _capture_email)
-
-    async def override_db():
-        yield auth_db
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        first = await client.post('/auth/resend-verification', json={'email': 'pending@example.com'})
-        second = await client.post('/auth/resend-verification', json={'email': 'pending@example.com'})
-        already_verified = await client.post('/auth/resend-verification', json={'email': 'admin@example.com'})
-        unknown = await client.post('/auth/resend-verification', json={'email': 'nobody@example.com'})
-
-    app.dependency_overrides.clear()
-
-    responses = [first, second, already_verified, unknown]
-    assert [r.status_code for r in responses] == [200, 200, 200, 200]
-    # Same generic message every time: the response must not reveal whether the account
-    # exists, is already verified, or was skipped by the resend cooldown.
-    messages = {r.json()['message'] for r in responses}
-    assert len(messages) == 1
-    # Only the first call for the pending account actually sends: the second is inside the
-    # resend cooldown, the verified account has nothing to verify, and the unknown email
-    # does not exist.
-    assert sent == ['pending@example.com']
 
 
 @pytest.mark.asyncio
@@ -4186,8 +4158,8 @@ async def test_branch_admin_cannot_take_over_a_peer_with_extra_branches(auth_db,
             full_name='Peer',
             role='branch_admin',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     auth_db.add_all([PortalUserBranch(user_id=30, company_id=1), PortalUserBranch(user_id=30, company_id=2)])
@@ -4211,7 +4183,7 @@ async def test_branch_admin_cannot_take_over_a_peer_with_extra_branches(auth_db,
 @pytest_asyncio.fixture
 async def two_tenants(auth_db):
     auth_db.add(Company(id=3, title='Other tenant branch', group_id=1))
-    auth_db.add(PortalAccount(id=2, label='Tenant B', created_at=datetime.utcnow()))
+    auth_db.add(PortalAccount(id=2, label='Tenant B', created_at=utcnow()))
     auth_db.add(PortalBranch(portal_account_id=2, company_id=3))
     auth_db.add(
         PortalUser(
@@ -4222,8 +4194,8 @@ async def two_tenants(auth_db):
             full_name='Platform Admin',
             role='platform_admin',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     await auth_db.commit()
@@ -4309,7 +4281,7 @@ async def test_email_token_purpose_expiry_and_inactive_user_are_refused(auth_db)
     assert await consume_email_token(auth_db, raw, 'verify') is None
 
     await auth_db.execute(
-        PortalEmailToken.__table__.update().where(PortalEmailToken.user_id == 1).values(expires_at=datetime.utcnow())
+        PortalEmailToken.__table__.update().where(PortalEmailToken.user_id == 1).values(expires_at=utcnow())
     )
     await auth_db.commit()
     assert await consume_email_token(auth_db, raw, TOKEN_PURPOSE_RESET) is None
@@ -4350,8 +4322,8 @@ async def test_successful_reset_invalidates_the_other_reset_tokens(auth_db, monk
             user_id=1,
             token_hash=_token_hash('stray-reset-token-1234'),
             purpose=TOKEN_PURPOSE_RESET,
-            expires_at=datetime.utcnow() + timedelta(hours=1),
-            created_at=datetime.utcnow(),
+            expires_at=utcnow() + timedelta(hours=1),
+            created_at=utcnow(),
         )
     )
     await auth_db.commit()
@@ -4427,15 +4399,15 @@ def test_set_portal_password_script_revokes_sessions(monkeypatch):
                 role='platform_admin',
                 is_active=True,
                 token_version=4,
-                created_at=datetime.utcnow(),
+                created_at=utcnow(),
             )
         )
         session.add(
             PortalRefreshToken(
                 user_id=1,
                 token_hash='h' * 64,
-                expires_at=datetime.utcnow() + timedelta(days=1),
-                created_at=datetime.utcnow(),
+                expires_at=utcnow() + timedelta(days=1),
+                created_at=utcnow(),
             )
         )
         session.commit()
@@ -4649,7 +4621,7 @@ async def test_refresh_replay_after_the_grace_window_revokes_the_session(auth_db
     first = await _issue(auth_db)
     second = await _rotate(auth_db, first)
     row = await _session_row(auth_db)
-    row.rotated_at = datetime.utcnow() - auth_sessions.REFRESH_ROTATION_GRACE - timedelta(seconds=1)
+    row.rotated_at = utcnow() - auth_sessions.REFRESH_ROTATION_GRACE - timedelta(seconds=1)
     await auth_db.commit()
 
     # The `yclients` logger does not propagate to root (see api.py), so attach the capture handler directly.
@@ -4675,7 +4647,7 @@ async def test_refresh_replay_after_the_grace_window_revokes_the_session(auth_db
 @pytest.mark.asyncio
 async def test_refresh_rotation_stops_at_the_absolute_session_age(auth_db, monkeypatch):
     monkeypatch.setattr(auth_sessions, 'AUTH_SESSION_MAX_AGE_DAYS', 90)
-    now = datetime.utcnow()
+    now = utcnow()
     auth_db.add_all([
         PortalRefreshToken(
             id=701, user_id=1, token_hash=auth_sessions._hash_token('too-old'),
@@ -4706,29 +4678,6 @@ async def test_issue_session_never_expires_past_the_absolute_cap(auth_db, monkey
     await _issue(auth_db)
     row = await _session_row(auth_db)
     assert abs((row.expires_at - (row.created_at + timedelta(days=7))).total_seconds()) < 1
-
-
-@pytest.mark.asyncio
-async def test_logout_others_without_a_refresh_cookie_is_a_400_and_keeps_every_session(auth_db):
-    now = datetime.utcnow()
-    auth_db.add(PortalRefreshToken(
-        id=801, user_id=1, token_hash='bearer-clients-own-session',
-        expires_at=now + timedelta(days=10), last_used_at=now, created_at=now,
-    ))
-    await auth_db.commit()
-    token = create_access_token(1, 'owner', 0, 801)
-
-    async def override_db():
-        yield auth_db
-
-    app.dependency_overrides[api.get_async_db] = override_db
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url='http://test') as client:
-        response = await client.post('/auth/logout-others', headers={'Authorization': f'Bearer {token}'})
-    app.dependency_overrides.clear()
-
-    assert response.status_code == 400
-    assert await auth_db.get(PortalRefreshToken, 801) is not None
 
 
 @pytest.mark.asyncio
@@ -4813,14 +4762,14 @@ def test_open_paths_are_exact_and_unchanged():
 
     public_actions = (
         'register', 'login', 'demo-login', 'refresh', 'logout',
-        'verify-email', 'forgot-password', 'reset-password', 'resend-verification',
+        'verify-email', 'forgot-password', 'reset-password',
     )
     expected = {'/health', '/health/ready', '/openapi.json', '/docs', '/redoc'} | {
         f'{prefix}/{action}' for prefix in ('/auth', '/dashboard/auth') for action in public_actions
     }
     assert OPEN_PATHS == expected
-    # The two sessions routes that used to ride on the `/auth/logout` prefix are protected now.
-    for path in ('/auth/logout-all', '/auth/logout-others', '/dashboard/auth/logout-all', '/auth/login/extra'):
+    # The sessions route that used to ride on the `/auth/logout` prefix are protected now.
+    for path in ('/auth/logout-all', '/dashboard/auth/logout-all', '/auth/login/extra'):
         assert path not in OPEN_PATHS
 
 
@@ -4847,7 +4796,6 @@ async def test_every_route_open_before_stays_open_and_nothing_else_opens(auth_db
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         for path in (
             '/auth/logout-all',
-            '/auth/logout-others',
             '/dashboard/auth/logout-all',
             '/auth/me',
             '/auth/sessions',
@@ -4865,7 +4813,9 @@ async def test_every_route_open_before_stays_open_and_nothing_else_opens(auth_db
 @pytest.mark.asyncio
 async def test_deleting_a_provisioned_user_releases_the_crm_staff_row(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
-    auth_db.add(Staff(id=9003, name='Worker', position='master', company_id=1, fired=0, bookable=True))
+    auth_db.add(Staff(
+        id=9003, name='Worker', position='master', company_id=1, fired=0, bookable=True, external_id=9003
+    ))
     await auth_db.commit()
     headers = await _bearer(auth_db, 1, 'owner')
     invite = {'role': 'barber', 'email': 'worker9003@example.com'}

@@ -1,12 +1,12 @@
 """Blocking YClients calls in onboarding / credential routes must stay off the event loop."""
 
 import threading
-from datetime import datetime
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select
 
+from clock import utcnow
 import onboarding_routes
 import yclients_credential_routes
 from models import Company, Group, PortalAccount, PortalUser, YClientsCredential
@@ -39,7 +39,7 @@ def fake_api(monkeypatch):
 
 @pytest_asyncio.fixture
 async def owner(async_session):
-    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=utcnow()))
     await async_session.flush()
     return PortalUser(id=1, portal_account_id=1, email='owner@example.com', role='owner', full_name='Owner')
 

@@ -22,7 +22,15 @@ from auth_scope import AccessContext
 from dashboard_reports import REPORT_REGISTRY, REPORT_USAGE_ID
 from database import get_async_session_factory
 from models import ReportUsageEvent
-from report_payload import NUMBER_FORMAT, PERCENT_FORMAT, card, table
+from report_common import percent
+from report_payload import (
+    DATE_FORMAT,
+    NUMBER_FORMAT,
+    PERCENT_FORMAT,
+    TEXT_FORMAT,
+    card,
+    table,
+)
 
 logger = logging.getLogger('yclients.report_usage')
 
@@ -188,14 +196,12 @@ def _catalog() -> list[tuple[str, str]]:
 
 async def fetch_report_usage(
     db: AsyncSession,
-    portal_account_id: int | None,
+    portal_account_id: int,
     start: date,
     end: date,
     granularity: str = 'day',
 ) -> dict[str, Any]:
     """Usage of the tenant's reports for usage days in [start, end]."""
-    if portal_account_id is None:
-        raise ValueError('report usage needs a tenant')
     event = ReportUsageEvent
     tenant = and_(event.portal_account_id == portal_account_id, event.role.not_in(EXCLUDED_ROLES))
     in_period = and_(tenant, event.usage_day >= start, event.usage_day <= end)
@@ -278,7 +284,7 @@ async def fetch_report_usage(
                 'user_days': int(user_days.get(report_id, 0)),
                 'users': int(total.users) if total else 0,
                 'calls': calls,
-                'compare_share': round(100 * int(total.compared) / calls, 1) if calls else None,
+                'compare_share': percent(int(total.compared), calls, 1) if total else None,
                 'median_ms': round(medians[report_id]) if report_id in medians else None,
                 'errors': int(total.errors) if total else 0,
                 'last_used': last_used[report_id].isoformat() if report_id in last_used else None,
@@ -312,14 +318,14 @@ async def fetch_report_usage(
                 'report_usage',
                 'Использование отчётов',
                 [
-                    ('title', 'Отчёт', 'text'),
+                    ('title', 'Отчёт', TEXT_FORMAT),
                     ('user_days', 'Дней-пользователей', NUMBER_FORMAT),
                     ('users', 'Уникальных пользователей', NUMBER_FORMAT),
                     ('calls', 'Вызовов', NUMBER_FORMAT),
                     ('compare_share', 'Доля со сравнением', PERCENT_FORMAT),
                     ('median_ms', 'Медиана времени ответа, мс', NUMBER_FORMAT),
                     ('errors', 'Ошибок', NUMBER_FORMAT),
-                    ('last_used', 'Последний запуск', 'date'),
+                    ('last_used', 'Последний запуск', DATE_FORMAT),
                 ],
                 rows,
                 row_key='title',
@@ -327,7 +333,7 @@ async def fetch_report_usage(
             table(
                 'report_usage_unused',
                 f'Не открывали {UNUSED_WINDOW_DAYS} дней',
-                [('title', 'Отчёт', 'text'), ('last_used', 'Последний запуск', 'date')],
+                [('title', 'Отчёт', TEXT_FORMAT), ('last_used', 'Последний запуск', DATE_FORMAT)],
                 unused,
                 hide_when_empty=True,
                 row_key='title',

@@ -7,6 +7,7 @@ import {
   collectJumpTargets,
   effectiveTop,
   jumpTargetsSignature,
+  mutationsAffectJumpTargets,
   shouldShowJumpNav,
 } from '../src/jumpTargets.js';
 
@@ -34,6 +35,13 @@ test('unrendered, unlabelled and duplicate blocks are not offered', () => {
 
 test('a missing root yields no targets', () => {
   assert.deepEqual(collectJumpTargets(null), []);
+});
+
+test('loader caption toggles do not rebuild the nav', () => {
+  const inLoader = { target: { closest: (selector) => (selector === '.view-loader' ? {} : null) } };
+  const elsewhere = { target: { closest: () => null } };
+  assert.equal(mutationsAffectJumpTargets([inLoader, inLoader]), false);
+  assert.equal(mutationsAffectJumpTargets([inLoader, elsewhere]), true);
 });
 
 test('the nav needs at least two targets', () => {

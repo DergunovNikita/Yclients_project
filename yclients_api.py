@@ -376,30 +376,17 @@ class YClientsAPI:
     # Услуги
     # ------------------------------------------------------------------
 
-    def get_services(self, company_id: str, staff_id: Optional[int] = None,
-                     category_id: Optional[int] = None) -> Optional[List[Dict]]:
+    def get_services(self, company_id: str, category_id: Optional[int] = None) -> Optional[List[Dict]]:
         if not self._ensure_auth():
             return None
 
         url = f'{self.base_url}/company/{company_id}/services'
         params = {}
-        if staff_id:
-            params['staff_id'] = staff_id
         if category_id:
             params['category_id'] = category_id
 
         result = self._get(url, params or None)
         return self._list_response_data(result, url)
-
-    # ------------------------------------------------------------------
-    # Должности
-    # ------------------------------------------------------------------
-
-    def get_positions(self, company_id: str) -> Optional[List[Dict]]:
-        if not self._ensure_auth():
-            return None
-        url = f'{self.base_url}/company/{company_id}/staff/positions/'
-        return self._list_response_data(self._get(url), url)
 
     # ------------------------------------------------------------------
     # Сотрудники
@@ -429,16 +416,6 @@ class YClientsAPI:
         if not self._ensure_auth():
             return None
         url = f'{self.base_url}/accounts/{company_id}'
-        return self._list_response_data(self._get(url), url)
-
-    # ------------------------------------------------------------------
-    # Склады
-    # ------------------------------------------------------------------
-
-    def get_storages(self, company_id: str) -> Optional[List[Dict]]:
-        if not self._ensure_auth():
-            return None
-        url = f'{self.base_url}/storages/{company_id}'
         return self._list_response_data(self._get(url), url)
 
     # ------------------------------------------------------------------
@@ -518,14 +495,11 @@ class YClientsAPI:
     # ------------------------------------------------------------------
 
     def get_staff_schedule(self, company_id: str,
-                           start_date: str, end_date: str,
-                           staff_ids: Optional[List[int]] = None) -> Optional[List[Dict]]:
+                           start_date: str, end_date: str) -> Optional[List[Dict]]:
         if not self._ensure_auth():
             return None
 
         params = {'start_date': start_date, 'end_date': end_date}
-        if staff_ids:
-            params['staff_ids[]'] = staff_ids
 
         result = self._get(f'{self.base_url}/company/{company_id}/staff/schedule',
                            params=params)

@@ -70,7 +70,8 @@ def test_percent_change_keeps_precision_for_the_one_rounding_the_page_does():
 
 def test_comparison_carries_charts_and_tables_only_for_ids_the_current_payload_has():
     current = _payload(
-        charts=[{'id': 'a'}], tables=[{'id': 't1', 'row_key': 'k', 'rows': [{'k': 1}]}, {'id': 'events'}]
+        charts=[{'id': 'a', 'labels': ['x']}],
+        tables=[{'id': 't1', 'row_key': 'k', 'rows': [{'k': 1}]}, {'id': 'events'}],
     )
     previous = _payload(
         charts=[
@@ -89,6 +90,49 @@ def test_comparison_carries_charts_and_tables_only_for_ids_the_current_payload_h
     assert comparison['tables'] == [{'id': 't1', 'rows': [{'k': 1}]}]
     assert 'raw' not in comparison
     assert comparison['source_status'] == 'ready'
+
+
+def test_comparison_category_chart_carries_only_labels_the_current_chart_has():
+    # The comparison run of a category chart has every row; the page pairs by label and never reads the rest.
+    current = _payload(charts=[
+        {'id': 'top', 'x_kind': 'category', 'labels': ['A', 'C'], 'datasets': []},
+        {'id': 'trend', 'x_kind': 'time', 'labels': ['2026-09-01', '2026-09-02'], 'datasets': []},
+    ])
+    previous = _payload(charts=[
+        {
+            'id': 'top',
+            'x_kind': 'category',
+            'labels': ['A', 'B', 'C', 'D'],
+            'datasets': [
+                {'label': 'Revenue', 'format': 'money', 'data': [1, 2, 3, 4]},
+                {'label': 'Visits', 'data': [10, 20]},
+            ],
+        },
+        {
+            'id': 'trend',
+            'x_kind': 'time',
+            'labels': ['2026-08-01', '2026-08-02', '2026-08-03'],
+            'datasets': [{'label': 'Revenue', 'data': [1, 2, 3]}],
+        },
+    ])
+    comparison = _comparison_payload(current, previous, None)
+    assert comparison['charts'] == [
+        {
+            'id': 'top',
+            'labels': ['A', 'C'],
+            'datasets': [
+                {'label': 'Revenue', 'format': 'money', 'data': [1, 3]},
+                # A series shorter than the labels is padded, not shifted.
+                {'label': 'Visits', 'data': [10, None]},
+            ],
+        },
+        # Consecutive periods are paired by position, so they are carried whole.
+        {
+            'id': 'trend',
+            'labels': ['2026-08-01', '2026-08-02', '2026-08-03'],
+            'datasets': [{'label': 'Revenue', 'data': [1, 2, 3]}],
+        },
+    ]
 
 
 def test_comparison_table_carries_only_rows_the_current_table_can_pair_with():
@@ -239,11 +283,10 @@ async def test_leaderboard_retries_only_database_failures(async_session, monkeyp
         reports_team, 'fetch_plan_fact', failing_with(OperationalError('SELECT 1', {}, OSError('gone')))
     )
     try:
-        with pytest.raises(ReportCalculationError) as raised:
+        with pytest.raises(ReportCalculationError):
             await fetch_report_data(async_session, 'staff_leaderboard', *window, company_id=1, staff_id=7)
     finally:
         logger.removeHandler(handler)
-    assert raised.value.stage == 'plan_fact'
     assert any(message.startswith('staff_leaderboard failed') for message in messages)
     # A person id stays out of the log line.
     assert not any('staff_id' in message for message in messages)

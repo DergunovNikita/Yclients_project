@@ -194,20 +194,21 @@ Security checks для CI и ручного triage:
 ```
 
 В `.github/workflows/deploy-vm.yml` перед деплоем обязательно проходят `ruff check .`, `pytest`
-и frontend-проверки (`npm run test:auth`, `test:dashboard`, `build`, `scan:auth-build`).
+и frontend-проверки (`npm test`, `scan:auth-tokens`, `build`, `scan:auth-build`).
 
 В CI отдельный workflow `.github/workflows/security.yml` запускает:
 
 - `gitleaks` остаётся в deploy workflow как full-history secrets gate;
-- `pip-audit` и `npm audit --audit-level=high` блокируют vulnerable dependencies;
+- `pip-audit` и `npm audit --audit-level=high` делают коммит красным при известных уязвимостях, но деплой не блокируют:
+  `deploy-vm.yml` от `security.yml` не зависит;
 - `Semgrep` и `Checkov` пока работают как report/SARIF checks для triage, чтобы не блокировать deploy на существующих IaC findings без явного suppressions review.
 
-`pip-audit` блокирует любую известную Python vulnerability: у Python advisory
+`pip-audit` падает на любой известной Python vulnerability: у Python advisory
 severity доступна не всегда, поэтому high/critical threshold применяется явно
 только к `npm audit`.
 
 Frontend audit — штатный `npm audit --audit-level=high`: любой high/critical в зависимостях
-(включая dev) блокирует CI. Allowlist исключений не ведётся; если понадобится первая suppression,
+(включая dev) делает проверку красной. Allowlist исключений не ведётся; если понадобится первая suppression,
 добавлять её отдельным решением после risk review.
 
 Локальный `./scripts/security-check.sh --strict` делает Semgrep/Checkov blocking намеренно:

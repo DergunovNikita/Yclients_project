@@ -10,6 +10,7 @@ from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import func
 
+from clock import utcnow
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from database import init_database, quote_identifier
 from models import (
@@ -26,9 +27,7 @@ from models import (
     ServiceCatalog,
     ServiceCategoryCatalog,
     Staff,
-    StaffPositionCatalog,
     StaffSchedule,
-    StorageCatalog,
     Transaction,
 )
 
@@ -41,7 +40,6 @@ class CompanyRefs:
     clients: list[Client]
     goods: list[GoodCatalog]
     accounts: list[AccountCatalog]
-    storages: list[StorageCatalog]
 
 
 FIRST_NAMES = [
@@ -89,16 +87,17 @@ WIPE_TABLES = [
     'service_catalog',
     'service_category_catalog',
     'staff',
-    'staff_position_catalog',
     'clients',
     'account_catalog',
-    'storage_catalog',
     'good_catalog',
     'good_category_catalog',
     'companies',
     'groups',
 ]
 
+
+# Warehouses are not synced; goods sales just point at one of two ids.
+DEMO_STORAGE_IDS = (1, 2)
 
 LOCAL_DB_HOSTS = {'localhost', '127.0.0.1', '::1'}
 
@@ -160,18 +159,14 @@ def seed_companies(
     if negative_ids:
         service_cat_id = next_negative_pk(db, ServiceCategoryCatalog, "category_id")
         service_id = next_negative_pk(db, ServiceCatalog, "service_id")
-        position_id = next_negative_pk(db, StaffPositionCatalog, "position_id")
         account_id = next_negative_pk(db, AccountCatalog, "account_id")
         good_category_id = next_negative_pk(db, GoodCategoryCatalog, "category_id")
-        storage_id = next_negative_pk(db, StorageCatalog, "storage_id")
         good_id = next_negative_pk(db, GoodCatalog, "good_id")
     else:
         service_cat_id = next_pk(db, ServiceCategoryCatalog, "category_id", 1)
         service_id = next_pk(db, ServiceCatalog, "service_id", 1)
-        position_id = next_pk(db, StaffPositionCatalog, "position_id", 1)
         account_id = next_pk(db, AccountCatalog, "account_id", 1)
         good_category_id = next_pk(db, GoodCategoryCatalog, "category_id", 1)
-        storage_id = next_pk(db, StorageCatalog, "storage_id", 1)
         good_id = next_pk(db, GoodCatalog, "good_id", 1)
     staff_id = next_negative_pk(db, Staff, "id") if negative_ids else next_pk(db, Staff, "id", 1)
     client_id = next_negative_pk(db, Client, "id") if negative_ids else next_pk(db, Client, "id", 1)
@@ -194,7 +189,7 @@ def seed_companies(
         db.flush()
 
         categories: list[ServiceCategoryCatalog] = []
-        now = datetime.now()
+        now = utcnow()
         for c_idx, category_name in enumerate(shared_service_categories):
             cat = ServiceCategoryCatalog(
                 company_id=company.id,
@@ -225,17 +220,6 @@ def seed_companies(
             db.add(service)
             services.append(service)
             service_id = advance_pk(service_id, negative=negative_ids)
-
-        for title in shared_positions:
-            db.add(
-                StaffPositionCatalog(
-                    company_id=company.id,
-                    position_id=position_id,
-                    title=title,
-                    updated_at=now,
-                )
-            )
-            position_id = advance_pk(position_id, negative=negative_ids)
 
         staff: list[Staff] = []
         for st_idx in range(staff_per_company):
@@ -307,21 +291,6 @@ def seed_companies(
             )
             good_category_id = advance_pk(good_category_id, negative=negative_ids)
 
-        storages: list[StorageCatalog] = []
-        for s_idx, storage_title in enumerate(["Main Storage", "Retail Shelf"]):
-            storage = StorageCatalog(
-                company_id=company.id,
-                storage_id=storage_id,
-                title=storage_title,
-                for_services=True,
-                for_sale=True,
-                comment="synthetic",
-                updated_at=now,
-            )
-            db.add(storage)
-            storages.append(storage)
-            storage_id = advance_pk(storage_id, negative=negative_ids)
-
         goods: list[GoodCatalog] = []
         for g_idx in range(goods_per_company):
             good = GoodCatalog(
@@ -348,7 +317,6 @@ def seed_companies(
                 clients=clients,
                 goods=goods,
                 accounts=accounts,
-                storages=storages,
             )
         )
 
@@ -391,7 +359,6 @@ def seed_activity(
         services = company_ref.services
         goods = company_ref.goods
         account_ids = [item.account_id for item in company_ref.accounts]
-        storage_ids = [item.storage_id for item in company_ref.storages]
         source_type = company.source_type or "yclients"
         appointment_external_id = 1
         financial_external_id = 1
@@ -488,7 +455,7 @@ def seed_activity(
                             date=dt + timedelta(minutes=duration // 60),
                             type_id=1,
                             good_id=good.good_id,
-                            storage_id=rng.choice(storage_ids),
+                            storage_id=rng.choice(DEMO_STORAGE_IDS),
                             amount=qty,
                             cost_per_unit=unit_cost,
                             cost=round(unit_cost * qty, 2),

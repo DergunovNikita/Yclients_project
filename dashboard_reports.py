@@ -512,7 +512,7 @@ def _comparison_payload(data: dict[str, Any], compare_data: dict[str, Any], staf
     A table without a `row_key` cannot be paired row by row, so it is not carried at all (a list of events
     such as the negative reviews would only ship the previous window's rows for nothing).
     """
-    chart_ids = {item.get('id') for item in data.get('charts', [])}
+    current_charts = {item.get('id'): item for item in data.get('charts', [])}
     current_tables = {item.get('id'): item for item in data.get('tables', [])}
     return {
         'period': compare_data['period'],
@@ -521,9 +521,9 @@ def _comparison_payload(data: dict[str, Any], compare_data: dict[str, Any], staf
         'cards': compare_data.get('cards', []),
         'rows': _comparison_rows(data.get('cards', []), compare_data.get('cards', [])),
         'charts': [
-            {'id': item['id'], 'labels': item.get('labels', []), 'datasets': item.get('datasets', [])}
+            _comparison_chart(current_charts[item['id']], item)
             for item in compare_data.get('charts', [])
-            if item.get('id') in chart_ids
+            if item.get('id') in current_charts
         ],
         'tables': [
             {'id': item['id'], 'rows': _comparison_table_rows(current_tables[item['id']], item)}
@@ -531,6 +531,28 @@ def _comparison_payload(data: dict[str, Any], compare_data: dict[str, Any], staf
             if item.get('id') in current_tables and item.get('row_key')
         ],
     }
+
+
+def _comparison_chart(current: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    """Labels and series of the comparison chart that the page can pair with a point of the current one.
+
+    Category charts are paired by label, so the comparison run's extra entities (it carries every row, not the
+    top few) are dropped, like the rows in `_comparison_table_rows`. Charts of consecutive periods are paired by
+    position and go whole.
+    """
+    labels = previous.get('labels', [])
+    datasets = previous.get('datasets', [])
+    if previous.get('x_kind') != 'time':
+        shown = {str(label) for label in current.get('labels', [])}
+        kept = [index for index, label in enumerate(labels) if str(label) in shown]
+        labels = [labels[index] for index in kept]
+        datasets = [_keep_points(dataset, kept) for dataset in datasets]
+    return {'id': previous['id'], 'labels': labels, 'datasets': datasets}
+
+
+def _keep_points(dataset: dict[str, Any], kept: list[int]) -> dict[str, Any]:
+    data = dataset.get('data') or []
+    return {**dataset, 'data': [data[index] if index < len(data) else None for index in kept]}
 
 
 def _comparison_table_rows(current: dict[str, Any], previous: dict[str, Any]) -> list[dict[str, Any]]:

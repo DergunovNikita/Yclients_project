@@ -49,7 +49,7 @@ All Vite entrypoints are wired to the runtime i18n module:
 
 - dashboard/reports: `index.html` + `src/main.js`;
 - auth: login, register, forgot/reset password and email verification;
-- portal: onboarding, profile, settings and admin.
+- portal: onboarding, settings and admin.
 
 Each page sets `<html lang>`, applies translations and mounts a language switcher
 where the layout provides one. New entrypoints should follow the same pattern and

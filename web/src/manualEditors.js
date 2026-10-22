@@ -12,6 +12,7 @@ import {
   storedValue,
 } from './manualFactInput.js';
 import { formatMoneyExact, formatNumber } from './reports/format.js';
+import { branchRowTitle } from './staffLabel.js';
 import { BRANCH_TIME_ZONE, parseServerInstant } from './timestamps.js';
 import {
   UNREADABLE_DATE,
@@ -90,10 +91,6 @@ const manualFactParams = (filters) => ({
   staff_id: filters.staff,
 });
 
-function branchTitle(row) {
-  return row.company_title || t('dash.branchFallbackWithId', { id: row.company_id });
-}
-
 // The cell the person types into; reviews and OPZ share it.
 function manualFactInputCell(row) {
   return `
@@ -130,7 +127,7 @@ function reviewFactTableHtml(rows) {
                   : '';
                 return `
                   <tr>
-                    <td>${escapeHtml(branchTitle(row))}</td>
+                    <td>${escapeHtml(branchRowTitle(row, t))}</td>
                     <td>${escapeHtml(row.staff_name)}${inactiveMark}</td>${manualFactInputCell(row)}
                     <td class="meta">${manualFactAuthorCell(row)}</td>
                   </tr>
@@ -169,7 +166,7 @@ function opzFactTableHtml(rows) {
                 const current = Number(row.current_value || 0);
                 return `
                   <tr data-current-value="${escapeHtml(current)}" data-counted="${row.counted === false ? 'false' : 'true'}">
-                    <td>${escapeHtml(branchTitle(row))}</td>
+                    <td>${escapeHtml(branchRowTitle(row, t))}</td>
                     <td>${escapeHtml(row.staff_name)}${inactiveMark}</td>
                     <td class="number">${escapeHtml(formatNumber(current))}</td>${manualFactInputCell(row)}
                     <td class="number" data-total-cell>${escapeHtml(formatNumber(row.total_value ?? current))}</td>
@@ -201,7 +198,7 @@ function yandexPayTableHtml(rows, { editable, monthStart }) {
             ${rows
               .map((row) => {
                 const counted = row.counted !== false;
-                const title = branchTitle(row);
+                const title = branchRowTitle(row, t);
                 const mark = counted
                   ? ''
                   : ` <span class="meta">· ${escapeHtml(t('dash.yandexPayNotCounted'))}</span>`;
@@ -243,7 +240,7 @@ function yandexPayTableHtml(rows, { editable, monthStart }) {
 }
 
 function yandexPayInvalidMessage(error, row) {
-  const branch = branchTitle(row);
+  const branch = branchRowTitle(row, t);
   const keys = {
     range: 'dash.yandexPayInvalidRange',
     precision: 'dash.yandexPayInvalidPrecision',
@@ -273,7 +270,6 @@ export function createManualEditors({ els, filterEls, host }) {
     path: '/dashboard/plan/reviews_fact',
     params: manualFactParams,
     conflictMessageKey: 'dash.manualFactConflict',
-    refreshStaffOnBranch: true,
     draftSnapshot: () => manualFactDraftSnapshot(els.reviewFactEditor),
     draft: {
       id: 'reviewFacts',
@@ -340,7 +336,6 @@ export function createManualEditors({ els, filterEls, host }) {
     path: '/dashboard/plan/opz_fact',
     params: manualFactParams,
     conflictMessageKey: 'dash.manualFactConflict',
-    refreshStaffOnBranch: true,
     draftSnapshot: () => manualFactDraftSnapshot(els.opzFactEditor),
     draft: {
       id: 'opzFacts',

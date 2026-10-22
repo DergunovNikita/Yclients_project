@@ -3,7 +3,6 @@
 import logging
 import secrets
 from contextlib import contextmanager
-from datetime import datetime
 
 import pytest
 import pytest_asyncio
@@ -13,6 +12,7 @@ from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from clock import utcnow
 import api
 import auth_routes
 import portal_account_provision
@@ -46,8 +46,8 @@ def _user(user_id, role, email=None, tenant=1, **fields):
         full_name=f'User {user_id}',
         role=role,
         is_active=True,
-        email_verified_at=datetime.utcnow(),
-        created_at=datetime.utcnow(),
+        email_verified_at=utcnow(),
+        created_at=utcnow(),
         **fields,
     )
 
@@ -60,7 +60,7 @@ async def tenant_db(async_session, monkeypatch):
     )
     async_session.add(Group(id=1, title='G1'))
     async_session.add_all([Company(id=1, title='Branch 1', group_id=1), Company(id=2, title='Branch 2', group_id=1)])
-    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=utcnow()))
     async_session.add_all(
         [PortalBranch(portal_account_id=1, company_id=1), PortalBranch(portal_account_id=1, company_id=2)]
     )
@@ -158,7 +158,7 @@ async def test_a_get_of_the_user_list_writes_nothing_when_no_mirror_is_missing(t
 async def test_branch_ids_for_a_list_of_users_match_the_per_user_loader(tenant_db):
     from auth_service import load_user_access_branch_ids
 
-    tenant_db.add(PortalAccount(id=2, label='Other', created_at=datetime.utcnow()))
+    tenant_db.add(PortalAccount(id=2, label='Other', created_at=utcnow()))
     tenant_db.add(Company(id=3, title='Branch 3', group_id=1))
     tenant_db.add(PortalBranch(portal_account_id=2, company_id=3))
     tenant_db.add_all(
@@ -419,6 +419,86 @@ async def test_distribute_credentials_survives_a_database_error_outside_the_send
     assert [item['user_id'] for item in data['errors']] == [12]
 
 
+@pytest.mark.asyncio
+async def test_distribute_credentials_keeps_mailing_every_user_after_one_failure(tenant_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    user_ids = [30, 31, 32, 33]
+    for user_id in user_ids:
+        tenant_db.add(_user(user_id, 'barber'))
+        tenant_db.add(PortalUserBranch(user_id=user_id, company_id=1))
+    await tenant_db.commit()
+    attempts = []
+
+    async def fails_once(db, user):
+        # The rollback of the first failure expires every loaded row; reading one that was not refreshed raises.
+        attempts.append((user.id, user.email))
+        if len(attempts) == 1:
+            raise RuntimeError('smtp down')
+        await db.commit()
+
+    monkeypatch.setattr('auth_routes.send_account_invite_email', fails_once)
+
+    async def override_db():
+        yield tenant_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app, raise_app_exceptions=False), base_url='http://test'
+        ) as client:
+            response = await client.post(
+                '/auth/admin/distribute-credentials',
+                headers={'Authorization': f'Bearer {await issue_access_token(tenant_db, 1, "owner")}'},
+                json={'user_ids': user_ids},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    data = response.json()['data']
+    assert [item['user_id'] for item in data['errors']] == [30]
+    assert [item['user_id'] for item in data['sent']] == [31, 32, 33]
+
+
+@pytest.mark.asyncio
+async def test_distribute_credentials_refreshes_each_user_at_most_once_after_failures(tenant_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    user_ids = list(range(20, 26))
+    for user_id in user_ids:
+        tenant_db.add(_user(user_id, 'barber'))
+        tenant_db.add(PortalUserBranch(user_id=user_id, company_id=1))
+    await tenant_db.commit()
+
+    async def always_fails(db, user):
+        raise RuntimeError('smtp down')
+
+    monkeypatch.setattr('auth_routes.send_account_invite_email', always_fails)
+    statements = []
+    engine = tenant_db.bind.sync_engine
+    event.listen(engine, 'before_cursor_execute', lambda *args: statements.append(args[2]))
+
+    async def override_db():
+        yield tenant_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            response = await client.post(
+                '/auth/admin/distribute-credentials',
+                headers={'Authorization': f'Bearer {await issue_access_token(tenant_db, 1, "owner")}'},
+                json={'user_ids': user_ids},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert [item['user_id'] for item in response.json()['data']['errors']] == user_ids
+    by_id = 'FROM system.portal_users \nWHERE system.portal_users.id = ?'
+    refreshes = [sql for sql in statements if sql.endswith(by_id)]
+    # One refresh per user mailed after the first failure, not one per loaded user on every failure.
+    assert len(refreshes) == len(user_ids) - 1
+
+
 # ---------- AUTH-13: one cross-tenant claim check ----------
 
 
@@ -434,7 +514,7 @@ class _FakeYClients:
 
 
 async def _tenant_with_claimed_location(session, *, with_users=True):
-    session.add(PortalAccount(id=2, label='Other', created_at=datetime.utcnow()))
+    session.add(PortalAccount(id=2, label='Other', created_at=utcnow()))
     await session.flush()
     session.add(
         Company(id=77, portal_account_id=1, source_type='yclients', external_id=101, title='Claimed', group_id=1)

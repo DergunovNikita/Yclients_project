@@ -26,7 +26,7 @@ const REQUEST_HEADER_ALLOWLIST = new Set([
 ]);
 
 const AUTH_ROUTE_RULES = [
-  { methods: ['POST'], pattern: /^(login|demo-login|register|refresh|logout|logout-all|logout-others|verify-email|forgot-password|resend-verification|reset-password|change-password)$/ },
+  { methods: ['POST'], pattern: /^(login|demo-login|register|refresh|logout|logout-all|verify-email|forgot-password|reset-password|change-password)$/ },
   { methods: ['GET'], pattern: /^(me|sessions|portal-accounts|admin\/meta|admin\/users|admin\/yclients-credentials|admin\/initial-passwords)$/ },
   { methods: ['DELETE'], pattern: /^sessions\/[^/]+$/ },
   { methods: ['POST'], pattern: /^(admin\/users|admin\/provision-accounts|admin\/distribute-credentials|admin\/yclients-credentials|admin\/yclients-credentials\/test)$/ },
@@ -127,12 +127,6 @@ export function normalizeProxyPath(rawPath) {
   }
 
   return normalized.join('/');
-}
-
-export function rawRequestPath(req) {
-  const rawUrl = String(req.url || '/');
-  const queryStart = rawUrl.indexOf('?');
-  return queryStart === -1 ? rawUrl : rawUrl.slice(0, queryStart);
 }
 
 function methodsForRules(path, rules) {
@@ -330,7 +324,7 @@ export function vmOrigin() {
   return origin.replace(/\/$/, '');
 }
 
-// Where each proxy scope lives on the VM. Both entry points (api/[...path].js and api/auth-proxy.js) read it.
+// Where each proxy scope lives on the VM; api/auth-proxy.js reads it.
 export const SCOPE_TARGET_PREFIX = {
   auth: 'dashboard/auth/',
   dashboard: 'dashboard/',

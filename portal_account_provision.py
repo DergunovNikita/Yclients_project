@@ -25,6 +25,10 @@ from portal_staff_sync import list_unlinked_staff
 logger = logging.getLogger('yclients.auth')
 
 
+class ProvisionConflict(ValueError):
+    """The account cannot be made because something already holds its login, id or staff link."""
+
+
 @dataclass
 class ProvisionedAccount:
     staff_id: int
@@ -71,7 +75,7 @@ def _checked_staff_email(staff: Staff, taken: _Taken, preferred: str | None = No
     if not email or not is_deliverable_portal_email(email):
         raise ValueError(f'Real email is required for staff {staff.id}')
     if email in taken.emails:
-        raise ValueError(f'Email already registered: {email}')
+        raise ProvisionConflict(f'Email already registered: {email}')
     return email
 
 
@@ -100,11 +104,11 @@ async def _provision(
     company_ids: list[int] | None,
 ) -> ProvisionedAccount:
     if staff.portal_user_id is not None:
-        raise ValueError(f'Staff {staff.id} already has a portal account')
+        raise ProvisionConflict(f'Staff {staff.id} already has a portal account')
     if staff.fired:
         raise ValueError(f'Staff {staff.id} is inactive')
     if staff.id in taken.user_ids:
-        raise ValueError(f'Portal user id {staff.id} is already taken')
+        raise ProvisionConflict(f'Portal user id {staff.id} is already taken')
 
     portal_account_id = taken.tenant_by_company.get(staff.company_id)
     if portal_account_id is None:

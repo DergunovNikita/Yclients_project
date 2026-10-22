@@ -160,20 +160,11 @@ async def require_auth(
     raise HTTPException(status_code=401, detail='Authentication required')
 
 
-async def get_current_user(
-    request: Request,
-    authorization: str | None = Header(default=None),
-    db: AsyncSession = Depends(get_async_db),
-) -> PortalUser:
-    # `require_auth` already loaded the user and checked CSRF for this very token.
+async def get_current_user(request: Request) -> PortalUser:
+    # Every route outside OPEN_PATHS runs the app-wide `require_api_key`, which loaded the user and checked CSRF.
     user = getattr(request.state, 'portal_user', None)
-    if user is not None:
-        return user
-    token = _extract_access_token(request, authorization)
-    if not token:
+    if user is None:
         raise HTTPException(status_code=401, detail='Authentication required')
-    user, _ = await _user_from_token(token, db)
-    enforce_csrf(request)
     return user
 
 
@@ -205,44 +196,14 @@ def require_roles(*roles: str):
     return _dep
 
 
-async def _caller_is_demo(request: Request, authorization: str | None, db: AsyncSession) -> bool:
-    """Whether the request carries a valid demo JWT; any other caller is simply not demo.
-
-    Soft by design: API-key, X-Sync-Token and unauthenticated callers carry no JWT and keep full
-    behaviour, so token-based automation keeps working.
-    """
-    ctx = getattr(request.state, 'access', None)
-    if ctx is not None and ctx.user_id is not None:
-        return ctx.is_demo
-    # `require_auth` did not run (an open path): resolve the token the slow way.
-    token = _extract_access_token(request, authorization)
-    if not token:
-        return False
-    try:
-        user_id = int(decode_access_token(token).get('sub'))
-    except (jwt.PyJWTError, TypeError, ValueError):
-        return False
-    return bool(await db.scalar(select(PortalUser.is_demo).where(PortalUser.id == user_id)))
-
-
-async def is_demo_request(
-    request: Request,
-    authorization: str | None = Header(default=None),
-    db: AsyncSession = Depends(get_async_db),
-) -> bool:
-    """Whether the caller is the shared read-only demo account."""
-    return await _caller_is_demo(request, authorization, db)
-
-
-async def forbid_demo(
-    request: Request,
-    authorization: str | None = Header(default=None),
-    db: AsyncSession = Depends(get_async_db),
-) -> None:
+async def forbid_demo(request: Request) -> None:
     """Reject mutating requests made by the shared read-only demo account.
 
-    Attach per write route via ``dependencies=[Depends(forbid_demo)]`` — never at router level,
-    since the routers also serve demo-allowed reads.
+    Soft by design: API-key, X-Sync-Token and unauthenticated callers carry no user and keep full
+    behaviour, so token-based automation keeps working. Attach per write route via
+    ``dependencies=[Depends(forbid_demo)]`` — never at router level, since the routers also serve
+    demo-allowed reads.
     """
-    if await _caller_is_demo(request, authorization, db):
+    ctx = getattr(request.state, 'access', None)
+    if ctx is not None and ctx.is_demo:
         raise HTTPException(status_code=403, detail='Demo account is read-only')

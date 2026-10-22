@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 from sqlalchemy import text
 
+from clock import utcnow
 from config import (
     REPORT_USAGE_RETENTION_DAYS,
     SYNC_LOCK_ID,
@@ -68,7 +69,7 @@ class SyncControlService:
         stale = db.query(SyncRun).filter(SyncRun.status == 'running').all()
         for run in stale:
             run.status = 'abandoned'
-            run.finished_at = datetime.now()
+            run.finished_at = utcnow()
             run.message = 'Run marked as abandoned: its process no longer holds the sync lock'
         db.commit()
         return len(stale)
@@ -107,7 +108,7 @@ class SyncControlService:
         if retention_days <= 0:
             return 0
 
-        now = now or datetime.now()
+        now = now or utcnow()
         cutoff = now - timedelta(days=retention_days)
         latest = self.get_latest_run(db)
         latest_id = latest.id if latest is not None else None
@@ -171,7 +172,7 @@ class SyncControlService:
         """Delete report_usage_events older than retention_days. The log is append-only and nothing refers to it."""
         if retention_days <= 0:
             return 0
-        cutoff = (now or datetime.now()) - timedelta(days=retention_days)
+        cutoff = (now or utcnow()) - timedelta(days=retention_days)
         deleted = db.query(ReportUsageEvent).filter(ReportUsageEvent.created_at < cutoff).delete(
             synchronize_session=False
         )
@@ -206,7 +207,7 @@ class SyncControlService:
         poll tick, every few seconds, forever. Backing off to the normal interval is the right
         answer for best-effort maintenance; the caller logs the failure.
         """
-        now = now or datetime.now()
+        now = now or utcnow()
         last_at = parse_datetime(self.get_state_values(db, [state_key]).get(state_key))
         if last_at is not None and now - last_at < timedelta(hours=interval_hours):
             return None
@@ -214,7 +215,7 @@ class SyncControlService:
         return sweep(now)
 
     def create_run(self, db, mode: str, trigger_type: str, initiator: str, log_path: str) -> SyncRun:
-        now = datetime.now()
+        now = utcnow()
         run = SyncRun(
             mode=mode,
             trigger_type=trigger_type,
@@ -226,12 +227,6 @@ class SyncControlService:
         db.add(run)
         db.commit()
         db.refresh(run)
-
-        self.set_state(db, 'last_run_id', str(run.id))
-        self.set_state(db, 'last_run_status', run.status)
-        self.set_state(db, 'last_run_mode', mode)
-        self.set_state(db, 'last_run_trigger_type', trigger_type)
-        self.set_state(db, 'last_run_started_at', now)
         return run
 
     def finish_run(
@@ -247,16 +242,13 @@ class SyncControlService:
 
         Only an unscoped success arms the auto-enqueue gate: a run for one tenant says nothing about the others.
         """
-        now = datetime.now()
+        now = utcnow()
         run.status = status
         run.finished_at = now
         run.message = message
         db.commit()
 
-        self.set_state(db, 'last_run_status', status)
-        self.set_state(db, 'last_run_finished_at', now)
         if status == 'success':
-            self.set_state(db, 'last_successful_run_id', str(run.id))
             self.set_state(db, 'last_successful_sync_at', now)
             if not scoped:
                 self.set_state(db, UNSCOPED_SUCCESS_STATE_KEY, now)
@@ -268,7 +260,7 @@ class SyncControlService:
             state = SyncState(key=key)
             db.add(state)
         state.value = serialize_dt(value)
-        state.updated_at = datetime.now()
+        state.updated_at = utcnow()
         db.commit()
 
     def get_latest_run(self, db) -> Optional[SyncRun]:

@@ -4,7 +4,7 @@
 // only against the same server state — the optimistic locking of the editors stays the only judge of a save.
 import { t } from './i18n.js';
 
-export const DRAFT_DEBOUNCE_MS = 500;
+const DRAFT_DEBOUNCE_MS = 500;
 const KEY_PREFIX = 'portal-draft/v1';
 const DRAFT_VERSION = 1;
 
@@ -20,7 +20,7 @@ export function draftKey({ userId, accountId }, editorId, scope) {
 }
 
 /** Stable, order-independent form of a scope such as `{ month, branch, staff }`. */
-export function scopeKey(scope) {
+function scopeKey(scope) {
   return Object.keys(scope || {})
     .sort()
     .map((name) => `${name}=${encodeURIComponent(String(scope[name] ?? ''))}`)

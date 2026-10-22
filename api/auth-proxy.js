@@ -1,8 +1,9 @@
 import { SCOPE_TARGET_PREFIX, createProxyHandler, validateProxyRequest, vmOrigin } from './_proxy.js';
 
-// Vercel's Hobby plan caps a deployment at 12 functions, and every nested path prefix would
-// otherwise need a function file of its own (a catch-all answers one segment only). vercel.json
-// rewrites such paths here instead, with the scope and the path in the query string.
+// The only function of the deployment. Vercel's Hobby plan caps a deployment at 12 functions, and a
+// catch-all file answers one path segment only, so every nested prefix would otherwise need a function
+// file of its own. vercel.json rewrites every proxied path here instead (/auth, /dashboard, /onboarding
+// and /api/health, with or without the /api prefix), carrying the scope and the path in the query string.
 
 export function buildTargetUrl(req) {
   const incoming = new URL(req.url, `https://${req.headers.host}`);
@@ -15,7 +16,8 @@ export function buildTargetUrl(req) {
     return { ok: false, statusCode: 400, error: 'Bad request' };
   }
   const scope = incoming.searchParams.get('scope') || 'auth';
-  if (!Object.hasOwn(SCOPE_TARGET_PREFIX, scope)) {
+  const isHealth = scope === 'health';
+  if (!isHealth && !Object.hasOwn(SCOPE_TARGET_PREFIX, scope)) {
     return { ok: false, statusCode: 404, error: 'Not found' };
   }
   const validation = validateProxyRequest(req, scope, incoming.searchParams.get('path') || '');
@@ -25,7 +27,8 @@ export function buildTargetUrl(req) {
   incoming.searchParams.delete('path');
   incoming.searchParams.delete('scope');
 
-  const target = new URL(`/${SCOPE_TARGET_PREFIX[scope]}${validation.path}`, vmOrigin());
+  const targetPath = isHealth ? '/health' : `/${SCOPE_TARGET_PREFIX[scope]}${validation.path}`;
+  const target = new URL(targetPath, vmOrigin());
   target.search = incoming.searchParams.toString();
   return { ok: true, target };
 }

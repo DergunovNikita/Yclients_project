@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import secrets
 import smtplib
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 
@@ -262,75 +263,81 @@ def send_auth_email(to_email: str, subject: str, body: str) -> None:
         smtp.send_message(message)
 
 
-async def send_verification_email(db: AsyncSession, user: PortalUser) -> None:
-    token = await create_email_token(db, user.id, TOKEN_PURPOSE_VERIFY, commit=False)
-    user.email_verification_sent_at = utcnow()
-    link = _email_link('/verify-email.html', token)
+async def _send_token_email(
+    db: AsyncSession,
+    user: PortalUser,
+    *,
+    purpose: str,
+    page: str,
+    subject: str,
+    body: Callable[[str, str], str],
+) -> None:
+    """Issue a single-use token, mail its link and commit; any failure rolls the whole thing back.
+
+    `body` gets the greeting name and the link. The caller stamps its own `*_sent_at` column.
+    """
+    token = await create_email_token(db, user.id, purpose, commit=False)
+    link = _email_link(page, token)
     name = (user.full_name or user.email).strip()
     try:
-        await asyncio.to_thread(
-            send_auth_email,
-            user.email,
-            'Подтверждение регистрации — YClients Portal',
-            (
-                f'Здравствуйте, {name}!\n\n'
-                'Для завершения регистрации перейдите по ссылке (действует 48 часов):\n'
-                f'{link}\n\n'
-                'Если вы не регистрировались на портале, просто проигнорируйте это письмо.\n'
-            ),
-        )
+        await asyncio.to_thread(send_auth_email, user.email, subject, body(name, link))
         await db.commit()
     except Exception:
         await db.rollback()
         raise
+
+
+async def send_verification_email(db: AsyncSession, user: PortalUser) -> None:
+    user.email_verification_sent_at = utcnow()
+    await _send_token_email(
+        db,
+        user,
+        purpose=TOKEN_PURPOSE_VERIFY,
+        page='/verify-email.html',
+        subject='Подтверждение регистрации — YClients Portal',
+        body=lambda name, link: (
+            f'Здравствуйте, {name}!\n\n'
+            'Для завершения регистрации перейдите по ссылке (действует 48 часов):\n'
+            f'{link}\n\n'
+            'Если вы не регистрировались на портале, просто проигнорируйте это письмо.\n'
+        ),
+    )
 
 
 async def send_password_reset_email(db: AsyncSession, user: PortalUser) -> None:
-    token = await create_email_token(db, user.id, TOKEN_PURPOSE_RESET, commit=False)
     user.password_reset_sent_at = utcnow()
-    link = _email_link('/reset-password.html', token)
-    name = (user.full_name or user.email).strip()
-    try:
-        await asyncio.to_thread(
-            send_auth_email,
-            user.email,
-            'Сброс пароля — YClients Portal',
-            (
-                f'Здравствуйте, {name}!\n\n'
-                'Чтобы задать новый пароль, перейдите по ссылке (действует 2 часа):\n'
-                f'{link}\n\n'
-                'Если вы не запрашивали сброс, проигнорируйте это письмо.\n'
-            ),
-        )
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        raise
+    await _send_token_email(
+        db,
+        user,
+        purpose=TOKEN_PURPOSE_RESET,
+        page='/reset-password.html',
+        subject='Сброс пароля — YClients Portal',
+        body=lambda name, link: (
+            f'Здравствуйте, {name}!\n\n'
+            'Чтобы задать новый пароль, перейдите по ссылке (действует 2 часа):\n'
+            f'{link}\n\n'
+            'Если вы не запрашивали сброс, проигнорируйте это письмо.\n'
+        ),
+    )
 
 
 async def send_account_invite_email(db: AsyncSession, user: PortalUser) -> None:
-    token = await create_email_token(db, user.id, TOKEN_PURPOSE_RESET, commit=False)
     user.password_reset_sent_at = utcnow()
-    link = _email_link('/reset-password.html', token)
-    name = (user.full_name or user.email).strip()
-    try:
-        await asyncio.to_thread(
-            send_auth_email,
-            user.email,
-            'Доступ к YClients Portal',
-            (
-                f'Здравствуйте, {name}!\n\n'
-                'Для вас создан аккаунт на портале.\n\n'
-                f'Логин: {user.email}\n'
-                'Чтобы задать пароль, перейдите по ссылке (действует 2 часа):\n'
-                f'{link}\n\n'
-                'Если вы не ожидали это письмо, просто проигнорируйте его.\n'
-            ),
-        )
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        raise
+    await _send_token_email(
+        db,
+        user,
+        purpose=TOKEN_PURPOSE_RESET,
+        page='/reset-password.html',
+        subject='Доступ к YClients Portal',
+        body=lambda name, link: (
+            f'Здравствуйте, {name}!\n\n'
+            'Для вас создан аккаунт на портале.\n\n'
+            f'Логин: {user.email}\n'
+            'Чтобы задать пароль, перейдите по ссылке (действует 2 часа):\n'
+            f'{link}\n\n'
+            'Если вы не ожидали это письмо, просто проигнорируйте его.\n'
+        ),
+    )
 
 
 def is_deliverable_portal_email(email: str) -> bool:

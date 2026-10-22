@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_deps import forbid_demo, get_dashboard_access, is_demo_request
+from auth_deps import forbid_demo, get_dashboard_access
 from auth_hierarchy import USER_ADMIN_ROLES
 from auth_scope import (
     AccessContext,
@@ -456,12 +456,12 @@ async def _validated_widget_scope(
 async def _require_visibility_portal_account_id(
     db: AsyncSession, ctx: AccessContext, x_portal_account_id: int | None
 ) -> int:
-    """Tenant of a metric-visibility route. An API key has none of its own, so it has to name one."""
-    portal_account_id = ctx.portal_account_id
-    if portal_account_id is None and ctx.full_access and x_portal_account_id is not None:
-        if await db.get(PortalAccount, x_portal_account_id) is None:
+    """Tenant of a metric-visibility route. An API key or platform admin has none of its own, so it has to name one."""
+    portal_account_id = x_portal_account_id if ctx.full_access else ctx.portal_account_id
+    if portal_account_id is not None and (ctx.full_access or ctx.is_platform_admin):
+        # The id came from the header: an unknown one would surface as a misleading FK conflict on save.
+        if await db.get(PortalAccount, portal_account_id) is None:
             raise HTTPException(status_code=400, detail='unknown X-Portal-Account-Id')
-        portal_account_id = x_portal_account_id
     if portal_account_id is None:
         raise HTTPException(status_code=400, detail='X-Portal-Account-Id is required')
     return portal_account_id
@@ -504,17 +504,18 @@ async def dashboard_staff(
     # scope; the dashboard filters pass them and get the branches that period can report on.
     start, end = (None, None) if start_date is None or end_date is None else _parse_range(start_date, end_date)
     scope = query_scope(ctx, company_id)
-    return {
-        'success': True,
-        'data': await fetch_staff(
-            db,
-            scope['company_id'],
-            allowed_company_ids=scope['branch_ids'],
-            force_allowed=scope['force_allowed'],
-            start=start,
-            end=end,
-        ),
-    }
+    # A personal role lists only itself: colleagues are not its to read (403 when it has no live staff row).
+    staff = await fetch_staff(
+        db,
+        scope['company_id'],
+        allowed_company_ids=scope['branch_ids'],
+        force_allowed=scope['force_allowed'],
+        start=start,
+        end=end,
+        staff_id=effective_staff_id(ctx, None),
+    )
+    # The selectors never read the YClients user id; the plan editor gets it from `fetch_staff` itself.
+    return {'success': True, 'data': [{key: value for key, value in row.items() if key != 'user_id'} for row in staff]}
 
 
 @router.get('/services')
@@ -563,13 +564,12 @@ async def dashboard_services_save(
 @router.get('/reports')
 async def dashboard_reports(
     ctx: AccessContext = Depends(get_dashboard_access),
-    is_demo: bool = Depends(is_demo_request),
 ):
     """Report catalog for the product reports SPA, narrowed to what the role may open."""
     return {
         'success': True,
         'data': fetch_report_registry(
-            is_demo,
+            ctx.is_demo,
             hide_financials=not can_view_financials(ctx),
             hide_branch_payments=not can_view_branch_payments(ctx),
             hide_report_usage=not can_view_report_usage(ctx),
@@ -595,7 +595,6 @@ async def dashboard_report_data(
     staff_position_ids: str | None = Query(None, description='Comma-separated barber level position ids'),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
-    is_demo: bool = Depends(is_demo_request),
 ):
     start, end = _parse_range(start_date, end_date)
     position_ids = _parse_staff_position_ids(staff_position_ids)
@@ -606,7 +605,7 @@ async def dashboard_report_data(
         raise HTTPException(status_code=400, detail='unknown report_id')
     # The catalog already hides these for demo; block the direct URL too so a
     # bookmark cannot surface a report the demo data can never populate.
-    if is_demo and canonical_id in DEMO_UNAVAILABLE_REPORTS:
+    if ctx.is_demo and canonical_id in DEMO_UNAVAILABLE_REPORTS:
         raise HTTPException(status_code=404, detail='Report is not available in the demo tenant')
     if report_requires_financials(canonical_id):
         require_financial_access(ctx)
@@ -646,7 +645,7 @@ async def dashboard_report_data(
     )
     with track_report_usage(
         ctx,
-        is_demo=is_demo,
+        is_demo=ctx.is_demo,
         report_id=canonical_id,
         requested_report_id=report_id,
         start=start,

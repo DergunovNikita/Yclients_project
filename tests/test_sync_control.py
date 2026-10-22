@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from clock import utcnow
 import sync_worker
 from models import SyncJob, SyncJobEvent, SyncRun, SyncState, YClientsCredential
 from sync_control import UNSCOPED_SUCCESS_STATE_KEY, SyncControlService
@@ -15,9 +16,9 @@ def test_set_state_serializes_datetime_to_isoformat():
         service = SyncControlService()
         value = datetime(2026, 3, 29, 10, 30, 45, 123456)
 
-        service.set_state(session, 'last_run_started_at', value)
+        service.set_state(session, 'last_successful_sync_at', value)
 
-        saved = session.get(SyncState, 'last_run_started_at')
+        saved = session.get(SyncState, 'last_successful_sync_at')
         assert saved is not None
         assert saved.value == '2026-03-29T10:30:45.123456'
 
@@ -489,7 +490,7 @@ def test_run_sync_job_locks_on_a_connection_no_pooled_session_can_take(monkeypat
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'cleanup_stale_runs',
                         lambda self, db: None)
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'create_run',
-                        lambda self, db, *a, **k: SyncRun(id=1, started_at=datetime.utcnow()))
+                        lambda self, db, *a, **k: SyncRun(id=1, started_at=utcnow()))
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'set_state', lambda *a, **k: None)
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'finish_run', lambda *a, **k: None)
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'get_status_payload',
@@ -770,7 +771,7 @@ def test_run_sync_job_closes_connections_when_release_lock_raises_at_normal_fini
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'acquire_lock', lambda self, db: True)
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'cleanup_stale_runs', lambda self, db: None)
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'create_run',
-                        lambda self, db, *a, **k: SyncRun(id=1, started_at=datetime.utcnow()))
+                        lambda self, db, *a, **k: SyncRun(id=1, started_at=utcnow()))
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'set_state', lambda *a, **k: None)
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'finish_run', lambda *a, **k: None)
     monkeypatch.setattr(sync_orchestrator, 'execute_sync', lambda **kwargs: {
@@ -828,7 +829,7 @@ def test_run_sync_job_releases_lock_even_when_notification_building_raises(monke
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'acquire_lock', lambda self, db: True)
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'cleanup_stale_runs', lambda self, db: None)
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'create_run',
-                        lambda self, db, *a, **k: SyncRun(id=1, started_at=datetime.utcnow()))
+                        lambda self, db, *a, **k: SyncRun(id=1, started_at=utcnow()))
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'set_state', lambda *a, **k: None)
     monkeypatch.setattr(sync_orchestrator.SyncControlService, 'finish_run', lambda *a, **k: None)
     monkeypatch.setattr(sync_orchestrator, 'execute_sync', lambda **kwargs: {
@@ -1171,3 +1172,53 @@ def test_run_sync_job_uses_the_database_it_is_given(monkeypatch):
     result = sync_orchestrator.run_sync_job('incremental', 'queued', database=Database())
 
     assert result['status'] == 'already_running'
+
+
+def test_a_failed_progress_write_rolls_back_the_control_session_and_the_run_goes_on(monkeypatch, tmp_path):
+    import sync_orchestrator
+    from sync_pipeline import run_sync_step
+
+    class RollbackSession(FakeSession):
+        rollbacks = 0
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    database = FakeDatabase()
+    database.control_db = RollbackSession()
+    recorded = []
+
+    def record_event(self, db, job_id, **kwargs):
+        if kwargs['message'] == 'first':
+            raise RuntimeError('connection lost')
+        recorded.append(kwargs['message'])
+
+    monkeypatch.setattr(sync_orchestrator, 'init_database', lambda *a, **k: database)
+    monkeypatch.setattr(sync_orchestrator, 'SYNC_LOG_DIR', str(tmp_path))
+    monkeypatch.setattr(sync_orchestrator, 'build_log_path', lambda *a, **k: str(tmp_path / 'x.log'))
+    control_cls = sync_orchestrator.SyncControlService
+    monkeypatch.setattr(control_cls, 'acquire_lock', lambda self, db: True)
+    monkeypatch.setattr(control_cls, 'release_lock', lambda self, db: None)
+    monkeypatch.setattr(control_cls, 'cleanup_stale_runs', lambda self, db: None)
+    monkeypatch.setattr(control_cls, 'create_run', lambda self, db, *a, **k: SyncRun(id=1, started_at=datetime.now()))
+    monkeypatch.setattr(control_cls, 'finish_run', lambda self, *a, **k: None)
+    monkeypatch.setattr(sync_orchestrator.SyncJobService, 'record_event', record_event)
+    monkeypatch.setattr(sync_orchestrator.SyncJobService, 'update_progress', lambda *a, **k: None)
+    monkeypatch.setattr(sync_orchestrator.TelegramNotifier, 'send', lambda self, message: None)
+    ran = []
+
+    def fake_execute_sync(progress_callback, **_kwargs):
+        results = []
+        for name in ('first', 'second'):
+            step = lambda name=name: ran.append(name) or True  # noqa: E731
+            run_sync_step(results, name, step, progress_callback=progress_callback)
+        return {'success': True, 'step_results': results}
+
+    monkeypatch.setattr(sync_orchestrator, 'execute_sync', fake_execute_sync)
+
+    result = sync_orchestrator.run_sync_job(mode='incremental', trigger_type='manual', initiator='pytest')
+
+    assert result['status'] == 'success'
+    assert ran == ['first', 'second']
+    assert database.control_db.rollbacks == 1
+    assert 'second' in recorded

@@ -1225,7 +1225,7 @@ document.addEventListener('keydown', (event) => {
   modals.closeTopmost();
 });
 
-document.getElementById('back-profile').addEventListener('click', () => {
+document.getElementById('back-settings').addEventListener('click', () => {
   window.location.href = '/settings.html';
 });
 

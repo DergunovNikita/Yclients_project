@@ -35,14 +35,20 @@ def test_deploy_workflow_gates_on_lint_and_frontend_checks():
     assert 'requirements-dev.txt' in workflow
     for command in (
         'npm ci',
-        'npm run test:auth',
-        'npm run test:dashboard',
+        'npm test',
+        'npm run scan:auth-tokens',
         'npm run build',
         'npm run scan:auth-build',
     ):
         assert command in workflow
     # A broken frontend/proxy (e.g. a 13th Vercel function) must stop the deploy, not just turn a check red.
     assert '- frontend' in deploy_job.split('steps:', 1)[0]
+
+
+def test_deploy_refuses_to_report_success_without_vm_secrets():
+    workflow = (ROOT / '.github/workflows/deploy-vm.yml').read_text()
+
+    assert 'refusing to report a successful production deploy' in workflow
 
 
 def test_local_security_script_documents_same_gate():

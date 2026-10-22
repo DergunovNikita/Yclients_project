@@ -423,11 +423,10 @@ export function clientsCards(summary, reportUrl) {
   ];
 }
 
-/** Appointment cards plus the notice under them; `exact` is false when the numbers are an estimate or missing. */
+/** Appointment cards plus the notice under them; a missing or estimated count is flagged in the notice. */
 export function appointmentsCards(summary) {
   const breakdown = summary.appointments_breakdown || {};
-  const exact = breakdown.source_status === 'ready';
-  const ready = exact || breakdown.source_status === 'local';
+  const ready = breakdown.source_status === 'ready' || breakdown.source_status === 'local';
   const metricValue = (value) => (ready ? formatNumber(value) : t('dash.noData'));
   const metricShare = (value) => (ready ? t('dash.ofTotal', { value: `${formatNumber(value)}%` }) : '');
   const share = (name, count, sharePct) => metricCard(name, { value: metricValue(count), note: metricShare(sharePct) });
@@ -438,7 +437,6 @@ export function appointmentsCards(summary) {
       share('CompletedAppointments', breakdown.completed, breakdown.completed_share_pct),
       share('IncompleteAppointments', breakdown.incomplete, breakdown.incomplete_share_pct),
     ],
-    exact,
     // A local count that is only the usual one (the period reaches today, a branch has a reporting window) needs
     // no apology; the warning is for YClients not answering.
     notice: ready

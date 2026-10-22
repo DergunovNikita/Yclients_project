@@ -252,3 +252,18 @@ async def test_a_malformed_or_oversized_list_is_refused_by_the_schema(client, co
     response = await client.put(ENDPOINT, json={'company_ids': company_ids}, headers=_auth('owner'))
 
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_a_platform_admin_naming_an_unknown_tenant_gets_400_not_a_conflict(client):
+    headers = {**_auth('platform_admin'), 'X-Portal-Account-Id': '999'}
+
+    for response in (
+        await client.get(ENDPOINT, headers=headers),
+        await client.put(ENDPOINT, json={'company_ids': []}, headers=headers),
+        await client.put(
+            '/dashboard/metric-visibility', json={'role': 'manager', 'visible_codes': []}, headers=headers
+        ),
+    ):
+        assert response.status_code == 400
+        assert response.json()['detail'] == 'unknown X-Portal-Account-Id'

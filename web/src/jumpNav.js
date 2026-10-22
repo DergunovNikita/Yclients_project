@@ -4,23 +4,20 @@ import {
   activeTargetIndex,
   collectJumpTargets,
   effectiveTop,
+  mutationsAffectJumpTargets,
   jumpTargetsSignature,
   shouldShowJumpNav,
 } from './jumpTargets.js';
 
-// Blocks may be re-rendered at any time (plan table, report charts), so beside the explicit event
-// the nav also watches the content for changes.
-export const JUMP_TARGETS_CHANGED_EVENT = 'jump-targets-changed';
+// Blocks may be re-rendered at any time (plan table, report charts), so the nav watches the content for changes.
 const ACTIVE_OFFSET_PX = 120;
 const BOTTOM_TOLERANCE_PX = 4;
-
-const activeView = () => document.querySelector('section.view.active');
 
 /**
  * Mounts one floating nav listing the `[data-jump-target]` blocks of the visible view.
  * @returns {{refresh: () => void}} call `refresh` after switching views
  */
-export function mountJumpNav({ getRoot = activeView, observeRoot = document.querySelector('main') } = {}) {
+export function mountJumpNav() {
   const nav = document.createElement('nav');
   nav.className = 'jump-nav';
   nav.hidden = true;
@@ -66,7 +63,7 @@ export function mountJumpNav({ getRoot = activeView, observeRoot = document.quer
 
   function rebuild() {
     frame = 0;
-    targets = collectJumpTargets(getRoot());
+    targets = collectJumpTargets(document.querySelector('section.view.active'));
     const visible = shouldShowJumpNav(targets);
     nav.hidden = !visible;
     document.body.classList.toggle('jump-nav-visible', visible);
@@ -106,9 +103,11 @@ export function mountJumpNav({ getRoot = activeView, observeRoot = document.quer
     });
   }, { passive: true });
   window.addEventListener('resize', refresh);
-  window.addEventListener(JUMP_TARGETS_CHANGED_EVENT, refresh);
-  if (observeRoot) {
-    new MutationObserver(refresh).observe(observeRoot, {
+  const main = document.querySelector('main');
+  if (main) {
+    new MutationObserver((records) => {
+      if (mutationsAffectJumpTargets(records)) refresh();
+    }).observe(main, {
       childList: true,
       subtree: true,
       attributes: true,

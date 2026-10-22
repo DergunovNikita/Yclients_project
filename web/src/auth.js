@@ -48,7 +48,7 @@ export function registerUnsavedWork(provider) {
   return () => unsavedWorkProviders.delete(provider);
 }
 
-export function hasUnsavedWork() {
+function hasUnsavedWork() {
   return [...unsavedWorkProviders].some((provider) => {
     try {
       return Boolean(provider());
@@ -148,11 +148,7 @@ function beginSessionTransition(destination = 'reload', loginPath = '/login.html
 }
 
 function publishAuthEvent(type, extra = {}) {
-  const event = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    type,
-    ...extra,
-  };
+  const event = { type, ...extra };
   authChannel?.postMessage(event);
   const storage = localStore();
   if (!storage) return;
@@ -444,7 +440,7 @@ function isMutatingMethod(method) {
 }
 
 function isPublicAuthPath(path) {
-  return ['/auth/login', '/auth/register', '/auth/forgot-password', '/auth/reset-password', '/auth/verify-email', '/auth/resend-verification']
+  return ['/auth/login', '/auth/register', '/auth/forgot-password', '/auth/reset-password', '/auth/verify-email']
     .some((prefix) => path.startsWith(prefix));
 }
 
@@ -843,12 +839,7 @@ export async function logout(loginPath = '/login.html') {
   } catch {
     /* local cleanup and redirect still happen */
   }
-  stopIdleMonitoring();
-  activeSessionUser = null;
-  activeSessionFingerprint = '';
-  clearLocalAuthState({ clearEmail: true });
-  publishAuthEvent('session-ended', { reason: 'logout' });
-  clearSensitivePage('logout');
+  clearLocalSession();
   window.location.href = loginPath;
 }
 

@@ -10,7 +10,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
 from pydantic import AfterValidator, BaseModel, EmailStr, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect as sa_inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_deps import forbid_demo, get_current_user, get_dashboard_access, require_roles
@@ -65,7 +65,12 @@ from dashboard_service import manual_fact_entry_keys
 from database import get_async_db, get_async_session_factory
 from models import Company, PortalAccount, PortalBranch, PortalUser, PortalUserBranch, Staff
 from portal_audit import log_portal_audit
-from portal_account_provision import provision_all_unlinked_staff, provision_staff_account, role_for_staff
+from portal_account_provision import (
+    ProvisionConflict,
+    provision_all_unlinked_staff,
+    provision_staff_account,
+    role_for_staff,
+)
 from portal_staff_sync import (
     detach_portal_user_staff,
     list_unlinked_staff,
@@ -93,7 +98,6 @@ AUTH_RATE_LIMIT_ROUTES = {
     'register': '/auth/register',
     'forgot_password': '/auth/forgot-password',
     'reset_password': '/auth/reset-password',
-    'resend_verification': '/auth/resend-verification',
 }
 
 
@@ -134,10 +138,6 @@ class ForgotPasswordRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(max_length=128)
     new_password: NewPassword
-
-
-class ResendVerificationRequest(BaseModel):
-    email: EmailStr
 
 
 class AdminStaffCreateAccountRequest(BaseModel):
@@ -455,7 +455,7 @@ async def refresh(
     response: Response,
     db: AsyncSession = Depends(get_async_db),
 ):
-    enforce_csrf(request, allow_bearer_skip=False)
+    enforce_csrf(request)
     raw_refresh = request.cookies.get(REFRESH_COOKIE_NAME)
     if not raw_refresh:
         raise HTTPException(status_code=401, detail='Missing refresh token')
@@ -469,7 +469,7 @@ async def logout(
     response: Response,
     db: AsyncSession = Depends(get_async_db),
 ):
-    enforce_csrf(request, allow_bearer_skip=False)
+    enforce_csrf(request)
     raw_refresh = request.cookies.get(REFRESH_COOKIE_NAME)
     if raw_refresh:
         await revoke_refresh(db, raw_refresh)
@@ -488,21 +488,6 @@ async def logout_all(
     bump_user_token_version(user)
     await db.commit()
     clear_auth_cookies(response)
-    return {'success': True}
-
-
-@router.post('/logout-others', dependencies=[Depends(forbid_demo)])
-async def logout_others(
-    request: Request,
-    user: PortalUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_async_db),
-):
-    current_refresh = request.cookies.get(REFRESH_COOKIE_NAME)
-    if not current_refresh:
-        # Without the cookie the caller's own session cannot be told apart and would be revoked too.
-        raise HTTPException(status_code=400, detail='Refresh cookie is required to keep the current session')
-    await revoke_user_sessions(db, user.id, except_refresh=current_refresh)
-    await db.commit()
     return {'success': True}
 
 
@@ -596,7 +581,7 @@ async def verify_email(body: TokenRequest, db: AsyncSession = Depends(get_async_
     return {'success': True, 'message': 'Email подтверждён. Теперь можно войти в кабинет.'}
 
 
-# (sender name, user id) -> monotonic time the mail was queued. The resend cooldown is stamped only after the
+# (sender name, user id) -> monotonic time the mail was queued. The reset cooldown is stamped only after the
 # mail has gone out, so without this a burst of requests lands inside the SMTP round trip, each passes the
 # cooldown check and each queues its own mail. The time bounds the entry if a task is ever lost.
 _auth_emails_in_flight: dict[tuple[str, int], float] = {}
@@ -644,28 +629,6 @@ async def forgot_password(
     return {
         'success': True,
         'message': 'Если аккаунт с таким email существует, на почту отправлена ссылка для сброса пароля.',
-    }
-
-
-@router.post('/resend-verification')
-async def resend_verification(
-    body: ResendVerificationRequest,
-    request: Request,
-    background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_async_db),
-):
-    email = normalize_email(body.email)
-    enforce_auth_rate_limit(request, AUTH_RATE_LIMIT_ROUTES['resend_verification'], email)
-    user = (await db.execute(select(PortalUser).where(PortalUser.email == email))).scalar_one_or_none()
-    if (
-        user is not None
-        and user.email_verified_at is None
-        and not email_cooldown_active(user.email_verification_sent_at)
-    ):
-        _queue_auth_email(background_tasks, user.id, send_verification_email)
-    return {
-        'success': True,
-        'message': 'Если аккаунт существует и не подтверждён — письмо отправлено повторно.',
     }
 
 
@@ -800,8 +763,8 @@ async def admin_meta(
         'success': True,
         'data': {
             'role': actor.role,
-            'can_manage_users': actor.role in USER_ADMIN_ROLES,
-            'assignable_roles': assignable_roles(actor.role) if actor.role in USER_ADMIN_ROLES else [],
+            'can_manage_users': True,
+            'assignable_roles': assignable_roles(actor.role),
             'portal_account_id': actor.portal_account_id,
             'company_ids': None if actor.role == 'platform_admin' else branch_ids,
         },
@@ -1185,8 +1148,10 @@ async def admin_create_staff_account(
             password=body.password,
             company_ids=company_ids,
         )
-    except ValueError as exc:
+    except ProvisionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     await db.commit()
     return {'success': True, 'data': _provisioned_payload(account)}
@@ -1228,7 +1193,7 @@ async def admin_list_initial_passwords(
             ),
         })
 
-    return {'success': True, 'data': payload, 'deprecated': True}
+    return {'success': True, 'data': payload}
 
 
 @router.post('/admin/distribute-credentials', dependencies=[Depends(forbid_demo)])
@@ -1245,6 +1210,10 @@ async def admin_distribute_credentials(
     # cross-tenant id must never even reach `users_by_id`, or its email leaks into `errors`.
     users = await _tenant_scoped_users(db, active_portal_account_id, PortalUser.id.in_(unique_ids))
     users_by_id = {user.id: user for user in users}
+    # A failed send rolls the session back and expires every loaded row, so everything the loop reads
+    # is taken into locals now; a user about to be mailed is refreshed only if a rollback expired it.
+    profiles = {user.id: (user.email, user.role) for user in users}
+    actor_role = actor.role
     branch_ids_by_user = await _load_access_branch_ids_by_user(db, users)
 
     sent: list[dict] = []
@@ -1257,12 +1226,8 @@ async def admin_distribute_credentials(
             errors.append({'user_id': user_id, 'reason': 'User not found'})
             continue
 
-        user_email = user.email
-        user_role = user.role
-        user_object_id = user.id
-
-        branch_ids = branch_ids_by_user[user.id]
-        if not can_manage_user(actor.role, actor_branch_ids, user_role, branch_ids):
+        user_email, user_role = profiles[user_id]
+        if not can_manage_user(actor_role, actor_branch_ids, user_role, branch_ids_by_user[user_id]):
             errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Access denied'})
             continue
         if not is_deliverable_portal_email(user_email):
@@ -1274,21 +1239,18 @@ async def admin_distribute_credentials(
             continue
 
         try:
+            if sa_inspect(user).expired:
+                await db.refresh(user)
             await send_account_invite_email(db, user)
         except Exception as exc:
             # The raw message can carry the SMTP host or DB internals; it must not reach the browser.
-            logger.warning('invite email failed user_id=%s error=%s', user_object_id, type(exc).__name__)
+            logger.warning('invite email failed user_id=%s error=%s', user_id, type(exc).__name__)
             errors.append({'user_id': user_id, 'email': user_email, 'reason': 'Email delivery failed'})
-            # The sender rolled the session back, which expired every loaded row; reading an expired
-            # attribute in the next iteration would raise MissingGreenlet and 500 the whole batch.
-            # A database error before the sender's own try leaves the session needing a rollback
-            # first, or the refresh itself raises PendingRollbackError.
+            # A database error before the sender's own try leaves the session needing a rollback.
             await db.rollback()
-            for loaded in (actor, *users_by_id.values()):
-                await db.refresh(loaded)
             continue
 
-        sent.append({'user_id': user_object_id, 'email': user_email})
+        sent.append({'user_id': user_id, 'email': user_email})
 
     return {
         'success': True,

@@ -223,17 +223,9 @@ async def revoke_refresh(db: AsyncSession, raw_refresh: str) -> None:
     )
 
 
-async def revoke_user_sessions(
-    db: AsyncSession,
-    user_id: int,
-    *,
-    except_refresh: str | None = None,
-) -> None:
+async def revoke_user_sessions(db: AsyncSession, user_id: int) -> None:
     """Delete all refresh tokens for a user. Used by logout-all and password change."""
-    stmt = delete(PortalRefreshToken).where(PortalRefreshToken.user_id == user_id)
-    if except_refresh is not None:
-        stmt = stmt.where(PortalRefreshToken.token_hash != _hash_token(except_refresh))
-    await db.execute(stmt)
+    await db.execute(delete(PortalRefreshToken).where(PortalRefreshToken.user_id == user_id))
 
 
 async def list_user_sessions(
@@ -398,7 +390,7 @@ def clear_auth_cookies(response: Response) -> None:
 
 # ---------- CSRF ----------
 
-def enforce_csrf(request: Request, *, allow_bearer_skip: bool = True) -> None:
+def enforce_csrf(request: Request) -> None:
     """Double-submit-cookie CSRF for mutating cookie-authenticated requests.
 
     Skipped for safe methods, Bearer auth (no cookie ambient credential), and
@@ -407,9 +399,6 @@ def enforce_csrf(request: Request, *, allow_bearer_skip: bool = True) -> None:
     if request.method in SAFE_METHODS:
         return
     has_session_cookie = bool(request.cookies.get(ACCESS_COOKIE_NAME) or request.cookies.get(REFRESH_COOKIE_NAME))
-    auth_header = request.headers.get('authorization', '')
-    if allow_bearer_skip and not has_session_cookie and auth_header.lower().startswith('bearer '):
-        return
     if not has_session_cookie:
         return
 

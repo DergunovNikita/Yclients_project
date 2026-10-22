@@ -134,11 +134,27 @@ def _group_company_credentials(
             raise YClientsAnalyticsError(
                 f'No YClients credentials configured for company {company_id}'
             )
-        key = credentials.id if credentials.id is not None else None
+        key = credentials.id
         if key not in groups:
             groups[key] = (credentials, [])
         groups[key][1].append(company_id)
     return groups
+
+
+async def _gather_or_cancel(coroutines: list[Any]) -> list[Any]:
+    """`asyncio.gather` that leaves nothing running when it raises: the siblings of a failed call are cancelled.
+
+    Plain `gather` re-raises the first error while the other requests go on, and by then the caller is
+    closing the HTTP client under them.
+    """
+    tasks = [asyncio.ensure_future(coroutine) for coroutine in coroutines]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 async def fetch_record_stats(
@@ -146,15 +162,14 @@ async def fetch_record_stats(
     start: date,
     end: date,
     staff_id: int | None = None,
-    db: AsyncSession | None = None,
+    *,
+    db: AsyncSession,
 ) -> dict[str, int]:
     """Load exact record_stats and sum them across the requested companies."""
     normalized_company_ids = list(dict.fromkeys(int(company_id) for company_id in company_ids))
     if not normalized_company_ids:
         return {'completed': 0, 'incomplete': 0, 'cancelled': 0, 'total': 0}
 
-    if db is None:
-        raise YClientsAnalyticsError('Database session is required to resolve YClients credentials')
     credential_by_company = await load_credentials_for_companies_async(db, normalized_company_ids)
     credential_groups = _group_company_credentials(credential_by_company, normalized_company_ids)
     company_rows = (
@@ -208,8 +223,8 @@ async def fetch_record_stats(
             for credentials, grouped_company_ids in credential_groups.values():
                 user_token = await _user_token(client, credentials)
                 rows.extend(
-                    await asyncio.gather(
-                        *(load_company(company_id, credentials, user_token) for company_id in grouped_company_ids)
+                    await _gather_or_cancel(
+                        [load_company(company_id, credentials, user_token) for company_id in grouped_company_ids]
                     )
                 )
     except (httpx.HTTPError, ValueError, TypeError) as exc:

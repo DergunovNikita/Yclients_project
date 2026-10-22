@@ -34,7 +34,7 @@ def test_appointment_shares_are_integer_and_sum_to_100():
     assert data['cancelled_share_pct'] == 34
     assert data['completed_share_pct'] == 33
     assert data['incomplete_share_pct'] == 33
-    assert data['shares_total_pct'] == 100
+    assert data['cancelled_share_pct'] + data['completed_share_pct'] + data['incomplete_share_pct'] == 100
     assert data['total_share_pct'] == 100
 
 
@@ -53,9 +53,7 @@ def test_appointment_shares_handle_single_category_and_empty_period():
     })
 
     assert single['completed_share_pct'] == 100
-    assert single['shares_total_pct'] == 100
     assert empty['total_share_pct'] == 0
-    assert empty['shares_total_pct'] == 0
     assert empty['cancelled_share_pct'] == 0
     assert empty['completed_share_pct'] == 0
     assert empty['incomplete_share_pct'] == 0
@@ -71,7 +69,6 @@ def test_appointment_breakdown_rejects_inconsistent_totals():
 
     assert data['source_status'] == 'unavailable'
     assert data['total'] is None
-    assert data['shares_total_pct'] is None
 
 
 @pytest.mark.asyncio
@@ -97,9 +94,6 @@ async def test_appointment_breakdown_maps_counts_and_compatibility_aliases(async
     assert data['cancelled'] == 5
     assert data['completed'] == 12
     assert data['incomplete'] == 3
-    assert data['attended'] == 12
-    assert data['pending'] == 3
-    assert data['shares_total_pct'] == 100
 
 
 @pytest.mark.asyncio
@@ -135,9 +129,6 @@ async def test_appointment_breakdown_falls_back_to_local_appointments(async_sess
     assert data['completed'] == 1
     assert data['cancelled'] == 1
     assert data['incomplete'] == 1
-    assert data['attended'] == 1
-    assert data['pending'] == 1
-    assert data['shares_total_pct'] == 100
 
 
 @pytest.mark.asyncio
@@ -195,9 +186,6 @@ async def test_dashboard_summary_exposes_exact_appointment_contract(async_sessio
         'cancelled_share_pct': 30,
         'completed_share_pct': 60,
         'incomplete_share_pct': 10,
-        'shares_total_pct': 100,
-        'attended': 6,
-        'pending': 1,
     }
 
 

@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 from sqlalchemy import func, select, text
 
+from clock import utcnow
 from config import SYNC_JOB_RETENTION_DAYS, SYNC_JOB_RETENTION_INTERVAL_HOURS
 from models import SyncJob, SyncJobEvent
 from sync_control import SyncControlService
@@ -53,7 +54,7 @@ class SyncJobService:
             mode=(mode or 'incremental').strip().lower(),
             initiator=initiator,
             status='queued',
-            requested_at=datetime.now(),
+            requested_at=utcnow(),
             portal_account_id=portal_account_id,
             credential_id=credential_id,
             company_ids=_normalize_company_ids(company_ids),
@@ -76,7 +77,7 @@ class SyncJobService:
             return None
         job = db.get(SyncJob, row.id)
         job.status = 'running'
-        job.started_at = datetime.now()
+        job.started_at = utcnow()
         job.finished_at = None
         job.error_message = None
         job.current_stage = 'running'
@@ -98,7 +99,7 @@ class SyncJobService:
 
     def finish_job(self, db, job: SyncJob, result: dict[str, Any]) -> SyncJob:
         job.run_id = result.get('run_id')
-        job.finished_at = datetime.now()
+        job.finished_at = utcnow()
         job.status = result.get('status', 'failed')
         job.progress_pct = 100 if job.status == 'success' else job.progress_pct
         job.current_stage = job.status
@@ -127,7 +128,7 @@ class SyncJobService:
         """
         if max_running_minutes <= 0:
             return 0
-        now = now or datetime.now()
+        now = now or utcnow()
         cutoff = now - timedelta(minutes=max_running_minutes)
         stale = (
             db.query(SyncJob)
@@ -181,7 +182,7 @@ class SyncJobService:
         if retention_days <= 0:
             return 0
 
-        now = now or datetime.now()
+        now = now or utcnow()
         cutoff = now - timedelta(days=retention_days)
         # Subqueries rather than materialised id lists, for the same reason as
         # SyncControlService.purge_old_runs: the stale set is unbounded after a long gap and
@@ -314,7 +315,7 @@ class SyncJobService:
             elapsed_seconds=elapsed_seconds,
             message=message,
             payload=payload or {},
-            created_at=datetime.now(),
+            created_at=utcnow(),
         )
         db.add(event)
         if commit:

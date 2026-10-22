@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import OperationalError
 
+from clock import utcnow
 import api
 import auth_deps
 import config
@@ -110,7 +111,6 @@ MONEY_FREE_AVERAGE_CHECK_KEYS = {
     'appointments',
     'completed_appointments',
     'denominator',
-    'extra_service_appointments',
     'extra_services',
     'extra_services_change_pct',
     'goods',
@@ -1648,7 +1648,6 @@ async def test_reporting_start_keeps_pre_opening_direct_revenue_out_of_years_and
     assert year_2025['revenue'] == 700.0
     assert year_2025['topup_revenue'] == 0.0
     assert year_2025['goods_revenue'] == 0.0
-    assert year_2025['goods_count'] == 0.0
 
 
 @pytest.mark.asyncio
@@ -2085,15 +2084,6 @@ async def test_reporting_start_excludes_pre_opening_goods_and_opz(
     )
     async_session.add_all(_yoy_source_states(1, date(2023, 1, 1), report_now.date()))
     await async_session.commit()
-
-    goods_facts = await dashboard_service.fetch_year_over_year_facts(
-        async_session,
-        date(2023, 1, 1),
-        report_now.date(),
-        company_id=1,
-        factual_at=report_now,
-    )
-    assert goods_facts['annual'][2025]['goods_count'] == 2.0
 
     opz_facts = await dashboard_service.fetch_opz_year_facts(
         async_session,
@@ -4150,7 +4140,7 @@ async def test_opz_year_facts_ignore_later_same_day_visit_for_staff(
 
 
 @pytest.mark.asyncio
-async def test_year_over_year_goods_source_controls_count_and_latest_year(
+async def test_year_over_year_does_not_require_goods_movements_coverage(
     async_session,
     monkeypatch,
 ):
@@ -4194,48 +4184,25 @@ async def test_year_over_year_goods_source_controls_count_and_latest_year(
     ])
     await async_session.commit()
 
-    missing_goods = await dashboard_reports.fetch_report_data(
+    report = await dashboard_reports.fetch_report_data(
         async_session,
         'year_over_year',
         date(2026, 1, 1),
         date(2026, 1, 31),
         allowed_company_ids=[1],
     )
-    missing_years = {row['year']: row for row in table_rows(missing_goods, 'years')}
+    years = {row['year']: row for row in table_rows(report, 'years')}
     july_2026 = next(
         row
-        for row in table_rows(missing_goods, 'months')
+        for row in table_rows(report, 'months')
         if row['year'] == 2026 and row['month'] == 7
     )
-    assert missing_years[2026]['goods_count'] is None
-    assert missing_years[2026]['source_status'] == 'partial'
-    assert 'goods_transactions_detail' in missing_years[2026]['missing_components']
+    # Goods movements feed no visible figure, so a branch without that source is still fully certified.
+    assert years[2026]['source_status'] == 'ready'
+    assert years[2026]['missing_components'] == []
+    assert 'goods_count' not in years[2026]
     assert july_2026['revenue'] == 0.0
     assert july_2026['source_status'] == 'ready'
-
-    async_session.add(SyncSourceState(
-        company_id=1,
-        source='goods_transactions_detail',
-        period_start=date(2024, 1, 1),
-        period_end=date(2026, 12, 31),
-    ))
-    await async_session.commit()
-    ready_goods = await dashboard_reports.fetch_report_data(
-        async_session,
-        'year_over_year',
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-        allowed_company_ids=[1],
-    )
-    ready_2026 = next(row for row in table_rows(ready_goods, 'years') if row['year'] == 2026)
-    overview = await dashboard_service.fetch_summary(
-        async_session,
-        date(2026, 1, 1),
-        date(2026, 7, 20),
-        company_id=1,
-    )
-    assert ready_2026['source_status'] == 'ready'
-    assert ready_2026['goods_count'] == overview['revenue']['goods_count'] == 2.0
 
 
 @pytest.mark.asyncio
@@ -4843,6 +4810,8 @@ async def test_service_group_counts_read_both_sides_of_the_title(async_session):
         Transaction(id=1, appointment_id=1, service_id=10, service_title='ВоСк бровей', amount=2, company_id=1),
         Transaction(id=2, appointment_id=1, service_id=11, service_title=None, amount=3, company_id=1),
         Transaction(id=3, appointment_id=1, service_id=12, service_title='Стрижка', amount=9, company_id=1),
+        # An empty copy of the title is no title, like a missing one (as in the top services and the title lookup).
+        Transaction(id=4, appointment_id=1, service_id=11, service_title='', amount=4, company_id=1),
     ])
     await async_session.commit()
 
@@ -4850,7 +4819,7 @@ async def test_service_group_counts_read_both_sides_of_the_title(async_session):
         async_session, date(2025, 1, 1), date(2025, 1, 31), 1
     )
     assert counts['wax_qty'] == 2.0
-    assert counts['camouflage_qty'] == 3.0
+    assert counts['camouflage_qty'] == 7.0
     assert counts['face_care_qty'] == 0.0
     assert counts['head_care_qty'] == 0.0
 
@@ -5242,8 +5211,8 @@ async def test_platform_admin_dashboard_bundle_requires_selected_tenant(async_se
     async_session.add(Group(id=1, title='Group'))
     async_session.add(Company(id=1, title='Tenant A Branch', group_id=1))
     async_session.add(Company(id=2, title='Tenant B Branch', group_id=1))
-    async_session.add(PortalAccount(id=1, label='Tenant A', created_at=datetime.utcnow()))
-    async_session.add(PortalAccount(id=2, label='Tenant B', created_at=datetime.utcnow()))
+    async_session.add(PortalAccount(id=1, label='Tenant A', created_at=utcnow()))
+    async_session.add(PortalAccount(id=2, label='Tenant B', created_at=utcnow()))
     async_session.add(PortalBranch(portal_account_id=1, company_id=1))
     async_session.add(PortalBranch(portal_account_id=2, company_id=2))
     async_session.add(
@@ -5255,8 +5224,8 @@ async def test_platform_admin_dashboard_bundle_requires_selected_tenant(async_se
             full_name='Platform Admin',
             role='platform_admin',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         )
     )
     await async_session.commit()
@@ -5308,7 +5277,7 @@ async def test_dashboard_widgets_reject_foreign_staff_scope(async_session, monke
         Company(id=2, title='Foreign Branch', group_id=1),
         Staff(id=10, name='Allowed Staff', company_id=1),
         Staff(id=20, name='Foreign Staff', company_id=2),
-        PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()),
+        PortalAccount(id=1, label='Tenant', created_at=utcnow()),
         PortalBranch(portal_account_id=1, company_id=1),
         PortalUser(
             id=910,
@@ -5317,8 +5286,8 @@ async def test_dashboard_widgets_reject_foreign_staff_scope(async_session, monke
             password_hash=cached_password_hash('Owner12345!'),
             role='owner',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         ),
     ])
     await async_session.commit()
@@ -5352,7 +5321,7 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
     async_session.add(Group(id=1, title='Group'))
     async_session.add(Company(id=1, title='Branch', group_id=1))
     async_session.add(Company(id=2, title='Other Branch', group_id=1))
-    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=utcnow()))
     async_session.add(PortalBranch(portal_account_id=1, company_id=1))
     async_session.add(PortalBranch(portal_account_id=1, company_id=2))
     async_session.add_all([
@@ -5363,8 +5332,8 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             password_hash=cached_password_hash('Viewer12345!'),
             role='barber',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         ),
         PortalUser(
             id=101,
@@ -5373,8 +5342,8 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             password_hash=cached_password_hash('Manager12345!'),
             role='manager',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         ),
         PortalUser(
             id=102,
@@ -5383,8 +5352,8 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             password_hash=cached_password_hash('Owner12345!'),
             role='owner',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         ),
         PortalUser(
             id=103,
@@ -5393,8 +5362,8 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
             password_hash=cached_password_hash('BranchAdmin12345!'),
             role='branch_admin',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         ),
         PortalUserBranch(user_id=100, company_id=1),
         PortalUserBranch(user_id=101, company_id=1),
@@ -5581,7 +5550,7 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
     async_session.add(Group(id=1, title='Group'))
     async_session.add(Company(id=1, title='Branch', group_id=1))
-    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=utcnow()))
     async_session.add(PortalBranch(portal_account_id=1, company_id=1))
     async_session.add_all([
         PortalUser(
@@ -5591,8 +5560,8 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
             password_hash=cached_password_hash('Owner12345!'),
             role='owner',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         ),
         PortalUser(
             id=201,
@@ -5601,8 +5570,8 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
             password_hash=cached_password_hash('Manager12345!'),
             role='manager',
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         ),
         PortalUserBranch(user_id=201, company_id=1),
         Staff(id=1, name='Staff', company_id=1),
@@ -5932,7 +5901,6 @@ async def test_dashboard_summary_revenue_and_change(async_session):
     assert data['appointments_breakdown']['completed'] == 1
     assert data['appointments_breakdown']['cancelled'] == 0
     assert data['appointments_breakdown']['incomplete'] == 0
-    assert data['appointments_breakdown']['attended'] == 1
 
 
 @pytest.mark.asyncio
@@ -6121,9 +6089,7 @@ async def test_dashboard_summary_split_revenue_and_average_checks(async_session)
     assert data['revenue']['service_count'] == 4.0
     assert data['revenue']['goods_count'] == 1.0
     assert data['revenue']['extra_service_count'] == 2.0
-    assert data['revenue']['extra_service_appointments'] == 1
     assert data['revenue']['unique_clients'] == 2
-    assert data['revenue']['extra_service_clients'] == 1
     assert data['average_check']['total'] == pytest.approx(1433.3333333333333)
     assert data['average_check']['services'] == pytest.approx(1233.3333333333333)
     assert data['average_check']['goods'] == 600.0
@@ -15422,7 +15388,7 @@ async def test_yoy_changes_remain_available_for_metrics_with_complete_sources(
             company_id=1,
             source='financial_transactions_detail',
             period_start=date(2024, 1, 1),
-            period_end=date(2025, 12, 31),
+            period_end=date(2024, 12, 31),
         ),
     ])
     await async_session.commit()
@@ -15436,13 +15402,14 @@ async def test_yoy_changes_remain_available_for_metrics_with_complete_sources(
     )
     years = {row['year']: row for row in table_rows(report, 'years')}
 
-    assert years[2024]['source_status'] == 'partial'
+    assert years[2024]['source_status'] == 'ready'
     assert years[2025]['source_status'] == 'partial'
     assert years[2025]['comparison_status'] == 'incomplete_source'
-    assert years[2025]['goods_count'] is None
-    assert years[2025]['revenue_change_pct'] == 100.0
+    # 2025 payments are not certified, so money is hidden while the visit counts stay comparable.
+    assert years[2025]['revenue'] is None
+    assert years[2025]['revenue_change_pct'] is None
     assert years[2025]['appointments_change_pct'] == 0.0
-    assert years[2025]['avg_check_change_pct'] == 100.0
+    assert years[2025]['avg_check_change_pct'] is None
 
 
 @pytest.mark.asyncio
@@ -16071,7 +16038,7 @@ async def test_plan_rules_reach_roles_without_money_and_personal_roles(async_ses
     monkeypatch.setattr(auth_deps, 'AUTH_REQUIRE_LOGIN', True)
     await _seed_plan_rules_branch(async_session, settings=FULL_PLAN_RULES)
     async_session.add_all([
-        PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()),
+        PortalAccount(id=1, label='Tenant', created_at=utcnow()),
         PortalBranch(portal_account_id=1, company_id=1),
         *(
             PortalUser(
@@ -16081,8 +16048,8 @@ async def test_plan_rules_reach_roles_without_money_and_personal_roles(async_ses
                 password_hash=cached_password_hash('Passw0rd12345!'),
                 role=role,
                 is_active=True,
-                email_verified_at=datetime.utcnow(),
-                created_at=datetime.utcnow(),
+                email_verified_at=utcnow(),
+                created_at=utcnow(),
             )
             for user_id, role in ((300, 'manager'), (301, 'barber'))
         ),

@@ -199,7 +199,7 @@ API_KEY = os.getenv('API_KEY', '')
 # Comma-separated origins for dashboard SPA (e.g. Vercel preview). Empty = no CORS middleware.
 DASHBOARD_CORS_ORIGINS = os.getenv('DASHBOARD_CORS_ORIGINS', '')
 DASHBOARD_CORS_ORIGIN_REGEX = os.getenv('DASHBOARD_CORS_ORIGIN_REGEX', '')
-DASHBOARD_CORS_ALLOW_METHODS = ('GET', 'POST', 'PATCH', 'DELETE')
+DASHBOARD_CORS_ALLOW_METHODS = ('GET', 'POST', 'PUT', 'PATCH', 'DELETE')
 DASHBOARD_CORS_ALLOW_HEADERS = (
     'Content-Type',
     'X-CSRF-Token',

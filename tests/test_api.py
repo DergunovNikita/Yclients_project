@@ -1,10 +1,10 @@
-from datetime import datetime
 import sys
 import types
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from clock import utcnow
 import api
 from api import app
 from conftest import issue_access_token
@@ -469,15 +469,15 @@ def _portal_user(user_id: int, role: str, branches: list[int]) -> list:
             full_name=f'User {user_id}',
             role=role,
             is_active=True,
-            email_verified_at=datetime.utcnow(),
-            created_at=datetime.utcnow(),
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
         ),
         *[PortalUserBranch(user_id=user_id, company_id=company_id) for company_id in branches],
     ]
 
 
 def _credential(credential_id: int, portal_account_id: int) -> YClientsCredential:
-    now = datetime.utcnow()
+    now = utcnow()
     return YClientsCredential(
         id=credential_id,
         portal_account_id=portal_account_id,
@@ -501,8 +501,8 @@ async def test_sync_trigger_credential_must_belong_to_the_callers_tenant(async_s
         Group(id=1, title='G'),
         Company(id=1, title='A', group_id=1),
         Company(id=2, title='B', group_id=1),
-        PortalAccount(id=1, label='Tenant A', created_at=datetime.utcnow()),
-        PortalAccount(id=2, label='Tenant B', created_at=datetime.utcnow()),
+        PortalAccount(id=1, label='Tenant A', created_at=utcnow()),
+        PortalAccount(id=2, label='Tenant B', created_at=utcnow()),
         PortalBranch(portal_account_id=1, company_id=1),
         PortalBranch(portal_account_id=2, company_id=2),
         *_portal_user(210, 'owner', [1]),

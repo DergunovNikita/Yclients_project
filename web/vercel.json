@@ -4,9 +4,7 @@
   "framework": null,
   "installCommand": "npm ci",
   "functions": {
-    "api/auth-proxy.js": { "maxDuration": 180 },
-    "api/auth/**/*.js": { "maxDuration": 180 },
-    "api/dashboard/**/*.js": { "maxDuration": 180 }
+    "api/auth-proxy.js": { "maxDuration": 180 }
   },
   "headers": [
     {
@@ -22,11 +20,11 @@
   "rewrites": [
     { "source": "/auth/:path*", "destination": "/api/auth-proxy?path=:path*" },
     { "source": "/api/auth/:path*", "destination": "/api/auth-proxy?path=:path*" },
-    { "source": "/dashboard/payments/:path*", "destination": "/api/auth-proxy?scope=dashboard&path=payments/:path*" },
-    { "source": "/api/dashboard/payments/:path*", "destination": "/api/auth-proxy?scope=dashboard&path=payments/:path*" },
-    { "source": "/dashboard/:path*", "destination": "/api/dashboard/:path*" },
+    { "source": "/dashboard/:path*", "destination": "/api/auth-proxy?scope=dashboard&path=:path*" },
+    { "source": "/api/dashboard/:path*", "destination": "/api/auth-proxy?scope=dashboard&path=:path*" },
     { "source": "/onboarding/:path*", "destination": "/api/auth-proxy?scope=onboarding&path=:path*" },
     { "source": "/api/onboarding/:path*", "destination": "/api/auth-proxy?scope=onboarding&path=:path*" },
+    { "source": "/api/health", "destination": "/api/auth-proxy?scope=health&path=health" },
     { "source": "/settings", "destination": "/settings.html" },
     { "source": "/reports", "destination": "/index.html" },
     { "source": "/reports/:path*", "destination": "/index.html" }

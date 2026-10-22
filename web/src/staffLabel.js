@@ -6,6 +6,11 @@ const ROLE_KEYS = {
   mixed: 'dash.staffRoleMixed',
 };
 
+// A row of the dashboard API names its branch by `company_title`; a branch without one is shown by its id.
+export function branchRowTitle(row, translate) {
+  return row.company_title || translate('dash.branchFallbackWithId', { id: row.company_id });
+}
+
 export function staffRoleLabel(category, translate) {
   const key = ROLE_KEYS[category];
   return key ? translate(key) : '';

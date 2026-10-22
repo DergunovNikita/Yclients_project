@@ -13,11 +13,13 @@ from dashboard_service import (
     fetch_top_services,
 )
 from models import Appointment, ServiceCatalog, Transaction
+from report_common import percent
 from report_payload import (
     MONEY_FORMAT,
     NO_MASTER,
     NUMBER_FORMAT,
     PERCENT_FORMAT,
+    TEXT_FORMAT,
     ReportRequest,
     card,
     chart,
@@ -38,8 +40,8 @@ def _service_title(title: str | None, service_id: int | None) -> str:
     return title
 
 
-def _ratio(numerator: float, denominator: float, scale: float = 1) -> float | None:
-    return numerator / denominator * scale if denominator else None
+def _ratio(numerator: float, denominator: float) -> float | None:
+    return numerator / denominator if denominator else None
 
 
 async def build_avg_check_by_service(req: ReportRequest) -> dict[str, Any]:
@@ -65,7 +67,7 @@ async def build_avg_check_by_service(req: ReportRequest) -> dict[str, Any]:
             'avg_price': _ratio(revenue, sold),
         }
         if with_share:
-            item['revenue_share'] = _ratio(revenue, total_revenue, 100)
+            item['revenue_share'] = percent(revenue, total_revenue)
         return item
 
     rows = [service_row(row, True) for row in services]
@@ -109,7 +111,7 @@ async def build_avg_check_by_service(req: ReportRequest) -> dict[str, Any]:
             'services',
             'Услуги',
             [
-                ('title', 'Услуга', 'text'),
+                ('title', 'Услуга', TEXT_FORMAT),
                 ('sold', 'Кол-во', NUMBER_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
                 ('avg_price', 'Средняя цена', MONEY_FORMAT),
@@ -122,7 +124,7 @@ async def build_avg_check_by_service(req: ReportRequest) -> dict[str, Any]:
             'extra_services',
             'Дополнительные услуги',
             [
-                ('title', 'Услуга', 'text'),
+                ('title', 'Услуга', TEXT_FORMAT),
                 ('sold', 'Кол-во', NUMBER_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
                 ('avg_price', 'Средняя цена', MONEY_FORMAT),
@@ -190,9 +192,9 @@ async def build_service_staff_profit(req: ReportRequest) -> dict[str, Any]:
             'staff_services',
             'Услуги по мастерам',
             [
-                ('staff_name', 'Мастер', 'text'),
-                ('company_title', 'Филиал', 'text'),
-                ('title', 'Услуга', 'text'),
+                ('staff_name', 'Мастер', TEXT_FORMAT),
+                ('company_title', 'Филиал', TEXT_FORMAT),
+                ('title', 'Услуга', TEXT_FORMAT),
                 ('sold', 'Кол-во', NUMBER_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
                 ('avg_price', 'Средняя цена', MONEY_FORMAT),
@@ -201,7 +203,6 @@ async def build_service_staff_profit(req: ReportRequest) -> dict[str, Any]:
             row_key='key',
         )
     ]
-    # No raw copy: the long table already carries the rows, and a second one doubles a ~3 MB payload.
     return req.base
 
 
@@ -278,7 +279,7 @@ async def build_service_combos(req: ReportRequest) -> dict[str, Any]:
             'pair': f"{_service_title(row.first_title, row.first_id)} + "
                     f"{_service_title(row.second_title, row.second_id)}",
             'visits': int(row.visits),
-            'share': _ratio(int(row.visits), multi_visits, 100),
+            'share': percent(int(row.visits), multi_visits),
         }
         for row in (pair_rows if req.for_comparison else pair_rows[:COMBO_TABLE_LIMIT])
     ]
@@ -298,7 +299,7 @@ async def build_service_combos(req: ReportRequest) -> dict[str, Any]:
         })
     req.base['cards'] = [
         card('Визитов с 2+ услугами', multi_visits, NUMBER_FORMAT),
-        card('Доля таких визитов', _ratio(multi_visits, visits, 100), PERCENT_FORMAT),
+        card('Доля таких визитов', percent(multi_visits, visits), PERCENT_FORMAT),
     ]
     top = top_rows(req, rows, CHART_ROWS)
     req.base['charts'] = [
@@ -315,7 +316,7 @@ async def build_service_combos(req: ReportRequest) -> dict[str, Any]:
             'combos',
             'Комбинации услуг',
             [
-                ('pair', 'Пара услуг', 'text'),
+                ('pair', 'Пара услуг', TEXT_FORMAT),
                 ('visits', 'Визитов', NUMBER_FORMAT),
                 ('share', 'Доля от визитов с 2+ услугами', PERCENT_FORMAT),
             ],

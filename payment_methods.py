@@ -562,16 +562,12 @@ async def fetch_payment_breakdown(
             'month': _month_value(month_start),
             'revenue': round(cash + cashless_yclients + other, 2),
             'cash': round(cash, 2),
-            'cashless_yclients': round(cashless_yclients, 2),
             'yandex_pay': _money(yandex_pay),
             'cashless': round(cashless_yclients - (yandex_pay or 0.0), 2) + 0.0,
             'other': round(other, 2),
         })
     return {
         'yandex_pay_applied': all(branch['yandex_pay_applied'] for branch in result),
-        'countable_months': sorted(
-            {month for branch in result for month in branch['yandex_pay_data_through']}
-        ),
         'branches': result,
         'monthly': monthly,
     }

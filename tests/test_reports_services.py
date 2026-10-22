@@ -170,7 +170,8 @@ async def test_comparison_chart_carries_every_service_so_a_riser_still_has_a_pre
     current = next(item for item in data['charts'] if item['id'] == 'service_revenue')
     previous = next(item for item in data['comparison']['charts'] if item['id'] == 'service_revenue')
     assert len(current['labels']) == 12 and current['labels'][0] == 'Service 19'
-    assert len(previous['labels']) == 20
+    # The comparison run ranked all 20 services, and the block keeps exactly the current top-12 labels.
+    assert set(previous['labels']) == set(current['labels'])
     assert previous['datasets'][0]['data'][previous['labels'].index('Service 19')] == 1.0
 
 

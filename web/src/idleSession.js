@@ -5,9 +5,9 @@ import { t } from './i18n.js';
 // activity of any tab is shared through localStorage, so a tab left in the background cannot end
 // the session of a user who is working in another one.
 export const IDLE_PROMPT_AFTER_MS = 2 * 60 * 60 * 1000;
-export const IDLE_CONFIRM_WINDOW_MS = 5 * 60 * 1000;
+const IDLE_CONFIRM_WINDOW_MS = 5 * 60 * 1000;
 export const IDLE_LOGOUT_AFTER_MS = IDLE_PROMPT_AFTER_MS + IDLE_CONFIRM_WINDOW_MS;
-export const IDLE_ACTIVITY_KEY = 'portal_last_activity';
+const IDLE_ACTIVITY_KEY = 'portal_last_activity';
 
 const NOTE_THROTTLE_MS = 1000;
 const STORAGE_WRITE_THROTTLE_MS = 5000;

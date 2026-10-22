@@ -10,7 +10,19 @@ from sqlalchemy.orm import aliased
 
 from dashboard_service import _company_scope_clause, day_window, reporting_window_clause
 from models import Comment, Company, Staff
-from report_payload import DECIMAL_FORMAT, NO_MASTER, NUMBER_FORMAT, PERCENT_FORMAT, ReportRequest, card, chart, table
+from report_common import percent
+from report_payload import (
+    DATE_FORMAT,
+    DECIMAL_FORMAT,
+    NO_MASTER,
+    NUMBER_FORMAT,
+    PERCENT_FORMAT,
+    TEXT_FORMAT,
+    ReportRequest,
+    card,
+    chart,
+    table,
+)
 
 MAX_RATING = 5
 LOW_RATING = 3
@@ -110,7 +122,7 @@ async def build_nps_dashboard(req: ReportRequest) -> dict[str, Any]:
     base['cards'] = [
         card('Отзывов', reviews, NUMBER_FORMAT),
         card('Средняя оценка', float(avg_rating) if avg_rating is not None else None, DECIMAL_FORMAT),
-        card('Доля оценок ниже 5', round(below_max / reviews * 100, 2) if reviews else None, PERCENT_FORMAT),
+        card('Доля оценок ниже 5', percent(below_max, reviews, 2), PERCENT_FORMAT),
         card('Отзывов с текстом', with_text, NUMBER_FORMAT),
     ]
     ratings = list(range(1, MAX_RATING + 1))
@@ -123,10 +135,10 @@ async def build_nps_dashboard(req: ReportRequest) -> dict[str, Any]:
             [{'label': 'Отзывов', 'data': [distribution[rating] for rating in ratings], 'format': NUMBER_FORMAT}],
         )
     ]
-    columns = [('date', 'Дата', 'date'), ('staff_name', 'Мастер', 'text')]
-    if len(req.allowed_company_ids or []) > 1:
-        columns.append(('company_title', 'Филиал', 'text'))
-    columns += [('rating', 'Оценка', DECIMAL_FORMAT), ('comment', 'Комментарий', 'text')]
+    columns = [('date', 'Дата', DATE_FORMAT), ('staff_name', 'Мастер', TEXT_FORMAT)]
+    if len(req.allowed_company_ids) > 1:
+        columns.append(('company_title', 'Филиал', TEXT_FORMAT))
+    columns += [('rating', 'Оценка', DECIMAL_FORMAT), ('comment', 'Комментарий', TEXT_FORMAT)]
     base['tables'] = [
         table(
             'negative_reviews',

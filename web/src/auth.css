@@ -727,32 +727,6 @@ textarea {
   }
 }
 
-.profile-password__form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 14px;
-  max-width: 420px;
-}
-
-.profile-password__form label {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 6px;
-  font-size: 14px;
-  font-weight: 500;
-}
-
-.profile-password__form input {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--input-border);
-  border-radius: var(--radius-md);
-}
-
-.profile-password__form .btn {
-  width: fit-content;
-}
-
 .admin-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -939,131 +913,6 @@ textarea {
   font-size: 12px;
   font-weight: 500;
   text-transform: none;
-}
-
-.profile-shell {
-  display: grid;
-  place-items: start center;
-}
-
-.profile-card {
-  width: min(520px, 100%);
-  padding: 28px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, #fff 0%, #f8fafc 100%);
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
-}
-
-.profile-card__top {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.profile-card__avatar {
-  display: grid;
-  place-items: center;
-  width: 64px;
-  height: 64px;
-  margin-bottom: 0;
-  border-radius: 999px;
-  background: var(--brand-soft);
-  color: var(--brand);
-  flex-shrink: 0;
-}
-
-.profile-card__logout {
-  width: auto;
-  margin-top: 0;
-  white-space: nowrap;
-}
-
-.profile-page .profile-card__logout {
-  min-height: 30px;
-  padding: 4px 10px;
-  font-size: 12px;
-  font-weight: 600;
-  background: #fff;
-  color: #a86565;
-  border: 1px solid #d9a3a3;
-}
-
-.profile-page .profile-card__logout:hover:not(:disabled) {
-  background: #fef2f2;
-  border-color: #c48888;
-  color: #991b1b;
-}
-
-.profile-card__avatar svg {
-  width: 32px;
-  height: 32px;
-}
-
-.profile-card h1 {
-  margin: 8px 0 0;
-  font-size: clamp(24px, 3vw, 30px);
-}
-
-.profile-card__identity {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.profile-card__identity-text {
-  min-width: 0;
-}
-
-.profile-card__identity-text h1 {
-  margin-top: 0;
-}
-
-@media (max-width: 480px) {
-  .profile-card__top,
-  .profile-card__identity {
-    flex-wrap: wrap;
-  }
-
-  .profile-card__logout,
-  .profile-card__change-password {
-    width: 100%;
-  }
-}
-
-.profile-card__change-password {
-  width: auto;
-  margin-top: 4px;
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
-.profile-card__role {
-  margin: 8px 0 0;
-  color: var(--brand);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.profile-card__actions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 24px;
-}
-
-.profile-card__actions .btn {
-  width: 100%;
-  margin-top: 0;
-  text-decoration: none;
-}
-
-.profile-card__actions a.btn:hover,
-.profile-card__actions a.btn:focus-visible {
-  text-decoration: none;
 }
 
 .admin-table td.admin-table__cell-actions {
@@ -1370,7 +1219,6 @@ body.admin-modal-open {
   .admin-toolbar input,
   .admin-toolbar select,
   .password-field input,
-  .profile-password__form input,
   .auth-lang select {
     font-size: 16px;
   }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from calendar import monthrange
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta
@@ -28,7 +29,7 @@ from dashboard_service import (
     shift_months_back,
 )
 from models import AccountCatalog, Appointment, Company, FinancialTransaction, Staff
-from report_common import appointment_conditions, month_label, short_month_label
+from report_common import appointment_conditions, month_label, percent, short_month_label
 from report_payload import (
     DECIMAL_FORMAT,
     MAX_PERIOD_BUCKETS,
@@ -36,6 +37,7 @@ from report_payload import (
     NO_MASTER,
     NUMBER_FORMAT,
     PERCENT_FORMAT,
+    TEXT_FORMAT,
     ReportInputError,
     ReportRequest,
     card,
@@ -69,10 +71,6 @@ def _month_end(day: date) -> date:
     return day.replace(day=monthrange(day.year, day.month)[1])
 
 
-def _share(part: int | float, whole: int | float) -> float | None:
-    return 100.0 * part / whole if whole else None
-
-
 def _visit_filters(req: ReportRequest) -> list[Any]:
     """The Overview's rules for which completed visits belong to a client (see `_client_recency_block`)."""
     filters = [
@@ -95,7 +93,7 @@ async def _branch_horizons(req: ReportRequest) -> dict[int, date]:
     silence there says nothing about whether they came back.
     """
     today = factual_branch_date(req.factual_at)
-    windows = await fetch_reporting_windows(req.db, req.allowed_company_ids or [])
+    windows = await fetch_reporting_windows(req.db, req.allowed_company_ids)
     return {
         company_id: window.end
         for company_id, window in windows.items()
@@ -112,7 +110,7 @@ async def _clients_rows(
     end: date,
     company_id: int | None,
     staff_id: int | None,
-    allowed_company_ids: list[int] | None,
+    allowed_company_ids: list[int],
     factual_at: datetime,
 ) -> list[dict[str, Any]]:
     visits_stmt = (
@@ -201,7 +199,7 @@ async def _clients_rows(
         if client is not None:
             client['lifetime_visits'] = int(row.lifetime_visits or 0)
 
-    rows = [
+    return [
         {
             'client_id': client_id,
             'visits': int(client['visits']),
@@ -210,22 +208,11 @@ async def _clients_rows(
         }
         for client_id, client in clients.items()
     ]
-    # client_id is a unique final tiebreaker (it can be None for the "no client" bucket,
-    # which sorts last): without it, clients tied on revenue swap places whenever the
-    # query plan changes.
-    rows.sort(
-        key=lambda item: (
-            item['revenue'],
-            item['client_id'] if item['client_id'] is not None else -1,
-        ),
-        reverse=True,
-    )
-    return rows
 
 
 def _client_pareto_rows(
     rows: list[dict[str, Any]],
-    total_revenue: float | None = None,
+    total_revenue: float,
 ) -> list[dict[str, Any]]:
     if not rows:
         return []
@@ -241,11 +228,7 @@ def _client_pareto_rows(
         ),
         reverse=True,
     )
-    revenue_denominator = (
-        float(total_revenue)
-        if total_revenue is not None
-        else sum(float(row.get('revenue') or 0) for row in sorted_rows)
-    )
+    revenue_denominator = float(total_revenue)
     total_clients = len(sorted_rows)
     top_count = max(1, (total_clients + 9) // 10)
     middle_count = max(0, (total_clients * 5 + 9) // 10 - top_count)
@@ -261,9 +244,9 @@ def _client_pareto_rows(
         out.append({
             'bucket': label,
             'clients': clients,
-            'clients_pct': 100.0 * clients / total_clients if total_clients else 0.0,
+            'clients_pct': percent(clients, total_clients) or 0.0,
             'revenue': revenue,
-            'revenue_pct': 100.0 * revenue / revenue_denominator if revenue_denominator else 0.0,
+            'revenue_pct': percent(revenue, revenue_denominator) or 0.0,
             'avg_revenue_per_client': revenue / clients if clients else 0.0,
         })
     return out
@@ -294,7 +277,7 @@ def _frequency_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         buckets[key]['revenue'] += row['revenue']
     out = list(buckets.values())
     for item in out:
-        item['clients_pct'] = _share(item['clients'], visitors) or 0.0
+        item['clients_pct'] = percent(item['clients'], visitors) or 0.0
     if paid_only['clients']:
         out.append(paid_only)
     return out
@@ -306,8 +289,9 @@ async def build_top_clients_pareto(req: ReportRequest) -> dict[str, Any]:
     )
     identified = [row for row in rows if row['client_id'] is not None]
     anonymous = [row for row in rows if row['client_id'] is None]
-    anonymous_revenue = sum(row['revenue'] for row in anonymous)
-    identified_revenue = sum(row['revenue'] for row in identified)
+    # fsum: the rows come in query order, and an exactly rounded total does not depend on it.
+    anonymous_revenue = math.fsum(row['revenue'] for row in anonymous)
+    identified_revenue = math.fsum(row['revenue'] for row in identified)
     total_revenue = identified_revenue + anonymous_revenue
     pareto_rows = _client_pareto_rows(identified, total_revenue)
     if anonymous_revenue:
@@ -316,7 +300,7 @@ async def build_top_clients_pareto(req: ReportRequest) -> dict[str, Any]:
             'clients': None,
             'clients_pct': None,
             'revenue': anonymous_revenue,
-            'revenue_pct': _share(anonymous_revenue, total_revenue),
+            'revenue_pct': percent(anonymous_revenue, total_revenue),
             'avg_revenue_per_client': None,
         })
     frequency_rows = _frequency_rows(identified)
@@ -352,7 +336,7 @@ async def build_top_clients_pareto(req: ReportRequest) -> dict[str, Any]:
             'client_pareto',
             'Pareto-бакеты клиентов',
             [
-                ('bucket', 'Бакет', 'text'),
+                ('bucket', 'Бакет', TEXT_FORMAT),
                 ('clients', 'Клиентов', NUMBER_FORMAT),
                 ('clients_pct', 'Доля клиентов', PERCENT_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
@@ -366,7 +350,7 @@ async def build_top_clients_pareto(req: ReportRequest) -> dict[str, Any]:
             'visit_frequency',
             'Частотность визитов за всю историю',
             [
-                ('bucket', 'Частотность', 'text'),
+                ('bucket', 'Частотность', TEXT_FORMAT),
                 ('clients', 'Клиентов', NUMBER_FORMAT),
                 ('clients_pct', 'Доля клиентов', PERCENT_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
@@ -481,7 +465,7 @@ async def build_retention_3_6_12(req: ReportRequest) -> dict[str, Any]:
             came_back = sum(int(getattr(row, f'within_{horizon}')) for row in ready)
             ready_size = sum(int(row.size) for row in ready)
             item[f'returned_{horizon}'] = came_back if ready else None
-            item[f'pct_{horizon}'] = _share(came_back, ready_size)
+            item[f'pct_{horizon}'] = percent(came_back, ready_size)
             mature_totals[horizon][0] += came_back
             mature_totals[horizon][1] += ready_size
         cohort_rows.append(item)
@@ -489,8 +473,8 @@ async def build_retention_3_6_12(req: ReportRequest) -> dict[str, Any]:
     base = req.base
     base['cards'] = [
         card('Новых клиентов (когорты периода)', sum(item['size'] for item in cohort_rows), NUMBER_FORMAT),
-        card('Вернулись в течение 3 мес', _share(*mature_totals[3]), PERCENT_FORMAT),
-        card('Вернулись в течение 6 мес', _share(*mature_totals[6]), PERCENT_FORMAT),
+        card('Вернулись в течение 3 мес', percent(*mature_totals[3]), PERCENT_FORMAT),
+        card('Вернулись в течение 6 мес', percent(*mature_totals[6]), PERCENT_FORMAT),
     ]
     base['charts'] = [
         chart(
@@ -513,7 +497,7 @@ async def build_retention_3_6_12(req: ReportRequest) -> dict[str, Any]:
             'retention_cohorts',
             'Когорты новых клиентов',
             [
-                ('cohort', 'Месяц первого визита', 'text'),
+                ('cohort', 'Месяц первого визита', TEXT_FORMAT),
                 ('size', 'Новых клиентов', NUMBER_FORMAT),
                 *((f'pct_{horizon}', f'Вернулись за {horizon} мес', PERCENT_FORMAT) for horizon in RETENTION_HORIZONS),
             ],
@@ -717,12 +701,12 @@ async def build_revenue_at_risk(req: ReportRequest) -> dict[str, Any]:
     ]
     staff_rows = sorted(staff.values(), key=lambda item: (-item['clients'], -item['revenue'], item['staff_key']))
     for item in staff_rows:
-        item['clients_pct'] = _share(item['clients'], churned_total) or 0.0
+        item['clients_pct'] = percent(item['clients'], churned_total) or 0.0
 
     base = req.base
     base['cards'] = [
         card('Ушедших клиентов', churned_total, NUMBER_FORMAT),
-        card('Доля от клиентов периода', _share(churned_total, share_base_clients), PERCENT_FORMAT),
+        card('Доля от клиентов периода', percent(churned_total, share_base_clients), PERCENT_FORMAT),
         card('Ежемесячная выручка под риском', monthly_at_risk, MONEY_FORMAT),
     ]
     base['charts'] = [
@@ -740,7 +724,7 @@ async def build_revenue_at_risk(req: ReportRequest) -> dict[str, Any]:
             'churn_by_month',
             'Ушедшие клиенты по месяцу последнего визита',
             [
-                ('month', 'Месяц последнего визита', 'text'),
+                ('month', 'Месяц последнего визита', TEXT_FORMAT),
                 ('clients', 'Ушедших клиентов', NUMBER_FORMAT),
                 ('revenue', 'Выручка под риском в месяц', MONEY_FORMAT),
             ],
@@ -752,8 +736,8 @@ async def build_revenue_at_risk(req: ReportRequest) -> dict[str, Any]:
             'churn_by_staff',
             'Ушедшие клиенты по последнему мастеру',
             [
-                ('staff_name', 'Мастер', 'text'),
-                ('company_title', 'Филиал', 'text'),
+                ('staff_name', 'Мастер', TEXT_FORMAT),
+                ('company_title', 'Филиал', TEXT_FORMAT),
                 ('clients', 'Ушедших клиентов', NUMBER_FORMAT),
                 ('clients_pct', 'Доля ушедших', PERCENT_FORMAT),
                 ('revenue', 'Выручка под риском в месяц', MONEY_FORMAT),
@@ -881,7 +865,7 @@ async def build_new_vs_returning_cross(req: ReportRequest) -> dict[str, Any]:
             'segments',
             'Сегменты за период',
             [
-                ('segment', 'Сегмент', 'text'),
+                ('segment', 'Сегмент', TEXT_FORMAT),
                 ('clients', 'Клиентов', NUMBER_FORMAT),
                 ('share', 'Доля', PERCENT_FORMAT),
                 ('clients_change_pct', 'Изменение клиентов', PERCENT_FORMAT),
@@ -894,7 +878,7 @@ async def build_new_vs_returning_cross(req: ReportRequest) -> dict[str, Any]:
             'opz_by_visit',
             'ОПЗ после первого и повторного визита',
             [
-                ('segment', 'Визит', 'text'),
+                ('segment', 'Визит', TEXT_FORMAT),
                 ('visits', 'Визитов', NUMBER_FORMAT),
                 ('opz_qty', 'ОПЗ', NUMBER_FORMAT),
                 ('opz_pct', 'ОПЗ %', PERCENT_FORMAT),

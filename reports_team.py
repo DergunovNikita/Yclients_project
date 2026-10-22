@@ -14,6 +14,7 @@ from report_payload import (
     MONEY_FORMAT,
     NUMBER_FORMAT,
     PERCENT_FORMAT,
+    TEXT_FORMAT,
     ReportCalculationError,
     ReportRequest,
     card,
@@ -53,7 +54,7 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
             company_id,
             staff_id,
             allowed_company_ids=req.allowed_company_ids,
-            force_allowed=req.allowed_company_ids is not None,
+            force_allowed=True,
             for_ratings=True,
             # The boards read the branch row only when no staff is selected.
             include_branch_row=staff_id is None,
@@ -71,7 +72,7 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
             await req.db.rollback()
         except Exception as rollback_error:  # noqa: BLE001 - the original failure is what the caller needs
             logger.warning('staff_leaderboard rollback failed: %s', type(rollback_error).__name__)
-        raise ReportCalculationError('staff leaderboard plan/fact failed', stage='plan_fact') from error
+        raise ReportCalculationError('staff leaderboard plan/fact failed') from error
     finally:
         logger.info(
             'staff_leaderboard plan_fact finished start=%s end=%s company_id=%s duration_ms=%s',
@@ -89,8 +90,8 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
                 'text': 'Не удалось рассчитать суммы допуслуг. Количество и проценты показаны полностью.',
             })
 
-    staff_col = ('staff', 'Сотрудник', 'text')
-    branch_col = ('company_title', 'Барбершоп', 'text')
+    staff_col = ('staff', 'Сотрудник', TEXT_FORMAT)
+    branch_col = ('company_title', 'Барбершоп', TEXT_FORMAT)
     qty_col = ('qty', 'Кол-во, шт', NUMBER_FORMAT)
     sum_col = ('sum', 'Сумма', MONEY_FORMAT)
     avg_col = ('avg', 'Ср. чек, ₽', MONEY_FORMAT)
@@ -270,7 +271,7 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
             'avg_check_plan_branch',
             'Топ выполнения плана среднего чека — барбершопы',
             [
-                ('staff', 'Барбершоп', 'text'),
+                ('staff', 'Барбершоп', TEXT_FORMAT),
                 ('plan', 'План', MONEY_FORMAT),
                 ('fact', 'Факт', MONEY_FORMAT),
                 ('pct', 'Выполнение, %', PERCENT_FORMAT),

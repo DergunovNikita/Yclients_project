@@ -8,7 +8,6 @@
     "build": "vite build",
     "test": "node --import ./tests/json-modules.mjs --test \"tests/*.test.mjs\"",
     "test:auth": "node --test tests/auth-runtime.test.mjs tests/proxy-runtime.test.mjs",
-    "test:dashboard": "npm test",
     "scan:auth-tokens": "node tests/browser-auth-scan.mjs .",
     "scan:auth-build": "node tests/browser-auth-scan.mjs dist",
     "preview": "vite preview"

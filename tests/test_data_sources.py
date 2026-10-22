@@ -1,9 +1,9 @@
-from datetime import datetime
 
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from clock import utcnow
 from data_sources import SOURCE_YCLIENTS, YClientsDataSourceAdapter, normalize_source_type
 from models import Company, Group, PortalAccount, PortalBranch
 
@@ -100,8 +100,8 @@ def test_a_failed_group_request_is_not_an_empty_network():
 @pytest.mark.asyncio
 async def test_yclients_materialize_branches_scopes_external_ids_by_tenant(async_session):
     async_session.add_all([
-        PortalAccount(id=1, label='Tenant A', created_at=datetime.utcnow()),
-        PortalAccount(id=2, label='Tenant B', created_at=datetime.utcnow()),
+        PortalAccount(id=1, label='Tenant A', created_at=utcnow()),
+        PortalAccount(id=2, label='Tenant B', created_at=utcnow()),
     ])
     await async_session.flush()
 
@@ -169,7 +169,7 @@ def test_normalize_source_type_rejects_an_unsupported_source():
 
 @pytest.mark.asyncio
 async def test_materialize_branches_reuses_a_prefetched_listing(async_session):
-    async_session.add(PortalAccount(id=1, label='Tenant A', created_at=datetime.utcnow()))
+    async_session.add(PortalAccount(id=1, label='Tenant A', created_at=utcnow()))
     await async_session.flush()
     listings = []
 

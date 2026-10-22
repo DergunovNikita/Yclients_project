@@ -308,10 +308,8 @@ def adapter_from_payload(
     password: str,
     **api_kwargs,
 ) -> DataSourceAdapter:
-    normalized = normalize_source_type(source_type)
-    if normalized == SOURCE_YCLIENTS:
-        return YClientsDataSourceAdapter(partner_token, login, password, **api_kwargs)
-    raise HTTPException(status_code=400, detail=f'Unsupported source_type: {normalized}')
+    normalize_source_type(source_type)  # the only supported type is YClients; anything else is a 400
+    return YClientsDataSourceAdapter(partner_token, login, password, **api_kwargs)
 
 
 def authenticated_adapter_from_payload(
@@ -340,7 +338,5 @@ def adapter_from_credential(
     credential: YClientsCredential,
     **api_kwargs,
 ) -> DataSourceAdapter:
-    normalized = normalize_source_type(source_type)
-    if normalized == SOURCE_YCLIENTS:
-        return YClientsDataSourceAdapter.from_credential(credential, **api_kwargs)
-    raise HTTPException(status_code=400, detail=f'Unsupported source_type: {normalized}')
+    normalize_source_type(source_type)
+    return YClientsDataSourceAdapter.from_credential(credential, **api_kwargs)

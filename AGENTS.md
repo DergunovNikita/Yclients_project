@@ -15,7 +15,8 @@
 - **Python 3.12**, FastAPI, SQLAlchemy 2.0, Alembic, Pydantic 2
 - **PostgreSQL 16**, Docker Compose
 - **Зависимости**: pip + requirements.txt (рантайм, его ставит Dockerfile) + requirements-dev.txt (pytest, ruff, aiosqlite; CI и локально) — не uv, не poetry
-- **Тесты**: pytest + httpx (TestClient)
+- **Тесты**: pytest + pytest-asyncio (`asyncio_mode = strict`) + httpx `AsyncClient` / `ASGITransport` (`TestClient` только в
+  `test_ops_security.py` и `test_security_config.py`)
 
 ### Structure
 Модули в корне; фронтенд в `web/`, служебные скрипты в `scripts/`:
@@ -34,7 +35,11 @@ main.py             — CLI прогона синка (`--mode`), exit code 75 �
 models.py           — SQLAlchemy модели (public + system schema)
 database.py         — connection pooling, миграции
 config.py           — переменные окружения (.env) + prod-валидация
-clock.py            — `utcnow()`: наивный UTC, соглашение всех `DateTime`-колонок
+clock.py            — `utcnow()`: наивный UTC, соглашение всех `DateTime`-колонок; синк и воркер (`sync_*.py`) берут время
+                      только оттуда, голый `datetime.now()` — время хоста — там запрещён (`tests/test_sync_clock.py`; исключение
+                      одно: `sync_logging.build_log_path` называет им файл лога и ничего не хранит)
+migrate.py          — миграции деплоя; пустую БД отдаёт `scripts/bootstrap_db.py` (схема из метаданных + stamp head: голый
+                      `alembic upgrade head` с нуля не работает, `0001` строит таблицы по текущим моделям)
 yclients_api.py     — HTTP-клиент YClients с retry/throttle
 yclients_analytics.py — async-чтение аналитики YClients для дашборда
 yclients_credentials.py / yclients_credential_routes.py — шифрованные креды YClients и их админка
@@ -42,11 +47,17 @@ data_sources.py     — граница адаптеров источника д�
 seed_fake_data.py   — генератор синтетики; scripts/seed_demo.py — демо-стенд
 scripts/            — служебные скрипты: `set_reporting_window` (окно отчётности филиала, см. ниже), `seed_demo`,
                       `merge_mirror_manual_facts` (перенос ручных фактов с зеркальной строки на настоящую, см. «admin и barber»),
-                      `backfill_staff_schedules`, `provision_staff_accounts`, `local-db-refresh.sh`, `preflight.sh`, `security-check.sh`
+                      `backfill_staff_schedules`, `provision_staff_accounts`, `local-db-refresh.sh`, `preflight.sh`, `security-check.sh`,
+                      `check.sh` (локальный полный прогон: ruff, pytest, `npm test`, сборка), `dev-env.sh` (окружение `.venv` для оболочки),
+                      `enqueue-sync.py` (поставить задачу через `/sync/trigger`), `sync-log-summary.py` (сводка `sync_*.log`),
+                      `report_payload_snapshot.py` (золотой diff ответов отчётов до/после правки), `test_smtp.py` (тестовое письмо)
 
 # Портал (личные кабинеты, multi-tenant)
 auth_routes.py      — эндпоинты аутентификации + администрирование пользователей
 auth_deps.py        — FastAPI-зависимости: require_auth, роли, forbid_demo (демо read-only)
+auth_hierarchy.py   — `ROLE_LEVEL`: ранги ролей, кто кого заводит и меняет (`assignable_roles`, `can_manage_user`)
+open_paths.py       — `OPEN_PATHS`: единственный список маршрутов без аутентификации
+create_portal_admin.py — бутстрап `platform_admin` при деплое (create-only, см. «Security»)
 auth_service.py     — хэш паролей, JWT, email-токены, отправка почты
 auth_sessions.py    — refresh-токены, cookie/CSRF, управление сессиями
 auth_scope.py       — AccessContext, скоуп доступа по филиалам
@@ -58,16 +69,18 @@ plan_config.py     — определения метрик План/факта �
 onboarding_routes.py — онбординг владельца (источник данных, выбор филиалов)
 dashboard_routes.py / dashboard_service.py — API и агрегации дашборда (Обзор, План/факт, виджеты)
 dashboard_reports.py — реестр отчётов (`REPORT_DEFINITIONS`), диспетчер `fetch_report_data`, сравнение периодов
-report_payload.py   — общая форма ответа отчёта: `ReportRequest`, `card`/`chart`/`table`/`ranking_table`, `ReportInputError`
+report_payload.py   — общая форма ответа отчёта: `ReportRequest`, `card`/`chart`/`table`/`ranking_table`, `ReportInputError`,
+                      константы форматов колонок (`MONEY_FORMAT` … `TEXT_FORMAT`, `DATE_FORMAT`)
 report_common.py    — запросные и подписные помощники, общие для нескольких билдеров (`appointment_conditions`,
-                      `period_key`/`period_starts`, подписи месяцев и дат)
+                      `period_key`/`period_starts`, `percent(part, whole, digits=None)` — доля в процентах,
+                      подписи месяцев и дат)
 reports_finance.py / reports_services.py / reports_clients.py / reports_operations.py /
 reports_goods.py / reports_feedback.py / reports_team.py — билдеры отчётов по группам; «Формы оплаты» и
                       «Сравнение по годам» — в finance, «Новые и вернувшиеся» — в clients, «Рейтинги» — в team
 report_usage.py     — учёт открытий отчётов и отчёт «Использование отчётов»
 payment_methods.py  — разбивка выручки по формам оплаты и ручной ввод Яндекс Пэй (отчёт `payment_methods`, `/dashboard/payments/yandex_pay`)
 web/                — Vite MPA (dashboard/reports, auth, onboarding, settings, admin, i18n ru/en/it)
-api/ / web/api/     — варианты same-origin Vercel proxy к backend API
+api/ / web/api/     — одинаковые копии same-origin Vercel proxy к backend API: одна функция `auth-proxy.js` + `_proxy.js`, маршрутизация rewrite-ами
 ```
 
 ## Code Style & Quality
@@ -145,8 +158,12 @@ cd web && npm run dev
 - **Schemas**: `public` (данные YClients) + `system` (sync state/jobs/runs + портал: аккаунты, пользователи, сессии, email-токены, филиалы)
 - **ORM**: SQLAlchemy 2.0 — sync (`Session`) для ETL, async (`AsyncSession`) для API
 - **Batch operations**: chunked по DB_BATCH_SIZE (1000)
-- **Справочники YClients** (категории и услуги, должности, кассы, склады, категории товаров, товары) живут только в
-  филиальных `*_catalog`; их читает дашборд. Старых глобальных двойников нет (миграции `0054`, `0056`);
+- **Справочники YClients** живут только в филиальных `*_catalog`: услуги (`service_catalog`), кассы (`account_catalog`),
+  категории товаров и товары читает дашборд; `service_category_catalog` читает только сам синк (`sync_services` берёт из неё
+  категории, когда ответ API их не несёт). Должностей и складов в справочниках нет: `staff_position_catalog` и
+  `storage_catalog` (шаги `sync_positions` / `sync_storages`, методы `get_positions` / `get_storages`) удалены миграцией
+  `0061` — их никто не читал; уровень барбера идёт из `staff.position_id` и `staff_position_months`, склад товарной
+  операции — id и название в самой строке `goods_transactions`. Старых глобальных двойников нет (миграции `0054`, `0056`);
   `service_labels` ссылается составным FK `(company_id, service_id)` на `service_catalog` (`ON DELETE CASCADE`).
   Та же `0056` убрала `system.sync_step_runs` и `sync_source_states.synced_at`: в них только писали, не читал никто
 - **Concurrency**: pg_advisory_lock, один sync за раз
@@ -172,6 +189,15 @@ cd web && npm run dev
   Брошенные `running`-строки (`sync_runs`, `sync_jobs`) закрывает холостой проход воркера, и только пока лок
   свободен (`SyncControlService.probe_idle_lock`): живой sync, в том числе многочасовой `full`, держит лок,
   поэтому по возрасту такие строки не рвутся. Один `Database` на воркер переиспользуется в `run_sync_job`.
+- **Ключи `system.sync_state`** — только то, что читает код: контрольные точки (`transactions_last_success_date:company:<id>`,
+  `historical_source_coverage_v1:company:<id>`), `last_successful_sync_at` (виджет статуса), `last_unscoped_sync_at` (гейт
+  автосинка) и три отметки чисток (`last_run_retention_at`, `last_job_retention_at`, `last_report_usage_retention_at`).
+  Состояние самих прогонов живёт в `sync_runs`; ключей `last_run_*` / `last_successful_run_id` `create_run` / `finish_run`
+  больше не пишут (миграция `0061` удалила и их, и `services_labels_last_*`, и устаревшую глобальную `transactions_last_success_date`). Нужен новый ключ — пиши его только вместе с читателем.
+- **Прогресс прогона — best-effort.** `progress_callback` вызывается из `run_sync_step` и `emit_progress` через `_notify_progress`:
+  сбой записи (например, оборванное соединение `control_db` в `sync_orchestrator`) печатает одну строку с именем класса исключения,
+  не подменяет результат шага и не обрывает прогон. Колбэк оркестратора при сбое делает `control_db.rollback()` и бросает дальше —
+  иначе сессия осталась бы в аборт-состоянии и каждая следующая запись прогресса падала бы тоже.
 - **Хранение прогонов**: `purge_old_runs` вместе со строками `sync_runs` удаляет и их файлы логов (`sync_*.log` прямо в
   `SYNC_LOG_DIR`, best-effort): иначе таблица худела бы, а `logs/` росла вечно.
 - **Режимы синхронизации**: `incremental` (каждые 4 часа, дочитывает `SYNC_LOOKBACK_DAYS`
@@ -191,7 +217,7 @@ cd web && npm run dev
   ревизия» тоже проверяет `/health/ready` (иначе упавший после выкладки API читался бы «нечего деплоить»); после
   неудачных `build`/`migrate` тег образа возвращается на прежний. `API_PORT` в контейнере всегда 8000 (`.env` задаёт
   только порт хоста).
-- **Prod fail-closed**: в production `config` требует сильные `AUTH_JWT_SECRET`/`SYNC_API_TOKEN`, `AUTH_COOKIE_SECURE=true` и выключенную публичную регистрацию; `AUTH_REQUIRE_LOGIN=false` допустим только при заданном сильном `API_KEY`; при отправке почты через SMTP (не console) `APP_PUBLIC_URL` обязан быть публичным https-адресом (ссылки в письмах), `LOG_LEVEL` — известным именем уровня
+- **Prod fail-closed**: в production `config` требует сильный `AUTH_JWT_SECRET` (≥ 32 символов) и `SYNC_API_TOKEN` не из заглушек (длинной нижней границы у токена нет сознательно: боевой токен короче 32 символов, и подъём порога не дал бы загрузиться api, worker и migrate), `AUTH_COOKIE_SECURE=true` и выключенную публичную регистрацию; `AUTH_REQUIRE_LOGIN=false` допустим только при заданном сильном `API_KEY`; при отправке почты через SMTP (не console) `APP_PUBLIC_URL` обязан быть публичным https-адресом (ссылки в письмах), `LOG_LEVEL` — известным именем уровня
 
 ### Окно отчётности филиала
 `companies.reporting_start_date` и `companies.reporting_end_date` (обе nullable) задают дни,
@@ -250,6 +276,8 @@ cd web && npm run dev
   `_write_manual_facts` отбивает `ManualFactRowNotOpen` правку строки филиала, ушедшего до начала месяца. На фронте
   правило симметричное, и это осознанное расхождение: селектор решает, что можно выбрать,
   а редактор — что можно исправить.
+- `_company_scope_clause(column, company_id, allowed)`: при заданных и `company_id`, и списке — `column = id AND column IN (allowed)`
+  (защита в глубину; роутеры и так отдают 403). `None` — без ограничения, `[]` — ничего не разрешено.
 - **Сырых таблиц наружу API не отдаёт.** JSON-списки, `/stats` и `/export/csv/*` удалены; данные читает только
   дашборд (`/dashboard/*`). Скоуп филиалов и окно там ставят сами запросы дашборда.
 - **Записи тоже отбивают филиал, ушедший от тенанта** (400): `save_plan_settings`, правка услуг
@@ -267,10 +295,17 @@ YClients получить свою копию уже занятой точки (
 - Сгенерированный пароль при массовом заведении учёток никому не показывается, поэтому хэш у них общий —
   `DUMMY_PASSWORD_HASH`, а не свой bcrypt на каждого (~250 мс): вход по такой учётке стоит те же один раунд bcrypt,
   а доступ даёт только письмо-приглашение. Заданный руками пароль хэшируется как обычно.
-- Письма «забыли пароль» и «повторить подтверждение» уходят фоновой задачей на своей сессии
+- Письмо «забыли пароль» уходит фоновой задачей на своей сессии
   (`_send_auth_email_after_response`): время ответа и ошибки SMTP не выдают, есть ли такой адрес.
   Кулдаун ставится только после отправки, поэтому пока письмо уходит, повторные запросы не плодят письма:
-  `_queue_auth_email` держит в памяти процесса пару (отправитель, пользователь) не дольше 60 с.
+  `_queue_auth_email` держит в памяти процесса пару (отправитель, пользователь) не дольше 60 с. Три отправителя
+  (`send_verification_email`, `send_password_reset_email`, `send_account_invite_email`) — тонкие обёртки над `_send_token_email`;
+  очередь ключуется по `sender.__name__`, поэтому имена публичные. Письмо подтверждения шлёт только регистрация
+  (inline): повторной отправки нет.
+- `POST /auth/admin/distribute-credentials` читает всё нужное циклу (почта, роль, id, роль актора) в локальные значения до
+  отправки: откат сессии после сбоя гасит все загруженные строки, и перед отправкой обновляется (раз) только тот
+  пользователь, которого откат погасил (`inspect(user).expired`), а не все загруженные на каждом сбое: «обновить один раз
+  после отката» оставило бы погашенными остальных, и их письма падали бы `MissingGreenlet`. Письма по-прежнему уходят в запросе.
 - `GET /auth/admin/users` чинит зеркальные строки `staff` по-прежнему, но коммитит только при реальной правке
   (`sync_all_portal_users_staff` возвращает, писало ли оно), а филиалы и строки `staff` читает двумя запросами
   на всех, не по два на пользователя. Успешное чтение списка кредов аудита не пишет — только отказ в выборе тенанта.
@@ -396,7 +431,7 @@ YClients получить свою копию уже занятой точки (
   по ролевым сегментам (`_staff_role_segments`, как строки План/факта) — месяц администратором: события, закреплённые за
   ним `_admin_opz_events_by_created_appointments` (та же раздача, что и у `_admin_opz_by_created_appointments`, ядро —
   `_admin_event_assignments`: создатель в смену, иначе наименее загруженный за день, затем за окно), над записями, закреплёнными за ним
-  (`_admin_records_by_staff(with_first_visits=True)` — те же, что «клиенты» его строки План/факта); месяц барбером — события
+  (`_admin_assigned_records(with_first_visits=True)` — те же, что «клиенты» его строки План/факта); месяц барбером — события
   его визитов над его визитами. Доли разбивки — события / записи, из которых первая запись клиента в филиале (`_first_visit_join`).
   Ручная добавка в разбивку не входит, но в итог `opz_qty` и `opz_pct` входит (см. «Обзор выбранного администратора»);
   `opz_pct` делится на закреплённые записи, а не на `cur['appointments']`
@@ -475,6 +510,10 @@ YClients получить свою копию уже занятой точки (
   покрывающим визиты месяца, прячет ОПЗ (с разбивкой); отдельная проверка по зависимостям события прячет **только**
   ОПЗ, не выручку и не визиты, но дописывает пробел в `missing_components` и переводит месяц в `partial`.
   Зависимость события может уходить в соседний месяц и даже в прошлый год (визит 31 декабря).
+- Покрытие года и месяца сертифицируют только `appointments_detail` и `financial_transactions_detail` (`YOY_SOURCES` в
+  `reports_finance.py`): выручка, в том числе товарная и пополнения, считается по платежам. Движения товаров
+  (`goods_transactions_detail`) питали только число проданных единиц, которого отчёт не показывал, — `fetch_year_over_year_facts`
+  его больше не читает, и отсутствие этого источника год «неполным» не делает.
 
 ### Ручные факты (отзывы и дополнительные ОПЗ)
 `manual_fact_metrics` хранит значения, которые вводят руками. Значение привязано к
@@ -482,7 +521,7 @@ YClients получить свою копию уже занятой точки (
 `period_start` — 1-е число, `period_end` — последнее (гарантия — уникальный индекс).
 Кодов два: `reviews_qty` (метрики нет в YClients вовсе) и `opz_qty` — добавка к расчётным ОПЗ.
 
-- Чтение (`_manual_fact_values`) раздвигает период до границ месяцев через `_month_window`.
+- Чтение (`_manual_fact_values_by_staff`) раздвигает период до границ месяцев через `_month_window`.
   Для `reviews_qty` этого достаточно: месяцы, пересекающиеся с периодом, берутся целиком, и
   План/факт за 01.08–13.08 показывает август полностью — иначе месячный план шёл бы против
   нулевого факта. Для `opz_qty` правило строже (см. ниже): половинчатый прошлый период
@@ -542,6 +581,12 @@ YClients получить свою копию уже занятой точки (
   `_admin_staff_ids_by_company` (точное совпадение периода плана с месяцем). Пока планы
   месячные, это одно и то же; план на нестандартный период их разведёт.
   Итог филиала в План/факте бывает больше суммы строк на нераспределённые события.
+
+- **У набранных чисел есть потолок** — `MAX_INPUT_VALUE = 1e9` (`dashboard_service.py`), тот же, что у суммы Яндекс Пэй
+  (`payment_methods.MAX_AMOUNT`). Ручные факты (`_parse_manual_value`, и `value`, и `previous_value`) и числа настроек плана
+  (`_parse_setting_number`) выше него — `ValueError` → 400. Без потолка `1e307` переполнял float: `opz_pct` = 100 × ОПЗ / клиенты
+  давал `inf`, JSON его не сериализует, и `/dashboard/bundle` отвечал 500 на весь филиал; план шёл тем же путём через выручку.
+  Проверка на уровне сервиса, а не `le=` в Pydantic: иначе ответ был бы 422 вместо 400 с понятным `detail`.
 
 ### Сохранение плана
 `save_plan_settings` — «удалить всё и вставить» по месяцу и филиалам, без оптимистичной блокировки:
@@ -606,7 +651,8 @@ SPA его не печатает: на 409 она перечитывает за�
   `barber` / `mixed` / `null` (`_staff_label_categories`). С периодом это те же месячные роли, по которым Обзор выбирает режим
   администратора (`_staff_role_periods_by_company`, один пакетный вызов на весь список, не по сотруднику): оба вида месяцев
   в окне — `mixed`. Без периода — по должности. Синтетические строки портала с должностью `owner` / `branch_admin` /
-  `manager` / `platform_admin` подписи не получают (`null`): у них алиас `admin` в названии роли читался бы «администратором».
+  `manager` / `platform_admin` в этот список не попадают вовсе (`fetch_staff` их исключает, `_counts_as_staff()`), поэтому `null` у
+  `category` — только у сотрудника без месячных ролей и без должности-алиаса.
   На фронте подпись — только текст option (`staffOption` в `web/src/staffLabel.js`); голое имя лежит в `option.dataset.name`, и
   заголовки («Личные показатели: …») берут его, а не `textContent`.
 - `barber` — **не** переименованный `viewer`: у `viewer` алиаса нет вовсе, и синтетическая
@@ -616,7 +662,20 @@ SPA его не печатает: на 409 она перечитывает за�
 - У учётки, заведённой из CRM (`provision_staff_account`, где `staff.id == portal_user.id`),
   должность остаётся из YClients, и ярлык роли на неё не влияет.
 - Строки `staff` из YClients в админке портала только читаются; из админки можно лишь завести учётку (`create-account`) —
-  правка и «удаление» отменялись бы следующим синком.
+  правка и «удаление» отменялись бы следующим синком. `POST /auth/admin/staff/{id}/create-account`: 409 — только
+  `ProvisionConflict(ValueError)` (почта уже зарегистрирована, у сотрудника уже есть учётка, id пользователя занят); остальные
+  `ValueError` провижининга (нет настоящей почты, сотрудник неактивен, филиал не привязан к тенанту) — 400.
+  `provision_all_unlinked_staff` ловит оба одним `except ValueError`.
+- **Строка CRM — это `Staff.id == portal_user.id` И `external_id IS NOT NULL`**, а не одно равенство id. Зеркальная строка
+  (`portal_staff_sync._add_portal_staff`) берёт `max(Staff.id)+1`, а учётки, заведённые из CRM, делят с `staff.id` одно
+  пространство номеров (`_ensure_portal_user_id_sequence`), поэтому свежая зеркальная строка может получить id своего же
+  пользователя; тогда её принимали за строку CRM: должность не следовала за ролью, `fired` не ставился при деактивации,
+  при удалении учётки строка отвязывалась вместо увольнения. У зеркальных строк `external_id` всегда `NULL`; у строк из
+  YClients он есть (миграция `0033` проставила `external_id = id` всем старым строкам, поэтому одного `external_id IS NOT
+  NULL` мало — нужна пара). Предикат один: `_is_crm_row` / `crm_staff_clause` в `portal_staff_sync.py`
+  (`_portal_owned_staff_clause`, `sync_portal_user_staff`, `detach_portal_user_staff`) — и `sync_staff` увольняет не попавших в
+  ответ YClients только строки, которыми владеет синк: `portal_user_id IS NULL` либо CRM-строка учётки (тот же
+  `crm_staff_clause`). Зеркальная строка, чей id случайно совпал с id пользователя, `external_id` не имеет и синком не увольняется.
 - **Зеркальные строки не-стоечных ролей — не сотрудники нигде в аналитике.** Учётки `owner` / `branch_admin` / `manager` /
   `platform_admin` получают синтетическую строку `staff` с должностью-ролью (`PORTAL_MIRROR_POSITIONS` в `models.py`:
   `PORTAL_ROLES` без `admin`/`barber`; пустая должность не зеркало). Это аккаунт, а не кресло и не стойка, но с плановой
@@ -670,6 +729,11 @@ SPA его не печатает: на 409 она перечитывает за�
   автоматически становится «личной» — и «личная» здесь fail-closed: если живой строки
   `staff` у учётки нет (сотрудника уволили в YClients, а логин остался),
   `effective_staff_id()` отвечает 403, а не показывает весь филиал.
+- `GET /dashboard/staff` тоже зажимает личную роль: `fetch_staff(staff_id=effective_staff_id(ctx, None))` — барбер или
+  администратор видит в селекторе только свою строку (коллег, их должности, уровни и категории он читать не должен);
+  без живой строки `staff` — 403, как везде. Селекторы дашборда и отчётов переносят список из одной строки (пункт «Все»
+  остаётся: запрос без `staff_id` сервер всё равно зажимает). Ответ не несёт `user_id` YClients — селекторы его не читают;
+  редактор планов получает его из `fetch_staff` напрямую.
 - Зажим обязан попасть **внутрь своих филиалов**: у переведённого сотрудника остаётся живой
   CRM-строкой филиал, из которого он ушёл, и у неё id всегда меньше, поэтому «первая строка»
   зажимала дашборд на филиал вне скоупа и каждый виджет отвечал `unknown staff_id`. Если
@@ -796,9 +860,10 @@ SPA его не печатает: на 409 она перечитывает за�
   сервера (в проде контейнер без `TZ`, то есть UTC, и расхождения нет). Перед разбором на фронте
   обязателен маркер
   `Z` — общий `parseServerInstant()` (`web/src/timestamps.js`). Без него браузер прочитает метку
-  как локальное время и сохранённое после полуночи UTC покажет вчерашним днём. Оба `formatDate`
-  в проекте ошибаются ровно на этой границе (в отчётах берётся только префикс даты, в настройках
-  строка парсится как локальная) — новый код с серверными метками идёт через `parseServerInstant`.
+  как локальное время и сохранённое после полуночи UTC покажет вчерашним днём. Настройки и админка форматируют серверные
+  метки через `formatBranchDateTime()` (`web/src/timestamps.js`); `formatDate` отчётов (`web/src/reports/format.js`) годится
+  только для дат без времени (берётся префикс `YYYY-MM-DD`) — метку с временем в него передавать нельзя, такой код идёт через
+  `parseServerInstant` / `formatBranchDateTime`.
 - `hidden` сам по себе не работал: авторские правила (`.tab { display: inline-flex }`, `label { display: flex }`)
   перебивают UA-стиль `[hidden]`. Теперь в `web/index.html` одно общее правило `[hidden] { display: none !important; }`
   (у остальных страниц оно в `auth.css`): новый скрываемый элемент покрыт автоматически, отдельные `[hidden]`-правила
@@ -947,6 +1012,9 @@ SPA его не печатает: на 409 она перечитывает за�
   «данные периода сравнения неполные»). В нём `cards` и `rows` (дельты по карточкам), а `charts` и `tables` — только те id, что
   есть в текущем ответе, причём таблицы только с `row_key` (без него строки нечем сопоставить, а список событий вроде
   низких оценок лишь довёз бы тексты отзывов прошлого окна). У отчётов нет и блока `raw`: страница его не рисует, а на длинном окне он был самой тяжёлой частью ответа и удваивал строки таблиц, поэтому его не стало вовсе — в ответе только `cards`, `charts`, `tables`, `notes`.
+  Категорийные графики блока несут только подписи, которые есть в текущем графике, и те же точки рядов
+  (`_comparison_chart`): страница сопоставляет их по подписи, а прогон сравнения отдаёт все строки; графики периодов
+  (`x_kind='time'`) идут целиком.
   `delta_pct = None` при нулевой базе — прочерк, а не выдуманные «+100 %». Процент округлён до четырёх знаков, не до двух: страница округляет ещё раз до одного,
   и уже округлённое −0,55 читалось бы как −0,6, когда ячейки таблицы по тем же точным значениям дают −0,5 — на одном экране.
   Изменение, округлившееся до нуля, показывается как «0%» без цвета (`formatDeltaPct`, `deltaClass(value, digits)`): ни «-0%», ни «+0%».
@@ -1284,9 +1352,11 @@ SPA его не печатает: на 409 она перечитывает за�
 
 ### Сопоставление визита со сменой
 Визит относится к смене администратора, если попал в её интервал; ночная смена ловит и утро
-следующего дня. Условие живёт в одном месте — `_schedule_slot_match()`, — но **день вызывающий обязан
-закрепить сам**, до предиката: EXISTS в `_postgres_schedule_slot_condition` (режим выбранного администратора на
-Обзоре: «Филиал во время смен», `_administrator_service_scope`) добавляет `date IN (день, день-1)`. Раздачу
+следующего дня. SQL-условие живёт в одном месте — `_postgres_administrator_schedule_condition()` (EXISTS по
+`StaffSchedule`, только PostgreSQL; режим выбранного администратора на Обзоре: «Филиал во время смен»,
+`_administrator_service_scope`), а его Python-зеркало — `_schedule_slot_covers_local_moment()` (SQLite и сопоставление
+в памяти): правило правится в обоих сразу. **День функция закрепляет сама, до предиката** — `date IN (день, день-1)`,
+а не внутри `OR`. Раздачу
 записей, ОПЗ и доп. услуг между администраторами это условие не делает: её ядро — `_admin_event_assignments`
 (Python, один проход по событиям), см. «Доп. услуги администратора».
 
@@ -1374,8 +1444,9 @@ SPA его не печатает: на 409 она перечитывает за�
 списки, а SQL сравнивает название на равенство (`IN`), а не десятками `LIKE '%…%'` на каждой
 строке фактов.
 
-- Сравнивается **сырое** `coalesce(transactions.service_title, service_catalog.title, '')`,
-  без `lower()`: списки собраны из тех же двух колонок, поэтому значения совпадают точно.
+- Сравнивается **сырое** `coalesce(nullif(transactions.service_title, ''), service_catalog.title, '')` (`_kpi_service_title()`:
+  пустая копия названия в визите считается отсутствующей, как в топе услуг и `_transaction_title_lookup`; оба запроса KPI читают
+  её), без `lower()`: списки собраны из тех же двух колонок, поэтому значения совпадают точно.
   Это заодно снимает расхождение диалектов, ради которого раньше перечислялись написания
   (`part.capitalize()`, `.upper()`): `lower()` в PostgreSQL сворачивает кириллицу, в SQLite
   нет, а `str.lower()` в Python — везде. Побочно чинится и `'ВоСк'`, который старый список
@@ -1383,7 +1454,7 @@ SPA его не печатает: на 409 она перечитывает за�
 - Названия берутся **двумя отдельными** `DISTINCT`, а не одним SQL `UNION`: union хеширует
   оба входа в один непараллельный проход — замерено 536 мс против 51 мс. Разница видна не на
   истории, а на окне в месяц, где весь запрос стоит меньше секунды.
-- Кэш живёт в `db.info` (как `reporting_start_dates` и `administrator_role_periods`), то есть
+- Кэш живёт в `db.info` (как `reporting_windows` и `administrator_role_periods`), то есть
   ровно один запрос — сессия создаётся на запрос. Список собирается по всем тенантам, но это
   безопасно: он лишь расширяет набор названий, а сами суммы по-прежнему режутся скоупом.
   Все кэши `db.info` (`opz_events`, `staff_schedule_coverage`, `staff_role_periods`, …) держатся на
@@ -1403,10 +1474,11 @@ SPA его не печатает: на 409 она перечитывает за�
   алиас `financial_overview`, а `booking_channels` пересобран (см. «Каталог отчётов»); `year_over_year` прежний.
 
 ### Замеры на локальной копии: сначала ANALYZE
-`./scripts/local-db-refresh.sh` оставляет базу **без статистики** — `pg_stat_user_tables`
-показывает пустые `last_analyze`/`last_autoanalyze` у `appointments` при 195k изменений.
-Планировщик работает на дефолтных оценках, планы не совпадают с продовыми, и замеры врут в
-обе стороны. Перед любым сравнением производительности — `VACUUM ANALYZE;` (7 с).
+`pg_restore` не оставляет статистики (`pg_stat_user_tables` пуст по `last_analyze` при 195k изменений у `appointments`):
+планировщик работает на дефолтных оценках, планы не совпадают с продовыми, и замеры врут в обе стороны. Поэтому
+`./scripts/local-db-refresh.sh` сам делает `vacuumdb --analyze-only` после восстановления; руками `VACUUM ANALYZE;` (7 с)
+нужен, только если базу заливали иначе. Тот же скрипт ставит дампу права 600 и после сверки sha256 оставляет в `DUMP_DIR`
+три свежих `prod_*.dump` (остальные такие файлы удаляет, чужие имена не трогает).
 
 - Автовакуум может сработать посреди прогона и переключить планы на ходу; разброс между
   повторами тогда достигает трёх раз. Сравнивать «до/после» только в одном прогоне, подряд.
@@ -1459,8 +1531,8 @@ SPA его не печатает: на 409 она перечитывает за�
   только когда у администратора реально нарисована такая ячейка (`hasRecordsCells` блока). Выбор колонок и ячеек — чистая `mergedStaffTable()`
   (`web/src/planStaffTable.js`, тест `plan-staff-table.test.mjs`), разметка — `renderMergedStaffSection` (`main.js`); форма ответа бэкенда не менялась,
   потому что её читают и рейтинги. Колонки без плана и фактов **не** отбрасываются: у всех одни и те же столбцы. Якоря для плавающей навигации —
-  `data-jump-target` / `data-jump-label` на блоках (филиал `plan-branch`, подзаголовки `plan-barbers` / `plan-admins`); после рендера страница шлёт
-  `jump-targets-changed`. Шапка таблицы липкая, поэтому `syncPlanTableFit` публикует её реальную высоту в `--plan-head-height`, а `scroll-margin-top`
+  `data-jump-target` / `data-jump-label` на блоках (филиал `plan-branch`, подзаголовки `plan-barbers` / `plan-admins`); навигация подхватывает их
+  сама (`MutationObserver` по `<main>`). Шапка таблицы липкая, поэтому `syncPlanTableFit` публикует её реальную высоту в `--plan-head-height`, а `scroll-margin-top`
   подзаголовка берёт её — прыжок не прячет подзаголовок под шапку (тест в `plan-table-layout.test.mjs`).
 - **Колонки таблиц филиала и «Сотрудники» выровнены** (`alignPlanTableColumns` в `main.js`, арифметика —
   `web/src/planTableColumns.js`): при двух и более таблицах на экране каждая меряется в `min-content`, ключ колонки
@@ -1536,10 +1608,11 @@ SPA его не печатает: на 409 она перечитывает за�
 в План/факте их ставит рендер таблиц, в настройках планов — панели «Филиалы» и «Сотрудники», в отчётах — «Показатели»,
 сравнение, «Графики» и каждая таблица (`renderReportData`). Новый блок, куда стоит прыгать, — это два атрибута, JS не нужен.
 
-- Список пересобирается на смену вкладки (`jumpNav.refresh()` в `setActiveView`), `resize`, событие `jump-targets-changed` и
-  `MutationObserver` по `<main>` (`hidden` / `class` / `data-jump-target` и состав узлов), через `requestAnimationFrame`;
-  равный набор ключей и подписей DOM не трогает. Поэтому событие — лишь подсказка, а не обязанность: рендер, забывший его
-  послать, не оставит навигацию устаревшей.
+- Список пересобирается на смену вкладки (`jumpNav.refresh()` в `setActiveView`), `resize` и `MutationObserver` по `<main>`
+  (`hidden` / `class` / `data-jump-target` и состав узлов), через `requestAnimationFrame`; равный набор ключей и подписей
+  DOM не трогает. Отдельного события «цели изменились» нет: рендер, забывший что-то сообщить, не оставит навигацию устаревшей.
+  Мутации внутри `.view-loader` наблюдатель игнорирует (`mutationsAffectJumpTargets`): подпись загрузчика меняет класс
+  каждые 2,7 с, и без фильтра навигация пересчитывалась бы впустую.
 - Десктоп: узкая «пилюля» из точек у правого края (`z-index: 25`, ниже дока сохранения — 30); подписи раскрываются по
   hover и клавиатурному фокусу (`:focus-visible`, не `:focus-within` — после клика мышью фокус остался бы на кнопке, и
   подписи висели бы поверх таблицы). Место ей даёт постоянный зазор `.shell` по 32 px (index.html), а не состояние
@@ -1587,8 +1660,9 @@ SPA его не печатает: на 409 она перечитывает за�
 ## Testing
 
 ```bash
-cd web && npm test                      # все web/tests/*.test.mjs по глобу; test:dashboard — его алиас, test:auth — быстрое подмножество
-pytest tests/                           # все тесты
+cd web && npm test                      # все web/tests/*.test.mjs по глобу; test:auth — быстрое подмножество (auth-runtime + proxy-runtime), его зовёт preflight.sh
+cd web && npm run scan:auth-tokens      # токены авторизации в исходниках web/ (CI и scripts/check.sh); scan:auth-build — то же по dist
+pytest tests/                           # все тесты; `pytest.ini` задаёт `testpaths = tests`, `scripts/test_smtp.py` при сборе не импортируется
 pytest tests/test_sync_parsing.py       # unit без БД
 pytest tests/test_api.py                # app-уровень: auth-гейты, sync control, health-пробы, middleware (SQLite in-memory)
 
@@ -1620,6 +1694,8 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
   если задан, ≥ 32 символов. Секрет клиент подделать не может: `x-proxy-secret` не входит в allowlist прокси.
   Лимитер — in-memory на процесс; чистятся только тронутый ключ и раз в минуту холостой обход (`_sweep_idle_rate_limit_keys`),
   не весь словарь на каждый запрос.
+- **CORS** (`DASHBOARD_CORS_ALLOW_METHODS`): GET, POST, PUT, PATCH, DELETE — `PUT` нужен `/dashboard/metric-visibility` и
+  `/dashboard/branch-order`.
 - **Заголовки ответа**: API отвечает с `Cache-Control: private, no-store` по умолчанию (`SECURITY_HEADERS`): всё, что оно
   отдаёт, — данные пользователя; маршрут со своим заголовком его не теряет (`setdefault`). `/sync/trigger` с чужим
   `credential_id` — 404.
@@ -1629,7 +1705,7 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
   `AUTH_SESSION_MAX_AGE_DAYS` (90) от `created_at`: `expires_at` не уезжает дальше, ротация старше потолка отказывает.
   Живые сессии демо-аккаунта ограничены `DEMO_MAX_ACTIVE_SESSIONS` (200, старейшие удаляются). Ограничение: два
   одновременных запроса с одним *текущим* токеном по-прежнему дают одному из них 401 — SPA это закрывает
-  блокировкой refresh между вкладками. `POST /auth/logout-others` без refresh-cookie отвечает 400. Сбой `/auth/refresh`
+  блокировкой refresh между вкладками. Сбой `/auth/refresh`
   (5xx, сеть) не вердикт: окно пароля и выход вызывает только 401/403 от самого refresh (`requestWithReauth`).
   Сессии удаляются строкой, колонки `revoked_at` больше нет.
 - **Refresh-cookie стоит на двух путях.** Браузер шлёт cookie только на URL под её `Path`, а API живёт и как `/auth/...`
@@ -1676,11 +1752,16 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
   чего он выдан, попадают в одну транзакцию. `list_branches` при сбое `get_groups()` — ошибка, не пустой список (иначе
   сохранился бы ключ без филиалов); `authenticate()` успешна только с `user_token`.
 - **Контекст запроса грузится один раз**: `require_auth` кладёт `PortalUser` в `request.state.portal_user`, а
-  `get_current_user`, `forbid_demo` и `is_demo_request` читают его (и `AccessContext.is_demo`), не декодируя JWT и
-  не обращаясь в БД повторно. Путь, на котором `require_auth` не выполнялся, по-прежнему разбирает токен сам.
+  `get_current_user` и `forbid_demo` читают его (и `AccessContext.is_demo`), не декодируя JWT и не обращаясь в БД
+  повторно. Запасного разбора токена больше нет: каждый маршрут вне `OPEN_PATHS` проходит общий `require_api_key`, поэтому
+  без `request.state.portal_user` `get_current_user` отвечает 401, а `forbid_demo` (демо = `ctx.is_demo`) пропускает
+  вызывающего без пользователя (ключ API, sync-токен). Открытые пути на этих зависимостях не стоят (тест обходит `app.routes`).
+  Отдельной зависимости `is_demo_request` нет — дашборд читает `ctx.is_demo`. `enforce_csrf(request)` без исключения для
+  Bearer: запрос без сессионной cookie (Bearer, ключ API) CSRF не проверяется вовсе. Отзыв чужих сессий —
+  `DELETE /auth/sessions/{id}`, всех — `/auth/logout-all`.
 - **Открытые пути — один набор** `OPEN_PATHS` (`open_paths.py`), точные совпадения; его читают `auth_deps.require_auth`
   и `api.require_api_key`. Новый публичный маршрут добавляется туда осознанно: префиксов больше нет, а
-  `/auth/logout-all` и `/auth/logout-others` — обычные защищённые маршруты.
+  `/auth/logout-all` — обычный защищённый маршрут.
 
 ### Content-Security-Policy на Vercel
 - В обоих `vercel.json` стоит `script-src 'self'`: страницы запускают только модули из файлов. Поэтому на сайте не должно быть
@@ -1710,30 +1791,39 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
 1. Портальные/дашборд-эндпоинты — в `auth_routes.py` / `dashboard_routes.py` / `onboarding_routes.py` с зависимостями
    доступа (`get_dashboard_access`, роли); модель в `models.py` и тест рядом, `api.py` не трогать. На мутации навешивать
    `forbid_demo`, чтобы демо оставался read-only.
-   Настройки тенанта (`/dashboard/metric-visibility`): у ключа API своего тенанта нет, поэтому он
-   обязан назвать его заголовком `X-Portal-Account-Id` (400 без него или с несуществующим id) — «самый маленький id»
+   Настройки тенанта (`/dashboard/metric-visibility`): у ключа API и платформенного админа своего
+   тенанта нет, поэтому они обязаны назвать его заголовком `X-Portal-Account-Id` (400 без него или с несуществующим id: иначе
+   неизвестный id всплывал 409 от внешнего ключа при сохранении; `/dashboard/branch-order` идёт тем же
+   `_require_visibility_portal_account_id`) — «самый маленький id»
    и автосоздание аккаунта из GET убраны. `/dashboard/services*` его не требует (каталог и разметка идут по филиалам, не по
    тенанту). `ValueError` сервиса в этих роутах превращается в 400 одним
    `_value_error_as_400()` вокруг всего try/except (а не вместо узких обработчиков 409), вторую копию писать не надо.
 2. Роут в allowlist same-origin прокси — **обе** копии `api/_proxy.js` и `web/api/_proxy.js`
    (локально всё работает и без этого, а в деплое запрос вернёт 404); проверка — в
-   `web/tests/proxy-runtime.test.mjs`. Allowlist мало, если путь вложенный (`payments/yandex_pay`)
-   или скоуп переписывается по пути (`/onboarding/…`): catch-all `[...path].js` на Vercel ловит только
-   один сегмент ниже своей папки, и такой путь — 404 от самого Vercel, до прокси. Так 08.10.2026 вкладка
-   «Яндекс Пэй» вышла в прод нерабочей, а онбординг владельца отвечал 404 с самого появления.
-   **Новую функцию-обёртку не заводить**: на тарифе Hobby в деплое не больше **12** функций, сейчас их 7
-   (учётные данные YClients идут через общий rewrite `/auth/:path*` → `auth-proxy`, отдельных функций у них нет),
-   и 13-я 09.10.2026 уронила всю сборку Vercel. Вместо этого — rewrite в **обоих** `vercel.json` на
-   `api/auth-proxy.js` со скоупом и путём в query: `/api/<скоуп>/<префикс>/:path*` →
-   `/api/auth-proxy?scope=<скоуп>&path=<префикс>/:path*` (и такой же для пути без `/api`, **раньше**
-   общего `/<скоуп>/:path*`). `auth-proxy.js` знает скоупы `auth` (по умолчанию), `dashboard` и
-   `onboarding` с теми же адресами на VM, что и `api/[...path].js`, и пропускает только allowlist; `scope`/`path` с **разными** значениями в query (Vercel подмешивает
-   исходный query в destination) — 400, одинаковый повтор проходит: если Vercel сам продублирует
-   подставленный параметр, отказ уронил бы всю авторизацию. `maxDuration` у функции 180 с (оба `vercel.json`, тест требует больше 160): онбординг проверяет креды в YClients.
-   Тесты «every allowlisted route reaches a Vercel function…» и «…within the Vercel function limit»
-   ловят и пропуск, и 13-ю функцию. Общая таблица скоуп → префикс VM (`SCOPE_TARGET_PREFIX`) и обработчик
-   (`createProxyHandler`) живут в `_proxy.js`; `[...path].js` и `auth-proxy.js` их только используют. Ошибки прокси
-   отдают `{error, detail}`.
+   `web/tests/proxy-runtime.test.mjs`; совпадение деревьев `api/` и `web/api/` стережёт только
+   `tests/test_proxy.py::test_root_and_web_proxy_trees_are_byte_identical`. **Функция в деплое одна — `api/auth-proxy.js`**
+   (с 22.10.2026; раньше было 7 — catch-all `[...path].js` и пять re-export'ов под `api/auth/` и `api/dashboard/`).
+   Весь проксируемый трафик — `/auth`, `/dashboard`, `/onboarding` с префиксом `/api` и без, плюс `/api/health` — идёт rewrite'ами
+   в **обоих** `vercel.json` на неё, а скоуп и путь едут в query: `/<скоуп>/:path*` и `/api/<скоуп>/:path*` →
+   `/api/auth-proxy?scope=<скоуп>&path=:path*` (для `auth` скоуп опущен, он по умолчанию; `/api/health` →
+   `?scope=health&path=health`). Поэтому глубина пути не важна: вложенный маршрут (`plan/settings`, `payments/yandex_pay`)
+   достаточно внести в allowlist `_proxy.js`, ни функции, ни нового rewrite он не требует. Причина прежних бед — catch-all
+   `[...path].js` на Vercel ловит только один сегмент ниже своей папки, и вложенный путь — 404 от самого Vercel, до прокси
+   (так 08.10.2026 вкладка «Яндекс Пэй» вышла в прод нерабочей, а онбординг владельца отвечал 404 с самого появления).
+   **Новую функцию-обёртку не заводить**: на тарифе Hobby в деплое не больше **12** функций, и 13-я 09.10.2026 уронила всю
+   сборку Vercel; файл-функция под `api/` перебивает rewrite'ы (файловая система выигрывает), поэтому лишний файл ещё и
+   перехватил бы путь мимо allowlist. `functions` в `vercel.json` — glob'ы, и сборка падает, если glob не совпал ни с одним
+   файлом: ключ только `api/auth-proxy.js`, скобочные пути в ключах нельзя. `auth-proxy.js` знает скоупы `auth` (по умолчанию),
+   `dashboard`, `onboarding` и `health` (только путь `health`, на VM `/health`) и пропускает только allowlist; `scope`/`path` с
+   **разными** значениями в query (Vercel подмешивает исходный query в destination) — 400, одинаковый повтор проходит: если
+   Vercel сам продублирует подставленный параметр, отказ уронил бы всю авторизацию. Ни один маршрут дашборда не принимает
+   query-параметр с именем `path` или `scope` — иначе схема сломала бы его; заведя такой, переименовать параметр. Остальной query
+   до VM доезжает тем же набором пар (`URLSearchParams` перекодирует, не меняя смысла). `maxDuration` у функции 180 с (оба
+   `vercel.json`, тест требует больше 160): онбординг проверяет креды в YClients. Тест «every allowlisted route is routed to
+   auth-proxy…» проигрывает rewrite'ы локально (`viaVercel`, `rewriteUrl`) для каждого пути allowlist обоих скоупов, «the
+   deployment is auth-proxy.js alone…» держит и лимит, и единственность функции. Общая таблица скоуп → префикс VM
+   (`SCOPE_TARGET_PREFIX`) и обработчик (`createProxyHandler`) живут в `_proxy.js`; `auth-proxy.js` их только использует.
+   Ошибки прокси отдают `{error, detail}`.
 
 ### Окна синхронизации: почему одного инкремента мало
 Оплату в YClients нередко проводят задним числом — через день, неделю или месяц после
@@ -1751,6 +1841,11 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
   решающий «перечитывать или дописывать», обязан спрашивать её, а не сравнивать с
   `'full'`: иначе `refresh` окажется append-only и не удалит то, что удалил YClients.
 - Нижняя граница окна — не раньше `reporting_start_date` филиала (`refresh_sync_start_date`).
+- **Контрольная точка только филиальная.** Режим и окно филиала решают `transactions_last_success_date:company:<id>` и маркер
+  покрытия (`resolve_company_sync_window`); глобального ключа без суффикса нет — читалка и фолбэк «у филиала есть строки» убраны.
+  Филиал без своей точки идёт в `full`, даже если маркер покрытия и строки есть: так бывает после `full`, где упал только шаг
+  без покрытия (маркер восстановился, точка не записана), и возобновлять оттуда нельзя — резать окно нечем. Прогон без
+  единого филиала (нет кредов) отдаёт в `window_start` / `mode` всю историю и `full` (`resolve_sync_window`).
 - `refresh` не подменяет обязательный первый `full`: филиал без подтверждённого
   исторического покрытия (`historical_coverage_state_key`) эскалируется в `full`, иначе
   90-дневный срез сертифицировал бы историю, которой нет.
@@ -1830,5 +1925,11 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
 ### Добавление нового шага синхронизации
 1. Метод API в `yclients_api.py`
 2. Функция парсинга в `sync_parsing.py` (если нужно)
-3. Функция `sync_<entity>()` в `sync_pipeline.py`
-4. Вызов в `execute_sync()` с обработкой ошибок
+3. Функция `sync_<entity>()` в `sync_pipeline.py`. Справочник филиала — `_upsert_catalog()` с `to_fields(row)`; факты —
+   один словарь `fields` на строку, из него и конструктор, и `_apply_fields()` при обновлении (колонки не писать дважды;
+   `tests/test_sync_upsert_equivalence.py` держит значения колонок после создания и после обновления). Поля, которые
+   выставляются только при создании (`id` из `ExternalPkAllocator`, у клиентов и записей — `external_id` / `source_type`),
+   остаются отдельными аргументами конструктора.
+4. Кортеж в `company_steps` внутри `execute_sync()` — `run_sync_step` сам ловит исключение шага и пишет прогресс. Ключ шага
+   добавить в `checkpoint_step_names`, если шаг решает, продвигать ли контрольную точку; источник — в
+   `FULL_REFRESH_COVERAGE_SOURCES` (и в очистку окна, `purge_full_refresh_window`), если шаг владеет покрытием истории.

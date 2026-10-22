@@ -52,19 +52,16 @@ const demoBtn = document.getElementById('demo-login');
 
 async function runDemoLogin() {
   errorEl.hidden = true;
-  demoBtn?.classList.add('is-loading');
-  if (demoBtn) demoBtn.disabled = true;
   try {
-    setSelectedPortalAccountId('');
-    await authFetch('/auth/demo-login', { method: 'POST' });
-    setSelectedPortalAccountId('');
-    window.location.href = loginDestination();
+    await withBusyButton(demoBtn, async () => {
+      setSelectedPortalAccountId('');
+      await authFetch('/auth/demo-login', { method: 'POST' });
+      setSelectedPortalAccountId('');
+      window.location.href = loginDestination();
+    });
   } catch (error) {
     errorEl.textContent = error.message;
     errorEl.hidden = false;
-  } finally {
-    demoBtn?.classList.remove('is-loading');
-    if (demoBtn) demoBtn.disabled = false;
   }
 }
 

@@ -66,7 +66,14 @@ if [ "$remote_sum" != "$local_sum" ]; then
   echo "Дамп повреждён при копировании (sha256 не совпал), база не тронута" >&2
   exit 1
 fi
+chmod 600 "$dump"
 echo "    $(du -h "$dump" | cut -f1), sha256 совпал"
+
+# Дампы копятся по ~26 МБ за обновление и содержат хэши паролей: оставляем три свежих.
+# Только после сверки — битый дамп не должен вытеснить рабочий.
+{ ls -t "$DUMP_DIR"/prod_*.dump 2>/dev/null || true; } | tail -n +4 | while IFS= read -r old_dump; do
+  rm -f -- "$old_dump"
+done
 
 echo "2/3 Пересоздаю локальную $DB_NAME на порту $DB_PORT"
 # --force отцепляет живые сессии: локальный API держит пул открытым,
@@ -77,6 +84,8 @@ echo "2/3 Пересоздаю локальную $DB_NAME на порту $DB_P
 echo "3/3 Восстанавливаю"
 "$PG_BIN/pg_restore" -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
   --no-owner --no-privileges "$dump"
+# pg_restore не оставляет статистики: без ANALYZE планировщик строит не те планы, что в проде, и замеры врут.
+"$PG_BIN/vacuumdb" -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" --analyze-only "$DB_NAME"
 
 "$PG_BIN/psql" -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc "
   SELECT 'схема:       ' || version_num FROM alembic_version;

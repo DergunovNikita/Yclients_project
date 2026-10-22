@@ -20,12 +20,13 @@ from dashboard_service import (
     financial_appointment_match_condition,
 )
 from models import AccountCatalog, Appointment, Company, FinancialTransaction, GoodTransaction
-from report_common import period_key, period_starts
+from report_common import percent, period_key, period_starts
 from report_payload import (
     DECIMAL_FORMAT,
     MONEY_FORMAT,
     NUMBER_FORMAT,
     PERCENT_FORMAT,
+    TEXT_FORMAT,
     ReportRequest,
     card,
     chart,
@@ -40,10 +41,6 @@ TOP_GOODS_IN_CHART = 12
 def _title_key(title: str) -> str:
     """Same normalization as the service group key: case and «ё» do not split one product."""
     return title.strip().lower().replace('ё', 'е')
-
-
-def _percent(part: float, whole: float) -> float | None:
-    return round(part / whole * 100, 2) if whole else None
 
 
 def _goods_payment_conditions(req: ReportRequest, *, by_seller: bool) -> list[Any]:
@@ -169,8 +166,9 @@ async def _sold_units(req: ReportRequest) -> list[Any]:
     return (await req.db.execute(stmt)).all()
 
 
-async def _company_titles(db: AsyncSession) -> dict[int, str]:
-    return {int(row.id): row.title for row in (await db.execute(select(Company.id, Company.title))).all()}
+async def _company_titles(db: AsyncSession, company_ids: list[int]) -> dict[int, str]:
+    rows = await db.execute(select(Company.id, Company.title).where(Company.id.in_(company_ids)))
+    return {int(row.id): row.title for row in rows.all()}
 
 
 def _merged_goods(
@@ -262,7 +260,7 @@ def _period_rows(
     for day, count in goods_visits.items():
         periods[period_key(day, granularity)]['goods_visits'] += count
     return [
-        {'period': period, **item, 'goods_share': _percent(item['goods_visits'], item['completed_visits'])}
+        {'period': period, **item, 'goods_share': percent(item['goods_visits'], item['completed_visits'], 2)}
         for period, item in sorted(periods.items())
     ]
 
@@ -289,20 +287,20 @@ async def build_goods_dynamics(req: ReportRequest) -> dict[str, Any]:
     unlinked_count, unlinked_amount = await _unlinked_goods_sales(req)
 
     goods_rows = _merged_goods(unit_rows, paid_rows)
-    seller_rows = _seller_rows(paid_rows, await _company_titles(req.db))
+    seller_rows = _seller_rows(paid_rows, await _company_titles(req.db, req.allowed_company_ids))
     period_rows = _period_rows(unit_rows, paid_rows, visits, goods_visits, req.start, req.end, req.granularity)
 
     total_revenue = sum(row['revenue'] for row in goods_rows)
     total_units = sum(row['units'] for row in goods_rows)
     completed_visits = sum(visits.values())
     visits_with_goods = sum(goods_visits.values())
-    show_branches = len(req.allowed_company_ids or []) > 1
+    show_branches = len(req.allowed_company_ids) > 1
 
     base['cards'] = [
         card('Выручка товаров', total_revenue, MONEY_FORMAT),
         card('Единиц продано', total_units, NUMBER_FORMAT),
         card('Визитов с покупкой товара', visits_with_goods, NUMBER_FORMAT),
-        card('Доля визитов с покупкой товара', _percent(visits_with_goods, completed_visits), PERCENT_FORMAT),
+        card('Доля визитов с покупкой товара', percent(visits_with_goods, completed_visits, 2), PERCENT_FORMAT),
     ]
     top_goods = top_rows(req, goods_rows, TOP_GOODS_IN_CHART)
     labels = [row['period'] for row in period_rows]
@@ -345,7 +343,7 @@ async def build_goods_dynamics(req: ReportRequest) -> dict[str, Any]:
             x_kind='time',
         ),
     ]
-    goods_columns = [('title', 'Товар', 'text')]
+    goods_columns = [('title', 'Товар', TEXT_FORMAT)]
     if show_branches:
         goods_columns.append(('branches', 'Филиалов', NUMBER_FORMAT))
     goods_columns += [
@@ -358,7 +356,7 @@ async def build_goods_dynamics(req: ReportRequest) -> dict[str, Any]:
             'periods',
             'Динамика по периодам',
             [
-                ('period', 'Период', 'text'),
+                ('period', 'Период', TEXT_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
                 ('units', 'Единиц', DECIMAL_FORMAT),
                 ('goods_visits', 'Визитов с товаром', NUMBER_FORMAT),
@@ -374,8 +372,8 @@ async def build_goods_dynamics(req: ReportRequest) -> dict[str, Any]:
             'goods_by_staff',
             'Продажи по сотрудникам',
             [
-                ('staff_name', 'Продавец', 'text'),
-                ('company_title', 'Филиал', 'text'),
+                ('staff_name', 'Продавец', TEXT_FORMAT),
+                ('company_title', 'Филиал', TEXT_FORMAT),
                 ('sales_count', 'Продаж', NUMBER_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
             ],

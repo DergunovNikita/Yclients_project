@@ -59,7 +59,7 @@ jobs:
         run: python -m pytest -q
 
   # Mirrors the frontend half of scripts/check.sh. proxy-runtime.test.mjs is what stops a 13th Vercel
-  # function (Hobby plan allows 12) and a drifted api/ vs web/api/ copy from reaching main.
+  # function (Hobby plan allows 12) from reaching main.
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
@@ -78,13 +78,13 @@ jobs:
         working-directory: web
         run: npm ci --ignore-scripts --audit=false
 
-      - name: Run auth and proxy tests
+      - name: Run frontend tests
         working-directory: web
-        run: npm run test:auth
+        run: npm test
 
-      - name: Run dashboard tests
+      - name: Scan sources for auth tokens
         working-directory: web
-        run: npm run test:dashboard
+        run: npm run scan:auth-tokens
 
       - name: Build
         working-directory: web

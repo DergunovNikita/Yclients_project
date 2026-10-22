@@ -1,8 +1,9 @@
 from argparse import Namespace
-from datetime import date, datetime
+from datetime import date
 
 from sqlalchemy import func, select
 
+from clock import utcnow
 import scripts.seed_demo as seed_demo
 from helpers import sqlite_session_with_system as shared_sqlite_session_with_system
 from models import (
@@ -22,9 +23,7 @@ from models import (
     ServiceCatalog,
     ServiceCategoryCatalog,
     Staff,
-    StaffPositionCatalog,
     StaffSchedule,
-    StorageCatalog,
     Transaction,
 )
 from sync_pipeline import sync_services
@@ -35,11 +34,9 @@ SEED_TABLES = [
     Company.__table__,
     ServiceCategoryCatalog.__table__,
     ServiceCatalog.__table__,
-    StaffPositionCatalog.__table__,
     Staff.__table__,
     Client.__table__,
     AccountCatalog.__table__,
-    StorageCatalog.__table__,
     GoodCategoryCatalog.__table__,
     GoodCatalog.__table__,
     Appointment.__table__,
@@ -58,7 +55,7 @@ class FakeServicesAPI:
     def __init__(self, services):
         self._services = services
 
-    def get_services(self, company_id, staff_id=None, category_id=None):
+    def get_services(self, company_id, category_id=None):
         return self._services
 
 
@@ -96,7 +93,7 @@ def provision_demo(db, args=None):
 
 
 def seed_real_tenant_with_overlapping_external_ids(db):
-    real_account = PortalAccount(id=1, label='Real tenant', is_demo=False, created_at=datetime.utcnow())
+    real_account = PortalAccount(id=1, label='Real tenant', is_demo=False, created_at=utcnow())
     group = Group(id=1, portal_account_id=1, external_id=1, title='Real group')
     company = Company(
         id=1,
@@ -250,7 +247,7 @@ def test_seed_demo_is_idempotent_for_account_user_branches_and_data():
 
 def test_seed_demo_child_primary_keys_do_not_scale_from_large_company_ids():
     with sqlite_session_with_system() as db:
-        db.add(PortalAccount(id=1, label='Real tenant', is_demo=False, created_at=datetime.utcnow()))
+        db.add(PortalAccount(id=1, label='Real tenant', is_demo=False, created_at=utcnow()))
         db.add(Group(id=1, portal_account_id=1, external_id=1, title='Real group'))
         db.add(
             Company(
@@ -306,7 +303,7 @@ def test_seed_demo_catalog_ids_do_not_collide_with_later_real_sync_ids():
         assert demo_services_before
         assert max(demo_services_before) < 0
 
-        db.add(PortalAccount(id=100, label='Real tenant', is_demo=False, created_at=datetime.utcnow()))
+        db.add(PortalAccount(id=100, label='Real tenant', is_demo=False, created_at=utcnow()))
         db.add(Group(id=100, portal_account_id=100, external_id=100, title='Real group'))
         db.add(
             Company(
@@ -337,7 +334,7 @@ def test_seed_demo_catalog_ids_do_not_collide_with_later_real_sync_ids():
 
 def test_seed_demo_refuses_to_reuse_non_demo_user_email():
     with sqlite_session_with_system() as db:
-        db.add(PortalAccount(id=1, label='Real tenant', is_demo=False, created_at=datetime.utcnow()))
+        db.add(PortalAccount(id=1, label='Real tenant', is_demo=False, created_at=utcnow()))
         db.add(
             PortalUser(
                 id=1,
@@ -347,7 +344,7 @@ def test_seed_demo_refuses_to_reuse_non_demo_user_email():
                 is_active=True,
                 is_demo=False,
                 portal_account_id=1,
-                created_at=datetime.utcnow(),
+                created_at=utcnow(),
             )
         )
         db.commit()

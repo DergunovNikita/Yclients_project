@@ -1,8 +1,8 @@
 // Pure helpers of the floating jump navigation: which blocks of the visible view it lists and which one is current.
 // DOM mounting lives in jumpNav.js, so these stay importable by node tests.
 
-export const JUMP_TARGET_ATTR = 'data-jump-target';
-export const MIN_JUMP_TARGETS = 2;
+const JUMP_TARGET_ATTR = 'data-jump-target';
+const MIN_JUMP_TARGETS = 2;
 
 // A target hidden by `hidden`, by an inactive view or by a closed report viewer has no layout box.
 const isRendered = (element) => element.getClientRects().length > 0;
@@ -23,6 +23,14 @@ export function collectJumpTargets(root, isVisible = isRendered) {
     targets.push({ key, label, element });
   });
   return targets;
+}
+
+/**
+ * Whether DOM mutations can change the list of targets. The loader swaps its caption class every few seconds
+ * inside `<main>`, and rebuilding the nav on each swap would be pure noise.
+ */
+export function mutationsAffectJumpTargets(records) {
+  return records.some((record) => !record.target.closest?.('.view-loader'));
 }
 
 export function shouldShowJumpNav(targets) {

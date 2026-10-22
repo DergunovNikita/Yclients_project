@@ -2,6 +2,7 @@ import argparse
 import time
 from datetime import datetime, timedelta
 
+from clock import utcnow
 from config import (
     DB_HOST,
     DB_NAME,
@@ -40,7 +41,7 @@ def enqueue_auto_sync_jobs_if_due(db, now: datetime | None = None) -> dict:
     if SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES <= 0:
         return {'status': 'disabled', 'enqueued': 0, 'skipped': 0}
 
-    now = now or datetime.now()
+    now = now or utcnow()
     due_before = now - timedelta(minutes=SYNC_AUTO_ENQUEUE_INTERVAL_MINUTES)
     control = SyncControlService()
     if control.get_running_run(db) is not None:

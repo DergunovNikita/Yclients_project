@@ -175,7 +175,6 @@ class CustomSelect {
   updateSearchVisibility() {
     const showSearch = this.select.options.length > 0;
     this.searchWrap.hidden = !showSearch;
-    this.root.classList.toggle('custom-select--searchable', showSearch);
   }
 
   applySearch() {

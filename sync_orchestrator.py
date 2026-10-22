@@ -1,7 +1,7 @@
-from datetime import datetime
 import threading
 import traceback
 
+from clock import utcnow
 from config import (
     DB_HOST,
     DB_NAME,
@@ -121,6 +121,14 @@ def run_sync_job(
     finished_message = 'Sync interrupted'
 
     def progress_callback(event: dict) -> None:
+        try:
+            _record_progress(event)
+        except Exception:
+            # A failed commit leaves control_db's transaction aborted; without this every later write would fail too.
+            control_db.rollback()
+            raise
+
+    def _record_progress(event: dict) -> None:
         stage_key = event.get('stage_key') or event.get('key') or event.get('current_stage')
         status = event.get('status') or 'info'
         jobs.record_event(
@@ -145,7 +153,7 @@ def run_sync_job(
 
     try:
         with stream_run_output(log_path):
-            started_at = datetime.now().isoformat()
+            started_at = utcnow().isoformat()
             print(f'▶ Sync run started at {started_at}')
             progress_callback({
                 'status': 'running',
@@ -203,7 +211,7 @@ def run_sync_job(
             'step_results': step_results,
         })
     finally:
-        finished_at = datetime.now()
+        finished_at = utcnow()
         # Lock release and connection cleanup come first, before any notification work, and
         # nothing below is allowed to run ahead of it. The previous ordering built the Telegram
         # message and sent it before releasing the lock; TelegramNotifier.send() catches

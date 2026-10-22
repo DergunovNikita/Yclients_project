@@ -19,7 +19,6 @@ import { t } from './i18n.js';
  * @param config.conflictMessageKey  what a 409 tells the user
  * @param config.onInput      optional, runs on every `input` event before the dirty check
  * @param config.emptyMonthRestores  a cleared month picker puts the loaded month back instead of loading
- * @param config.refreshStaffOnBranch  a branch change reloads the worker list first
  * @param config.draft        optional, with `host.drafts`: keeps what was typed across a reload. `{ id, collect, apply }` —
  *                            `collect()` lists every row as `{ key, cells, server, previous }` (`previous` is what the
  *                            row's `previous_value` would be), `apply([{ key, cells }])` types the cells back in
@@ -224,7 +223,7 @@ export function createManualEntryEditor(config, host) {
       await guarded(async () => {
         filter.branch.value = requestedBranch;
         host.filterDropdowns[filter.branch.id]?.refresh();
-        if (config.refreshStaffOnBranch) await host.refreshStaffForBranch(filter, () => editor.load());
+        if (filter.staff) await host.refreshStaffForBranch(filter, () => editor.load());
         else await editor.load();
       });
     });

@@ -1,4 +1,4 @@
-"""Builders for the operations and team reports."""
+"""Builders for the operations reports: bookings, booking channels, peak load and staff efficiency."""
 
 from __future__ import annotations
 
@@ -21,13 +21,14 @@ from dashboard_service import (
     financial_appointment_match_condition,
 )
 from models import AccountCatalog, Appointment, Company, FinancialTransaction, Staff
-from report_common import appointment_conditions, period_key, period_starts
+from report_common import appointment_conditions, percent, period_key, period_starts
 from report_payload import (
     DECIMAL_FORMAT,
     MONEY_FORMAT,
     NO_MASTER,
     NUMBER_FORMAT,
     PERCENT_FORMAT,
+    TEXT_FORMAT,
     ReportRequest,
     card,
     chart,
@@ -39,14 +40,9 @@ from report_payload import (
 NO_SHOW_ATTENDANCE = -1
 ONLINE_CREATED_USER_ID = 0
 STAFF_CHART_ROWS = 12
-TEXT_FORMAT = 'text'
 WEEKDAY_SHORT = ('Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс')
 WEEKDAY_FULL = ('Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье')
 WEEKDAY_KEYS = ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')
-
-
-def _share(part: int | float, whole: int | float) -> float | None:
-    return round(100.0 * part / whole, 1) if whole else None
 
 
 async def _records_by_period(req: ReportRequest, measures: dict[str, Any]) -> list[dict[str, Any]]:
@@ -132,7 +128,7 @@ async def _staff_records(req: ReportRequest) -> list[dict[str, Any]]:
             'records': records,
             'completed': int(row.completed or 0),
             'no_show': no_show,
-            'no_show_share': _share(no_show, records),
+            'no_show_share': percent(no_show, records, 1),
         })
     rows.sort(key=lambda item: (-item['records'], item['staff_id'] is None, item['staff_id'] or 0))
     return rows
@@ -145,7 +141,7 @@ async def build_bookings_dynamics(req: ReportRequest) -> dict[str, Any]:
         'no_show': Appointment.attendance == NO_SHOW_ATTENDANCE,
     })
     for row in period_rows:
-        row['no_show_share'] = _share(row['no_show'], row['records'])
+        row['no_show_share'] = percent(row['no_show'], row['records'], 1)
     staff_rows = await _staff_records(req)
 
     exact = await fetch_appointments_breakdown(
@@ -170,7 +166,7 @@ async def build_bookings_dynamics(req: ReportRequest) -> dict[str, Any]:
         card('Всего записей', totals['total'], NUMBER_FORMAT),
         card('Завершено', totals['completed'], NUMBER_FORMAT),
         card('Неявки', totals['cancelled'], NUMBER_FORMAT),
-        card('Доля неявок', _share(totals['cancelled'], totals['total']), PERCENT_FORMAT),
+        card('Доля неявок', percent(totals['cancelled'], totals['total'], 1), PERCENT_FORMAT),
     ]
     if exact['source_status'] == 'ready':
         scope_text = (
@@ -389,7 +385,7 @@ async def build_booking_channels(req: ReportRequest) -> dict[str, Any]:
     })
     for row in period_rows:
         row['unknown'] = row['records'] - row['online'] - row['by_staff']
-        row['online_share'] = _share(row['online'], row['online'] + row['by_staff'])
+        row['online_share'] = percent(row['online'], row['online'] + row['by_staff'], 1)
     records = _sum(period_rows, 'records')
     online = _sum(period_rows, 'online')
     by_staff = _sum(period_rows, 'by_staff')
@@ -397,7 +393,7 @@ async def build_booking_channels(req: ReportRequest) -> dict[str, Any]:
     base['cards'] = [
         card('Записей', records, NUMBER_FORMAT),
         card('Онлайн', online, NUMBER_FORMAT),
-        card('Доля онлайн', _share(online, online + by_staff), PERCENT_FORMAT),
+        card('Доля онлайн', percent(online, online + by_staff, 1), PERCENT_FORMAT),
         card('Через администратора', by_staff, NUMBER_FORMAT),
     ]
     base['notes'].append({
@@ -468,7 +464,7 @@ async def _staff_rows(
     end: date,
     company_id: int | None,
     staff_id: int | None,
-    allowed_company_ids: list[int] | None,
+    allowed_company_ids: list[int],
     factual_at: datetime,
 ) -> list[dict[str, Any]]:
     appt_stmt = (

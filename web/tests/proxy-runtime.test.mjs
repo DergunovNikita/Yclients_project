@@ -3,10 +3,9 @@ import { readdir, readFile } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import test from 'node:test';
 
-import rootProxyHandler, { buildTargetUrl as buildRootProxyTarget } from '../../api/[...path].js';
+import rootProxyHandler, { buildTargetUrl as buildRootProxyTarget } from '../../api/auth-proxy.js';
 import * as rootProxy from '../../api/_proxy.js';
-import { buildTargetUrl as buildAuthProxyTarget } from '../api/auth-proxy.js';
-import webProxyHandler, { buildTargetUrl as buildWebProxyTarget } from '../api/[...path].js';
+import webProxyHandler, { buildTargetUrl as buildWebProxyTarget } from '../api/auth-proxy.js';
 import * as webProxy from '../api/_proxy.js';
 
 class ResponseRecorder {
@@ -31,6 +30,51 @@ function requestStub(method = 'GET', headers = {}, url = '/') {
   req.url = url;
   req.headers = { accept: 'application/json', host: 'example.test', ...headers };
   return req;
+}
+
+// Locally there is no Vercel layer, so the routing the deployment does is replayed here: the first
+// vercel.json rewrite whose source matches wins, `:path*` is substituted into the destination, and
+// Vercel merges the original query string into it. Both trees' proxies must answer alike.
+const VERCEL_CONFIGS = ['../../vercel.json', '../vercel.json'];
+const vercelConfigs = await Promise.all(
+  VERCEL_CONFIGS.map(async (file) => JSON.parse(await readFile(new URL(file, import.meta.url), 'utf8'))),
+);
+const ROOT_REWRITES = vercelConfigs[0].rewrites;
+
+function rewriteUrl(rewrites, url) {
+  const queryStart = url.indexOf('?');
+  const pathname = queryStart === -1 ? url : url.slice(0, queryStart);
+  const query = queryStart === -1 ? '' : url.slice(queryStart + 1);
+  for (const rule of rewrites) {
+    let captured = '';
+    if (rule.source.endsWith('/:path*')) {
+      const base = rule.source.slice(0, -'/:path*'.length);
+      if (pathname === base) {
+        captured = '';
+      } else if (pathname.startsWith(`${base}/`)) {
+        captured = pathname.slice(base.length + 1);
+      } else {
+        continue;
+      }
+    } else if (pathname !== rule.source) {
+      continue;
+    }
+    const destination = rule.destination.replace(':path*', captured);
+    if (!query) return destination;
+    return `${destination}${destination.includes('?') ? '&' : '?'}${query}`;
+  }
+  return null;
+}
+
+function viaVercel(method, url, rewrites = ROOT_REWRITES) {
+  // A file under api/ wins over every rewrite; auth-proxy.js is the only one left.
+  const routed = url.startsWith('/api/auth-proxy') ? url : rewriteUrl(rewrites, url);
+  if (routed === null) return { ok: false, statusCode: 404, error: 'Not found' };
+  const [root, web] = [buildRootProxyTarget, buildWebProxyTarget].map((build) => build(requestStub(method, {}, routed)));
+  assert.equal(root.ok, web.ok, `${method} ${url}: the two proxy trees disagree`);
+  assert.equal(root.statusCode, web.statusCode, `${method} ${url}: the two proxy trees disagree`);
+  assert.equal(root.target?.href, web.target?.href, `${method} ${url}: the two proxy trees disagree`);
+  return web;
 }
 
 function upstreamHeaders(cookies) {
@@ -396,7 +440,7 @@ test('proxyToVm does not forward the upstream content-encoding or content-length
   }
 });
 
-test('both proxy entry points read one scope table', () => {
+test('both proxy trees read one scope table', () => {
   assert.deepEqual(webProxy.SCOPE_TARGET_PREFIX, rootProxy.SCOPE_TARGET_PREFIX);
   assert.deepEqual(Object.keys(webProxy.SCOPE_TARGET_PREFIX), ['auth', 'dashboard', 'onboarding']);
 });
@@ -410,7 +454,7 @@ test('handlers answer a build failure with a fixed 500 that does not echo the er
   try {
     for (const handler of [rootProxyHandler, webProxyHandler]) {
       const res = new ResponseRecorder();
-      await handler(requestStub('GET', {}, '/api/health'), res);
+      await handler(requestStub('GET', {}, '/api/auth-proxy?scope=health&path=health'), res);
 
       assert.equal(res.statusCode, 500);
       assert.equal(res.body, '{"error":"Internal error","detail":"Internal error"}');
@@ -428,33 +472,33 @@ test('auth proxy allows only expected paths and methods', () => {
   process.env.VM_API_ORIGIN = 'https://vm.example.test';
 
   try {
-    const login = buildAuthProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=login'));
+    const login = buildWebProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=login'));
     assert.equal(login.ok, true);
     assert.equal(login.target.href, 'https://vm.example.test/dashboard/auth/login');
 
-    const methodBlocked = buildAuthProxyTarget(requestStub('GET', {}, '/api/auth-proxy?path=login'));
+    const methodBlocked = buildWebProxyTarget(requestStub('GET', {}, '/api/auth-proxy?path=login'));
     assert.equal(methodBlocked.ok, false);
     assert.equal(methodBlocked.statusCode, 405);
     assert.deepEqual(methodBlocked.allowedMethods, ['POST']);
 
-    const traversalBlocked = buildAuthProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=admin/%2e%2e/users'));
+    const traversalBlocked = buildWebProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=admin/%2e%2e/users'));
     assert.equal(traversalBlocked.ok, false);
     assert.equal(traversalBlocked.statusCode, 404);
 
-    const unknownBlocked = buildAuthProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=admin/shell'));
+    const unknownBlocked = buildWebProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=admin/shell'));
     assert.equal(unknownBlocked.ok, false);
     assert.equal(unknownBlocked.statusCode, 404);
 
     // The SPA calls /auth/portal-accounts; the admin/ alias is not proxied.
-    assert.equal(buildAuthProxyTarget(requestStub('GET', {}, '/api/auth-proxy?path=portal-accounts')).ok, true);
-    const aliasBlocked = buildAuthProxyTarget(requestStub('GET', {}, '/api/auth-proxy?path=admin/portal-accounts'));
+    assert.equal(buildWebProxyTarget(requestStub('GET', {}, '/api/auth-proxy?path=portal-accounts')).ok, true);
+    const aliasBlocked = buildWebProxyTarget(requestStub('GET', {}, '/api/auth-proxy?path=admin/portal-accounts'));
     assert.equal(aliasBlocked.ok, false);
     assert.equal(aliasBlocked.statusCode, 404);
 
     // Synced staff rows are read-only in the portal: only account creation is proxied.
-    assert.equal(buildAuthProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=admin/staff/7/create-account')).ok, true);
+    assert.equal(buildWebProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=admin/staff/7/create-account')).ok, true);
     for (const method of ['PATCH', 'DELETE']) {
-      const staffBlocked = buildAuthProxyTarget(requestStub(method, {}, '/api/auth-proxy?path=admin/staff/7'));
+      const staffBlocked = buildWebProxyTarget(requestStub(method, {}, '/api/auth-proxy?path=admin/staff/7'));
       assert.equal(staffBlocked.ok, false, method);
       assert.equal(staffBlocked.statusCode, 404, method);
     }
@@ -467,38 +511,38 @@ test('auth proxy allows only expected paths and methods', () => {
   }
 });
 
-test('catch-all proxy enforces dashboard and auth route allowlists', () => {
+test('the proxy enforces dashboard and auth route allowlists behind the rewrites', () => {
   const originalOrigin = process.env.VM_API_ORIGIN;
   process.env.VM_API_ORIGIN = 'https://vm.example.test';
 
   try {
-    const dashboard = buildWebProxyTarget(requestStub('GET', {}, '/api/dashboard/branches?company_id=1'));
+    const dashboard = viaVercel('GET', '/api/dashboard/branches?company_id=1');
     assert.equal(dashboard.ok, true);
     assert.equal(dashboard.target.href, 'https://vm.example.test/dashboard/branches?company_id=1');
 
-    const metricVisibility = buildWebProxyTarget(requestStub('PUT', {}, '/api/dashboard/metric-visibility'));
+    const bare = viaVercel('GET', '/dashboard/branches?company_id=1');
+    assert.equal(bare.target.href, dashboard.target.href, 'the bare /dashboard path is routed like /api/dashboard');
+
+    const metricVisibility = viaVercel('PUT', '/api/dashboard/metric-visibility');
     assert.equal(metricVisibility.ok, true);
     assert.equal(metricVisibility.target.href, 'https://vm.example.test/dashboard/metric-visibility');
 
     // Every dashboard route the SPA calls has to be listed here, in both copies of the
     // proxy — an endpoint missing from the allowlist answers 404 only in the deployed app.
-    for (const buildTarget of [buildWebProxyTarget, buildRootProxyTarget]) {
-      for (const [method, path] of [
-        ['GET', '/api/dashboard/plan/reviews_fact?month=2025-01'],
-        ['POST', '/api/dashboard/plan/reviews_fact'],
-        ['GET', '/api/dashboard/plan/opz_fact?month=2025-01'],
-        ['POST', '/api/dashboard/plan/opz_fact'],
-        ['GET', '/api/dashboard/payments/yandex_pay?month=2025-01'],
-        ['POST', '/api/dashboard/payments/yandex_pay'],
-        ['GET', '/api/dashboard/branch-order'],
-        ['PUT', '/api/dashboard/branch-order'],
-      ]) {
-        const result = buildTarget(requestStub(method, {}, path));
-        assert.equal(result.ok, true, `${method} ${path}`);
-      }
+    for (const [method, path] of [
+      ['GET', '/api/dashboard/plan/reviews_fact?month=2025-01'],
+      ['POST', '/api/dashboard/plan/reviews_fact'],
+      ['GET', '/api/dashboard/plan/opz_fact?month=2025-01'],
+      ['POST', '/api/dashboard/plan/opz_fact'],
+      ['GET', '/api/dashboard/payments/yandex_pay?month=2025-01'],
+      ['POST', '/api/dashboard/payments/yandex_pay'],
+      ['GET', '/api/dashboard/branch-order'],
+      ['PUT', '/api/dashboard/branch-order'],
+    ]) {
+      assert.equal(viaVercel(method, path).ok, true, `${method} ${path}`);
     }
 
-    const serviceBatch = buildWebProxyTarget(requestStub('PATCH', {}, '/api/dashboard/services'));
+    const serviceBatch = viaVercel('PATCH', '/api/dashboard/services');
     assert.equal(serviceBatch.ok, true);
     assert.equal(serviceBatch.target.href, 'https://vm.example.test/dashboard/services');
 
@@ -515,30 +559,30 @@ test('catch-all proxy enforces dashboard and auth route allowlists', () => {
       ['GET', '/api/dashboard/widget/top_services'],
       ['GET', '/api/dashboard/widget/extra_services'],
     ]) {
-      for (const buildTarget of [buildWebProxyTarget, buildRootProxyTarget]) {
-        const result = buildTarget(requestStub(method, {}, path));
-        assert.equal(result.ok, false, `${method} ${path}`);
-      }
+      assert.equal(viaVercel(method, path).ok, false, `${method} ${path}`);
     }
 
-    const auth = buildRootProxyTarget(requestStub('POST', {}, '/api/auth/admin/users'));
+    const auth = viaVercel('POST', '/api/auth/admin/users');
     assert.equal(auth.ok, true);
     assert.equal(auth.target.href, 'https://vm.example.test/dashboard/auth/admin/users');
 
-    const health = buildWebProxyTarget(requestStub('HEAD', {}, '/api/health'));
+    const health = viaVercel('HEAD', '/api/health');
     assert.equal(health.ok, true);
     assert.equal(health.target.href, 'https://vm.example.test/health');
+    assert.equal(viaVercel('POST', '/api/health').statusCode, 405);
+    // Health is answered only for its own path: it is not a scope that reaches a VM prefix.
+    assert.equal(viaVercel('GET', '/api/auth-proxy?scope=health&path=health/x').statusCode, 404);
 
-    const onboarding = buildWebProxyTarget(requestStub('POST', {}, '/api/onboarding/credentials'));
+    const onboarding = viaVercel('POST', '/api/onboarding/credentials');
     assert.equal(onboarding.ok, true);
     assert.equal(onboarding.target.href, 'https://vm.example.test/dashboard/onboarding/credentials');
 
-    const methodBlocked = buildWebProxyTarget(requestStub('DELETE', {}, '/api/dashboard/branches'));
+    const methodBlocked = viaVercel('DELETE', '/api/dashboard/branches');
     assert.equal(methodBlocked.ok, false);
     assert.equal(methodBlocked.statusCode, 405);
     assert.deepEqual(methodBlocked.allowedMethods, ['GET', 'HEAD']);
 
-    const unknownBlocked = buildWebProxyTarget(requestStub('GET', {}, '/api/sync/jobs'));
+    const unknownBlocked = viaVercel('GET', '/api/sync/jobs');
     assert.equal(unknownBlocked.ok, false);
     assert.equal(unknownBlocked.statusCode, 404);
   } finally {
@@ -550,23 +594,32 @@ test('catch-all proxy enforces dashboard and auth route allowlists', () => {
   }
 });
 
-test('catch-all proxy rejects encoded traversal and encoded separators', () => {
+test('encoded traversal and separators never reach anything but an allowlisted route', () => {
   const originalOrigin = process.env.VM_API_ORIGIN;
   process.env.VM_API_ORIGIN = 'https://vm.example.test';
 
   try {
     const blockedUrls = [
       '/api/dashboard/%2e%2e/auth/login',
+      '/api/dashboard/%252e%252e/auth/login',
       '/api/auth/admin/%2e%2e/users',
-      '/api/dashboard/payments%2fyandex_pay',
       '/api/dashboard/payments%5cyandex_pay',
       '/api/dashboard/payments//yandex_pay',
+      '/api/dashboard/plan/../auth/login',
+      '/dashboard/%2e%2e/%2e%2e/health',
     ];
 
     for (const url of blockedUrls) {
-      const result = buildWebProxyTarget(requestStub('GET', {}, url));
+      const result = viaVercel('GET', url);
       assert.equal(result.ok, false, `${url} should be blocked`);
       assert.equal(result.statusCode, 404, `${url} should return 404`);
+    }
+
+    // The path travels in a query value, so an encoded separator decodes there into the plain path:
+    // that is the allowlisted route itself, never another one.
+    const encodedSlash = viaVercel('GET', '/api/dashboard/payments%2fyandex_pay');
+    if (encodedSlash.ok) {
+      assert.equal(encodedSlash.target.href, 'https://vm.example.test/dashboard/payments/yandex_pay');
     }
   } finally {
     if (originalOrigin === undefined) {
@@ -577,7 +630,7 @@ test('catch-all proxy rejects encoded traversal and encoded separators', () => {
   }
 });
 
-test('catch-all proxy handler delegates service mutations to the shared target', async () => {
+test('the proxy handler forwards a rewritten service mutation to the shared target', async () => {
   const originalOrigin = process.env.VM_API_ORIGIN;
   const originalFetch = globalThis.fetch;
   process.env.VM_API_ORIGIN = 'https://vm.example.test';
@@ -595,9 +648,10 @@ test('catch-all proxy handler delegates service mutations to the shared target',
   };
 
   try {
+    const routed = rewriteUrl(ROOT_REWRITES, '/api/dashboard/services');
     const cases = [
-      [rootProxyHandler, 'PATCH', '/api/dashboard/services'],
-      [webProxyHandler, 'PATCH', '/api/dashboard/services'],
+      [rootProxyHandler, 'PATCH', routed],
+      [webProxyHandler, 'PATCH', routed],
     ];
 
     for (const [handler, method, url] of cases) {
@@ -606,7 +660,7 @@ test('catch-all proxy handler delegates service mutations to the shared target',
       assert.equal(res.statusCode, 200);
     }
 
-    assert.deepEqual(targets, cases.map(([, , url]) => `https://vm.example.test${url.replace('/api', '')}`));
+    assert.deepEqual(targets, cases.map(() => 'https://vm.example.test/dashboard/services'));
   } finally {
     globalThis.fetch = originalFetch;
     if (originalOrigin === undefined) {
@@ -640,11 +694,11 @@ test('every admin credential path goes through the generic auth rewrite and the 
       ['POST', 'admin/yclients-credentials/12/test'],
     ];
     for (const [method, path] of cases) {
-      const target = buildAuthProxyTarget(requestStub(method, {}, `/api/auth-proxy?path=${path}`));
+      const target = buildWebProxyTarget(requestStub(method, {}, `/api/auth-proxy?path=${path}`));
       assert.equal(target.ok, true, `${method} ${path}`);
       assert.equal(target.target.href, `https://vm.example.test/dashboard/auth/${path}`);
     }
-    const wrongMethod = buildAuthProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=admin/yclients-credentials/12'));
+    const wrongMethod = buildWebProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=admin/yclients-credentials/12'));
     assert.equal(wrongMethod.statusCode, 405);
   } finally {
     if (originalOrigin === undefined) {
@@ -655,31 +709,11 @@ test('every admin credential path goes through the generic auth rewrite and the 
   }
 });
 
-test('root and web proxy files stay synchronized', async () => {
-  const syncedFiles = [
-    '_proxy.js',
-    'auth-proxy.js',
-    '[...path].js',
-    'auth/[...path].js',
-    'dashboard/[...path].js',
-  ];
-
-  for (const file of syncedFiles) {
-    const [rootSource, webSource] = await Promise.all([
-      readFile(new URL(`../../api/${file}`, import.meta.url), 'utf8'),
-      readFile(new URL(`../api/${file}`, import.meta.url), 'utf8'),
-    ]);
-
-    assert.equal(rootSource, webSource, `${file} differs between api and web/api`);
-  }
-});
-
-// Vercel's catch-all `[...path].js` only answers one segment below its own directory, so every
-// scope and every nested prefix the allowlist opens (`plan/…`, `payments/…`) must be reachable by
-// either a function under `api/<dir>/` or a vercel.json rewrite to api/auth-proxy.js, which takes
-// the scope and the path as query parameters. New prefixes go the rewrite way: the Hobby plan caps a
-// deployment at 12 functions, and the 13th failed the whole Vercel build on 2026-10-09. Locally
-// there is no such layer, so only this test notices either gap.
+// The deployment has exactly one function, api/auth-proxy.js, and every proxied path reaches it
+// through a vercel.json rewrite that carries the scope and the path in the query string. A catch-all
+// file would answer one path segment only, so a nested route (`plan/…`, `payments/…`) would need a
+// function of its own — and the Hobby plan caps a deployment at 12 functions (the 13th failed the
+// whole Vercel build on 2026-10-09). Locally there is no such layer, so only this test notices a gap.
 const VERCEL_FUNCTION_LIMIT = 12;
 
 async function functionFiles(tree, dir = '') {
@@ -696,69 +730,130 @@ async function functionFiles(tree, dir = '') {
   return files;
 }
 
-test('every allowlisted route reaches a Vercel function in both trees', async () => {
+// The literal paths one scope's allowlist opens, read from the source: every pattern of the dashboard
+// and onboarding scopes is a plain alternation of fixed paths.
+async function allowlistedPaths(scope, nextMarker) {
   const source = await readFile(new URL('../../api/_proxy.js', import.meta.url), 'utf8');
-  const ruleBlock = (scope, nextMarker) => source.slice(
+  const block = source.slice(
     source.indexOf(`const ${scope.toUpperCase()}_ROUTE_RULES`),
     source.indexOf(nextMarker),
   );
-  const scopes = {
-    dashboard: ruleBlock('dashboard', 'const ONBOARDING_ROUTE_RULES'),
-    onboarding: ruleBlock('onboarding', 'export function env'),
-  };
-  const dirs = [];
-  for (const [scope, rules] of Object.entries(scopes)) {
-    assert.ok(rules.includes('pattern:'), `no route rules found for ${scope}`);
-    dirs.push({ scope, dir: scope, prefix: '' });
-    for (const match of new Set([...rules.matchAll(/(?:\^|\(|\|)([a-z_-]+)\\\//g)].map((m) => m[1]))) {
-      dirs.push({ scope, dir: `${scope}/${match}`, prefix: `${match}/` });
+  const rules = [...block.matchAll(/\{ methods: \[([^\]]*)\], pattern: \/\^\(?([^)$]*)\)?\$\/ \}/g)];
+  assert.ok(rules.length > 0, `no route rules found for ${scope}`);
+  const routes = [];
+  for (const [, methods, alternatives] of rules) {
+    for (const path of alternatives.split('|').map((item) => item.replaceAll('\\/', '/'))) {
+      assert.match(path, /^[a-z_/-]+$/, `${scope}: ${path} is not a literal path, teach this test about it`);
+      for (const method of methods.match(/[A-Z]+/g)) {
+        routes.push([method, path]);
+      }
     }
   }
-  assert.ok(dirs.some(({ dir }) => dir === 'dashboard/payments'), 'payments prefix not found in the allowlist');
+  return routes;
+}
 
-  for (const vercelConfig of ['../../vercel.json', '../vercel.json']) {
-    const { rewrites } = JSON.parse(await readFile(new URL(vercelConfig, import.meta.url), 'utf8'));
-    const ruleIndex = (src, destination) => rewrites.findIndex(
-      (rule) => rule.source === src && (destination === undefined || rule.destination === destination),
-    );
-    for (const { scope, dir, prefix } of dirs) {
-      const viaProxy = `/api/auth-proxy?scope=${scope}&path=${prefix}:path*`;
-      if (ruleIndex(`/api/${dir}/:path*`, viaProxy) !== -1) {
-        // The bare path (`/dashboard/payments/…`) must hit the same rule before the scope-wide one.
-        const bare = ruleIndex(`/${dir}/:path*`, viaProxy);
-        assert.ok(bare !== -1, `${vercelConfig}: /${dir}/ is not rewritten like /api/${dir}/`);
-        const scopeWide = ruleIndex(`/${scope}/:path*`);
-        assert.ok(dir === scope || bare < scopeWide, `${vercelConfig}: /${dir}/ rule comes after /${scope}/:path*`);
-        continue;
+test('every allowlisted route is routed to auth-proxy with the right scope and path', async () => {
+  const originalOrigin = process.env.VM_API_ORIGIN;
+  process.env.VM_API_ORIGIN = 'https://vm.example.test';
+  try {
+    const dashboard = await allowlistedPaths('dashboard', 'const ONBOARDING_ROUTE_RULES');
+    const onboarding = await allowlistedPaths('onboarding', 'export function env');
+    const nested = new Set(dashboard.map(([, path]) => path).filter((path) => path.includes('/')));
+    assert.ok(['plan/settings', 'widget/plan_fact', 'reports/data', 'payments/yandex_pay'].every((p) => nested.has(p)));
+
+    for (const config of vercelConfigs) {
+      for (const [scope, routes] of [['dashboard', dashboard], ['onboarding', onboarding]]) {
+        for (const [method, path] of routes) {
+          for (const prefix of [`/${scope}/`, `/api/${scope}/`]) {
+            const routed = rewriteUrl(config.rewrites, `${prefix}${path}?company_id=7&start_date=2026-01-01`);
+            assert.equal(
+              routed,
+              `/api/auth-proxy?scope=${scope}&path=${path}&company_id=7&start_date=2026-01-01`,
+              `${prefix}${path}`,
+            );
+            const result = viaVercel(method, `${prefix}${path}?company_id=7&start_date=2026-01-01`, config.rewrites);
+            assert.equal(result.ok, true, `${method} ${prefix}${path}`);
+            assert.equal(
+              result.target.href,
+              `https://vm.example.test/dashboard/${scope === 'onboarding' ? 'onboarding/' : ''}${path}`
+                + '?company_id=7&start_date=2026-01-01',
+              `${method} ${prefix}${path}: the client query must reach the VM unchanged`,
+            );
+          }
+        }
       }
-      for (const tree of ['../../api', '../api']) {
-        const files = await readdir(new URL(`${tree}/${dir}/`, import.meta.url)).catch(() => []);
-        assert.ok(
-          files.some((file) => file.endsWith('.js')),
-          `${tree}/${dir}/ has no function file and ${vercelConfig} does not rewrite /api/${dir}/ to auth-proxy`,
-        );
+      // Auth paths ride in a query parameter, so their depth never matters.
+      for (const [method, path] of [
+        ['POST', 'login'],
+        ['GET', 'me'],
+        ['DELETE', 'sessions/abc'],
+        ['PATCH', 'admin/users/7'],
+        ['POST', 'admin/staff/7/create-account'],
+        ['POST', 'admin/yclients-credentials/12/test'],
+      ]) {
+        for (const prefix of ['/auth/', '/api/auth/']) {
+          const result = viaVercel(method, `${prefix}${path}`, config.rewrites);
+          assert.equal(result.ok, true, `${method} ${prefix}${path}`);
+          assert.equal(result.target.href, `https://vm.example.test/dashboard/auth/${path}`);
+        }
+      }
+      assert.equal(viaVercel('GET', '/api/health', config.rewrites).target.href, 'https://vm.example.test/health');
+      // Bare scope roots name no route.
+      for (const url of ['/dashboard', '/api/dashboard', '/api/dashboard/', '/onboarding', '/auth', '/api/auth']) {
+        assert.equal(viaVercel('GET', url, config.rewrites).ok, false, url);
       }
     }
-    // The scope-wide dashboard rule is what sends every one-segment path to its catch-all function.
-    assert.ok(
-      ruleIndex('/dashboard/:path*', '/api/dashboard/:path*') !== -1,
-      `${vercelConfig} no longer sends /dashboard/ to api/dashboard/`,
-    );
-    // Auth paths ride in a query parameter to a single function, so their depth never matters.
-    assert.ok(
-      ruleIndex('/auth/:path*', '/api/auth-proxy?path=:path*') !== -1,
-      `${vercelConfig} no longer sends /auth/ through api/auth-proxy.js`,
-    );
+  } finally {
+    if (originalOrigin === undefined) {
+      delete process.env.VM_API_ORIGIN;
+    } else {
+      process.env.VM_API_ORIGIN = originalOrigin;
+    }
   }
 });
 
-test('each proxy tree stays within the Vercel function limit', async () => {
+test('a client-supplied query passes through a dashboard rewrite untouched', () => {
+  const originalOrigin = process.env.VM_API_ORIGIN;
+  process.env.VM_API_ORIGIN = 'https://vm.example.test';
+  try {
+    const roundTrip = (url) => new URL(viaVercel('GET', url).target.href).searchParams;
+    const params = roundTrip(
+      '/api/dashboard/widget/plan_fact?company_id=1&company_id=2&staff_position_ids=1,2,3&q=%D0%91+%20a&flag=&x=a%26b',
+    );
+    assert.deepEqual([...params], [
+      ['company_id', '1'],
+      ['company_id', '2'],
+      ['staff_position_ids', '1,2,3'],
+      ['q', 'Б  a'],
+      ['flag', ''],
+      ['x', 'a&b'],
+    ]);
+    // Conflicting copies of a routing parameter are refused instead of guessed at; no dashboard route
+    // takes a query parameter of either name (see dashboard_routes.py).
+    for (const url of ['/api/dashboard/bundle?path=auth/login', '/api/dashboard/bundle?scope=onboarding']) {
+      const refused = viaVercel('GET', url);
+      assert.equal(refused.ok, false, url);
+      assert.equal(refused.statusCode, 400, url);
+    }
+  } finally {
+    if (originalOrigin === undefined) {
+      delete process.env.VM_API_ORIGIN;
+    } else {
+      process.env.VM_API_ORIGIN = originalOrigin;
+    }
+  }
+});
+
+test('the deployment is auth-proxy.js alone, well within the Vercel function limit', async () => {
   for (const tree of ['../../api', '../api']) {
     const files = await functionFiles(tree);
     assert.ok(
       files.length <= VERCEL_FUNCTION_LIMIT,
       `${tree} has ${files.length} functions (limit ${VERCEL_FUNCTION_LIMIT}): ${files.join(', ')}`,
     );
+    // Every proxied path is a rewrite to this file; another function file would be dead weight, or
+    // a path answered by something the rewrites and the allowlist never see.
+    assert.deepEqual(files, ['auth-proxy.js'], `${tree} must contain no function besides auth-proxy.js`);
   }
 });
 
@@ -767,23 +862,23 @@ test('auth proxy forwards rewritten dashboard and onboarding scopes', () => {
   process.env.VM_API_ORIGIN = 'https://vm.example.test';
 
   try {
-    const editor = buildAuthProxyTarget(
+    const editor = buildWebProxyTarget(
       requestStub('GET', {}, '/api/auth-proxy?scope=dashboard&path=payments/yandex_pay&month=2026-10'),
     );
     assert.equal(editor.ok, true);
     assert.equal(editor.target.href, 'https://vm.example.test/dashboard/payments/yandex_pay?month=2026-10');
 
-    const save = buildAuthProxyTarget(requestStub('POST', {}, '/api/auth-proxy?scope=dashboard&path=payments/yandex_pay'));
+    const save = buildWebProxyTarget(requestStub('POST', {}, '/api/auth-proxy?scope=dashboard&path=payments/yandex_pay'));
     assert.equal(save.ok, true);
 
-    const onboarding = buildAuthProxyTarget(requestStub('GET', {}, '/api/auth-proxy?scope=onboarding&path=state'));
+    const onboarding = buildWebProxyTarget(requestStub('GET', {}, '/api/auth-proxy?scope=onboarding&path=state'));
     assert.equal(onboarding.ok, true);
     assert.equal(onboarding.target.href, 'https://vm.example.test/dashboard/onboarding/state');
 
-    const login = buildAuthProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=login'));
+    const login = buildWebProxyTarget(requestStub('POST', {}, '/api/auth-proxy?path=login'));
     assert.equal(login.target.href, 'https://vm.example.test/dashboard/auth/login', 'auth stays the default scope');
 
-    const keepsClientQuery = buildAuthProxyTarget(
+    const keepsClientQuery = buildWebProxyTarget(
       requestStub('GET', {}, '/api/auth-proxy?scope=dashboard&company_id=7&path=payments/yandex_pay&month=2026-10'),
     );
     assert.equal(
@@ -800,17 +895,17 @@ test('auth proxy forwards rewritten dashboard and onboarding scopes', () => {
       '/api/auth-proxy?path=me&path=sessions',
     ];
     for (const url of ambiguous) {
-      const refused = buildAuthProxyTarget(requestStub('GET', {}, url));
+      const refused = buildWebProxyTarget(requestStub('GET', {}, url));
       assert.equal(refused.ok, false, url);
       assert.equal(refused.statusCode, 400, url);
     }
 
     // A repeated identical copy is not ambiguous: refusing it would break every auth call if Vercel
     // ever echoed the parameter it substituted.
-    const echoedAuth = buildAuthProxyTarget(requestStub('GET', {}, '/api/auth-proxy?path=me&path=me'));
+    const echoedAuth = buildWebProxyTarget(requestStub('GET', {}, '/api/auth-proxy?path=me&path=me'));
     assert.equal(echoedAuth.ok, true);
     assert.equal(echoedAuth.target.href, 'https://vm.example.test/dashboard/auth/me');
-    const echoedScope = buildAuthProxyTarget(
+    const echoedScope = buildWebProxyTarget(
       requestStub('GET', {}, '/api/auth-proxy?scope=onboarding&path=state&scope=onboarding&path=state'),
     );
     assert.equal(echoedScope.ok, true);
@@ -832,7 +927,7 @@ test('auth proxy forwards rewritten dashboard and onboarding scopes', () => {
       '/api/auth-proxy?scope=dashboard&path=admin/users',
       '/api/auth-proxy?scope=dashboard&path=payments/%2e%2e/plan/settings',
     ]) {
-      const blocked = buildAuthProxyTarget(requestStub('GET', {}, url));
+      const blocked = buildWebProxyTarget(requestStub('GET', {}, url));
       assert.equal(blocked.ok, false, url);
       assert.equal(blocked.statusCode, 404, url);
     }
@@ -850,14 +945,20 @@ test('both vercel.json files agree, and the auth proxy outlasts a YClients crede
     ['../../vercel.json', '../vercel.json'].map(async (file) => JSON.parse(await readFile(new URL(file, import.meta.url), 'utf8'))),
   );
   assert.deepEqual(root.rewrites, web.rewrites, 'rewrites differ between vercel.json and web/vercel.json');
+  // A rewrite into /api/ may only name the one function that exists: anything else is a 404 from Vercel.
+  for (const { source, destination } of root.rewrites.filter((rule) => rule.destination.startsWith('/api/'))) {
+    assert.ok(destination.startsWith('/api/auth-proxy?'), `${source} rewrites to ${destination}, which is no function`);
+  }
   assert.deepEqual(root.functions, web.functions, 'functions differ between vercel.json and web/vercel.json');
   // Onboarding verifies credentials against YClients (30s timeout, retried) inside this function.
   assert.ok(root.functions['api/auth-proxy.js'].maxDuration >= 60);
   // The proxy aborts its own upstream call at PROXY_TIMEOUT_MS (160 s) and must still have time to
   // answer; a shorter function limit turns every slow call into a bare Vercel timeout.
-  for (const fn of ['api/auth-proxy.js', 'api/auth/**/*.js', 'api/dashboard/**/*.js']) {
-    assert.ok(root.functions[fn].maxDuration > 160, `${fn} maxDuration must exceed the 160 s proxy timeout`);
+  for (const [fn, { maxDuration }] of Object.entries(root.functions)) {
+    assert.ok(maxDuration > 160, `${fn} maxDuration must exceed the 160 s proxy timeout`);
   }
+  // Both trees hold only auth-proxy.js, so it is the one function that needs an entry.
+  assert.deepEqual(Object.keys(root.functions), ['api/auth-proxy.js']);
   // A `functions` key is a glob, and Vercel fails the whole build when one matches no function.
   // `[...path]` reads as a character class, not a file name, so bracketed paths stay out of the keys.
   for (const key of Object.keys(root.functions)) {

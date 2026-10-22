@@ -29,12 +29,13 @@ from yclients_credentials import (
 from database import Database, init_database
 from models import (
     Group, Company,
-    ServiceCategoryCatalog, ServiceCatalog, StaffPositionCatalog, Staff, StaffPositionMonth, Client,
-    AccountCatalog, StorageCatalog, GoodCategoryCatalog, GoodCatalog,
+    ServiceCategoryCatalog, ServiceCatalog, Staff, StaffPositionMonth, Client,
+    AccountCatalog, GoodCategoryCatalog, GoodCatalog,
     Appointment, Transaction, FinancialTransaction, GoodTransaction,
     Comment, StaffSchedule,
     SyncState, SyncSourceState, YClientsCredential,
 )
+from portal_staff_sync import crm_staff_clause
 from sync_control import SyncControlService
 from sync_parsing import (
     parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_int,
@@ -105,32 +106,15 @@ def chunked(items: Iterable[int], size: int):
         yield items[idx:idx + batch_size]
 
 
-def load_existing_branch_map(db, model, company_id: int, ids, id_column):
+def load_existing_branch_map(db, model, company_id: int, ids, id_column, source_type: str | None = None):
+    """Rows of one branch by `id_column`; `source_type` narrows to one source for models that carry it."""
     existing = {}
     unique_ids = [item_id for item_id in dict.fromkeys(ids) if item_id is not None]
     for batch in chunked(unique_ids, DB_BATCH_SIZE):
-        for obj in (
-            db.query(model)
-            .filter(model.company_id == company_id, id_column.in_(batch))
-            .all()
-        ):
-            existing[getattr(obj, id_column.key)] = obj
-    return existing
-
-
-def load_existing_source_branch_map(db, model, company_id: int, ids, id_column, source_type: str = SOURCE_YCLIENTS):
-    existing = {}
-    unique_ids = [item_id for item_id in dict.fromkeys(ids) if item_id is not None]
-    for batch in chunked(unique_ids, DB_BATCH_SIZE):
-        for obj in (
-            db.query(model)
-            .filter(
-                model.company_id == company_id,
-                model.source_type == source_type,
-                id_column.in_(batch),
-            )
-            .all()
-        ):
+        query = db.query(model).filter(model.company_id == company_id, id_column.in_(batch))
+        if source_type is not None:
+            query = query.filter(model.source_type == source_type)
+        for obj in query.all():
             existing[getattr(obj, id_column.key)] = obj
     return existing
 
@@ -144,7 +128,7 @@ def load_existing_or_adopt_legacy_source_map(
     source_type: str = SOURCE_YCLIENTS,
 ):
     ids = list(ids)  # walked twice: a generator would leave nothing to adopt
-    existing = load_existing_source_branch_map(db, model, company_id, ids, id_column, source_type)
+    existing = load_existing_branch_map(db, model, company_id, ids, id_column, source_type)
     missing = [
         external_id
         for external_id in dict.fromkeys(int(item_id) for item_id in ids if item_id is not None)
@@ -209,6 +193,32 @@ def bulk_delete_by_ids(db, model, column, ids) -> int:
     return deleted
 
 
+def _apply_fields(obj, fields: dict) -> None:
+    for name, value in fields.items():
+        setattr(obj, name, value)
+
+
+def _upsert_catalog(db, model, company_id: int, rows: list[dict], key_column, row_key, to_fields) -> None:
+    """Insert or update one branch-scoped catalog row per payload row; rows without a key are skipped.
+
+    `to_fields(row)` returns the columns shared by create and update; `updated_at` is added here.
+    """
+    now = utcnow()
+    existing = load_existing_branch_map(db, model, company_id, (row_key(row) for row in rows), key_column)
+    for row in rows:
+        key = row_key(row)
+        if key is None:
+            continue
+        fields = {**to_fields(row), 'updated_at': now}
+        obj = existing.get(key)
+        if not obj:
+            obj = model(company_id=company_id, **{key_column.key: key}, **fields)
+            db.add(obj)
+            existing[key] = obj
+        else:
+            _apply_fields(obj, fields)
+
+
 def _step_api(args, kwargs):
     """The YClients client a step was handed, if it was handed one."""
     candidate = kwargs.get('api', args[0] if args else None)
@@ -220,6 +230,14 @@ def _incomplete_window_note(api) -> str | None:
     if api is None or api.last_dated_fetch_complete:
         return None
     return 'окно прочитано постранично, строки могли не приехать'
+
+
+def _notify_progress(progress_callback, event: dict) -> None:
+    """Deliver a progress event; progress is best-effort, so a failing callback must not abort the run."""
+    try:
+        progress_callback(event)
+    except Exception as exc:
+        print(f"  ! Не удалось записать прогресс: {type(exc).__name__}")
 
 
 def run_sync_step(results, name: str, fn, *args, **kwargs):
@@ -264,7 +282,7 @@ def run_sync_step(results, name: str, fn, *args, **kwargs):
             'elapsed': elapsed,
         })
         if progress_callback is not None:
-            progress_callback({
+            _notify_progress(progress_callback, {
                 **progress_context,
                 'stage_key': step_key,
                 'status': 'success' if success else 'warning',
@@ -398,7 +416,7 @@ def has_valid_historical_coverage_marker(
     )
 
 
-def resolve_transaction_window(db, end_date: date, state_key: str = TRANSACTIONAL_STATE_KEY):
+def resolve_transaction_window(db, end_date: date, state_key: str):
     full_start = full_sync_start_date(end_date)
     if not SYNC_INCREMENTAL:
         return full_start, FULL_SYNC_MODE
@@ -416,20 +434,16 @@ def resolve_transaction_window(db, end_date: date, state_key: str = TRANSACTIONA
     return max(full_start, incremental_start), INCREMENTAL_SYNC_MODE
 
 
-def resolve_sync_window(db, end_date: date, requested_mode: str, state_key: str = TRANSACTIONAL_STATE_KEY):
+def resolve_sync_window(end_date: date, requested_mode: str):
+    """Window reported for a run that resolved no branch (no credentials, nothing selected).
+
+    Checkpoints are per branch, so there is none to read here: a windowed read has nothing
+    behind it and reports the full history, like a branch without a checkpoint.
+    """
     normalized_mode = (requested_mode or INCREMENTAL_SYNC_MODE).strip().lower()
-    if normalized_mode == FULL_SYNC_MODE:
-        return full_sync_start_date(end_date), FULL_SYNC_MODE
     if normalized_mode == REFRESH_SYNC_MODE and SYNC_INCREMENTAL:
         return max(full_sync_start_date(end_date), refresh_sync_start_date(end_date)), REFRESH_SYNC_MODE
-    return resolve_transaction_window(db, end_date, state_key)
-
-
-def company_has_transactional_rows(db, company_id: int) -> bool:
-    for model in (Appointment, FinancialTransaction, GoodTransaction, Comment):
-        if db.query(model.id).filter(model.company_id == int(company_id)).first() is not None:
-            return True
-    return False
+    return full_sync_start_date(end_date), FULL_SYNC_MODE
 
 
 def resolve_company_sync_window(db, end_date: date, requested_mode: str, company_id: int):
@@ -441,14 +455,7 @@ def resolve_company_sync_window(db, end_date: date, requested_mode: str, company
 
     scoped_key = transactional_state_key(company_id)
     scoped_checkpoint = get_sync_state_value(db, scoped_key)
-    legacy_checkpoint = get_sync_state_value(db, TRANSACTIONAL_STATE_KEY)
-    has_legacy_company = bool(legacy_checkpoint) and company_has_transactional_rows(
-        db, company_id
-    )
-    if (
-        (scoped_checkpoint or has_legacy_company)
-        and not has_valid_historical_coverage_marker(db, company_id)
-    ):
+    if scoped_checkpoint and not has_valid_historical_coverage_marker(db, company_id):
         # One full pass is mandatory after introducing detailed source coverage.
         # Otherwise a legacy incremental checkpoint would only certify the recent
         # lookback window and every historical YoY value would remain unknown.
@@ -460,15 +467,12 @@ def resolve_company_sync_window(db, end_date: date, requested_mode: str, company
         # behind that window would be certified on a 90-day interval it cannot honor.
         # SYNC_INCREMENTAL=false is the operator's kill switch for windowed reads, so
         # it must silence refresh exactly as it silences incremental.
-        if not SYNC_INCREMENTAL or not (scoped_checkpoint or has_legacy_company):
+        if not SYNC_INCREMENTAL or not scoped_checkpoint:
             return history_start, FULL_SYNC_MODE
         return refresh_sync_start_date(end_date, reporting_start), REFRESH_SYNC_MODE
 
     if scoped_checkpoint:
         return resolve_transaction_window(db, end_date, scoped_key)
-
-    if has_legacy_company:
-        return resolve_transaction_window(db, end_date, TRANSACTIONAL_STATE_KEY)
 
     return history_start, FULL_SYNC_MODE
 
@@ -887,35 +891,15 @@ def sync_service_categories(api: YClientsAPI, db, company_id: str, db_company_id
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        now = datetime.now()
-        existing_catalog = load_existing_branch_map(
+        _upsert_catalog(
             db,
             ServiceCategoryCatalog,
             cid,
-            (category.get('id') for category in categories),
+            categories,
             ServiceCategoryCatalog.category_id,
+            lambda c: c.get('id'),
+            lambda c: {'title': c.get('title', ''), 'weight': c.get('weight'), 'api_id': c.get('api_id')},
         )
-        for c in categories:
-            cat_id = c.get('id')
-            if cat_id is None:
-                continue
-            catalog_obj = existing_catalog.get(cat_id)
-            if not catalog_obj:
-                catalog_obj = ServiceCategoryCatalog(
-                    company_id=cid,
-                    category_id=cat_id,
-                    title=c.get('title', ''),
-                    weight=c.get('weight'),
-                    api_id=c.get('api_id'),
-                    updated_at=now,
-                )
-                db.add(catalog_obj)
-                existing_catalog[cat_id] = catalog_obj
-            else:
-                catalog_obj.title = c.get('title', '')
-                catalog_obj.weight = c.get('weight')
-                catalog_obj.api_id = c.get('api_id')
-                catalog_obj.updated_at = now
 
         db.commit()
         print(f"  ✓ Категории услуг сохранены ({len(categories)} шт.)")
@@ -943,7 +927,6 @@ def sync_services(api: YClientsAPI, db, company_id: str, db_company_id: int | No
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        now = datetime.now()
         if any(
             not isinstance(service, dict)
             or service.get('id') is None
@@ -976,23 +959,15 @@ def sync_services(api: YClientsAPI, db, company_id: str, db_company_id: int | No
                         'title': category.title,
                     }
 
-        existing_catalog = load_existing_branch_map(
-            db,
-            ServiceCatalog,
-            cid,
-            (service.get('id') for service in services),
-            ServiceCatalog.service_id,
-        )
         # A successful company-level response is the current YClients snapshot. Keep
         # historical catalog rows for old transactions, but hide anything not seen now.
         db.query(ServiceCatalog).filter(ServiceCatalog.company_id == cid).update(
             {ServiceCatalog.is_active: False},
             synchronize_session='fetch',
         )
-        for service_data in services:
+
+        def service_fields(service_data: dict) -> dict:
             service_id = service_data.get('id')
-            if service_id is None:
-                continue
             category_title = None
             category_id = None
             if 'category' in service_data and service_data['category']:
@@ -1001,85 +976,21 @@ def sync_services(api: YClientsAPI, db, company_id: str, db_company_id: int | No
             elif service_id in category_by_service_id:
                 category_id = category_by_service_id[service_id].get('id')
                 category_title = category_by_service_id[service_id].get('title')
+            return {
+                'title': service_data.get('title', ''),
+                'price_min': service_data.get('price_min'),
+                'duration': service_data.get('duration'),
+                'category_id': category_id,
+                'category_title': category_title,
+                'is_active': True,
+            }
 
-            catalog_obj = existing_catalog.get(service_id)
-            if not catalog_obj:
-                catalog_obj = ServiceCatalog(
-                    company_id=cid,
-                    service_id=service_id,
-                    title=service_data.get('title', ''),
-                    price_min=service_data.get('price_min'),
-                    duration=service_data.get('duration'),
-                    category_id=category_id,
-                    category_title=category_title,
-                    is_active=True,
-                    updated_at=now,
-                )
-                db.add(catalog_obj)
-                existing_catalog[service_id] = catalog_obj
-            else:
-                catalog_obj.title = service_data.get('title', '')
-                catalog_obj.price_min = service_data.get('price_min')
-                catalog_obj.duration = service_data.get('duration')
-                catalog_obj.category_id = category_id
-                catalog_obj.category_title = category_title
-                catalog_obj.is_active = True
-                catalog_obj.updated_at = now
+        _upsert_catalog(
+            db, ServiceCatalog, cid, services, ServiceCatalog.service_id, lambda s: s.get('id'), service_fields
+        )
 
         db.commit()
         print(f"  ✓ Услуги сохранены ({len(services)} шт.)")
-        return True
-
-    except Exception as e:
-        db.rollback()
-        print(f"  ✗ Ошибка: {e}")
-        return False
-
-
-# ===================================================================
-# 4. Должности
-# ===================================================================
-
-def sync_positions(api: YClientsAPI, db, company_id: str, db_company_id: int | None = None):
-    print("\n── Должности ──")
-
-    positions = api.get_positions(company_id)
-    if not positions:
-        print("  Нет данных")
-        return False
-
-    print(f"  Найдено: {len(positions)}")
-
-    try:
-        cid = _db_company_id(company_id, db_company_id)
-        now = datetime.now()
-        existing_catalog = load_existing_branch_map(
-            db,
-            StaffPositionCatalog,
-            cid,
-            (position.get('id') for position in positions),
-            StaffPositionCatalog.position_id,
-        )
-        for p in positions:
-            pid = p.get('id')
-            if pid is None:
-                continue
-            catalog_obj = existing_catalog.get(pid)
-            if not catalog_obj:
-                catalog_obj = StaffPositionCatalog(
-                    company_id=cid,
-                    position_id=pid,
-                    title=p.get('title', ''),
-                    updated_at=now,
-                )
-                db.add(catalog_obj)
-                existing_catalog[pid] = catalog_obj
-            else:
-                catalog_obj.title = p.get('title', '')
-                catalog_obj.updated_at = now
-
-        db.commit()
-        print(f"  ✓ Должности сохранены ({len(positions)} шт.)")
         return True
 
     except Exception as e:
@@ -1121,21 +1032,17 @@ def _snapshot_staff_positions(db, company_id: int, positions: dict[int, tuple[in
         )
     }
     for staff_id, (position_id, position_title) in positions.items():
+        fields = {
+            'company_id': company_id,
+            'position_id': position_id,
+            'position_title': position_title,
+            'updated_at': now,
+        }
         row = stored.get(staff_id)
         if row is None:
-            db.add(StaffPositionMonth(
-                staff_id=staff_id,
-                month=month,
-                company_id=company_id,
-                position_id=position_id,
-                position_title=position_title,
-                updated_at=now,
-            ))
+            db.add(StaffPositionMonth(staff_id=staff_id, month=month, **fields))
         else:
-            row.company_id = company_id
-            row.position_id = position_id
-            row.position_title = position_title
-            row.updated_at = now
+            _apply_fields(row, fields)
 
 
 def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None = None):
@@ -1173,41 +1080,29 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
             fired = int(bool(s.get('is_fired'))) if s.get('fired') is None else int(s.get('fired') or 0)
             email = _valid_staff_email(s.get('email'))
 
+            fields = {
+                'external_id': staff_id,
+                'source_type': SOURCE_YCLIENTS,
+                'name': s.get('name', ''),
+                'email': email,
+                'specialization': s.get('specialization'),
+                'position': position_title,
+                'position_id': position_id,
+                'rating': s.get('rating'),
+                'votes_count': s.get('votes_count'),
+                'bookable': s.get('bookable', True),
+                'fired': fired,
+                'user_id': user_id,
+                'company_id': cid,
+            }
             obj = existing_staff.get(staff_id)
             if not obj:
-                obj = Staff(
-                    **pk_allocator.kwargs(staff_id),
-                    external_id=staff_id,
-                    source_type=SOURCE_YCLIENTS,
-                    name=s.get('name', ''),
-                    email=email,
-                    specialization=s.get('specialization'),
-                    position=position_title,
-                    position_id=position_id,
-                    rating=s.get('rating'),
-                    votes_count=s.get('votes_count'),
-                    bookable=s.get('bookable', True),
-                    fired=fired,
-                    user_id=user_id,
-                    company_id=cid,
-                )
+                obj = Staff(**pk_allocator.kwargs(staff_id), **fields)
                 db.add(obj)
                 db.flush()
                 existing_staff[staff_id] = obj
             else:
-                obj.name = s.get('name', '')
-                obj.email = email
-                obj.specialization = s.get('specialization')
-                obj.position = position_title
-                obj.position_id = position_id
-                obj.rating = s.get('rating')
-                obj.votes_count = s.get('votes_count')
-                obj.bookable = s.get('bookable', True)
-                obj.fired = fired
-                obj.user_id = user_id
-                obj.company_id = cid
-                obj.external_id = staff_id
-                obj.source_type = SOURCE_YCLIENTS
+                _apply_fields(obj, fields)
 
             if obj.id is not None and not fired:
                 active_staff_ids.add(int(obj.id))
@@ -1216,9 +1111,10 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
         # Portal-created rows never appear in the YClients list, so firing every
         # unlisted row made portal managers vanish from «Работник» after each sync.
         # Their `fired` belongs to the portal, exactly as this branch owns the CRM rows.
+        # A mirror row can land on its own user's id; it has no external_id, so only that tells it from a CRM row.
         stale_query = db.query(Staff).filter(
             Staff.company_id == cid,
-            or_(Staff.portal_user_id.is_(None), Staff.portal_user_id == Staff.id),
+            or_(Staff.portal_user_id.is_(None), crm_staff_clause(Staff.portal_user_id)),
         )
         if active_staff_ids:
             stale_query = stale_query.filter(~Staff.id.in_(active_staff_ids))
@@ -1263,31 +1159,24 @@ def sync_clients(api: YClientsAPI, db, company_id: str, db_company_id: int | Non
             if client_id is None:
                 continue
 
+            fields = {
+                'name': c.get('name', ''),
+                'phone': c.get('phone'),
+                'email': c.get('email'),
+                'birth_date': parse_date(c.get('birth_date')),
+                'visits_count': c.get('visits_count', 0),
+                'last_visit_date': parse_date(c.get('last_visit_date')),
+                'discount': c.get('discount', 0),
+                'company_id': cid,
+            }
             obj = existing_clients.get(client_id)
             if not obj:
-                obj = Client(
-                    external_id=client_id,
-                    source_type=SOURCE_YCLIENTS,
-                    name=c.get('name', ''),
-                    phone=c.get('phone'), email=c.get('email'),
-                    birth_date=parse_date(c.get('birth_date')),
-                    visits_count=c.get('visits_count', 0),
-                    last_visit_date=parse_date(c.get('last_visit_date')),
-                    discount=c.get('discount', 0),
-                    company_id=cid,
-                )
+                obj = Client(external_id=client_id, source_type=SOURCE_YCLIENTS, **fields)
                 db.add(obj)
                 # A listing page boundary can repeat a client; the repeat must update this row, not insert a twin.
                 existing_clients[client_id] = obj
             else:
-                obj.name = c.get('name', '')
-                obj.phone = c.get('phone')
-                obj.email = c.get('email')
-                obj.birth_date = parse_date(c.get('birth_date'))
-                obj.visits_count = c.get('visits_count', 0)
-                obj.last_visit_date = parse_date(c.get('last_visit_date'))
-                obj.discount = c.get('discount', 0)
-                obj.company_id = cid
+                _apply_fields(obj, fields)
 
         db.commit()
         print(f"  ✓ Клиенты сохранены ({len(clients)} шт.)")
@@ -1315,96 +1204,18 @@ def sync_accounts(api: YClientsAPI, db, company_id: str, db_company_id: int | No
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        now = datetime.now()
-        existing_catalog = load_existing_branch_map(
+        _upsert_catalog(
             db,
             AccountCatalog,
             cid,
-            (account.get('id') for account in accounts),
+            accounts,
             AccountCatalog.account_id,
+            lambda a: a.get('id'),
+            lambda a: {'title': a.get('title', ''), 'type': a.get('type'), 'comment': a.get('comment')},
         )
-        for a in accounts:
-            aid = a.get('id')
-            if aid is None:
-                continue
-            catalog_obj = existing_catalog.get(aid)
-            if not catalog_obj:
-                catalog_obj = AccountCatalog(
-                    company_id=cid,
-                    account_id=aid,
-                    title=a.get('title', ''),
-                    type=a.get('type'),
-                    comment=a.get('comment'),
-                    updated_at=now,
-                )
-                db.add(catalog_obj)
-                existing_catalog[aid] = catalog_obj
-            else:
-                catalog_obj.title = a.get('title', '')
-                catalog_obj.type = a.get('type')
-                catalog_obj.comment = a.get('comment')
-                catalog_obj.updated_at = now
 
         db.commit()
         print(f"  ✓ Кассы сохранены ({len(accounts)} шт.)")
-        return True
-
-    except Exception as e:
-        db.rollback()
-        print(f"  ✗ Ошибка: {e}")
-        return False
-
-
-# ===================================================================
-# 8. Склады
-# ===================================================================
-
-def sync_storages(api: YClientsAPI, db, company_id: str, db_company_id: int | None = None):
-    print("\n── Склады ──")
-
-    storages = api.get_storages(company_id)
-    if not storages:
-        print("  Нет данных")
-        return False
-
-    print(f"  Найдено: {len(storages)}")
-
-    try:
-        cid = _db_company_id(company_id, db_company_id)
-        now = datetime.now()
-        existing_catalog = load_existing_branch_map(
-            db,
-            StorageCatalog,
-            cid,
-            (storage.get('id') for storage in storages),
-            StorageCatalog.storage_id,
-        )
-        for s in storages:
-            sid = s.get('id')
-            if sid is None:
-                continue
-            catalog_obj = existing_catalog.get(sid)
-            if not catalog_obj:
-                catalog_obj = StorageCatalog(
-                    company_id=cid,
-                    storage_id=sid,
-                    title=s.get('title', ''),
-                    for_services=s.get('for_services', False),
-                    for_sale=s.get('for_sale', False),
-                    comment=s.get('comment'),
-                    updated_at=now,
-                )
-                db.add(catalog_obj)
-                existing_catalog[sid] = catalog_obj
-            else:
-                catalog_obj.title = s.get('title', '')
-                catalog_obj.for_services = s.get('for_services', False)
-                catalog_obj.for_sale = s.get('for_sale', False)
-                catalog_obj.comment = s.get('comment')
-                catalog_obj.updated_at = now
-
-        db.commit()
-        print(f"  ✓ Склады сохранены ({len(storages)} шт.)")
         return True
 
     except Exception as e:
@@ -1429,33 +1240,15 @@ def sync_good_categories(api: YClientsAPI, db, company_id: str, db_company_id: i
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        now = datetime.now()
-        existing_catalog = load_existing_branch_map(
+        _upsert_catalog(
             db,
             GoodCategoryCatalog,
             cid,
-            (category.get('id') for category in categories),
+            categories,
             GoodCategoryCatalog.category_id,
+            lambda c: c.get('id'),
+            lambda c: {'title': c.get('title', ''), 'parent_category_id': c.get('parent_category_id')},
         )
-        for c in categories:
-            cat_id = c.get('id')
-            if cat_id is None:
-                continue
-            catalog_obj = existing_catalog.get(cat_id)
-            if not catalog_obj:
-                catalog_obj = GoodCategoryCatalog(
-                    company_id=cid,
-                    category_id=cat_id,
-                    title=c.get('title', ''),
-                    parent_category_id=c.get('parent_category_id'),
-                    updated_at=now,
-                )
-                db.add(catalog_obj)
-                existing_catalog[cat_id] = catalog_obj
-            else:
-                catalog_obj.title = c.get('title', '')
-                catalog_obj.parent_category_id = c.get('parent_category_id')
-                catalog_obj.updated_at = now
 
         db.commit()
         print(f"  ✓ Категории товаров сохранены ({len(categories)} шт.)")
@@ -1483,50 +1276,23 @@ def sync_goods(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        now = datetime.now()
-        good_ids = [
-            g.get('good_id') or g.get('id')
-            for g in goods
-            if g.get('good_id') or g.get('id')
-        ]
-        existing_catalog = load_existing_branch_map(
+        _upsert_catalog(
             db,
             GoodCatalog,
             cid,
-            good_ids,
+            goods,
             GoodCatalog.good_id,
+            lambda g: g.get('good_id') or g.get('id') or None,
+            lambda g: {
+                'title': g.get('title', ''),
+                'cost': g.get('cost'),
+                'actual_cost': g.get('actual_cost'),
+                'barcode': g.get('barcode'),
+                'unit_short_title': g.get('unit_short_title'),
+                'category_id': g.get('category_id'),
+                'last_change_date': parse_datetime(g.get('last_change_date')),
+            },
         )
-        for g in goods:
-            gid = g.get('good_id') or g.get('id')
-            if not gid:
-                continue
-            last_change_date = parse_datetime(g.get('last_change_date'))
-
-            catalog_obj = existing_catalog.get(gid)
-            if not catalog_obj:
-                catalog_obj = GoodCatalog(
-                    company_id=cid,
-                    good_id=gid,
-                    title=g.get('title', ''),
-                    cost=g.get('cost'),
-                    actual_cost=g.get('actual_cost'),
-                    barcode=g.get('barcode'),
-                    unit_short_title=g.get('unit_short_title'),
-                    category_id=g.get('category_id'),
-                    last_change_date=last_change_date,
-                    updated_at=now,
-                )
-                db.add(catalog_obj)
-                existing_catalog[gid] = catalog_obj
-            else:
-                catalog_obj.title = g.get('title', '')
-                catalog_obj.cost = g.get('cost')
-                catalog_obj.actual_cost = g.get('actual_cost')
-                catalog_obj.barcode = g.get('barcode')
-                catalog_obj.unit_short_title = g.get('unit_short_title')
-                catalog_obj.category_id = g.get('category_id')
-                catalog_obj.last_change_date = last_change_date
-                catalog_obj.updated_at = now
 
         db.commit()
         print(f"  ✓ Товары сохранены ({len(goods)} шт.)")
@@ -1630,36 +1396,27 @@ def sync_records(api: YClientsAPI, db, company_id: str,
             staff_id = _internal_staff_id(staff_map, r.get('staff_id'))
             created_user_id = r.get('created_user_id')
 
+            fields = {
+                'staff_id': staff_id,
+                'client_id': client_id,
+                'created_user_id': created_user_id,
+                'date': parse_date(r.get('date')),
+                'datetime': parse_datetime(r.get('datetime')),
+                'create_date': parse_datetime(r.get('create_date')),
+                'seance_length': r.get('seance_length'),
+                'attendance': r.get('attendance', 0),
+                'comment': r.get('comment'),
+            }
             obj = existing_records.get(record_id)
             if not obj:
-                obj = Appointment(
-                    external_id=record_id,
-                    source_type=SOURCE_YCLIENTS,
-                    company_id=cid,
-                    staff_id=staff_id, client_id=client_id,
-                    created_user_id=created_user_id,
-                    date=parse_date(r.get('date')),
-                    datetime=parse_datetime(r.get('datetime')),
-                    create_date=parse_datetime(r.get('create_date')),
-                    seance_length=r.get('seance_length'),
-                    attendance=r.get('attendance', 0),
-                    comment=r.get('comment'),
-                )
+                obj = Appointment(external_id=record_id, source_type=SOURCE_YCLIENTS, company_id=cid, **fields)
                 db.add(obj)
                 # A long paginated fetch can return the same record twice when upstream
                 # rows shift between pages. Without this the second copy looks new and
                 # collides on uq_appointments_company_source_external.
                 existing_records[record_id] = obj
             else:
-                obj.staff_id = staff_id
-                obj.client_id = client_id
-                obj.created_user_id = created_user_id
-                obj.date = parse_date(r.get('date'))
-                obj.datetime = parse_datetime(r.get('datetime'))
-                obj.create_date = parse_datetime(r.get('create_date'))
-                obj.seance_length = r.get('seance_length')
-                obj.attendance = r.get('attendance', 0)
-                obj.comment = r.get('comment')
+                _apply_fields(obj, fields)
 
             appointments_with_services.append((obj, r.get('services') or []))
 
@@ -1814,47 +1571,32 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
             internal_client_id = _internal_client_id(client_map, client)
             internal_master_id = _internal_staff_id(staff_map, master) if isinstance(master, dict) else None
 
+            fields = {
+                'external_id': tid,
+                'source_type': SOURCE_YCLIENTS,
+                'document_id': parse_int(t.get('document_id')),
+                'expense_id': parse_int(expense.get('id')) if isinstance(expense, dict) else None,
+                'expense_title': expense_title,
+                'date': parse_datetime(t.get('date')),
+                'amount': t.get('amount'),
+                'comment': t.get('comment'),
+                'account_id': parse_int(account.get('id')) if isinstance(account, dict) else None,
+                'client_id': internal_client_id,
+                'master_id': internal_master_id,
+                # `record_id: 0` means the sale had no visit behind it; visit_id
+                # carries the same sentinel but nothing keys off it.
+                'record_id': parse_reference_id(t.get('record_id')),
+                'visit_id': parse_int(t.get('visit_id')),
+                'sold_item_id': parse_int(t.get('sold_item_id')),
+                'sold_item_type': t.get('sold_item_type'),
+                'company_id': cid,
+            }
             if not obj:
-                obj = FinancialTransaction(
-                    **pk_allocator.kwargs(tid),
-                    external_id=tid,
-                    source_type=SOURCE_YCLIENTS,
-                    document_id=parse_int(t.get('document_id')),
-                    expense_id=parse_int(expense.get('id')) if isinstance(expense, dict) else None,
-                    expense_title=expense_title,
-                    date=parse_datetime(t.get('date')),
-                    amount=t.get('amount'),
-                    comment=t.get('comment'),
-                    account_id=parse_int(account.get('id')) if isinstance(account, dict) else None,
-                    client_id=internal_client_id,
-                    master_id=internal_master_id,
-                    # `record_id: 0` means the sale had no visit behind it; visit_id
-                    # carries the same sentinel but nothing keys off it.
-                    record_id=parse_reference_id(t.get('record_id')),
-                    visit_id=parse_int(t.get('visit_id')),
-                    sold_item_id=parse_int(t.get('sold_item_id')),
-                    sold_item_type=t.get('sold_item_type'),
-                    company_id=cid,
-                )
+                obj = FinancialTransaction(**pk_allocator.kwargs(tid), **fields)
                 db.add(obj)
                 existing_txns[tid] = obj
             else:
-                obj.external_id = tid
-                obj.source_type = SOURCE_YCLIENTS
-                obj.document_id = parse_int(t.get('document_id'))
-                obj.expense_id = parse_int(expense.get('id')) if isinstance(expense, dict) else None
-                obj.expense_title = expense_title
-                obj.date = parse_datetime(t.get('date'))
-                obj.amount = t.get('amount')
-                obj.comment = t.get('comment')
-                obj.account_id = parse_int(account.get('id')) if isinstance(account, dict) else None
-                obj.client_id = internal_client_id
-                obj.master_id = internal_master_id
-                obj.record_id = parse_reference_id(t.get('record_id'))
-                obj.visit_id = parse_int(t.get('visit_id'))
-                obj.sold_item_id = parse_int(t.get('sold_item_id'))
-                obj.sold_item_type = t.get('sold_item_type')
-                obj.company_id = cid
+                _apply_fields(obj, fields)
 
         mark_sync_source_coverage(db, cid, PERSONAL_ACCOUNT_SOURCE, start_date, end_date)
 
@@ -1937,45 +1679,30 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
 
             tx_date = parse_datetime(t.get('create_date') or t.get('date'))
 
+            fields = {
+                'external_id': tid,
+                'source_type': SOURCE_YCLIENTS,
+                'document_id': t.get('document_id'),
+                'type_id': t.get('type_id'),
+                'good_id': good_id,
+                'good_title': good_title,
+                'storage_id': storage_id,
+                'storage_title': storage_title,
+                'amount': t.get('amount'),
+                'cost_per_unit': t.get('cost_per_unit'),
+                'cost': t.get('cost'),
+                'discount': t.get('discount'),
+                'master_id': internal_master_id,
+                'client_id': internal_client_id,
+                'company_id': cid,
+                'date': tx_date,
+            }
             if not obj:
-                obj = GoodTransaction(
-                    **pk_allocator.kwargs(tid),
-                    external_id=tid,
-                    source_type=SOURCE_YCLIENTS,
-                    document_id=t.get('document_id'),
-                    type_id=t.get('type_id'),
-                    good_id=good_id,
-                    good_title=good_title,
-                    storage_id=storage_id,
-                    storage_title=storage_title,
-                    amount=t.get('amount'),
-                    cost_per_unit=t.get('cost_per_unit'),
-                    cost=t.get('cost'),
-                    discount=t.get('discount'),
-                    master_id=internal_master_id,
-                    client_id=internal_client_id,
-                    company_id=cid,
-                    date=tx_date,
-                )
+                obj = GoodTransaction(**pk_allocator.kwargs(tid), **fields)
                 db.add(obj)
                 existing_txns[tid] = obj
             else:
-                obj.external_id = tid
-                obj.source_type = SOURCE_YCLIENTS
-                obj.document_id = t.get('document_id')
-                obj.type_id = t.get('type_id')
-                obj.good_id = good_id
-                obj.good_title = good_title
-                obj.storage_id = storage_id
-                obj.storage_title = storage_title
-                obj.amount = t.get('amount')
-                obj.cost_per_unit = t.get('cost_per_unit')
-                obj.cost = t.get('cost')
-                obj.discount = t.get('discount')
-                obj.master_id = internal_master_id
-                obj.client_id = internal_client_id
-                obj.company_id = cid
-                obj.date = tx_date
+                _apply_fields(obj, fields)
 
         mark_sync_source_coverage(
             db, cid, GOODS_TRANSACTIONS_SOURCE, start_date, end_date
@@ -2036,35 +1763,25 @@ def sync_comments(api: YClientsAPI, db, company_id: str,
                 continue
             obj = existing_comments.get(cmt_id)
             master_id = _internal_staff_id(staff_map, c.get('master_id'))
+            fields = {
+                'external_id': cmt_id,
+                'source_type': SOURCE_YCLIENTS,
+                'type': c.get('type'),
+                'master_id': master_id,
+                'text': c.get('text'),
+                'date': parse_datetime(c.get('date')),
+                'rating': c.get('rating'),
+                'user_id': c.get('user_id'),
+                'user_name': c.get('user_name'),
+                'record_id': c.get('record_id'),
+                'company_id': cid,
+            }
             if not obj:
-                obj = Comment(
-                    **pk_allocator.kwargs(cmt_id),
-                    external_id=cmt_id,
-                    source_type=SOURCE_YCLIENTS,
-                    type=c.get('type'),
-                    master_id=master_id,
-                    text=c.get('text'),
-                    date=parse_datetime(c.get('date')),
-                    rating=c.get('rating'),
-                    user_id=c.get('user_id'),
-                    user_name=c.get('user_name'),
-                    record_id=c.get('record_id'),
-                    company_id=cid,
-                )
+                obj = Comment(**pk_allocator.kwargs(cmt_id), **fields)
                 db.add(obj)
                 existing_comments[cmt_id] = obj
             else:
-                obj.external_id = cmt_id
-                obj.source_type = SOURCE_YCLIENTS
-                obj.type = c.get('type')
-                obj.master_id = master_id
-                obj.text = c.get('text')
-                obj.date = parse_datetime(c.get('date'))
-                obj.rating = c.get('rating')
-                obj.user_id = c.get('user_id')
-                obj.user_name = c.get('user_name')
-                obj.record_id = c.get('record_id')
-                obj.company_id = cid
+                _apply_fields(obj, fields)
 
         db.commit()
         print(f"  ✓ Комментарии сохранены ({len(comments)} шт.)")
@@ -2239,7 +1956,7 @@ def execute_sync(
     companies_count = 0
 
     end = end_date or date.today()
-    default_start, default_sync_mode = resolve_sync_window(db, end, mode)
+    default_start, default_sync_mode = resolve_sync_window(end, mode)
     default_sd = default_start.isoformat()
     ed = end.isoformat()
     schedule_end = end + timedelta(days=SCHEDULE_DAYS)
@@ -2267,7 +1984,7 @@ def execute_sync(
     ) -> None:
         if progress_callback is None:
             return
-        progress_callback({
+        _notify_progress(progress_callback, {
             'portal_account_id': credential.portal_account_id if credential else portal_account_id,
             'credential_id': credential.id if credential else credential_id,
             'company_id': company_id,
@@ -2492,11 +2209,9 @@ def execute_sync(
                 company_steps = [
                     ("Категории услуг", sync_service_categories, {}),
                     ("Услуги", sync_services, {}),
-                    ("Должности", sync_positions, {}),
                     ("Сотрудники", sync_staff, {}),
                     ("Клиенты", sync_clients, {}),
                     ("Кассы", sync_accounts, {}),
-                    ("Склады", sync_storages, {}),
                     ("Категории товаров", sync_good_categories, {}),
                     ("Товары", sync_goods, {}),
                     (

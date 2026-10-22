@@ -52,6 +52,14 @@ def appointment_conditions(
     return conditions
 
 
+def percent(part: int | float, whole: int | float, digits: int | None = None) -> float | None:
+    """`part` as a percentage of `whole`, rounded to `digits` places when given; None for a zero `whole`."""
+    if not whole:
+        return None
+    value = 100.0 * part / whole
+    return value if digits is None else round(value, digits)
+
+
 def period_key(value: date | datetime | None, granularity: str) -> str:
     if value is None:
         return ''

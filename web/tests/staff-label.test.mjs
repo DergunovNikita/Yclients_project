@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { staffOption, staffRoleLabel } from '../src/staffLabel.js';
+import { branchRowTitle, staffOption, staffRoleLabel } from '../src/staffLabel.js';
 
 const translate = (key) => ({
   'dash.staffRoleAdministrator': 'администратор',
@@ -54,4 +54,10 @@ test('titles read the bare name, never the option text that carries the label', 
   assert.match(main, /option\.dataset\.name = name/);
   assert.doesNotMatch(main, /staff\.selectedOptions\[0\]\??\.textContent/);
   assert.match(main, /selectedOption\.dataset\.name/);
+});
+
+test('a branch without a title is named by its id', () => {
+  const tr = (key, params) => `${key}:${params.id}`;
+  assert.equal(branchRowTitle({ company_title: 'Ривьера', company_id: 7 }, tr), 'Ривьера');
+  assert.equal(branchRowTitle({ company_title: '', company_id: 7 }, tr), 'dash.branchFallbackWithId:7');
 });

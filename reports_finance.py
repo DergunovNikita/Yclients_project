@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dashboard_service import (
     COMPLETED_ATTENDANCE,
     GOODS_SALE_TYPE_ID,
-    GOODS_SOLD_ITEM_TYPE,
     SERVICE_SOLD_ITEM_TYPE,
     DateRange,
     ReportingWindow,
@@ -23,10 +22,9 @@ from dashboard_service import (
     _business_staff_id_condition,
     _coerce_date,
     _company_scope_clause,
-    _financial_staff_attribution_condition,
+    _direct_revenue_classifiers,
     _opz_split_fields,
     _pct_change,
-    _personal_account_condition,
     _physical_account_condition,
     _source_coverage_status,
     business_appointment_condition,
@@ -40,11 +38,21 @@ from dashboard_service import (
 )
 from models import AccountCatalog, Appointment, FinancialTransaction, GoodTransaction, SyncSourceState
 from payment_methods import REASON_BEYOND_PERIOD, REASON_STARTS_MID_MONTH, fetch_payment_breakdown
-from report_common import describe_months, format_day, month_label, period_key, period_starts, short_month_label
+from report_common import (
+    describe_months,
+    format_day,
+    month_label,
+    percent,
+    period_key,
+    period_starts,
+    short_month_label,
+)
 from report_payload import (
+    DATE_FORMAT,
     MONEY_FORMAT,
     NUMBER_FORMAT,
     PERCENT_FORMAT,
+    TEXT_FORMAT,
     ReportRequest,
     card,
     chart,
@@ -53,12 +61,12 @@ from report_payload import (
 )
 
 
-YOY_ANNUAL_SOURCES = (
+# Goods movements (`goods_transactions_detail`) only fed a units-sold figure the report never showed; the goods
+# revenue column comes from payments, which `financial_transactions_detail` certifies.
+YOY_SOURCES = (
     'appointments_detail',
     'financial_transactions_detail',
-    'goods_transactions_detail',
 )
-YOY_MONTHLY_SOURCES = YOY_ANNUAL_SOURCES[:2]
 
 
 async def build_financial_overview(req: ReportRequest) -> dict[str, Any]:
@@ -142,7 +150,7 @@ async def build_financial_overview(req: ReportRequest) -> dict[str, Any]:
             'periods',
             'Динамика по периодам',
             [
-                ('period', 'Период', 'text'),
+                ('period', 'Период', TEXT_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
                 ('appointments', 'Завершённые визиты', NUMBER_FORMAT),
                 ('average_check', 'Средний чек', MONEY_FORMAT),
@@ -183,7 +191,7 @@ async def _year_over_year_activity_bounds(
     db: AsyncSession,
     company_id: int | None,
     staff_id: int | None,
-    allowed_company_ids: list[int] | None,
+    allowed_company_ids: list[int],
     now: datetime,
 ) -> tuple[date, dict[str, Any]] | None:
     """Return the first YClients record and the OPZ facts.
@@ -249,20 +257,7 @@ async def _year_over_year_activity_bounds(
         )
     ).one()
 
-    direct_component = FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE
-    if staff_id is not None:
-        direct_component = or_(
-            and_(
-                FinancialTransaction.sold_item_type == GOODS_SOLD_ITEM_TYPE,
-                _financial_staff_attribution_condition(staff_id),
-            ),
-            and_(
-                _personal_account_condition(),
-                _financial_staff_attribution_condition(staff_id),
-            ),
-        )
-    else:
-        direct_component = or_(direct_component, _personal_account_condition())
+    direct_component = or_(*_direct_revenue_classifiers(staff_id))
     direct_conditions = [
         FinancialTransaction.date.is_not(None),
         FinancialTransaction.date <= now,
@@ -351,7 +346,7 @@ async def _year_over_year_source_states(
         await db.execute(
             select(SyncSourceState).where(
                 SyncSourceState.company_id.in_(scope_company_ids),
-                SyncSourceState.source.in_(YOY_ANNUAL_SOURCES),
+                SyncSourceState.source.in_(YOY_SOURCES),
             )
         )
     ).scalars().all()
@@ -363,7 +358,7 @@ def _year_over_year_missing_sources(
     scope_company_ids: list[int],
     period_start: date,
     period_end: date,
-    required_sources: tuple[str, ...] = YOY_ANNUAL_SOURCES,
+    required_sources: tuple[str, ...] = YOY_SOURCES,
     appointment_dependencies: dict[int, tuple[date, date]] | None = None,
     reporting_windows: dict[int, ReportingWindow] | None = None,
 ) -> list[str]:
@@ -414,12 +409,10 @@ def _mask_unknown_year_metrics(
     missing = set(missing_sources)
     appointments_known = 'appointments_detail' not in missing
     financials_known = 'financial_transactions_detail' not in missing
-    goods_known = 'goods_transactions_detail' not in missing
 
     if not appointments_known:
         for metric in (
             'appointments',
-            'service_count',
             'extra_service_count',
             'unique_clients',
             'visits_per_client',
@@ -435,16 +428,9 @@ def _mask_unknown_year_metrics(
             'service_revenue',
             'goods_revenue',
             'topup_revenue',
-            'extra_service_revenue',
             'avg_check',
         ):
             row[metric] = None
-
-    if not goods_known:
-        row['goods_count'] = None
-    if 'staff_schedules' in missing:
-        row['extra_service_count'] = None
-        row['extra_service_revenue'] = None
 
 
 def _year_periods(activity_start: date, report_end: date) -> list[dict[str, Any]]:
@@ -488,10 +474,7 @@ def _year_row(
         'goods_revenue': float(annual.get('goods_revenue') or 0),
         'topup_revenue': float(annual.get('topup_revenue') or 0),
         'appointments': appointments,
-        'service_count': float(annual.get('service_count') or 0),
-        'goods_count': float(annual.get('goods_count') or 0),
         'extra_service_count': float(annual.get('extra_service_count') or 0),
-        'extra_service_revenue': float(annual.get('extra_service_revenue') or 0),
         'unique_clients': unique_clients,
         # No completed visits means no average check, visits per client or OPZ rate; a zero would draw a real bar.
         'avg_check': revenue / appointments if appointments else None,
@@ -538,7 +521,7 @@ def _monthly_yoy_rows(
                 scope_company_ids,
                 slice_start,
                 slice_end,
-                YOY_MONTHLY_SOURCES,
+                YOY_SOURCES,
                 (appointment_dependencies or {}).get(month),
                 reporting_windows,
             )
@@ -660,6 +643,67 @@ def _with_year_changes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+# (metric, series label, format, (by-year chart id and title, month-by-month chart id and title))
+YEAR_OVER_YEAR_CHART_METRICS = (
+    (
+        'revenue', 'Выручка', MONEY_FORMAT,
+        ('year_revenue', 'Выручка по годам', 'monthly_revenue_yoy', 'Помесячная выручка год к году'),
+    ),
+    (
+        'appointments', 'Визиты', NUMBER_FORMAT,
+        ('year_appointments', 'Визиты по годам', 'monthly_appointments_yoy', 'Помесячные визиты год к году'),
+    ),
+    (
+        'avg_check', 'Средний чек', MONEY_FORMAT,
+        ('year_avg_check', 'Средний чек по годам', 'monthly_avg_check_yoy', 'Помесячный средний чек год к году'),
+    ),
+    (
+        'opz_qty', 'ОПЗ', NUMBER_FORMAT,
+        ('year_opz', 'ОПЗ по годам', 'monthly_opz_yoy', 'Помесячные ОПЗ год к году'),
+    ),
+    (
+        'opz_pct', 'ОПЗ %', PERCENT_FORMAT,
+        ('year_opz_pct', 'ОПЗ % по годам', 'monthly_opz_pct_yoy', 'Помесячный ОПЗ % год к году'),
+    ),
+)
+
+
+def _year_and_month_charts(
+    year_rows: list[dict[str, Any]],
+    monthly_by_year: dict[int, list[dict[str, Any]]],
+    metric: str,
+    label: str,
+    fmt: str,
+    ids: tuple[str, str, str, str],
+    skip_empty_years: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A metric by year (bars) next to its month-by-month year-over-year lines.
+
+    With `skip_empty_years` a year with no value in any month is left off the lines, and the
+    remaining ones keep the colour they would have had, so they match the neighbouring charts.
+    """
+    year_id, year_title, month_id, month_title = ids
+    series = []
+    for position, year in enumerate(sorted(monthly_by_year)):
+        values = [row[metric] for row in monthly_by_year[year]]
+        if skip_empty_years and all(value is None for value in values):
+            continue
+        item = {'label': str(year), 'data': values, 'format': fmt}
+        if skip_empty_years:
+            item['colorIndex'] = position
+        series.append(item)
+    return (
+        chart(
+            year_id,
+            year_title,
+            'bar',
+            [str(row['year']) for row in year_rows],
+            [{'label': label, 'data': [row[metric] for row in year_rows], 'format': fmt}],
+        ),
+        chart(month_id, month_title, 'line', [f'{month:02d}' for month in range(1, 13)], series),
+    )
+
+
 async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
     base = req.base
     db = req.db
@@ -752,7 +796,6 @@ async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
         )
 
     year_rows = _with_year_changes(year_rows)
-    months = [f'{month:02d}' for month in range(1, 13)]
     monthly_rows = [
         row
         for year in sorted(monthly_by_year)
@@ -796,164 +839,39 @@ async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
     # The grid is two columns wide, so each metric is a row: by year on the left, its
     # month-by-month year-over-year comparison on the right.
     base['charts'] = [
-        chart(
-            'year_revenue',
-            'Выручка по годам',
-            'bar',
-            [str(row['year']) for row in year_rows],
-            [{'label': 'Выручка', 'data': [row['revenue'] for row in year_rows], 'format': MONEY_FORMAT}],
-        ),
-        chart(
-            'monthly_revenue_yoy',
-            'Помесячная выручка год к году',
-            'line',
-            months,
-            [
-                {
-                    'label': str(year),
-                    'data': [row['revenue'] for row in monthly_by_year[year]],
-                    'format': MONEY_FORMAT,
-                }
-                for year in sorted(monthly_by_year)
-            ],
-        ),
-        chart(
-            'year_appointments',
-            'Визиты по годам',
-            'bar',
-            [str(row['year']) for row in year_rows],
-            [{'label': 'Визиты', 'data': [row['appointments'] for row in year_rows], 'format': NUMBER_FORMAT}],
-        ),
-        chart(
-            'monthly_appointments_yoy',
-            'Помесячные визиты год к году',
-            'line',
-            months,
-            [
-                {
-                    'label': str(year),
-                    'data': [row['appointments'] for row in monthly_by_year[year]],
-                    'format': NUMBER_FORMAT,
-                }
-                for year in sorted(monthly_by_year)
-            ],
-        ),
-        chart(
-            'year_avg_check',
-            'Средний чек по годам',
-            'bar',
-            [str(row['year']) for row in year_rows],
-            [{
-                'label': 'Средний чек',
-                'data': [row['avg_check'] for row in year_rows],
-                'format': MONEY_FORMAT,
-            }],
-        ),
-        chart(
-            'monthly_avg_check_yoy',
-            'Помесячный средний чек год к году',
-            'line',
-            months,
-            [
-                {
-                    'label': str(year),
-                    'data': [row['avg_check'] for row in monthly_by_year[year]],
-                    'format': MONEY_FORMAT,
-                }
-                for year in sorted(monthly_by_year)
-            ],
-        ),
-        chart(
-            'year_opz',
-            'ОПЗ по годам',
-            'bar',
-            [str(row['year']) for row in year_rows],
-            [{'label': 'ОПЗ', 'data': [row['opz_qty'] for row in year_rows], 'format': NUMBER_FORMAT}],
-        ),
-        chart(
-            'monthly_opz_yoy',
-            'Помесячные ОПЗ год к году',
-            'line',
-            months,
-            [
-                {
-                    'label': str(year),
-                    'data': [row['opz_qty'] for row in monthly_by_year[year]],
-                    'format': NUMBER_FORMAT,
-                }
-                for year in sorted(monthly_by_year)
-            ],
-        ),
-        chart(
-            'year_opz_pct',
-            'ОПЗ % по годам',
-            'bar',
-            [str(row['year']) for row in year_rows],
-            [{'label': 'ОПЗ %', 'data': [row['opz_pct'] for row in year_rows], 'format': PERCENT_FORMAT}],
-        ),
-        chart(
-            'monthly_opz_pct_yoy',
-            'Помесячный ОПЗ % год к году',
-            'line',
-            months,
-            [
-                {
-                    'label': str(year),
-                    'data': [row['opz_pct'] for row in monthly_by_year[year]],
-                    'format': PERCENT_FORMAT,
-                }
-                for year in sorted(monthly_by_year)
-            ],
-        ),
-        # A part with no visits in any year (a history of first visits only) has no rate to plot,
-        # and an all-empty chart reads as a broken one, so its pair of charts and empty years are left out.
-        *(
-            opz_chart
-            for key, title in (('first', 'после первого визита'), ('repeat', 'после повторного визита'))
-            if any(row[f'opz_{key}_visit_pct'] is not None for row in year_rows)
-            for opz_chart in (
-                chart(
+        year_chart
+        for metric, label, fmt, ids in YEAR_OVER_YEAR_CHART_METRICS
+        for year_chart in _year_and_month_charts(year_rows, monthly_by_year, metric, label, fmt, ids)
+    ]
+    # A part with no visits in any year (a history of first visits only) has no rate to plot, and an
+    # all-empty chart reads as a broken one, so its pair of charts and empty years are left out.
+    for key, title in (('first', 'после первого визита'), ('repeat', 'после повторного визита')):
+        metric = f'opz_{key}_visit_pct'
+        if any(row[metric] is not None for row in year_rows):
+            base['charts'].extend(_year_and_month_charts(
+                year_rows,
+                monthly_by_year,
+                metric,
+                'ОПЗ %',
+                PERCENT_FORMAT,
+                (
                     f'year_opz_{key}_visit_pct',
                     f'ОПЗ % {title} по годам',
-                    'bar',
-                    [str(row['year']) for row in year_rows],
-                    [{
-                        'label': 'ОПЗ %',
-                        'data': [row[f'opz_{key}_visit_pct'] for row in year_rows],
-                        'format': PERCENT_FORMAT,
-                    }],
-                ),
-                chart(
                     f'monthly_opz_{key}_visit_pct_yoy',
                     f'Помесячный ОПЗ % {title} год к году',
-                    'line',
-                    months,
-                    [
-                        {
-                            'label': str(year),
-                            'data': [row[f'opz_{key}_visit_pct'] for row in monthly_by_year[year]],
-                            'format': PERCENT_FORMAT,
-                            # A left-out year must not shift the colours of the later ones off
-                            # the neighbouring OPZ charts.
-                            'colorIndex': position,
-                        }
-                        for position, year in enumerate(sorted(monthly_by_year))
-                        if any(row[f'opz_{key}_visit_pct'] is not None for row in monthly_by_year[year])
-                    ],
                 ),
-            )
-        ),
-    ]
+                skip_empty_years=True,
+            ))
     base['tables'] = [
         table(
             'years',
             'Годовые агрегаты',
             without_empty_columns([
                 ('year', 'Год', NUMBER_FORMAT),
-                ('period_start', 'С', 'date'),
-                ('period_end', 'По', 'date'),
-                ('period_status', 'Период', 'text'),
-                ('source_status', 'Покрытие', 'text'),
+                ('period_start', 'С', DATE_FORMAT),
+                ('period_end', 'По', DATE_FORMAT),
+                ('period_status', 'Период', TEXT_FORMAT),
+                ('source_status', 'Покрытие', TEXT_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
                 ('revenue_change_pct', 'Выручка YoY', PERCENT_FORMAT),
                 ('appointments', 'Визиты', NUMBER_FORMAT),
@@ -985,7 +903,7 @@ async def build_year_over_year(req: ReportRequest) -> dict[str, Any]:
             'Помесячные агрегаты',
             without_empty_columns([
                 ('year', 'Год', NUMBER_FORMAT),
-                ('month_label', 'Месяц', 'text'),
+                ('month_label', 'Месяц', TEXT_FORMAT),
                 ('revenue', 'Выручка', MONEY_FORMAT),
                 ('appointments', 'Визиты', NUMBER_FORMAT),
                 ('avg_check', 'Средний чек', MONEY_FORMAT),
@@ -1047,7 +965,7 @@ async def build_payment_methods(req: ReportRequest) -> dict[str, Any]:
         forms.append(('other', 'Прочие кассы'))
 
     def share(value: float | None, revenue: float) -> float | None:
-        return round(value / revenue * 100, 2) if value is not None and revenue else None
+        return percent(value, revenue, 2) if value is not None else None
 
     def positive_or_none(value: float | None) -> float | None:
         return value if value is not None and value >= 0 else None
@@ -1126,7 +1044,7 @@ async def build_payment_methods(req: ReportRequest) -> dict[str, Any]:
             wide=True,
             x_kind='time',
         ))
-    table_columns = [('metric', 'Показатель', 'text')]
+    table_columns = [('metric', 'Показатель', TEXT_FORMAT)]
     # Shares first: the structure is what the report is read for, the roubles back it up.
     # Branch titles are long column headers, so they wrap instead of stretching the table.
     base['tables'] = [

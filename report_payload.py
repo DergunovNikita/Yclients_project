@@ -16,6 +16,8 @@ MONEY_FORMAT = 'money'
 NUMBER_FORMAT = 'number'
 PERCENT_FORMAT = 'percent'
 DECIMAL_FORMAT = 'decimal'
+TEXT_FORMAT = 'text'
+DATE_FORMAT = 'date'
 # Label of the row that collects records without a staff member.
 NO_MASTER = 'Без мастера'
 
@@ -33,10 +35,6 @@ class ReportInputError(ValueError):
 class ReportCalculationError(RuntimeError):
     """Raised when a report cannot produce any usable payload."""
 
-    def __init__(self, message: str, *, stage: str = 'unknown') -> None:
-        super().__init__(message)
-        self.stage = stage
-
 
 @dataclass(frozen=True)
 class ReportRequest:
@@ -49,7 +47,7 @@ class ReportRequest:
     company_id: int | None
     staff_id: int | None
     granularity: str
-    allowed_company_ids: list[int] | None
+    allowed_company_ids: list[int]
     factual_at: datetime
     period_preset: str | None = None
     # Barber level filter (position ids); set only for reports that offer it and when no staff is selected.

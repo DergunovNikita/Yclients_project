@@ -489,7 +489,7 @@ assert allowed.status_code == 200, allowed.text
 assert allowed.headers.get('access-control-allow-origin') == 'https://dashboard.example.com'
 assert allowed.headers.get('access-control-allow-credentials') == 'true'
 allowed_methods = allowed.headers.get('access-control-allow-methods', '')
-for method in ('GET', 'POST', 'PATCH', 'DELETE'):
+for method in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE'):
     assert method in allowed_methods, allowed_methods
 allowed_headers = allowed.headers.get('access-control-allow-headers', '').lower()
 for header in ('content-type', 'x-csrf-token', 'x-portal-account-id', 'x-api-key'):
@@ -510,7 +510,7 @@ blocked_method = client.options(
     '/health',
     headers={
         'Origin': 'https://dashboard.example.com',
-        'Access-Control-Request-Method': 'PUT',
+        'Access-Control-Request-Method': 'TRACE',
     },
 )
 assert blocked_method.status_code == 400
@@ -652,3 +652,10 @@ def test_public_registration_defaults_enabled_only_for_local_and_test():
     production_result = _run_import_config(production_env)
     assert production_result.returncode == 0, production_result.stderr
     assert production_result.stdout.strip() == 'False'
+
+
+def test_cors_allows_every_method_the_dashboard_uses():
+    import config
+
+    # PUT carries /dashboard/metric-visibility and /dashboard/branch-order.
+    assert set(config.DASHBOARD_CORS_ALLOW_METHODS) == {'GET', 'POST', 'PUT', 'PATCH', 'DELETE'}

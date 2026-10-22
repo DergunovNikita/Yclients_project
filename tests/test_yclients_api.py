@@ -465,10 +465,8 @@ def test_authenticate_returns_false_on_a_non_json_reply():
     [
         ('get_groups', ()),
         ('get_service_categories', ('1',)),
-        ('get_positions', ('1',)),
         ('get_staff', ('1',)),
         ('get_accounts', ('1',)),
-        ('get_storages', ('1',)),
         ('get_good_categories', ('1',)),
     ],
 )

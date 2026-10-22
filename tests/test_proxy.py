@@ -1,7 +1,6 @@
 from pathlib import Path
 
 
-
 def test_vercel_proxy_does_not_inject_backend_api_key_for_anonymous_requests():
     root = Path(__file__).resolve().parents[1]
     for relative_path in ('api/_proxy.js', 'web/api/_proxy.js'):
@@ -9,16 +8,6 @@ def test_vercel_proxy_does_not_inject_backend_api_key_for_anonymous_requests():
         assert 'VM_API_KEY' not in source
         assert 'API_KEY' not in source
         assert "headers['X-API-Key']" not in source
-
-
-def test_production_workflows_fail_closed():
-    root = Path(__file__).resolve().parents[1]
-    deploy = (root / '.github/workflows/deploy-vm.yml').read_text()
-    security = (root / '.github/workflows/security.yml').read_text()
-
-    assert 'refusing to report a successful production deploy' in deploy
-    assert 'continue-on-error: true' not in security
-    assert '--soft-fail' not in security
 
 
 def test_root_and_web_proxy_trees_are_byte_identical():

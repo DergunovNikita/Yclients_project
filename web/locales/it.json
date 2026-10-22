@@ -596,7 +596,7 @@
   },
   "admin": {
     "brandSuffix": "Utenti",
-    "backProfile": "Torna all'area personale",
+    "backSettings": "Torna all'area personale",
     "usersTitle": "Utenti della piattaforma",
     "usersSubhead": "Gli utenti della tua rete e sottostanti. Gli utenti con una filiale assegnata compaiono nel filtro «Operatore» della dashboard.",
     "businessNetwork": "Rete aziendale",

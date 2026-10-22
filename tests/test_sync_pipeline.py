@@ -63,7 +63,7 @@ class FakeServicesAPI:
         self._services = services
         self._services_by_category = services_by_category or {}
 
-    def get_services(self, company_id, staff_id=None, category_id=None):
+    def get_services(self, company_id, category_id=None):
         if category_id is not None:
             return self._services_by_category.get(category_id, [])
         return self._services
@@ -137,11 +137,9 @@ SYNC_STEP_FUNCTIONS = (
     'sync_groups_and_companies',
     'sync_service_categories',
     'sync_services',
-    'sync_positions',
     'sync_staff',
     'sync_clients',
     'sync_accounts',
-    'sync_storages',
     'sync_good_categories',
     'sync_goods',
     'sync_records',
@@ -222,7 +220,7 @@ TRANSACTIONAL_WINDOW_TABLES = [
 ]
 
 
-def test_company_window_uses_scoped_checkpoint_first(monkeypatch):
+def test_company_window_uses_scoped_checkpoint_not_a_stale_global_one(monkeypatch):
     monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
     monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2026, 1, 1))
     monkeypatch.setattr(sync_pipeline, 'SYNC_INCREMENTAL', True)
@@ -250,17 +248,26 @@ def test_company_window_uses_scoped_checkpoint_first(monkeypatch):
         )
 
 
-def test_company_window_falls_back_to_global_for_existing_transactional_company(monkeypatch):
+@pytest.mark.parametrize('stale_global_checkpoint', [True, False])
+@pytest.mark.parametrize('mode', ['incremental', 'refresh'])
+def test_company_with_coverage_but_no_scoped_checkpoint_runs_full(monkeypatch, mode, stale_global_checkpoint):
+    """A `full` pass whose only failed step owns no coverage leaves the marker but no checkpoint.
+
+    The branch has rows and certified history, yet nothing says which day it is synced
+    through: reading the retired global checkpoint instead would resume months behind.
+    """
     monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
     monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2026, 1, 1))
     monkeypatch.setattr(sync_pipeline, 'SYNC_INCREMENTAL', True)
     monkeypatch.setattr(sync_pipeline, 'SYNC_LOOKBACK_DAYS', 2)
+    monkeypatch.setattr(sync_pipeline, 'SYNC_REFRESH_DAYS', 90)
 
     with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
         db.add(Appointment(id=1, company_id=1, date=date(2026, 6, 20)))
-        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-30'))
+        if stale_global_checkpoint:
+            db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-30'))
         db.add(SyncState(key=sync_pipeline.historical_coverage_state_key(1), value='2026-06-20'))
         for source in sync_pipeline.FULL_REFRESH_COVERAGE_SOURCES:
             db.add(SyncSourceState(
@@ -271,9 +278,9 @@ def test_company_window_falls_back_to_global_for_existing_transactional_company(
             ))
         db.commit()
 
-        assert sync_pipeline.resolve_company_sync_window(db, date(2026, 7, 1), 'incremental', 1) == (
-            date(2026, 6, 28),
-            'incremental',
+        assert sync_pipeline.resolve_company_sync_window(db, date(2026, 7, 1), mode, 1) == (
+            date(2026, 1, 1),
+            'full',
         )
 
 
@@ -293,25 +300,6 @@ def test_company_window_ignores_global_for_new_company_without_transactional_row
             date(2026, 1, 1),
             'full',
         )
-
-
-@pytest.mark.parametrize(
-    'row',
-    [
-        Appointment(id=1, company_id=1, date=date(2026, 6, 20)),
-        FinancialTransaction(id=1, company_id=1, date=datetime(2026, 6, 20, 12, 0)),
-        GoodTransaction(id=1, company_id=1, date=datetime(2026, 6, 20, 12, 0)),
-        Comment(id=1, company_id=1, date=datetime(2026, 6, 20, 12, 0)),
-    ],
-)
-def test_company_has_transactional_rows_detects_existing_sources(row):
-    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
-        db.add(Group(id=1, title='G1'))
-        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
-        db.add(row)
-        db.commit()
-
-        assert sync_pipeline.company_has_transactional_rows(db, 1) is True
 
 
 def test_limited_window_marker_cannot_certify_complete_history(monkeypatch):
@@ -505,9 +493,7 @@ def test_refresh_window_falls_back_to_full_when_incremental_is_disabled(monkeypa
         assert sync_pipeline.resolve_company_sync_window(
             db, date(2026, 7, 1), 'refresh', 1
         ) == (date(2022, 1, 1), 'full')
-        assert sync_pipeline.resolve_sync_window(
-            db, date(2026, 7, 1), 'refresh'
-        ) == (date(2022, 1, 1), 'full')
+        assert sync_pipeline.resolve_sync_window(date(2026, 7, 1), 'refresh') == (date(2022, 1, 1), 'full')
 
 
 def test_resolve_sync_window_reports_the_refresh_window_for_the_run(monkeypatch):
@@ -517,10 +503,17 @@ def test_resolve_sync_window_reports_the_refresh_window_for_the_run(monkeypatch)
     monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
     monkeypatch.setattr(sync_pipeline, 'SYNC_REFRESH_DAYS', 90)
 
-    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
-        assert sync_pipeline.resolve_sync_window(
-            db, date(2026, 7, 1), 'refresh'
-        ) == (date(2026, 4, 2), 'refresh')
+    assert sync_pipeline.resolve_sync_window(date(2026, 7, 1), 'refresh') == (date(2026, 4, 2), 'refresh')
+
+
+def test_resolve_sync_window_has_no_checkpoint_to_resume_from(monkeypatch):
+    """A run that resolved no branch reports the full history for an incremental request."""
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2022, 1, 1))
+    monkeypatch.setattr(sync_pipeline, 'SYNC_INCREMENTAL', True)
+    monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
+
+    assert sync_pipeline.resolve_sync_window(date(2026, 7, 1), 'incremental') == (date(2022, 1, 1), 'full')
+    assert sync_pipeline.resolve_sync_window(date(2026, 7, 1), 'full') == (date(2022, 1, 1), 'full')
 
 
 def test_refresh_recertifies_coverage_even_when_a_coverageless_step_fails(monkeypatch):
@@ -764,12 +757,12 @@ def test_execute_sync_does_not_certify_incomplete_historical_coverage(monkeypatc
         ) is None
 
 
-def test_execute_sync_uses_global_checkpoint_for_existing_company_without_purge(monkeypatch):
+def test_execute_sync_runs_full_for_coverage_without_scoped_checkpoint(monkeypatch):
     with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
         db.add(Appointment(id=1, company_id=1, date=date(2026, 6, 20)))
-        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-28'))
+        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-28'))  # retired, stale
         db.add(SyncState(key=sync_pipeline.historical_coverage_state_key(1), value='2026-06-20'))
         db.commit()
 
@@ -793,18 +786,17 @@ def test_execute_sync_uses_global_checkpoint_for_existing_company_without_purge(
         result = execute_sync(mode='incremental', end_date=date(2026, 6, 30), portal_account_id=7)
 
         assert result['success'] is True
-        assert result['mode'] == 'incremental'
-        assert result['window_start'] == '2026-06-26'
-        assert purge_calls == []
+        assert result['mode'] == 'full'
+        assert result['window_start'] == sync_pipeline.full_sync_start_date(date(2026, 6, 30)).isoformat()
+        assert purge_calls
         assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
 
 
-def test_execute_sync_forces_one_time_history_backfill_for_legacy_checkpoint(monkeypatch):
+def test_execute_sync_forces_one_time_history_backfill_without_coverage_marker(monkeypatch):
     with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
         db.add(Appointment(id=1, company_id=1, date=date(2023, 2, 10)))
-        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-28'))
         for source in sync_pipeline.FULL_REFRESH_COVERAGE_SOURCES:
             db.add(SyncSourceState(
                 company_id=1,
@@ -883,7 +875,7 @@ def test_execute_sync_does_not_checkpoint_when_full_cleanup_fails(monkeypatch):
         assert cleanup['success'] is False
 
 
-def test_execute_sync_full_refreshes_new_company_even_with_global_checkpoint(monkeypatch):
+def test_execute_sync_full_refreshes_new_company_even_with_stale_global_checkpoint(monkeypatch):
     with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
@@ -1010,7 +1002,7 @@ def test_execute_sync_skips_credentials_without_assigned_companies(monkeypatch):
         monkeypatch.setattr(
             sync_pipeline,
             'resolve_sync_window',
-            lambda _db, _end_date, requested_mode: (date(2026, 6, 28), requested_mode),
+            lambda _end_date, requested_mode: (date(2026, 6, 28), requested_mode),
         )
 
         result = execute_sync(mode='incremental', end_date=date(2026, 6, 30))
@@ -2113,6 +2105,31 @@ def test_sync_staff_marks_missing_staff_as_fired():
         assert db.get(Staff, 900).fired == 0
 
 
+def test_sync_staff_fires_only_crm_rows_and_leaves_mirror_rows_that_share_their_users_id():
+    with sqlite_session_with_system(
+        [Group.__table__, Company.__table__, Staff.__table__, StaffPositionMonth.__table__]
+    ) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add_all([
+            Staff(id=1, external_id=1, source_type='yclients', name='Listed', company_id=1, fired=0),
+            # CRM row of an employee who also has a portal account (staff.id == portal user id).
+            Staff(id=5, external_id=5, source_type='yclients', name='Dismissed', company_id=1, fired=0,
+                  portal_user_id=5),
+            # Mirror row whose id happens to equal its user's id: no external_id, so the portal owns it.
+            Staff(id=7, name='Portal Manager', position='manager', company_id=1, fired=0, portal_user_id=7),
+        ])
+        db.commit()
+
+        api = FakeYClientsAPI([{'id': 1, 'name': 'Listed', 'fired': 0}])
+
+        assert sync_staff(api, db, '1') is True
+
+        assert db.get(Staff, 1).fired == 0
+        assert db.get(Staff, 5).fired == 1
+        assert db.get(Staff, 7).fired == 0
+
+
 def test_sync_staff_ignores_invalid_staff_email():
     with sqlite_session_with_system(
         [Group.__table__, Company.__table__, Staff.__table__, StaffPositionMonth.__table__]
@@ -2827,3 +2844,22 @@ def test_counter_sale_without_a_visit_is_stored_as_unlinked():
                   for r in db.query(FinancialTransaction).all()}
         assert stored[501] is None
         assert stored[502] == 1932171630
+
+
+def test_a_failing_progress_callback_does_not_replace_the_step_result_or_stop_later_steps(capsys):
+    calls = []
+
+    def flaky_callback(event):
+        calls.append(event['message'])
+        if len(calls) == 1:
+            raise RuntimeError('db password=secret')
+
+    results = []
+    first = run_sync_step(results, 'first', lambda: True, progress_callback=flaky_callback)
+    second = run_sync_step(results, 'second', lambda: False, progress_callback=flaky_callback)
+
+    assert (first, second) == (True, False)
+    assert [item['name'] for item in results] == ['first', 'second']
+    assert calls == ['first', 'second']
+    output = capsys.readouterr().out
+    assert 'RuntimeError' in output and 'secret' not in output

@@ -15,7 +15,6 @@ _PUBLIC_AUTH_ACTIONS = (
     'verify-email',
     'forgot-password',
     'reset-password',
-    'resend-verification',
 )
 
 # The auth router is mounted twice, under `/auth` and `/dashboard/auth`.

@@ -319,7 +319,6 @@ async def test_yandex_pay_is_carved_out_of_cashless_for_whole_months(client, see
     assert beta['yandex_pay_missing_months'] == ['2026-08']
     assert alpha['yandex_pay_missing_months'] == []
     assert breakdown['yandex_pay_applied'] is True
-    assert breakdown['countable_months'] == ['2026-08']
     warnings = [note['title'] for note in payload['notes'] if note['kind'] == 'warning']
     assert warnings == ['Яндекс Пэй введён не за все месяцы']
     shares = {row['metric']: row for row in _table(payload, 'payment_shares')['rows']}
@@ -1146,11 +1145,16 @@ async def test_monthly_rows_sum_to_the_branch_table_and_apply_yandex_pay_per_mon
     july, august = breakdown['monthly']
     assert (july['month'], august['month']) == ('2026-07', '2026-08')
     # Nothing entered for July: unknown, and the cashless stays whole.
-    assert july['yandex_pay'] is None and july['cashless'] == july['cashless_yclients'] == 100.0
+    assert july['yandex_pay'] is None and july['cashless'] == 100.0
     assert august['yandex_pay'] == 700.5
-    assert august['cashless'] == pytest.approx(august['cashless_yclients'] - 700.5)
-    for key in ('revenue', 'cash', 'cashless_yclients', 'other'):
+    parts = august['cash'] + august['cashless'] + august['yandex_pay'] + august['other']
+    assert august['revenue'] == pytest.approx(parts)
+    for key in ('revenue', 'cash', 'other'):
         assert july[key] + august[key] == pytest.approx(sum(branch[key] for branch in breakdown['branches']))
+    # Months carry Yandex Pay netted out of the cashless; put back, they add up to the branches' YClients cashless.
+    assert july['cashless'] + august['cashless'] + august['yandex_pay'] == pytest.approx(
+        sum(branch['cashless_yclients'] for branch in breakdown['branches'])
+    )
     assert july['revenue'] == pytest.approx(12470.0) and august['revenue'] == pytest.approx(5300.0)
     assert breakdown['yandex_pay_applied'] is True
 
@@ -1167,7 +1171,8 @@ async def test_a_partial_edge_month_gets_no_yandex_pay_while_the_others_do(seede
     # The table is all-or-nothing, the trend decides month by month.
     assert breakdown['yandex_pay_applied'] is False
     assert all(branch['yandex_pay'] is None for branch in breakdown['branches'])
-    assert july['yandex_pay'] is None and july['cashless'] == july['cashless_yclients']
+    assert july['yandex_pay'] is None
+    assert july['cashless'] == pytest.approx(july['revenue'] - july['cash'] - july['other'])
     assert august['yandex_pay'] == 600.0
 
     month_to_date = await payment_methods.fetch_payment_breakdown(

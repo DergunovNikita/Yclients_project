@@ -596,7 +596,7 @@
   },
   "admin": {
     "brandSuffix": "Users",
-    "backProfile": "Back to account",
+    "backSettings": "Back to account",
     "usersTitle": "Platform users",
     "usersSubhead": "The users of your network and below. Users with an assigned branch appear in the “Employee” filter on the dashboard.",
     "businessNetwork": "Business network",

@@ -1,8 +1,10 @@
-from datetime import date, datetime
+import asyncio
+from datetime import date
 
 import httpx
 import pytest
 
+from clock import utcnow
 import yclients_analytics
 from models import Company, Group, PortalAccount, PortalBranch, Staff, YClientsCredentialCompany
 from yclients_credentials import new_credential
@@ -63,7 +65,7 @@ class FakeAsyncClient:
 async def _seed_db_credentials(async_session, monkeypatch, company_ids=(1, 2)):
     monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-analytics-key')
     async_session.add(Group(id=1, title='Group'))
-    async_session.add(PortalAccount(id=1, label='Tenant', created_at=datetime.utcnow()))
+    async_session.add(PortalAccount(id=1, label='Tenant', created_at=utcnow()))
     for company_id in company_ids:
         async_session.add(
             Company(id=company_id, external_id=100 + company_id, title=f'Company {company_id}', group_id=1)
@@ -121,13 +123,37 @@ async def test_fetch_record_stats_requires_credentials(async_session):
 
 
 @pytest.mark.asyncio
-async def test_fetch_record_stats_requires_database_session():
-    with pytest.raises(yclients_analytics.YClientsAnalyticsError, match='Database session is required'):
+async def test_fetch_record_stats_cancels_sibling_requests_when_one_company_fails(async_session, monkeypatch):
+    started = asyncio.Event()
+    cancelled = []
+
+    class OneFailsClient(FakeAsyncClient):
+        async def get(self, url, *, headers, params):
+            if '/company/101/' in url:
+                # Fail only once the sibling is in flight, so there is something left to cancel.
+                await started.wait()
+                raise httpx.ReadTimeout('timed out', request=httpx.Request('GET', url))
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.append(url)
+                raise
+
+    await _seed_db_credentials(async_session, monkeypatch)
+    monkeypatch.setattr(yclients_analytics.httpx, 'AsyncClient', OneFailsClient)
+    tasks_before = asyncio.all_tasks()
+
+    with pytest.raises(yclients_analytics.YClientsAnalyticsError):
         await yclients_analytics.fetch_record_stats(
-            [1],
+            [1, 2],
             date(2026, 6, 1),
             date(2026, 6, 30),
+            db=async_session,
         )
+
+    assert len(cancelled) == 1
+    assert asyncio.all_tasks() == tasks_before
 
 
 @pytest.mark.asyncio

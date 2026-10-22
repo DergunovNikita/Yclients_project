@@ -133,19 +133,6 @@ class ServiceLabel(Base):
     )
 
 
-class StaffPositionCatalog(Base):
-    __tablename__ = 'staff_position_catalog'
-
-    company_id = Column(Integer, ForeignKey('companies.id'), primary_key=True)
-    position_id = Column(Integer, primary_key=True)
-    title = Column(String, nullable=False)
-    updated_at = Column(DateTime, nullable=False)
-
-    __table_args__ = (
-        Index('ix_staff_position_catalog_position_id', 'position_id'),
-    )
-
-
 class Staff(Base):
     __tablename__ = 'staff'
 
@@ -156,7 +143,7 @@ class Staff(Base):
     email = Column(String)
     specialization = Column(String)
     position = Column(String, index=True)
-    # YClients position id, the barber "level". No FK: the catalog key is per branch (company_id, position_id).
+    # YClients position id, the barber "level". No FK: the same title can sit under several ids, even in one branch.
     position_id = Column(Integer)
     rating = Column(Float)
     votes_count = Column(Integer)
@@ -220,22 +207,6 @@ class AccountCatalog(Base):
 
     __table_args__ = (
         Index('ix_account_catalog_account_id', 'account_id'),
-    )
-
-
-class StorageCatalog(Base):
-    __tablename__ = 'storage_catalog'
-
-    company_id = Column(Integer, ForeignKey('companies.id'), primary_key=True)
-    storage_id = Column(Integer, primary_key=True)
-    title = Column(String, nullable=False)
-    for_services = Column(Boolean, default=False)
-    for_sale = Column(Boolean, default=False)
-    comment = Column(Text)
-    updated_at = Column(DateTime, nullable=False)
-
-    __table_args__ = (
-        Index('ix_storage_catalog_storage_id', 'storage_id'),
     )
 
 
