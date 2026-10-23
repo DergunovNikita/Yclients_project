@@ -31,6 +31,7 @@
 - `dashboard_service.py` / `dashboard_routes.py` / `dashboard_reports.py` — агрегаты и отчёты продуктового дашборда (JSON)
 - `web/` - Vite MPA: дашборд, отчёты, auth, onboarding, settings и admin
 - `api/` / `web/api/` - варианты same-origin proxy для Vercel deployment
+- `deploy/nginx/api-allowlist.conf` - allowlist маршрутов того же proxy для nginx на VM (генерируется `scripts/nginx-allowlist.mjs`)
 - `docker-compose.yml` - запуск `api`, `worker` и PostgreSQL (на VM); локальная разработка идёт без Docker
 - `sync.sh` - ручной запуск one-shot sync через Docker Compose
 

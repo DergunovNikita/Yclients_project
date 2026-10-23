@@ -48,6 +48,13 @@ const ONBOARDING_ROUTE_RULES = [
   { methods: ['POST'], pattern: /^(credentials|branches)$/ },
 ];
 
+// The rule tables are also read by scripts/nginx-allowlist.mjs, which renders the same allowlist for nginx.
+export const ROUTE_RULES = {
+  auth: AUTH_ROUTE_RULES,
+  dashboard: DASHBOARD_ROUTE_RULES,
+  onboarding: ONBOARDING_ROUTE_RULES,
+};
+
 export function env(name) {
   const value = process.env[name];
   return value && value.trim() ? value.trim() : '';
@@ -145,14 +152,8 @@ function methodsForRules(path, rules) {
 }
 
 export function allowedMethodsForProxyPath(scope, path) {
-  if (scope === 'auth') {
-    return methodsForRules(path, AUTH_ROUTE_RULES);
-  }
-  if (scope === 'dashboard') {
-    return methodsForRules(path, DASHBOARD_ROUTE_RULES);
-  }
-  if (scope === 'onboarding') {
-    return methodsForRules(path, ONBOARDING_ROUTE_RULES);
+  if (Object.hasOwn(ROUTE_RULES, scope)) {
+    return methodsForRules(path, ROUTE_RULES[scope]);
   }
   if (scope === 'health' && path === 'health') {
     return ['GET', 'HEAD'];

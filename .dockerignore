@@ -13,8 +13,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 logs/
-# Not needed at runtime: the SPA ships through Vercel, the tests and docs are for development.
+# Not needed at runtime: the SPA is built in CI and served by Vercel or nginx, the tests and docs are for development.
 web/
 api/
+deploy/
 tests/
 docs/

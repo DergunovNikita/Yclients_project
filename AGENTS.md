@@ -49,7 +49,7 @@ scripts/            — служебные скрипты: `set_reporting_window
                       `merge_mirror_manual_facts` (перенос ручных фактов с зеркальной строки на настоящую, см. «admin и barber»),
                       `backfill_staff_schedules`, `provision_staff_accounts`, `local-db-refresh.sh`, `preflight.sh`, `security-check.sh`,
                       `check.sh` (локальный полный прогон: ruff, pytest, `npm test`, сборка), `dev-env.sh` (окружение `.venv` для оболочки),
-                      `enqueue-sync.py` (поставить задачу через `/sync/trigger`), `sync-log-summary.py` (сводка `sync_*.log`),
+                      `nginx-allowlist.mjs` (allowlist `api/_proxy.js` для nginx → `deploy/nginx/api-allowlist.conf`), `enqueue-sync.py` (поставить задачу через `/sync/trigger`), `sync-log-summary.py` (сводка `sync_*.log`),
                       `report_payload_snapshot.py` (золотой diff ответов отчётов до/после правки), `test_smtp.py` (тестовое письмо)
 
 # Портал (личные кабинеты, multi-tenant)
@@ -1766,7 +1766,37 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
   inline-скриптов, обработчиков `on…=` в разметке, `eval`/`new Function` и скриптов, создаваемых из кода; `web/tests/csp-script-src.test.mjs`
   это проверяет по исходникам. Стили сознательно не ограничены (`style-src` нет) — диалог повторного входа берёт правила из
   `web/src/reauth.css`, а не из встроенного `<style>`, но запрета на них нет.
-- API отдаёт собственный, более строгий CSP (`api.py`); этот касается только статики с Vercel.
+- API отдаёт собственный, более строгий CSP (`api.py`); этот касается только статики (Vercel и nginx на VM).
+
+### Фронтенд на VM: nginx, same-origin
+Рядом с Vercel (пока тот жив) тот же SPA раздаётся nginx на VM: статика из `current` (симлинк на релиз) и `/api/...` прокси на
+`127.0.0.1:8000`, всё на одном хосте. Домен (`*.vercel.app` в РФ закрыт), сертификат, секрет и site-конфиг — только в приватной
+документации; в репозитории хостов и доменов нет.
+
+- **nginx повторяет `api/_proxy.js`, а не «проксирует всё».** Тот же allowlist путей и методов (`auth` / `dashboard` / `onboarding` с `/api`
+  и без него, `GET|HEAD /api/health`; `/sync/*`, `/docs`, `/openapi.json`, `/api/<что-то другое>` не проксируются; 404 для неизвестного пути,
+  405 с `Allow` для известного с чужим методом, тела — те же `{"error","detail"}`, которые SPA узнаёт как «маршрут не обслуживается»).
+  Заголовки запроса — только список из `_proxy.js` (`proxy_pass_request_headers off` + явные `proxy_set_header`): `Authorization`,
+  `X-API-Key`, `X-Sync-Token` до API не доходят. Путь на VM тот же: `auth` → `/dashboard/auth/…`, `onboarding` → `/dashboard/onboarding/…`.
+- **`X-Proxy-Secret` ставит сам nginx, `X-Forwarded-For` / `X-Real-IP` — `$remote_addr` (перезапись, не дописывание).** API верит адресу только
+  вместе с секретом (`client_ip`), поэтому клиентские значения обоих заголовков отбрасываются; значение секрета — то же `PROXY_SHARED_SECRET`,
+  что у Vercel-прокси (`VM_PROXY_SECRET`), новой переменной у API нет. Если перед nginx когда-нибудь встанет CDN, `$remote_addr` нужно
+  заменить на настоящий адрес посетителя (`realip`), иначе лимитер входа сложит всех в одну корзину.
+- **Таймауты: `proxy_read_timeout` 150 с** (как у прежнего nginx перед API; `statement_timeout` 170 с остаётся выше), `client_max_body_size` 4500k
+  (потолок тела у функции Vercel). Падение или таймаут API — JSON 503 / 504 с `detail`, ответ самого API с этими кодами проходит как есть.
+- **Заголовки.** CSP и прочие заголовки `vercel.json` ставятся на статику; у API-локаций свой `add_header`, поэтому они не наследуются (API
+  отдаёт свои, строже), там только HSTS. `expires -1` (HTML — всегда с ревалидацией) на API-локации отключён: иначе он затирает
+  `Cache-Control: private, no-store` API. Длинный кэш (`expires 1y`) — только `/assets/` (хэшированные файлы Vite); остальное без кэша.
+  Rewrites из `vercel.json` (`/settings`, `/reports`, `/reports/*`) — `try_files`. Меняешь `vercel.json` (заголовки, rewrites) — меняй и nginx.
+- **Куки.** Сессия на новом домене отдельная (cookie без `Domain`): при переезде все входят заново. Пути refresh-cookie те же (`/auth`,
+  `/api/auth`), nginx их не переписывает. CORS не нужен (same-origin); `APP_PUBLIC_URL` — база ссылок в письмах, на новый домен его меняют при переключении.
+- **Как доезжает статика.** CI (`deploy-vm.yml`): job Frontend собирает `web/dist` так же, как Vercel (`VITE_API_BASE=/api`; необязательные
+  `VITE_DEMO_ORIGIN`, `VITE_DEMO_AUTOLOGIN`, `VITE_PUBLIC_REGISTRATION` — переменные репозитория, зеркало настроек Vercel) и кладёт в артефакт
+  `web-dist`; job Deploy VM после бэкенда и запуска синка по SSH распаковывает сборку в `releases/.incoming-<релиз>` каталога `VM_WEB_ROOT`
+  (секрет с умолчанием) и только целую переименовывает в `releases/<время>-<sha>`, затем атомарно переставляет симлинк `current` (`mv -T`);
+  хранит пять последних релизов (только что включённый не ротируется, брошенные `.incoming-*` чистятся). Нет каталога на VM — шаг пропускается
+  с notice (Vercel продолжает работать); сбой самого SSH — ошибка шага, а не «каталога нет». nginx перезагружать не нужно. Откат — перекинуть `current` на прежний релиз. Копия allowlist в `/etc/nginx`
+  ставится руками (нужен root); если она отличается от `deploy/nginx/api-allowlist.conf` из репозитория на VM, шаг печатает warning.
 
 ### SQL Safety
 - Прикладные запросы используют SQLAlchemy ORM/Core и параметризованные выражения
@@ -1823,6 +1853,9 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
    вложенных путях обоих скоупов, «the deployment stays within the Vercel function limit» держит лимит в 12 функций и то, что файл-функция только `auth-proxy.js`. Общая таблица скоуп → префикс VM
    (`SCOPE_TARGET_PREFIX`) и обработчик (`createProxyHandler`) живут в `_proxy.js`; `auth-proxy.js` их только использует.
    Ошибки прокси отдают `{error, detail}`.
+   **Тот же маршрут вносится и в nginx** (SPA на VM, см. «Фронтенд на VM»): источник правды — `api/_proxy.js`, а `deploy/nginx/api-allowlist.conf`
+   из него генерируется (`node scripts/nginx-allowlist.mjs > deploy/nginx/api-allowlist.conf`); тест `nginx-allowlist.test.mjs` падает, если файл
+   устарел. Сам site-конфиг nginx лежит в приватной документации.
 
 ### Окна синхронизации: почему одного инкремента мало
 Оплату в YClients нередко проводят задним числом — через день, неделю или месяц после

@@ -86,13 +86,32 @@ jobs:
         working-directory: web
         run: npm run scan:auth-tokens
 
+      # The same build Vercel makes, for the nginx-served copy of the site: the API is same-origin under /api.
+      # The optional VITE_* repository variables mirror the Vercel project's; unset they are empty, which the
+      # sources read as "off".
       - name: Build
         working-directory: web
+        env:
+          VITE_API_BASE: /api
+          VITE_DEMO_ORIGIN: ${{ vars.VITE_DEMO_ORIGIN }}
+          VITE_DEMO_AUTOLOGIN: ${{ vars.VITE_DEMO_AUTOLOGIN }}
+          VITE_PUBLIC_REGISTRATION: ${{ vars.VITE_PUBLIC_REGISTRATION }}
         run: npm run build
 
       - name: Scan build for auth tokens
         working-directory: web
         run: npm run scan:auth-build
+
+      - name: Upload frontend build
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+          # "Re-run all jobs" uploads a second time into the same run; without this the name is already taken.
+          overwrite: true
+          retention-days: 7
 
   deploy-vm:
     name: Deploy VM
@@ -108,6 +127,7 @@ jobs:
       VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
       VM_SSH_PORT: ${{ secrets.VM_SSH_PORT || '22' }}
       VM_PROJECT_DIR: ${{ secrets.VM_PROJECT_DIR || '/opt/yclients_bi_system' }}
+      VM_WEB_ROOT: ${{ secrets.VM_WEB_ROOT || '/var/www/yclients-app' }}
     steps:
       - name: Require VM deploy secrets
         if: env.VM_HOST == '' || env.VM_USER == '' || env.VM_SSH_KEY == ''
@@ -169,4 +189,64 @@ jobs:
           echo "Sync launched detached."
           echo "This job does not wait for it — a green deploy does not mean the sync finished."
           echo "Follow on the VM: tail -f ${project_dir}/${log_path}"
+          REMOTE
+
+      # Static files of the nginx-served site. They go last: the API they talk to is already deployed, and a
+      # failure here must not stop the sync launch above. A VM without the web root has not been set up for
+      # serving the site yet (Vercel still serves it), so that is a notice, not a failure.
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist
+
+      - name: Publish frontend release on VM
+        if: env.VM_HOST != '' && env.VM_USER != '' && env.VM_SSH_KEY != ''
+        run: |
+          set -euo pipefail
+          ssh_vm() {
+            ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" "$VM_USER@$VM_HOST" "$@"
+          }
+          # `test -d` answers 1 for a missing directory; any other failure (ssh itself exits 255) is a real error
+          # and must not read as "not set up yet".
+          status=0
+          ssh_vm "test -d '$VM_WEB_ROOT'" || status=$?
+          if [ "$status" -eq 1 ]; then
+            echo "::notice::No web root on the VM; frontend release skipped."
+            exit 0
+          elif [ "$status" -ne 0 ]; then
+            echo "::error::Could not check the web root on the VM (exit $status)."
+            exit "$status"
+          fi
+          release="$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA::8}"
+          # Unpacked into a dot-directory that rotation and nginx never look at; it becomes a release only whole.
+          partial="$VM_WEB_ROOT/releases/.incoming-$release"
+          tar -C web-dist -czf - . | ssh_vm "rm -rf '$partial' && mkdir -p '$partial' && tar -xzf - -C '$partial'"
+          ssh_vm bash -s -- "$VM_WEB_ROOT" "$release" "$VM_PROJECT_DIR" <<'REMOTE'
+          set -euo pipefail
+          umask 022
+          web_root="$1"
+          release="$2"
+          project_dir="$3"
+          keep=5
+          partial="$web_root/releases/.incoming-$release"
+          target="$web_root/releases/$release"
+          [ -f "$partial/index.html" ] || { echo "Release has no index.html" >&2; exit 1; }
+          chmod -R a+rX "$partial"
+          mv "$partial" "$target"
+          # Atomic switch: nginx resolves the symlink per request, so no reload and no half-copied state.
+          ln -sfn "releases/$release" "$web_root/current.new"
+          mv -Tf "$web_root/current.new" "$web_root/current"
+          # Runs are serialised by the workflow's concurrency group, so leftovers of failed uploads are nobody's.
+          rm -rf "$web_root"/releases/.incoming-*
+          # The release just switched to is never rotated out, whatever its name sorts like.
+          ls -1d "$web_root"/releases/*/ | { grep -vxF "$target/" || true; } | sort -r | tail -n +"$keep" | xargs -r rm -rf
+          echo "Frontend release $release is live; kept: $(ls -1 "$web_root/releases" | tr '\n' ' ')"
+          # The nginx copy of the proxy allowlist is installed by hand (it needs root); a route added to
+          # api/_proxy.js is a 404 on the nginx-served site until it is refreshed and nginx is reloaded.
+          installed=/etc/nginx/yclients-api-allowlist.conf
+          shipped="$project_dir/deploy/nginx/api-allowlist.conf"
+          if [ -f "$installed" ] && [ -f "$shipped" ] && ! cmp -s "$installed" "$shipped"; then
+            echo "::warning::$installed differs from $shipped: install it and reload nginx (RUNBOOK-vm-frontend)."
+          fi
           REMOTE
