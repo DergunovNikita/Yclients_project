@@ -16,7 +16,7 @@ function payloadErrorMessage(payload, fallback) {
   return fallback;
 }
 
-// The bare phrases FastAPI and the Vercel proxy answer for a route the deployment does not serve:
+// The bare phrases FastAPI and the site's nginx answer for a route the deployment does not serve:
 // English text that says nothing to the user, so the localized fallback is shown instead.
 const BARE_ROUTING_MESSAGES = new Set(['not found', 'method not allowed']);
 

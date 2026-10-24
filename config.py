@@ -196,7 +196,7 @@ API_HOST = os.getenv('API_HOST', '0.0.0.0')
 API_PORT = _get_int('API_PORT', 8000)
 API_KEY = os.getenv('API_KEY', '')
 
-# Comma-separated origins for dashboard SPA (e.g. Vercel preview). Empty = no CORS middleware.
+# Comma-separated origins for a dashboard SPA served from another origin. Empty = no CORS middleware.
 DASHBOARD_CORS_ORIGINS = os.getenv('DASHBOARD_CORS_ORIGINS', '')
 DASHBOARD_CORS_ORIGIN_REGEX = os.getenv('DASHBOARD_CORS_ORIGIN_REGEX', '')
 DASHBOARD_CORS_ALLOW_METHODS = ('GET', 'POST', 'PUT', 'PATCH', 'DELETE')
@@ -224,7 +224,7 @@ AUTH_REFRESH_TOKEN_EXPIRE_DAYS = _get_int('AUTH_REFRESH_TOKEN_EXPIRE_DAYS', 30)
 AUTH_MAX_ACTIVE_SESSIONS = _get_int('AUTH_MAX_ACTIVE_SESSIONS', 15)
 # Rotation slides a session's expiry forward; this is the hard ceiling from the day it was created.
 AUTH_SESSION_MAX_AGE_DAYS = _get_int('AUTH_SESSION_MAX_AGE_DAYS', 90)
-# Shared with the Vercel proxy (VM_PROXY_SECRET there). Only a request carrying it is believed
+# Shared with the nginx in front of the API (it sends it as X-Proxy-Secret). Only a request carrying it is believed
 # about the visitor's address in X-Forwarded-For; without it the socket peer is the client.
 PROXY_SHARED_SECRET = os.getenv('PROXY_SHARED_SECRET', '').strip()
 AUTH_REQUIRE_LOGIN = _get_bool('AUTH_REQUIRE_LOGIN', not bool(API_KEY))

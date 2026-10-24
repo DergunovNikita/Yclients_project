@@ -124,7 +124,7 @@ def init_async_database(host: str, port: int, name: str, user: str, password: st
     #     baseline) + max_overflow=15 (burst room for concurrent heavy dashboard reports) = 30,
     #     so API (30) + worker (30) = 60 -- the low end of the ~60-70 ceiling for the two
     #     together, leaving margin for migrations/psql and Postgres's own reserved connections.
-    # statement_timeout=170s (above nginx's 150s and below Vercel's 180s) is what frees a connection
+    # statement_timeout=170s (just above nginx's proxy_read_timeout of 150s) is what frees a connection
     # when the client has given up: Starlette does not cancel a non-streaming handler on disconnect,
     # so an abandoned slow report would otherwise hold its pooled connection to the end, and ~30 of
     # them (the whole pool) starve /auth/me. The limit applies per statement and, on the extended

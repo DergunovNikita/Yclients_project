@@ -57,7 +57,7 @@ else
   fail "pytest fast subset failed"
 fi
 
-# 4) auth frontend/proxy runtime tests, if local Node/npm are available
+# 4) auth frontend runtime tests, if local Node/npm are available
 if [[ -x "$LOCAL_BIN/node" && -x "$LOCAL_BIN/npm" ]]; then
   info "npm run test:auth"
   if (cd web && "$LOCAL_BIN/npm" run test:auth); then

@@ -10,13 +10,17 @@ const sources = (dir) => readdirSync(new URL(dir, root), { recursive: true })
   .filter((name) => name.endsWith('.js'))
   .map((name) => [`${dir}${name}`, readFileSync(new URL(`${dir}${name}`, root), 'utf8')]);
 
-test('both Vercel configs send script-src self', () => {
-  for (const path of ['../vercel.json', 'vercel.json']) {
-    const config = JSON.parse(readFileSync(new URL(path, root), 'utf8'));
-    const csp = config.headers.flatMap((entry) => entry.headers).find((header) => header.key === 'Content-Security-Policy');
-    assert.match(csp.value, /(^|; )script-src 'self'(;|$)/, path);
-    assert.doesNotMatch(csp.value, /unsafe-inline|unsafe-eval/, path);
-  }
+// What nginx serves with every page: the header snippet the site config includes.
+const headers = new Map(
+  [...readFileSync(new URL('../deploy/nginx/static-headers.conf', root), 'utf8').matchAll(/^add_header (\S+) "([^"]*)" always;$/gm)]
+    .map(([, name, value]) => [name, value]),
+);
+
+test('the served static headers send script-src self', () => {
+  const csp = headers.get('Content-Security-Policy');
+  assert.match(csp, /(^|; )script-src 'self'(;|$)/);
+  assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval/);
+  assert.match(csp, /(^|; )frame-ancestors 'none'(;|$)/);
 });
 
 test('every page runs only external module scripts and carries no inline handler', () => {

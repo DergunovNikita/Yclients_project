@@ -1,5 +1,5 @@
-import json
 import os
+import re
 import subprocess
 import sys
 
@@ -546,7 +546,7 @@ print('ok')
     assert result.stdout.strip().splitlines()[-1] == 'ok'
 
 
-def test_vercel_configs_define_security_headers():
+def test_static_headers_snippet_defines_security_headers():
     expected = {
         'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'self'; object-src 'none'; script-src 'self'",
         'Referrer-Policy': 'strict-origin-when-cross-origin',
@@ -554,19 +554,12 @@ def test_vercel_configs_define_security_headers():
         'X-Frame-Options': 'DENY',
     }
 
-    for path in ('vercel.json', 'web/vercel.json'):
-        with open(path, encoding='utf-8') as handle:
-            config = json.load(handle)
-        headers = config.get('headers') or []
-        assert headers, f'{path} must define Vercel security headers'
-        merged = {
-            item['key']: item['value']
-            for section in headers
-            for item in section.get('headers', [])
-        }
-        for key, value in expected.items():
-            assert merged.get(key) == value
-        assert 'Strict-Transport-Security' not in merged
+    with open('deploy/nginx/static-headers.conf', encoding='utf-8') as handle:
+        merged = dict(re.findall(r'^add_header (\S+) "([^"]*)" always;$', handle.read(), re.M))
+
+    assert merged == expected
+    # HSTS belongs to the site config, next to the certificate it depends on.
+    assert 'Strict-Transport-Security' not in merged
 
 
 def test_local_and_test_import_allow_local_defaults():

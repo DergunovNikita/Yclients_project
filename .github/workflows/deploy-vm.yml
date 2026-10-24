@@ -58,8 +58,7 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
-  # Mirrors the frontend half of scripts/check.sh. proxy-runtime.test.mjs is what stops a 13th Vercel
-  # function (Hobby plan allows 12) from reaching main.
+  # Mirrors the frontend half of scripts/check.sh.
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
@@ -86,9 +85,8 @@ jobs:
         working-directory: web
         run: npm run scan:auth-tokens
 
-      # The same build Vercel makes, for the nginx-served copy of the site: the API is same-origin under /api.
-      # The optional VITE_* repository variables mirror the Vercel project's; unset they are empty, which the
-      # sources read as "off".
+      # The site is served by the VM's nginx and the API is same-origin under /api. The optional VITE_* repository
+      # variables are build-time settings; unset they are empty, which the sources read as "off".
       - name: Build
         working-directory: web
         env:
@@ -193,7 +191,7 @@ jobs:
 
       # Static files of the nginx-served site. They go last: the API they talk to is already deployed, and a
       # failure here must not stop the sync launch above. A VM without the web root has not been set up for
-      # serving the site yet (Vercel still serves it), so that is a notice, not a failure.
+      # serving the site, so that is a notice, not a failure.
       - name: Download frontend build
         uses: actions/download-artifact@v4
         with:
@@ -242,11 +240,14 @@ jobs:
           # The release just switched to is never rotated out, whatever its name sorts like.
           ls -1d "$web_root"/releases/*/ | { grep -vxF "$target/" || true; } | sort -r | tail -n +"$keep" | xargs -r rm -rf
           echo "Frontend release $release is live; kept: $(ls -1 "$web_root/releases" | tr '\n' ' ')"
-          # The nginx copy of the proxy allowlist is installed by hand (it needs root); a route added to
-          # api/_proxy.js is a 404 on the nginx-served site until it is refreshed and nginx is reloaded.
-          installed=/etc/nginx/yclients-api-allowlist.conf
-          shipped="$project_dir/deploy/nginx/api-allowlist.conf"
-          if [ -f "$installed" ] && [ -f "$shipped" ] && ! cmp -s "$installed" "$shipped"; then
-            echo "::warning::$installed differs from $shipped: install it and reload nginx (RUNBOOK-vm-frontend)."
-          fi
+          # The nginx copies of the route allowlist and the static headers are installed by hand (they need root);
+          # a route added to deploy/nginx/routes.mjs is a 404 on the site until its allowlist is refreshed and nginx
+          # is reloaded.
+          for name in api-allowlist static-headers; do
+            installed="/etc/nginx/yclients-$name.conf"
+            shipped="$project_dir/deploy/nginx/$name.conf"
+            if [ -f "$installed" ] && [ -f "$shipped" ] && ! cmp -s "$installed" "$shipped"; then
+              echo "::warning::$installed differs from $shipped: install it and reload nginx (RUNBOOK-vm-frontend)."
+            fi
+          done
           REMOTE

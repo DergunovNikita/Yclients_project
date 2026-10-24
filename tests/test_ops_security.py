@@ -58,8 +58,8 @@ def test_async_engine_has_a_statement_timeout_and_the_sync_engine_does_not(monke
     database.init_async_database('db.example', 5432, 'yclients_db', 'user', 'pw')
 
     settings = captured['connect_args']['server_settings']
-    # Above nginx's proxy_read_timeout (150 s), below Vercel's maxDuration (180 s).
-    assert 150_000 < int(settings['statement_timeout']) < 180_000
+    # Above nginx's proxy_read_timeout (150 s): the database gives up shortly after nginx has answered 504.
+    assert 150_000 < int(settings['statement_timeout'])
     assert settings['plan_cache_mode'] == 'force_custom_plan'
 
     sync_kwargs = {}

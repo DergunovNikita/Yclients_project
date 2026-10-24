@@ -15,7 +15,7 @@ def test_deploy_waits_for_every_check():
     workflow = (ROOT / '.github/workflows/deploy-vm.yml').read_text()
     needs = workflow.split('  deploy-vm:', 1)[1].split('steps:', 1)[0]
 
-    # A broken frontend/proxy (e.g. a 13th Vercel function) must stop the deploy, not just turn a check red.
+    # A broken frontend (tests, build, token scan) must stop the deploy, not just turn a check red.
     for job in ('secrets-scan', 'test', 'frontend'):
         assert f'- {job}' in needs
 
