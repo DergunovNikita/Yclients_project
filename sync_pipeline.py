@@ -6,7 +6,6 @@ import traceback
 from datetime import date, timedelta, datetime
 from typing import Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from sqlalchemy import or_
 from config import (
     DEFAULT_BRANCH_TIMEZONE,
     DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD,
@@ -35,7 +34,7 @@ from models import (
     Comment, StaffSchedule,
     SyncState, SyncSourceState, YClientsCredential,
 )
-from portal_staff_sync import crm_staff_clause
+from portal_staff_sync import yclients_staff_clause
 from sync_control import SyncControlService
 from sync_parsing import (
     parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_int,
@@ -134,11 +133,17 @@ def load_existing_or_adopt_legacy_source_map(
         for external_id in dict.fromkeys(int(item_id) for item_id in ids if item_id is not None)
         if external_id not in existing
     ]
-    # Rows from before external ids existed carry the YClients id as their primary key.
+    # Rows from before external ids existed carry the YClients id as their primary key. A row of another source
+    # (a portal mirror whose id happens to equal a YClients one) is not that employee and is left alone.
     for batch in chunked(missing, DB_BATCH_SIZE):
         for legacy in (
             db.query(model)
-            .filter(model.id.in_(batch), model.company_id == company_id, model.external_id.is_(None))
+            .filter(
+                model.id.in_(batch),
+                model.company_id == company_id,
+                model.external_id.is_(None),
+                model.source_type == source_type,
+            )
             .all()
         ):
             legacy.external_id = legacy.id
@@ -1108,14 +1113,10 @@ def sync_staff(api: YClientsAPI, db, company_id: str, db_company_id: int | None 
                 active_staff_ids.add(int(obj.id))
                 month_positions[int(obj.id)] = (position_id, position_title)
 
-        # Portal-created rows never appear in the YClients list, so firing every
+        # Portal-created (mirror) rows never appear in the YClients list, so firing every
         # unlisted row made portal managers vanish from «Работник» after each sync.
-        # Their `fired` belongs to the portal, exactly as this branch owns the CRM rows.
-        # A mirror row can land on its own user's id; it has no external_id, so only that tells it from a CRM row.
-        stale_query = db.query(Staff).filter(
-            Staff.company_id == cid,
-            or_(Staff.portal_user_id.is_(None), crm_staff_clause(Staff.portal_user_id)),
-        )
+        # Their `fired` belongs to the portal; rows of YClients, linked to a portal user or not, are fired here.
+        stale_query = db.query(Staff).filter(Staff.company_id == cid, yclients_staff_clause())
         if active_staff_ids:
             stale_query = stale_query.filter(~Staff.id.in_(active_staff_ids))
         stale_query.update({Staff.fired: 1}, synchronize_session=False)

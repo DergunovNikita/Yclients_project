@@ -2004,7 +2004,7 @@ def test_sync_staff_marks_missing_staff_as_fired():
         db.add(Staff(id=1, name='Existing', company_id=1, fired=0))
         db.add(Staff(id=2, name='Stale', company_id=1, fired=0))
         # Portal-created row: absent from YClients by design, fired flag owned by the portal.
-        db.add(Staff(id=900, name='Portal Manager', company_id=1, fired=0, portal_user_id=42))
+        db.add(Staff(id=900, name='Portal Manager', company_id=1, fired=0, portal_user_id=42, source_type='portal'))
         db.commit()
 
         api = FakeYClientsAPI([
@@ -2038,8 +2038,9 @@ def test_sync_staff_fires_only_crm_rows_and_leaves_mirror_rows_that_share_their_
             # CRM row of an employee who also has a portal account (staff.id == portal user id).
             Staff(id=5, external_id=5, source_type='yclients', name='Dismissed', company_id=1, fired=0,
                   portal_user_id=5),
-            # Mirror row whose id happens to equal its user's id: no external_id, so the portal owns it.
-            Staff(id=7, name='Portal Manager', position='manager', company_id=1, fired=0, portal_user_id=7),
+            # Mirror row whose id happens to equal its user's id: marked 'portal', so the portal owns it.
+            Staff(id=7, name='Portal Manager', position='manager', company_id=1, fired=0, portal_user_id=7,
+                  source_type='portal'),
         ])
         db.commit()
 
@@ -2050,6 +2051,74 @@ def test_sync_staff_fires_only_crm_rows_and_leaves_mirror_rows_that_share_their_
         assert db.get(Staff, 1).fired == 0
         assert db.get(Staff, 5).fired == 1
         assert db.get(Staff, 7).fired == 0
+
+
+def test_sync_staff_owns_the_fired_flag_of_a_row_linked_to_an_account_under_any_id():
+    with sqlite_session_with_system(
+        [Group.__table__, Company.__table__, Staff.__table__, StaffPositionMonth.__table__]
+    ) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add_all([
+            Staff(id=1, external_id=1, source_type='yclients', name='Listed', company_id=1, fired=0),
+            # A row of YClients an admin linked to account 42: its id has nothing to do with the account's.
+            Staff(id=2, external_id=2, source_type='yclients', name='Dismissed', company_id=1, fired=0,
+                  portal_user_id=42),
+            Staff(id=3, external_id=3, source_type='yclients', name='Kept', company_id=1, fired=0, portal_user_id=42),
+            Staff(id=900, name='Mirror', position='admin', company_id=1, fired=0, portal_user_id=43,
+                  source_type='portal'),
+        ])
+        db.commit()
+
+        api = FakeYClientsAPI([
+            {'id': 1, 'name': 'Listed', 'fired': 0},
+            {'id': 3, 'name': 'Kept Renamed', 'fired': 0},
+        ])
+
+        assert sync_staff(api, db, '1') is True
+
+        assert db.get(Staff, 2).fired == 1
+        kept = db.get(Staff, 3)
+        assert (kept.fired, kept.name, kept.portal_user_id) == (0, 'Kept Renamed', 42)
+        assert db.get(Staff, 900).fired == 0
+
+
+def test_sync_staff_leaves_a_mirror_made_by_code_that_predates_the_portal_marker():
+    """Between the migration and the restart the old API still inserts mirrors as 'yclients' without external_id."""
+    with sqlite_session_with_system(
+        [Group.__table__, Company.__table__, Staff.__table__, StaffPositionMonth.__table__]
+    ) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add_all([
+            Staff(id=1, external_id=1, source_type='yclients', name='Listed', company_id=1, fired=0),
+            Staff(id=900, name='Old mirror', position='admin', company_id=1, fired=0, portal_user_id=43),
+        ])
+        db.commit()
+
+        assert sync_staff(FakeYClientsAPI([{'id': 1, 'name': 'Listed', 'fired': 0}]), db, '1') is True
+
+        assert db.get(Staff, 900).fired == 0
+
+
+def test_sync_staff_does_not_adopt_a_portal_mirror_whose_id_equals_an_employees():
+    with sqlite_session_with_system(
+        [Group.__table__, Company.__table__, Staff.__table__, StaffPositionMonth.__table__]
+    ) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1))
+        db.add(Staff(id=77, name='Mirror', position='admin', company_id=1, fired=0, portal_user_id=5,
+                     source_type='portal'))
+        db.commit()
+
+        assert sync_staff(FakeYClientsAPI([{'id': 77, 'name': 'Employee', 'fired': 0}]), db, '1') is True
+
+        mirror = db.get(Staff, 77)
+        assert (mirror.name, mirror.source_type, mirror.external_id, mirror.portal_user_id) == (
+            'Mirror', 'portal', None, 5
+        )
+        employee = db.query(Staff).filter(Staff.external_id == 77).one()
+        assert (employee.name, employee.source_type, employee.portal_user_id) == ('Employee', 'yclients', None)
 
 
 def test_sync_staff_ignores_invalid_staff_email():

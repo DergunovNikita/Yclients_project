@@ -10,9 +10,15 @@ from fastapi import HTTPException
 from plan_config import ALL_MONEY_CODES, default_money_codes_for_role
 
 # Roles scoped to a whole branch rather than to one staff row. The complement is what
-# `AccessContext.staff_id` / `staff_keys` are resolved for, so this decides both the
-# manual-fact editors and the `effective_staff_id` clamp on every dashboard endpoint.
+# `AccessContext.staff_id` / `staff_keys` are resolved for, so this decides the manual-fact
+# editors (who may enter which rows), the branch payments and the branch totals of Plan/fact.
 BRANCH_SCOPE_ROLES = ('platform_admin', 'owner', 'branch_admin', 'manager')
+
+# Roles that are not clamped to their own staff row when reading the dashboard: the branch roles
+# and the administrator, who reads every colleague of their branches (money stays per metric).
+# `barber` is the only personal role left. This is read-only visibility; writing manual facts
+# is still decided by `BRANCH_SCOPE_ROLES` / `manual_fact_staff_keys`.
+STAFF_VIEW_ROLES = (*BRANCH_SCOPE_ROLES, 'admin')
 
 
 @dataclass(frozen=True)
@@ -80,14 +86,29 @@ class CompanyScope:
     allowed_company_ids: list[int] | None = None
 
 
-def build_company_scope(ctx: AccessContext, requested_company_id: int | None) -> CompanyScope:
-    """Validate requested branch and return SQL scope for dashboard queries."""
+def build_company_scope(
+    ctx: AccessContext,
+    requested_company_id: int | None,
+    requested_company_ids: frozenset[int] | None = None,
+) -> CompanyScope:
+    """Validate requested branch(es) and return SQL scope for dashboard queries.
+
+    `requested_company_ids` is a chosen group of two or more branches: the network path restricted to it. A
+    single branch always comes as `requested_company_id`, so one chosen branch behaves exactly like the scalar.
+    """
     if ctx.full_access:
+        if requested_company_ids:
+            return CompanyScope(allowed_company_ids=sorted(requested_company_ids))
         return CompanyScope(company_id=requested_company_id)
 
     allowed = ctx.company_ids or []
     if not allowed:
         raise HTTPException(status_code=403, detail='No branch access assigned')
+
+    if requested_company_ids:
+        if not requested_company_ids <= set(allowed):
+            raise HTTPException(status_code=403, detail='Branch not allowed')
+        return CompanyScope(allowed_company_ids=sorted(requested_company_ids))
 
     if requested_company_id is not None:
         if requested_company_id not in allowed:
@@ -107,8 +128,12 @@ def user_branch_ids(ctx: AccessContext) -> tuple[list[int] | None, bool]:
     return ctx.company_ids or [], True
 
 
-def query_scope(ctx: AccessContext, requested_company_id: int | None) -> dict[str, Any]:
-    company_scope = build_company_scope(ctx, requested_company_id)
+def query_scope(
+    ctx: AccessContext,
+    requested_company_id: int | None,
+    requested_company_ids: frozenset[int] | None = None,
+) -> dict[str, Any]:
+    company_scope = build_company_scope(ctx, requested_company_id, requested_company_ids)
     branch_ids, force_allowed = user_branch_ids(ctx)
     return {
         'company_id': company_scope.company_id,
@@ -118,23 +143,43 @@ def query_scope(ctx: AccessContext, requested_company_id: int | None) -> dict[st
     }
 
 
-def effective_staff_id(ctx: AccessContext, requested_staff_id: int | None) -> int | None:
-    """Clamp a personal role to its own staff row.
+def effective_staff_selection(
+    ctx: AccessContext,
+    requested: int | frozenset[int] | None,
+    company_id: int | None = None,
+    allowed_company_ids: list[int] | None = None,
+) -> int | frozenset[int] | None:
+    """Clamp a personal role to its own staff rows inside the resolved branch scope.
 
-    A role outside `BRANCH_SCOPE_ROLES` is personal by definition, so an unresolved staff row
+    A role outside `STAFF_VIEW_ROLES` is personal by definition, so an unresolved staff row
     is a refusal, not a pass. YClients can fire an employee while their portal login stays
     active — `load_portal_user_staff_rows` then returns nothing — and falling through would
     hand that stale login the whole branch instead of one row.
+
+    A person owns one row per branch they work in, so the clamp is a set, narrowed to the request's branch
+    scope (`company_id` or `allowed_company_ids`; the user's own branches when neither is given). Nothing
+    requested gives all those rows: one is returned as an `int`, several as a `frozenset`. A requested person
+    or group must lie inside them, otherwise 403. Roles that view the whole branch (`STAFF_VIEW_ROLES`) and
+    the API key keep what they asked for; the caller still validates it against the branch scope.
     """
-    if ctx.full_access:
-        return requested_staff_id
-    if ctx.staff_id is None:
-        if ctx.role in BRANCH_SCOPE_ROLES:
-            return requested_staff_id
+    if ctx.full_access or ctx.role in STAFF_VIEW_ROLES:
+        return requested
+    if ctx.staff_id is None and not ctx.staff_keys:
         raise HTTPException(status_code=403, detail='No staff row assigned')
-    if requested_staff_id is not None and int(requested_staff_id) != int(ctx.staff_id):
+    if ctx.staff_keys:
+        scope_ids = {company_id} if company_id is not None else set(
+            allowed_company_ids if allowed_company_ids is not None else ctx.company_ids or []
+        )
+        own = {int(staff_id) for row_company_id, staff_id in ctx.staff_keys if row_company_id in scope_ids}
+    else:
+        own = {int(ctx.staff_id)}
+    if not own:
+        raise HTTPException(status_code=403, detail='No staff row assigned')
+    if requested is None:
+        return next(iter(own)) if len(own) == 1 else frozenset(own)
+    if not ({int(requested)} if isinstance(requested, int) else set(requested)) <= own:
         raise HTTPException(status_code=403, detail='Staff member not allowed')
-    return int(ctx.staff_id)
+    return requested
 
 
 def manual_fact_staff_keys(ctx: AccessContext) -> frozenset[tuple[int, int]] | None:
@@ -174,10 +219,11 @@ def can_view_financials(ctx: AccessContext) -> bool:
 def can_view_branch_payments(ctx: AccessContext) -> bool:
     """Whether the principal may see branch-level payment totals and enter Yandex Pay.
 
-    Revenue visibility alone is not enough: `admin`/`barber` are clamped to their own staff row,
-    and branch cash/cashless totals would reveal what that clamp hides even when the owner has
-    opened `revenue` for them. One predicate guards the report catalog, the report data, the
-    editor and the `/auth/me` flag, so the four never disagree.
+    Revenue visibility alone is not enough: `admin`/`barber` are not branch-level roles. Branch
+    cash/cashless totals are owner-side reporting that an administrator, who reads colleagues'
+    counts but not revenue, must not get just because the owner opened `revenue`. One predicate
+    guards the report catalog, the report data, the editor and the `/auth/me` flag, so the four
+    never disagree.
     """
     return ctx.full_access or (ctx.role in BRANCH_SCOPE_ROLES and can_view_financials(ctx))
 

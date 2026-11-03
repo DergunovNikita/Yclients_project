@@ -12,7 +12,9 @@ from typing import Any
 from dashboard_service import (
     COMPLETED_ATTENDANCE,
     _appointment_factual_at_condition,
+    StaffSelection,
     _company_scope_clause,
+    _staff_match,
     business_appointment_condition,
     reporting_window_clause,
 )
@@ -24,7 +26,7 @@ def appointment_conditions(
     start: date | None,
     end: date,
     company_id: int | None,
-    staff_id: int | None,
+    staff_id: StaffSelection | None,
     *,
     attended_only: bool = False,
     allowed_company_ids: list[int] | None = None,
@@ -48,7 +50,7 @@ def appointment_conditions(
     if scope is not None:
         conditions.append(scope)
     if staff_id is not None:
-        conditions.append(Appointment.staff_id == staff_id)
+        conditions.append(_staff_match(Appointment.staff_id, staff_id))
     return conditions
 
 

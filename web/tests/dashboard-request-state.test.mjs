@@ -18,8 +18,8 @@ import {
   reportPeriodIsValid,
   reportRequestFilters,
   reportStaffApplies,
-  staffSelectionForOptions,
   reportSearchParams,
+  scopeParams,
   chartTooltipValue,
   reportFilterVisibility,
   reportScopedFilterAllowsLoad,
@@ -331,6 +331,10 @@ test('a deep-linked branch or staff never degrades to a broader scope', () => {
   assert.equal(reportScopedFilterAllowsLoad('17', false, []), false);
   assert.equal(reportScopedFilterAllowsLoad('17', true, [17, 18]), true);
   assert.equal(reportScopedFilterAllowsLoad('17', true, [18]), false);
+  // A list is allowed only as a whole: one branch of the link that is not offered blocks it.
+  assert.equal(reportScopedFilterAllowsLoad(['17', '18'], true, [17, 18, 19]), true);
+  assert.equal(reportScopedFilterAllowsLoad(['17', '20'], true, [17, 18, 19]), false);
+  assert.equal(reportScopedFilterAllowsLoad([], false, []), true);
 });
 
 test('slow warning keeps retry action and timeout aborts the request', () => {
@@ -391,14 +395,14 @@ test('tableHasRows detects data across plain rows and ranking metrics', () => {
 
 test('a report link carries the whole filter state, not just what it mentions', () => {
   const full = reportFiltersFromParams(new URLSearchParams(
-    'start_date=2026-08-01&end_date=2026-08-31&company_id=7&staff_id=42'
+    'start_date=2026-08-01&end_date=2026-08-31&company_ids=7,8&staff_ids=42,43'
     + '&granularity=month&compare_start_date=2025-08-01&compare_end_date=2025-08-31',
   ));
   assert.deepEqual(full, {
     start_date: '2026-08-01',
     end_date: '2026-08-31',
-    company_id: '7',
-    staff_id: '42',
+    company_ids: '7,8',
+    staff_ids: '42,43',
     granularity: 'month',
     staff_position_ids: '',
     compare_start_date: '2025-08-01',
@@ -410,8 +414,8 @@ test('a report link carries the whole filter state, not just what it mentions', 
   // Going back to an entry that named no branch, staff or comparison must drop them
   // rather than inherit the filters of the report being left behind.
   const bare = reportFiltersFromParams(new URLSearchParams('start_date=2026-08-01'));
-  assert.equal(bare.company_id, '');
-  assert.equal(bare.staff_id, '');
+  assert.equal(bare.company_ids, '');
+  assert.equal(bare.staff_ids, '');
   assert.equal(bare.compare_start_date, '');
   assert.equal(bare.compare_enabled, false);
   assert.equal(bare.granularity, 'day');
@@ -427,12 +431,27 @@ test('a report link carries the whole filter state, not just what it mentions', 
   );
 });
 
+test('links written before the filters became lists still open, as a list of one', () => {
+  const old = reportFiltersFromParams(new URLSearchParams('start_date=2026-08-01&company_id=7&staff_id=42'));
+  assert.equal(old.company_ids, '7');
+  assert.equal(old.staff_ids, '42');
+  // Written again, the link carries the lists.
+  const rewritten = reportSearchParams(old);
+  assert.equal(rewritten.get('company_ids'), '7');
+  assert.equal(rewritten.get('staff_ids'), '42');
+  assert.equal(rewritten.has('company_id'), false);
+  assert.equal(rewritten.has('staff_id'), false);
+  // The list wins when a link somehow holds both; repeats and blanks are dropped.
+  const both = reportFiltersFromParams(new URLSearchParams('company_id=1&company_ids=7,,8,7'));
+  assert.equal(both.company_ids, '7,8');
+});
+
 test('a report link reads back exactly what it was written from', () => {
   const filters = {
     start_date: '2026-08-01',
     end_date: '2026-08-31',
-    company_id: '7',
-    staff_id: '42',
+    company_ids: '7,8',
+    staff_ids: '42,43',
     granularity: 'month',
     staff_position_ids: '',
     compare_start_date: '2025-08-01',
@@ -517,7 +536,7 @@ test('a period caught mid-edit never reaches the address bar', () => {
   const valid = {
     start_date: '2026-08-01',
     end_date: '2026-08-31',
-    company_id: '7',
+    company_ids: '7',
     granularity: 'month',
   };
   assert.equal(reportPeriodIsValid(valid), true);
@@ -532,7 +551,7 @@ test('a period caught mid-edit never reaches the address bar', () => {
   // Every link — the report's and the catalog's alike — is written through this one rule.
   assert.equal(
     reportLinkSearch({ filters: valid, currentSearch }),
-    'start_date=2026-08-01&end_date=2026-08-31&company_id=7&granularity=month',
+    'start_date=2026-08-01&end_date=2026-08-31&company_ids=7&granularity=month',
   );
   assert.equal(
     reportLinkSearch({ filters: { ...valid, start_date: '2026-09-30', end_date: '2026-09-01' }, currentSearch }),
@@ -554,17 +573,6 @@ test('a period caught mid-edit never reaches the address bar', () => {
   );
 });
 
-test('a staff link keeps its employee only while that branch still has them', () => {
-  // The select reports '' for an id whose option has not been rendered yet, so the
-  // selection is decided against the ids that are about to be rendered instead.
-  assert.equal(staffSelectionForOptions('42', [7, 42, 99]), '42');
-  assert.equal(staffSelectionForOptions(42, ['42']), '42');
-  // An employee of another branch falls back to the whole branch, deliberately.
-  assert.equal(staffSelectionForOptions('42', [7, 99]), '');
-  assert.equal(staffSelectionForOptions('42', []), '');
-  assert.equal(staffSelectionForOptions('', [7, 42]), '');
-});
-
 test('every report filter reaches the link and comes back', () => {
   // The request, the link and the parser walk REPORT_FILTER_KEYS, so a filter added to it
   // cannot reach the request while quietly falling out of the link a user shares.
@@ -581,7 +589,7 @@ test('a report that hides the period is run and linked with a valid one', () => 
   const inherited = {
     start_date: '2026-09-30',
     end_date: '2026-09-01',
-    company_id: '7',
+    company_ids: '7',
     granularity: 'day',
   };
   const fallbackPeriod = { start: '2026-08-01', end: '2026-08-31' };
@@ -599,7 +607,7 @@ test('a report that hides the period is run and linked with a valid one', () => 
   });
   assert.equal(substituted.start_date, '2026-08-01');
   assert.equal(substituted.end_date, '2026-08-31');
-  assert.equal(substituted.company_id, '7');
+  assert.equal(substituted.company_ids, '7');
   // Valid, so the report is neither blocked nor left with a frozen link that would drop
   // the branch the user picked.
   assert.equal(reportPeriodIsValid(substituted), true);
@@ -611,10 +619,10 @@ test('a report that hides the period still publishes the filters the user did pi
   const inverted = {
     start_date: '2026-09-05',
     end_date: '2026-08-31',
-    company_id: '7',
+    company_ids: '7',
     granularity: 'day',
   };
-  const currentSearch = 'start_date=2026-09-05&end_date=2026-08-31&company_id=5&granularity=day';
+  const currentSearch = 'start_date=2026-09-05&end_date=2026-08-31&company_ids=5&granularity=day';
 
   // A report that shows the period keeps the last valid link while the range is inverted —
   // the user can see the dates and fix them.
@@ -626,7 +634,7 @@ test('a report that hides the period still publishes the filters the user did pi
   // One that hides the period cannot be fixed by its user, so freezing its link would strand
   // the branch they switched to in the data while the URL kept advertising the old one.
   const published = reportLinkSearch({ filters: inverted, currentSearch, periodApplies: false });
-  assert.equal(published.includes('company_id=7'), true);
+  assert.equal(published.includes('company_ids=7'), true);
   assert.equal(published.includes('start_date=2026-09-05'), true);
 });
 
@@ -637,17 +645,17 @@ test('a report without a staff filter neither asks for one nor links to one', ()
   assert.equal(reportStaffApplies({}), true);
   assert.equal(reportStaffApplies(undefined), true);
 
-  const inherited = { start_date: '2026-09-01', end_date: '2026-09-30', company_id: '7', staff_id: '42' };
-  assert.equal(reportRequestFilters({ filters: inherited, staffApplies: false }).staff_id, '');
-  assert.equal(reportRequestFilters({ filters: inherited }).staff_id, '42');
-  assert.equal(reportRequestFilters({ filters: inherited, staffApplies: false }).company_id, '7');
+  const inherited = { start_date: '2026-09-01', end_date: '2026-09-30', company_ids: '7', staff_ids: '42,43' };
+  assert.equal(reportRequestFilters({ filters: inherited, staffApplies: false }).staff_ids, '');
+  assert.equal(reportRequestFilters({ filters: inherited }).staff_ids, '42,43');
+  assert.equal(reportRequestFilters({ filters: inherited, staffApplies: false }).company_ids, '7');
   const both = reportRequestFilters({
     filters: inherited,
     staffApplies: false,
     periodApplies: false,
     fallbackPeriod: { start: '2026-08-01', end: '2026-08-31' },
   });
-  assert.equal(both.staff_id, '');
+  assert.equal(both.staff_ids, '');
   assert.equal(both.start_date, '2026-08-01');
 });
 
@@ -668,4 +676,35 @@ test('a level rides in the request and the link of a report that offers it, and 
   assert.equal(reportFiltersFromParams(new URLSearchParams(link.toString())).staff_position_ids, '7,12');
   assert.equal(reportSearchParams({ ...filters, staff_position_ids: '' }).has('staff_position_ids'), false);
   assert.equal(reportFiltersFromParams(new URLSearchParams('start_date=2026-08-01')).staff_position_ids, '');
+});
+
+test('the report request carries the chosen branches and people as lists', () => {
+  const filters = { start_date: '2026-08-01', end_date: '2026-08-31', company_ids: '7,8', staff_ids: '42,43' };
+  const params = reportDataParams({ reportId: 'financial_overview', filters, meta: {} });
+  assert.equal(params.company_ids, '7,8');
+  assert.equal(params.staff_ids, '42,43');
+  assert.equal('company_id' in params, false);
+  assert.equal('staff_id' in params, false);
+  // The request leaves out what is empty, the cache key too.
+  assert.equal(reportDataCacheKey(reportDataParams({ reportId: 'x', filters: { ...filters, staff_ids: '' }, meta: {} }))
+    .includes('staff_ids'), false);
+});
+
+test('the Overview and plan/fact ask for the chosen branches, people and levels', () => {
+  const option = (value, selected) => ({ value, selected, dataset: {} });
+  const select = (...entries) => ({ options: entries.map(([value, selected]) => option(value, selected)) });
+  const filter = {
+    branch: select(['1', true], ['2', false], ['3', true]),
+    staff: select(['10', false]),
+    level: select(['7,12', true], ['3', true]),
+  };
+  assert.deepEqual(scopeParams(filter), { company_ids: '1,3', staff_ids: '', staff_position_ids: '3,7,12' });
+  // People win over levels, as on the server.
+  filter.staff = select(['10', true], ['11', true]);
+  assert.deepEqual(scopeParams(filter), { company_ids: '1,3', staff_ids: '10,11', staff_position_ids: '' });
+  // Nothing chosen asks for everything, and a single select (an editor's) reads the same way.
+  assert.deepEqual(
+    scopeParams({ branch: select(['', true], ['5', false]), staff: select(['', true]), level: select(['', true]) }),
+    { company_ids: '', staff_ids: '', staff_position_ids: '' },
+  );
 });

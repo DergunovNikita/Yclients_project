@@ -13,7 +13,7 @@ from typing import Annotated, Any, Callable
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, BeforeValidator, Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,11 +21,11 @@ from auth_deps import forbid_demo, get_dashboard_access
 from auth_hierarchy import USER_ADMIN_ROLES
 from auth_scope import (
     AccessContext,
-    BRANCH_SCOPE_ROLES,
+    STAFF_VIEW_ROLES,
     can_view_branch_payments,
     can_view_financials,
     can_view_report_usage,
-    effective_staff_id,
+    effective_staff_selection,
     hidden_money_codes,
     manual_fact_staff_keys,
     query_scope,
@@ -54,10 +54,13 @@ from dashboard_service import (
     save_service_management,
     save_plan_settings,
     save_manual_facts,
+    fetch_last_shift_days,
     fetch_staff,
     fetch_summary,
     fetch_top_services,
+    StaffSelection,
     level_group_staff_count,
+    staff_filter_echo,
     staff_ids_for_levels,
 )
 from dashboard_reports import (
@@ -298,11 +301,14 @@ def _assert_manual_fact_rows_allowed(
             raise HTTPException(status_code=403, detail='Staff member not allowed')
 
 
-MAX_STAFF_POSITION_IDS = 200
+MAX_FILTER_IDS = 200
 
 
-def _parse_staff_position_ids(raw: str | None) -> frozenset[int] | None:
-    """`staff_position_ids` query value: comma-separated positive ints, `None` when absent or empty."""
+def _parse_id_list(raw: str | None, name: str) -> frozenset[int] | None:
+    """A list query value (`staff_position_ids`, `company_ids`, `staff_ids`): comma-separated positive int32s.
+
+    `None` when absent or empty; repeated ids collapse.
+    """
     if raw is None or not raw.strip():
         return None
     ids: set[int] = set()
@@ -310,17 +316,60 @@ def _parse_staff_position_ids(raw: str | None) -> frozenset[int] | None:
         part = part.strip()
         # The length check comes first: `int()` of a thousands-digit string raises instead of answering.
         if not (part.isascii() and part.isdigit() and len(part) <= 10 and 0 < int(part) <= 2**31 - 1):
-            raise HTTPException(status_code=400, detail='staff_position_ids must be comma-separated positive integers')
+            raise HTTPException(status_code=400, detail=f'{name} must be comma-separated positive integers')
         ids.add(int(part))
-    if len(ids) > MAX_STAFF_POSITION_IDS:
-        raise HTTPException(status_code=400, detail=f'staff_position_ids takes at most {MAX_STAFF_POSITION_IDS} ids')
+    if len(ids) > MAX_FILTER_IDS:
+        raise HTTPException(status_code=400, detail=f'{name} takes at most {MAX_FILTER_IDS} ids')
     return frozenset(ids)
+
+
+def _parse_staff_position_ids(raw: str | None) -> frozenset[int] | None:
+    return _parse_id_list(raw, 'staff_position_ids')
+
+
+def _one_or_group(
+    one: int | None, raw_list: str | None, one_name: str, list_name: str
+) -> tuple[int | None, frozenset[int] | None]:
+    """A filter sent as a scalar or as a list: `(id, None)` for no or one choice, `(None, ids)` for two or more.
+
+    A one-element list is the scalar, so every downstream path (administrator mode, the single-branch view,
+    YClients analytics) is the one the old links already take. Sending both spellings is a 400.
+    """
+    ids = _parse_id_list(raw_list, list_name)
+    if ids is None:
+        return one, None
+    if one is not None:
+        raise HTTPException(status_code=400, detail=f'{one_name} and {list_name} cannot be combined')
+    if len(ids) == 1:
+        return next(iter(ids)), None
+    return None, ids
+
+
+# The `revenue` summary block is mostly money, but it also carries the visit and sale counts behind the
+# Overview's count cards. With revenue hidden only these survive; a field not listed here is removed, so a
+# new money field in the block is hidden by default.
+REVENUE_BLOCK_COUNT_FIELDS: frozenset[str] = frozenset({
+    'appointments',
+    'appointments_change_pct',
+    'unique_clients',
+    'unique_clients_change_pct',
+    'service_count',
+    'service_count_change_pct',
+    'goods_count',
+    'goods_count_change_pct',
+    'extra_service_count',
+    'extra_service_count_change_pct',
+})
 
 
 def _hide_summary_financials(summary: dict[str, Any], hidden_codes: frozenset[str]) -> dict[str, Any]:
     payload = deepcopy(summary)
     for key in money_payload_keys(hidden_codes, 'summary'):
-        payload.pop(key, None)
+        block = payload.get(key)
+        if key == 'revenue' and isinstance(block, dict):
+            payload[key] = {field: value for field, value in block.items() if field in REVENUE_BLOCK_COUNT_FIELDS}
+        else:
+            payload.pop(key, None)
     if 'revenue' in hidden_codes:
         # The whole `average_check` block survives on `avg_check`, but it carries the income it
         # was divided from. Hiding revenue at the top level and shipping it one key deeper is
@@ -402,6 +451,11 @@ def _hide_staff_leaderboard_financials(
         if extra_table is not None:
             _remove_table_field(extra_table, 'sum', metric='sum')
             _remove_table_field(extra_table, 'avg', metric='avg')
+        cosmo_table = next((table for table in tables if table.get('id') == 'cosmo_barber'), None)
+        if cosmo_table is not None:
+            # The cosmetics share is cosmetics / personal revenue: with the share and the amount shown,
+            # the revenue is one division away.
+            _remove_table_field(cosmo_table, 'pct', metric='pct')
 
     payload['tables'] = [table for table in tables if table.get('id') not in hidden_table_ids]
     if hidden_codes:
@@ -412,45 +466,82 @@ def _hide_staff_leaderboard_financials(
 async def _validate_dashboard_scope(
     db: AsyncSession,
     company_id: int | None,
-    staff_id: int | None,
+    staff_id: StaffSelection | None,
     compare_staff_id: int | None = None,
     allowed_company_ids: list[int] | None = None,
+    selected_company_ids: frozenset[int] | None = None,
 ) -> None:
+    """400 for an unknown branch or person, 403 for a branch outside `allowed_company_ids`.
+
+    `selected_company_ids` are the branches a request chose as a group (already inside the principal's scope, and
+    passed on as `allowed_company_ids`); `staff_id` may be a group, and then every member must exist in the scope.
+    """
     if company_id is not None:
         if allowed_company_ids is not None and company_id not in allowed_company_ids:
             raise HTTPException(status_code=403, detail='Branch not allowed')
         company_exists = await db.scalar(select(Company.id).where(Company.id == company_id).limit(1))
         if company_exists is None:
             raise HTTPException(status_code=400, detail='unknown company_id')
+    if selected_company_ids:
+        known = await db.scalar(
+            select(func.count()).select_from(Company).where(Company.id.in_(sorted(selected_company_ids)))
+        )
+        if known != len(selected_company_ids):
+            raise HTTPException(status_code=400, detail='unknown company_id')
 
     for field_name, candidate_staff_id in (('staff_id', staff_id), ('compare_staff_id', compare_staff_id)):
         if candidate_staff_id is None:
             continue
-        conditions = [Staff.id == candidate_staff_id]
+        group = isinstance(candidate_staff_id, frozenset)
+        conditions = [Staff.id.in_(sorted(candidate_staff_id)) if group else Staff.id == candidate_staff_id]
         if company_id is not None:
             conditions.append(Staff.company_id == company_id)
         if allowed_company_ids is not None:
             conditions.append(Staff.company_id.in_(allowed_company_ids))
-        staff_exists = await db.scalar(select(Staff.id).where(*conditions).limit(1))
-        if staff_exists is None:
+        if group:
+            known_staff = (await db.scalars(select(Staff.id).where(*conditions))).all()
+            missing = len(known_staff) != len(candidate_staff_id)
+        else:
+            missing = await db.scalar(select(Staff.id).where(*conditions).limit(1)) is None
+        if missing:
             raise HTTPException(status_code=400, detail=f'unknown {field_name}')
+
+
+def _scope_branch_ids(scope: dict[str, Any]) -> list[int] | None:
+    """Branches a request's queries may read: the chosen group when there is one, otherwise the principal's own."""
+    return scope['allowed_company_ids'] if scope['allowed_company_ids'] is not None else scope['branch_ids']
 
 
 async def _validated_widget_scope(
     db: AsyncSession,
     ctx: AccessContext,
     company_id: int | None,
+    company_ids: str | None,
     staff_id: int | None,
-) -> tuple[dict[str, Any], int | None]:
-    scope = query_scope(ctx, company_id)
-    scoped_staff_id = effective_staff_id(ctx, staff_id)
+    staff_ids: str | None,
+) -> tuple[dict[str, Any], StaffSelection | None]:
+    """Branch and staff filters of a dashboard request, as the scalar or list spelling, resolved and checked.
+
+    Returns the SQL scope and the staff selection after the personal-role clamp: an `int` for one person,
+    a `frozenset` for a group, `None` for nobody in particular.
+    """
+    company_id, branch_group = _one_or_group(company_id, company_ids, 'company_id', 'company_ids')
+    staff_id, staff_group = _one_or_group(staff_id, staff_ids, 'staff_id', 'staff_ids')
+    scope = query_scope(ctx, company_id, branch_group)
+    selected_staff = effective_staff_selection(
+        ctx,
+        staff_group if staff_group is not None else staff_id,
+        scope['company_id'],
+        scope['allowed_company_ids'],
+    )
     await _validate_dashboard_scope(
         db,
         scope['company_id'],
-        scoped_staff_id,
-        allowed_company_ids=scope['branch_ids'],
+        selected_staff,
+        allowed_company_ids=_scope_branch_ids(scope),
+        selected_company_ids=branch_group,
     )
-    return scope, scoped_staff_id
+    return scope, selected_staff
 
 
 async def _require_visibility_portal_account_id(
@@ -495,6 +586,7 @@ async def dashboard_branches(
 @router.get('/staff')
 async def dashboard_staff(
     company_id: int | None = Query(None, description='Optional YClients company (salon) id'),
+    company_ids: str | None = Query(None, description='Comma-separated company ids'),
     start_date: date | None = Query(None),
     end_date: date | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
@@ -503,19 +595,27 @@ async def dashboard_staff(
     # The dates are optional so that callers which only administer staff keep the whole
     # scope; the dashboard filters pass them and get the branches that period can report on.
     start, end = (None, None) if start_date is None or end_date is None else _parse_range(start_date, end_date)
-    scope = query_scope(ctx, company_id)
-    # A personal role lists only itself: colleagues are not its to read (403 when it has no live staff row).
+    company_id, branch_group = _one_or_group(company_id, company_ids, 'company_id', 'company_ids')
+    scope = query_scope(ctx, company_id, branch_group)
+    # A personal role (barber) lists only its own rows (403 when it has none): colleagues are not its to read.
     staff = await fetch_staff(
         db,
         scope['company_id'],
-        allowed_company_ids=scope['branch_ids'],
+        allowed_company_ids=_scope_branch_ids(scope),
         force_allowed=scope['force_allowed'],
         start=start,
         end=end,
-        staff_id=effective_staff_id(ctx, None),
+        staff_id=effective_staff_selection(ctx, None, scope['company_id'], scope['allowed_company_ids']),
     )
     # The selectors never read the YClients user id; the plan editor gets it from `fetch_staff` itself.
-    return {'success': True, 'data': [{key: value for key, value in row.items() if key != 'user_id'} for row in staff]}
+    items = [{key: value for key, value in row.items() if key != 'user_id'} for row in staff]
+    if not ctx.full_access and ctx.role not in STAFF_VIEW_ROLES:
+        # Own rows only (the clamp above): where the person works NOW, so the first view opens on the right branch.
+        last_shifts = await fetch_last_shift_days(db, items)
+        for item in items:
+            day = last_shifts.get((int(item['company_id']), int(item['id'])))
+            item['last_shift_date'] = day.isoformat() if day else None
+    return {'success': True, 'data': items}
 
 
 @router.get('/services')
@@ -583,7 +683,9 @@ async def dashboard_report_data(
     start_date: date = Query(...),
     end_date: date = Query(...),
     company_id: int | None = Query(None),
+    company_ids: str | None = Query(None, description='Comma-separated company ids'),
     staff_id: int | None = Query(None),
+    staff_ids: str | None = Query(None, description='Comma-separated staff ids'),
     granularity: str = Query('day', description='day, week or month'),
     compare_start_date: date | None = Query(None),
     compare_end_date: date | None = Query(None),
@@ -598,6 +700,8 @@ async def dashboard_report_data(
 ):
     start, end = _parse_range(start_date, end_date)
     position_ids = _parse_staff_position_ids(staff_position_ids)
+    company_id, branch_group = _one_or_group(company_id, company_ids, 'company_id', 'company_ids')
+    staff_id, staff_group = _one_or_group(staff_id, staff_ids, 'staff_id', 'staff_ids')
     # Every gate speaks about the canonical report: a retired id must not dodge the check
     # of the report it now resolves to, nor inherit the one it used to have.
     canonical_id = resolve_report_id(report_id)
@@ -622,15 +726,19 @@ async def dashboard_report_data(
             'data': await fetch_report_usage(db, require_tenant_context(ctx), start, end, granularity),
         }
     # What the client asked for, noted before the clamps below rewrite it.
-    requested_staff_filter = staff_id is not None
+    requested_staff_filter = staff_id is not None or staff_group is not None
     compare_requested = bool(
         compare_start_date or compare_end_date or compare_staff_id is not None or compare_previous
     )
-    scope = query_scope(ctx, company_id)
-    staff_id = effective_staff_id(ctx, staff_id)
+    scope = query_scope(ctx, company_id, branch_group)
+    selected_staff = effective_staff_selection(
+        ctx, staff_group if staff_group is not None else staff_id, scope['company_id'], scope['allowed_company_ids']
+    )
     if compare_staff_id is not None:
         # Clamping an absent value would turn "no staff comparison" into a comparison with oneself.
-        compare_staff_id = effective_staff_id(ctx, compare_staff_id)
+        compare_staff_id = effective_staff_selection(
+            ctx, compare_staff_id, scope['company_id'], scope['allowed_company_ids']
+        )
     if (compare_start_date is None) ^ (compare_end_date is None):
         raise HTTPException(status_code=400, detail='compare_start_date and compare_end_date must be passed together')
     if compare_end_date is not None and compare_end_date >= date.max:
@@ -639,9 +747,10 @@ async def dashboard_report_data(
     await _validate_dashboard_scope(
         db,
         scope['company_id'],
-        staff_id,
+        selected_staff,
         compare_staff_id,
         allowed_company_ids=scope['allowed_company_ids'],
+        selected_company_ids=branch_group,
     )
     with track_report_usage(
         ctx,
@@ -654,7 +763,7 @@ async def dashboard_report_data(
         period_preset=period_preset,
         compare_used=compare_requested,
         staff_filter=requested_staff_filter,
-        company_filter=company_id is not None,
+        company_filter=company_id is not None or branch_group is not None,
     ) as usage:
         try:
             data = await fetch_report_data(
@@ -663,7 +772,7 @@ async def dashboard_report_data(
                 start,
                 end,
                 scope['company_id'],
-                staff_id,
+                selected_staff,
                 granularity,
                 compare_start_date,
                 compare_end_date,
@@ -764,25 +873,27 @@ async def dashboard_widget_plan_fact(
     start_date: date = Query(...),
     end_date: date = Query(...),
     company_id: int | None = Query(None),
+    company_ids: str | None = Query(None, description='Comma-separated company ids'),
     staff_id: int | None = Query(None),
+    staff_ids: str | None = Query(None, description='Comma-separated staff ids'),
     staff_position_ids: str | None = Query(None, description='Comma-separated barber level position ids'),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
     position_ids = _parse_staff_position_ids(staff_position_ids)
-    scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
-    branch_ids, force_allowed = user_branch_ids(ctx)
+    scope, selected_staff = await _validated_widget_scope(db, ctx, company_id, company_ids, staff_id, staff_ids)
+    _, force_allowed = user_branch_ids(ctx)
     plan_fact = await fetch_plan_fact(
         db,
         start,
         end,
         scope['company_id'],
-        staff_id,
-        allowed_company_ids=branch_ids,
+        selected_staff,
+        allowed_company_ids=_scope_branch_ids(scope),
         force_allowed=force_allowed,
-        # `effective_staff_id` clamped a personal role to its own row: whole-branch totals are not its to read.
-        include_branch_row=ctx.full_access or ctx.role in BRANCH_SCOPE_ROLES,
+        # The staff clamp left a personal role its own rows only: whole-branch totals are not its to read.
+        include_branch_row=ctx.full_access or ctx.role in STAFF_VIEW_ROLES,
         staff_position_ids=position_ids,
     )
     hidden = hidden_money_codes(ctx)
@@ -1164,7 +1275,9 @@ async def dashboard_bundle(
     start_date: date = Query(...),
     end_date: date = Query(...),
     company_id: int | None = Query(None),
+    company_ids: str | None = Query(None, description='Comma-separated company ids'),
     staff_id: int | None = Query(None),
+    staff_ids: str | None = Query(None, description='Comma-separated staff ids'),
     period_preset: PeriodPreset = None,
     staff_position_ids: str | None = Query(None, description='Comma-separated barber level position ids'),
     db: AsyncSession = Depends(get_async_db),
@@ -1172,7 +1285,7 @@ async def dashboard_bundle(
 ):
     start, end = _parse_range(start_date, end_date)
     position_ids = _parse_staff_position_ids(staff_position_ids)
-    scope, staff_id = await _validated_widget_scope(db, ctx, company_id, staff_id)
+    scope, staff_id = await _validated_widget_scope(db, ctx, company_id, company_ids, staff_id, staff_ids)
     factual_at = dashboard_service.factual_now()
     level_filter = None
     if position_ids is not None and staff_id is None:
@@ -1200,6 +1313,8 @@ async def dashboard_bundle(
     )
     if level_filter is not None:
         summary['level_filter'] = level_filter
+    elif isinstance(staff_id, frozenset):
+        summary['staff_filter'] = staff_filter_echo(staff_id)
     hidden = hidden_money_codes(ctx)
     can_see_financials = can_view_financials(ctx)
     daily = await fetch_revenue_daily(

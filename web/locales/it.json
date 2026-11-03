@@ -102,7 +102,8 @@
     "select": "Seleziona…",
     "search": "Cerca…",
     "nothingFound": "Nessun risultato",
-    "selectedCount": "Selezionati: {count}"
+    "selectedCount": "Selezionati: {count}",
+    "clearSelection": "Cancella selezione"
   },
   "roles": {
     "platform_admin": "Amministratore della piattaforma",
@@ -323,6 +324,8 @@
     "allLevels": "Tutti i ruoli",
     "levelScope": "Ruolo: {title} · {count} dip.",
     "levelScopeDescription": "I dati qui sotto riguardano i barbieri di questo ruolo nelle filiali selezionate; le card i cui report non filtrano per ruolo non hanno il link al report.",
+    "staffGroupScope": "Dipendenti selezionati: {count}",
+    "staffGroupScopeDescription": "I dati qui sotto sommano le visite dei dipendenti selezionati come operatori.",
     "staffRoleAdministrator": "amministratore",
     "staffRoleBarber": "barbiere",
     "staffRoleMixed": "barbiere/amm.",
@@ -639,6 +642,7 @@
     "distribute": "Invia",
     "done": "Fatto",
     "createUserTitle": "Nuovo utente",
+    "createUserStaffHint": "Barbieri e amministratori si creano dalla riga del dipendente YClients: menu della riga → «Crea account».",
     "password": "Password",
     "passwordPlaceholder": "opzionale; altrimenti usa il link d'invito",
     "name": "Nome",
@@ -666,6 +670,16 @@
     "errorsCount": "Errori: {count}",
     "staffNoAccount": "staff · senza account",
     "createAccount": "Crea account",
+    "linkToYclients": "Collega a YClients",
+    "linkStaffTitle": "Dipendente YClients",
+    "linkStaffLead": "{name}: l'account mostra i numeri della riga del dipendente in YClients. Sceglila in ogni filiale. La riga di servizio dell'account nella filiale viene chiusa e le recensioni e gli OPZ extra inseriti su di essa passano alla riga scelta.",
+    "linkStaffPick": "Scegli un dipendente",
+    "linkStaffAction": "Collega",
+    "unlinkStaffAction": "Scollega",
+    "linkStaffNone": "Nessun dipendente YClients libero in questa filiale",
+    "linkStaffFired": "licenziato",
+    "staffLinked": "Dipendente YClients \"{staff}\" collegato. Valori manuali spostati: {count}.",
+    "staffUnlinked": "Dipendente YClients \"{staff}\" scollegato.",
     "edit": "Modifica",
     "confirmed": "confermato",
     "pending": "in attesa",
@@ -691,14 +705,25 @@
     "credentialsDeleted": "Credenziali YClients eliminate",
     "userCreated": "Utente {email} creato",
     "selectTenantForSettings": "Seleziona un business tenant per le impostazioni.",
-    "businessTenantSelected": "Business tenant selezionato"
+    "businessTenantSelected": "Business tenant selezionato",
+    "passwordRequiredPlaceholder": "almeno 8 caratteri",
+    "staffAccountPasswordOptional": "Facoltativa: senza password il dipendente riceve un'email d'invito.",
+    "staffAccountPasswordRequired": "Su questo server le email d'invito non partono: imposta una password (almeno 8 caratteri) e consegnala al dipendente.",
+    "passwordTooShort": "La password deve avere almeno 8 caratteri.",
+    "passwordTooLong": "La password è troppo lunga: al massimo 72 byte.",
+    "needsStaffLink": "Non collegato a YClients",
+    "needsStaffLinkHint": "In alcune filiali questo account non ha una riga dipendente YClients, quindi i numeri sono a zero. Clicca per collegarlo.",
+    "invitesUnavailable": "Da questo server non partono email di invito: consegna login e password di persona.",
+    "invitesUnavailableShort": "Posta non configurata"
   },
   "authErrors": {
     "invalidCredentials": "Email o password non validi.",
     "accountDisabled": "Account disattivato.",
     "temporaryUnavailable": "Il servizio è temporaneamente non disponibile. Riprova tra poco.",
     "serviceUnavailable": "Il servizio è temporaneamente non disponibile. Aggiorna la pagina.",
-    "authenticationRequired": "Accesso richiesto."
+    "authenticationRequired": "Accesso richiesto.",
+    "network": "Nessun collegamento con il server. Controlla la connessione e riprova.",
+    "invalidEmail": "Email non valida: l'indirizzo deve avere la forma nome@azienda.it."
   },
   "reauth": {
     "title": "Nuovo accesso",
@@ -774,5 +799,14 @@
   "demo": {
     "viewDemo": "Guarda la demo",
     "banner": "Modalità demo · dati fittizi"
+  },
+  "errorDetails": {
+    "toggle": "Dettagli dell'errore",
+    "request": "Richiesta",
+    "response": "Risposta",
+    "noResponse": "nessuna risposta",
+    "server": "Server",
+    "browser": "Browser",
+    "time": "Ora"
   }
 }

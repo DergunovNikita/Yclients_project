@@ -136,6 +136,24 @@ MONEY_FREE_AVERAGE_CHECK_KEYS = {
     'unique_clients',
 }
 
+# With revenue hidden the `revenue` summary block keeps only the counts behind the Overview's count cards.
+MONEY_FREE_REVENUE_BLOCK_KEYS = {
+    'appointments',
+    'appointments_change_pct',
+    'extra_service_count',
+    'extra_service_count_change_pct',
+    'goods_count',
+    'goods_count_change_pct',
+    'service_count',
+    'service_count_change_pct',
+    'unique_clients',
+    'unique_clients_change_pct',
+}
+
+
+def assert_revenue_block_is_counts_only(summary):
+    assert set(summary.get('revenue') or {}) <= MONEY_FREE_REVENUE_BLOCK_KEYS, sorted(summary.get('revenue') or {})
+
 
 @pytest.mark.asyncio
 async def test_dashboard_reports_registry_contract(async_session):
@@ -5430,19 +5448,19 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
 
     assert viewer_summary.status_code == 200
     assert viewer_summary.json()['data']['financials_hidden'] is True
-    assert 'revenue' not in viewer_summary.json()['data']
+    assert_revenue_block_is_counts_only(viewer_summary.json()['data'])
     assert 'average_check' not in viewer_summary.json()['data']
     assert forbidden_other_staff.status_code == 403
     assert manager_other_staff.status_code == 200
     assert manager_other_staff.json()['data']['financials_hidden'] is True
-    assert 'revenue' not in manager_other_staff.json()['data']
+    assert_revenue_block_is_counts_only(manager_other_staff.json()['data'])
     assert manager_bundle.status_code == 200
     manager_bundle_data = manager_bundle.json()['data']
     # The bundle is what the dashboard loads, so the same guard has to hold on this route.
     bundle_average_check = manager_bundle_data['summary'].get('average_check') or {}
     assert set(bundle_average_check) <= MONEY_FREE_AVERAGE_CHECK_KEYS, sorted(set(bundle_average_check))
     assert manager_bundle_data['financials_hidden'] is True
-    assert 'revenue' not in manager_bundle_data['summary']
+    assert_revenue_block_is_counts_only(manager_bundle_data['summary'])
     assert manager_bundle_data['top_services'] == []
     assert manager_bundle_data['extra_services'] == []
     assert manager_bundle_data['revenue_daily'] == [
@@ -5599,7 +5617,7 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
     # Default: a manager sees the average check but not the branch revenue.
     assert manager_default.status_code == 200
     assert manager_default.json()['data']['financials_hidden'] is True
-    assert 'revenue' not in manager_default.json()['data']
+    assert_revenue_block_is_counts_only(manager_default.json()['data'])
     average_check = manager_default.json()['data']['average_check']
     assert average_check['total'] is not None
     # Nothing inside the block may be an absolute sum. Asserted as a closed set rather than a
@@ -5645,7 +5663,7 @@ async def test_metric_visibility_config_controls_money_metrics(async_session, mo
     assert manager_after.status_code == 200
     assert manager_after.json()['data']['financials_hidden'] is True
     assert 'average_check' in manager_after.json()['data']
-    assert 'revenue' not in manager_after.json()['data']
+    assert_revenue_block_is_counts_only(manager_after.json()['data'])
 
     # With every money code hidden, the staff_leaderboard report must not keep a single
     # money-formatted column in any table, regardless of that table's id.

@@ -901,7 +901,7 @@ async def test_bundle_route_still_hides_money_under_a_level(async_session, no_up
     assert response.status_code == 200
     assert data['financials_hidden'] is True
     assert data['summary']['level_filter']['staff_count'] == 4
-    assert 'revenue' not in data['summary'] and data['summary']['visit_metrics']['unique_clients'] == 4
+    assert 'total' not in data['summary']['revenue'] and data['summary']['visit_metrics']['unique_clients'] == 4
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,7 @@ import reports_goods
 import reports_operations
 import reports_services
 import reports_team
-from dashboard_service import DateRange, _appointment_company_ids
+from dashboard_service import DateRange, StaffSelection, _appointment_company_ids
 from models import Company, Staff
 from plan_config import normalize_staff_category
 from report_payload import ReportInputError, ReportRequest
@@ -418,7 +418,7 @@ async def fetch_report_data(
     start: date,
     end: date,
     company_id: int | None = None,
-    staff_id: int | None = None,
+    staff_id: StaffSelection | None = None,
     granularity: str = 'day',
     compare_start: date | None = None,
     compare_end: date | None = None,
@@ -506,7 +506,9 @@ def _previous_window(start: date, end: date, period_preset: str | None) -> tuple
     return previous.start, previous.end
 
 
-def _comparison_payload(data: dict[str, Any], compare_data: dict[str, Any], staff_id: int | None) -> dict[str, Any]:
+def _comparison_payload(
+    data: dict[str, Any], compare_data: dict[str, Any], staff_id: StaffSelection | None
+) -> dict[str, Any]:
     """Comparison block: cards matched by label, charts and tables only for ids the current payload has.
 
     A table without a `row_key` cannot be paired row by row, so it is not carried at all (a list of events
@@ -516,7 +518,7 @@ def _comparison_payload(data: dict[str, Any], compare_data: dict[str, Any], staf
     current_tables = {item.get('id'): item for item in data.get('tables', [])}
     return {
         'period': compare_data['period'],
-        'staff_id': staff_id,
+        'staff_id': sorted(staff_id) if isinstance(staff_id, frozenset) else staff_id,
         'source_status': compare_data['source_status'],
         'cards': compare_data.get('cards', []),
         'rows': _comparison_rows(data.get('cards', []), compare_data.get('cards', [])),
@@ -576,7 +578,7 @@ async def _fetch_report_payload(
     start: date,
     end: date,
     company_id: int | None,
-    staff_id: int | None,
+    staff_id: StaffSelection | None,
     granularity: str,
     allowed_company_ids: list[int] | None,
     factual_at: datetime,
@@ -633,8 +635,17 @@ async def _report_calculation_scope(
     db: AsyncSession,
     report_id: str,
     company_id: int | None,
-    staff_id: int | None,
+    staff_id: StaffSelection | None,
 ) -> dict[str, Any]:
+    if isinstance(staff_id, frozenset):
+        # No personal note for a group: the page words that one for exactly one person.
+        return {
+            'kind': 'staff_group',
+            'mode': 'plan_fact' if report_id == 'staff_leaderboard' else 'group',
+            'staff_ids': sorted(staff_id),
+            'staff_count': len(staff_id),
+            'company_id': company_id,
+        }
     if staff_id is not None:
         staff = (
             await db.execute(

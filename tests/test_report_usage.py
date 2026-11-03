@@ -138,6 +138,20 @@ async def test_staff_filter_is_the_requested_value_not_the_clamped_one(async_ses
 
 
 @pytest.mark.asyncio
+async def test_a_list_filter_counts_as_a_filter_like_its_scalar(async_session, usage_app):
+    await _seed(async_session)
+    async_session.add(Company(id=2, title='Other', group_id=1))
+    async_session.add(Staff(id=6, name='Other master', position='Барбер', company_id=1))
+    await async_session.commit()
+    usage_app['ctx'] = AccessContext.from_user(user_id=9, role='owner', portal_account_id=1, company_ids=[1, 2])
+
+    assert (await _data(staff_ids='5,6', company_ids='1,2')).status_code == 200
+
+    (row,) = await _events(async_session)
+    assert (row.staff_filter, row.company_filter) == (True, True)
+
+
+@pytest.mark.asyncio
 async def test_compare_flag_covers_every_way_to_ask_for_a_comparison(async_session, usage_app):
     await _seed(async_session)
 

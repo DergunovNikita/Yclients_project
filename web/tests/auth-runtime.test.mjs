@@ -713,6 +713,49 @@ test('a proxy 404/405 with the bare phrase reads as "service unavailable", not a
   await assert.rejects(auth.authFetch('/dashboard/branches'), /User not found/);
 });
 
+test('a rejected fetch becomes a readable error and keeps the browser text in its details', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  globalThis.fetch = async () => { throw new TypeError('Failed to fetch'); };
+  await assert.rejects(
+    auth.authFetch('/auth/admin/staff/12/create-account', { method: 'POST', body: '{"password":"hunter2hunter2"}' }),
+    (error) => {
+      assert.notEqual(error.message, 'Failed to fetch');
+      assert.equal(error.details.status, null);
+      assert.equal(error.details.method, 'POST');
+      assert.equal(error.details.path, '/auth/admin/staff/12/create-account');
+      assert.equal(error.details.browser, 'Failed to fetch');
+      assert.doesNotMatch(JSON.stringify(error.details), /hunter2/);
+      return true;
+    },
+  );
+
+  globalThis.fetch = async () => { throw Object.assign(new Error('aborted'), { name: 'AbortError' }); };
+  await assert.rejects(auth.authFetch('/auth/me'), (error) => error.name === 'AbortError' && !error.details);
+});
+
+test('an HTTP error carries the status and server text, and an invalid-email 422 is translated', async (t) => {
+  const { auth, server } = await loadAuthModule();
+  t.after(() => server.close());
+
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: 'Invites are not deliverable' }), { status: 400 });
+  await assert.rejects(auth.authFetch('/auth/admin/staff/12/create-account', { method: 'POST' }), (error) => {
+    assert.equal(error.status, 400);
+    assert.equal(error.details.status, 400);
+    assert.equal(error.details.server, 'Invites are not deliverable');
+    return true;
+  });
+
+  const emailIssue = { type: 'value_error', loc: ['body', 'email'], msg: 'value is not a valid email address', input: 'a@b' };
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: [emailIssue] }), { status: 422 });
+  await assert.rejects(auth.authFetch('/auth/admin/users', { method: 'POST' }), (error) => {
+    assert.match(error.message, /^Invalid email/);
+    assert.equal(error.details.server, 'body.email: value is not a valid email address');
+    return true;
+  });
+});
+
 test('two page runtimes coordinate refresh and rotate cookies only once', async (t) => {
   const locks = new MemoryLockManager();
   const firstModule = await loadAuthModule({ locks });

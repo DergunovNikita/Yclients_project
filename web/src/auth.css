@@ -404,6 +404,52 @@ textarea {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b91c1c' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cline x1='12' y1='8' x2='12' y2='12'/%3E%3Cline x1='12' y1='16' x2='12.01' y2='16'/%3E%3C/svg%3E");
 }
 
+/* A banner whose error carries details: the round icon becomes the «i» button that unfolds them (errorDetails.js). */
+.alert--has-details::before {
+  display: none;
+}
+
+.alert__info {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  margin-top: 0;
+  padding: 0;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font: italic 700 13px/1 Georgia, 'Times New Roman', serif;
+  cursor: pointer;
+}
+
+.alert__info:hover,
+.alert__info[aria-expanded='true'] {
+  background: var(--danger-text);
+  color: var(--danger-bg);
+}
+
+.alert__info:focus-visible {
+  outline: 2px solid var(--danger-text);
+  outline-offset: 2px;
+}
+
+.alert__body {
+  min-width: 0;
+  flex: 1;
+}
+
+.alert__details {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.65);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 .alert.success {
   background: var(--success-bg);
   color: var(--success-text);
@@ -890,6 +936,28 @@ textarea {
   font-weight: 600;
 }
 
+/* An admin/barber account with no YClients row behind it: it reads zeros until linked. A button when it can open the link. */
+.role-badge--warn {
+  margin-left: 6px;
+  border: 1px solid #fcd34d;
+  background: #fffbeb;
+  color: #92400e;
+  font-family: inherit;
+}
+
+button.role-badge--warn {
+  cursor: pointer;
+}
+
+button.role-badge--warn:hover {
+  background: #fef3c7;
+}
+
+button.role-badge--warn:focus-visible {
+  outline: 2px solid #92400e;
+  outline-offset: 2px;
+}
+
 .status-dot {
   display: inline-flex;
   align-items: center;
@@ -1167,6 +1235,14 @@ body.admin-modal-open {
   padding-bottom: 8px;
 }
 
+.admin-modal__hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .admin-modal .custom-select__menu {
   z-index: 120;
 }
@@ -1222,4 +1298,41 @@ body.admin-modal-open {
   .auth-lang select {
     font-size: 16px;
   }
+}
+
+.staff-links {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.staff-link {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.staff-link__branch {
+  font-weight: 600;
+}
+
+.staff-link__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.staff-link__row select {
+  min-width: 0;
+}
+
+.staff-link__fired {
+  color: var(--muted);
+}
+
+.staff-link__empty {
+  color: var(--muted);
 }

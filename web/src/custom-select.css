@@ -266,3 +266,21 @@
     font-size: 16px;
   }
 }
+
+.custom-select__clear {
+  display: block;
+  margin: 6px 4px 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--brand, #0f766e);
+  font-size: 12px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  cursor: pointer;
+}
+
+.custom-select__clear:hover {
+  text-decoration: underline;
+}

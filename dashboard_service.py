@@ -43,6 +43,8 @@ from sqlalchemy.sql.visitors import InternalTraversal
 import yclients_analytics
 from config import DEFAULT_BRANCH_TIMEZONE
 from models import (
+    ADMIN_PLACEHOLDER_STAFF_PREFIX,
+    WAITLIST_STAFF_NAME,
     AccountCatalog,
     Appointment,
     Company,
@@ -64,6 +66,8 @@ from models import (
     StaffSchedule,
     SyncSourceState,
     Transaction,
+    is_admin_placeholder_staff_name as _is_admin_placeholder_staff_name,
+    is_waitlist_staff_name as _is_waitlist_staff_name,
 )
 from auth_hierarchy import PLATFORM_ADMIN_ROLE
 from portal_audit import log_portal_audit
@@ -86,8 +90,6 @@ logger = logging.getLogger('yclients.dashboard')
 GOODS_SALE_TYPE_ID = 1
 SERVICE_SOLD_ITEM_TYPE = 'service'
 GOODS_SOLD_ITEM_TYPE = 'goods_transaction'
-WAITLIST_STAFF_NAME = 'лист ожидания'
-ADMIN_PLACEHOLDER_STAFF_PREFIX = 'администратор'
 PLAN_SETTINGS_SOURCE = 'dashboard_plan_settings'
 GOODS_KPI_CODES = ('wax_qty', 'camouflage_qty', 'face_care_qty', 'head_care_qty')
 COMPLETED_ATTENDANCE = 1
@@ -521,7 +523,7 @@ async def fetch_appointments_breakdown(
     start: date,
     end: date,
     company_id: Optional[int] = None,
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
@@ -539,9 +541,9 @@ async def fetch_appointments_breakdown(
 # A staff filter is one person (`int`) or a group of people (`frozenset[int]`, see `staff_ids_for_levels`). Every
 # `staff_id` parameter annotated `Optional[StaffSelection]` takes either, so it must never be passed to `int()` or
 # compared with `==`: use `_staff_match` (SQL) / `_staff_in` (rows in memory). `is not None` still means "a staff
-# filter is active", and an EMPTY group is a filter that matches nobody, never "no filter". Administrator,
-# Plan/fact and report paths keep `Optional[int]`: a group never reaches them (`_administrator_service_scope`
-# answers "not an administrator" for a group).
+# filter is active", and an EMPTY group is a filter that matches nobody, never "no filter". The administrator
+# paths keep `Optional[int]`: a group never reaches them (`_administrator_service_scope` answers "not an
+# administrator" for a group). Plan/fact and the reports take a group too (several chosen people).
 StaffSelection = int | frozenset[int]
 
 
@@ -557,14 +559,6 @@ def _staff_in(selection: StaffSelection, staff_id: Any) -> bool:
     if isinstance(selection, frozenset):
         return staff_id in selection
     return staff_id == selection
-
-
-def _is_waitlist_staff_name(value: Any) -> bool:
-    return str(value or '').strip().casefold() == WAITLIST_STAFF_NAME
-
-
-def _is_admin_placeholder_staff_name(value: Any) -> bool:
-    return str(value or '').strip().casefold().startswith(ADMIN_PLACEHOLDER_STAFF_PREFIX)
 
 
 def _business_staff_id_condition(staff_id_column):
@@ -2259,7 +2253,7 @@ async def fetch_client_mix_metrics(
     start: date,
     end: date,
     company_id: Optional[int] = None,
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     *,
     factual_at: Optional[datetime] = None,
@@ -2595,7 +2589,7 @@ async def fetch_year_over_year_facts(
     start: date,
     end: date,
     company_id: Optional[int] = None,
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
@@ -2797,7 +2791,7 @@ async def fetch_year_over_year_facts(
         dependency_filters.append(or_(
             and_(
                 FinancialTransaction.sold_item_type == SERVICE_SOLD_ITEM_TYPE,
-                Appointment.staff_id == staff_id,
+                _staff_match(Appointment.staff_id, staff_id),
             ),
             and_(
                 FinancialTransaction.master_id.is_(None),
@@ -3475,7 +3469,7 @@ async def fetch_paid_goods_rows(
     start: date,
     end: date,
     company_id: Optional[int] = None,
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
@@ -4131,7 +4125,7 @@ async def fetch_opz_year_facts(
     start: date,
     end: date,
     company_id: Optional[int],
-    staff_id: Optional[int],
+    staff_id: Optional[StaffSelection],
     allowed_company_ids: Optional[list[int]] = None,
     factual_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
@@ -7146,9 +7140,9 @@ async def fetch_staff(
     include_staff_ids: Optional[list[int]] = None,
     start: Optional[date] = None,
     end: Optional[date] = None,
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
 ) -> list[dict[str, Any]]:
-    """Staff of the branches in scope, optionally narrowed to one reporting period or one employee.
+    """Staff of the branches in scope, optionally narrowed to one reporting period or to one employee or a group.
 
     The employee filter sits next to the branch filter and has to agree with it: a period
     the branch cannot report on must not offer its people either. Without a period the
@@ -7185,7 +7179,7 @@ async def fetch_staff(
     if company_id is not None:
         stmt = stmt.where(Company.id == company_id)
     if staff_id is not None:
-        stmt = stmt.where(Staff.id == staff_id)
+        stmt = stmt.where(_staff_match(Staff.id, staff_id))
     if start is not None and end is not None:
         stmt = stmt.where(branch_window_overlap_clause(Staff.company_id, start, end))
 
@@ -7225,6 +7219,22 @@ async def fetch_staff(
             'category': category,
         })
     return items
+
+
+async def fetch_last_shift_days(db: AsyncSession, rows: list[dict[str, Any]]) -> dict[tuple[int, int], date]:
+    """Latest shift day on or before the branch «today» per `(company_id, staff_id)` of the given staff rows.
+
+    Only for the rows asked about (a personal role's own), one grouped query. Rows without any past shift are absent.
+    """
+    ids = sorted({int(row['id']) for row in rows})
+    if not ids:
+        return {}
+    found = await db.execute(
+        select(StaffSchedule.company_id, StaffSchedule.staff_id, func.max(StaffSchedule.date))
+        .where(StaffSchedule.staff_id.in_(ids), StaffSchedule.date <= factual_branch_date())
+        .group_by(StaffSchedule.company_id, StaffSchedule.staff_id)
+    )
+    return {(int(company_id), int(staff_id)): day for company_id, staff_id, day in found.all()}
 
 
 async def staff_ids_for_levels(
@@ -8845,12 +8855,17 @@ async def _filter_groups_by_level(
     return kept, {'position_ids': sorted(position_ids), 'titles': sorted(title for title in titles.values() if title)}
 
 
+def staff_filter_echo(staff_ids: Collection[int]) -> dict[str, Any]:
+    """`staff_filter` of a response about a chosen group of people, so the page can title the view."""
+    return {'staff_ids': sorted(staff_ids), 'staff_count': len(staff_ids)}
+
+
 async def fetch_plan_fact(
     db: AsyncSession,
     start: date,
     end: date,
     company_id: Optional[int] = None,
-    staff_id: Optional[int] = None,
+    staff_id: Optional[StaffSelection] = None,
     allowed_company_ids: Optional[list[int]] = None,
     force_allowed: bool = False,
     for_ratings: bool = False,
@@ -8871,11 +8886,19 @@ async def fetch_plan_fact(
     totals would sit above a filtered list and mislead, so the branch row and diagnostics are omitted; the network
     view then lists the staff rows of every branch (`view_scope == 'staff'`) instead of network and branch rows.
     The payload echoes the active filter as `level_filter`.
+
+    A `staff_id` that is a group of people (`frozenset`, see `StaffSelection`) is the same kind of view as the level
+    filter, over exactly those people whatever their category: staff rows only, no branch row or diagnostics, and
+    `plan_rules` only where one branch is shown. It wins over `staff_position_ids` and is echoed as `staff_filter`.
     """
     factual_at = factual_at or factual_now()
-    if staff_id is not None:
+    staff_group = staff_id if isinstance(staff_id, frozenset) else None
+    if staff_group is not None:
+        staff_id = None
+    if staff_id is not None or staff_group is not None:
         staff_position_ids = None
     level_view = staff_position_ids is not None
+    staff_view = level_view or staff_group is not None
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
     # A branch that left the tenant contributes neither plan nor fact, so its row could only
     # ever read "0 of nothing" under the network total. A branch that has not opened yet is
@@ -8923,6 +8946,8 @@ async def fetch_plan_fact(
             }
             if level_view:
                 empty['level_filter'] = {'position_ids': sorted(staff_position_ids), 'titles': []}
+            if staff_group is not None:
+                empty['staff_filter'] = staff_filter_echo(staff_group)
             if for_ratings:
                 empty['staff_leaderboards'] = _staff_leaderboards_payload([])
             return empty
@@ -8948,10 +8973,12 @@ async def fetch_plan_fact(
         level_filter = None
         if level_view:
             groups, level_filter = await _filter_groups_by_level(db, groups, end, staff_position_ids)
+        elif staff_group is not None:
+            groups = [group for group in groups if group.get('staff_id') in staff_group]
         selected_staff_plan = _selected_staff_plan_payload(selected_staff, groups)
         parent_group = None
         diagnostics: list[dict[str, Any]] = []
-        if include_branch_row and not level_view:
+        if include_branch_row and not staff_view:
             parent_group, diagnostics = await _branch_row_and_diagnostics(
                 db,
                 start,
@@ -8984,6 +9011,8 @@ async def fetch_plan_fact(
         }
         if level_filter is not None:
             payload['level_filter'] = level_filter
+        if staff_group is not None:
+            payload['staff_filter'] = staff_filter_echo(staff_group)
         if for_ratings:
             payload['staff_leaderboards'] = _staff_leaderboards_payload(
                 groups,
@@ -8997,11 +9026,18 @@ async def fetch_plan_fact(
     opz_events_by_company: dict[int, list[OpzEvent]] = {}
     staff_groups_by_company: dict[int, list[dict[str, Any]]] = {}
     await _company_timezone_names(db, company_ids)
-    for branch_id in company_ids:
+    # A group only has rows in the branches its members work in; the others would be computed to be thrown away.
+    staff_company_ids = company_ids
+    if staff_group:
+        member_branches = set((await db.execute(
+            select(Staff.company_id).where(Staff.id.in_(sorted(staff_group))).distinct()
+        )).scalars().all())
+        staff_company_ids = [branch_id for branch_id in company_ids if branch_id in member_branches]
+    for branch_id in staff_company_ids:
         opz_events_by_company[branch_id] = await _opz_events(
             db, start, end, branch_id, factual_at=factual_at
         )
-        if not level_view:
+        if not staff_view:
             facts_by_company[branch_id] = await _fact_metric_components(
                 db,
                 start,
@@ -9010,9 +9046,9 @@ async def fetch_plan_fact(
                 opz_override=float(len(opz_events_by_company[branch_id])),
                 factual_at=factual_at,
             )
-    # The level view returns staff rows only: branch facts and the administrator diagnostics are never shown.
+    # The level and staff views return staff rows only: branch facts and the administrator diagnostics are never shown.
     role_periods_by_company: dict[int, dict[int, list[tuple[date, date]]]] = {}
-    if not level_view:
+    if not staff_view:
         role_periods_by_company = await _administrator_role_periods_by_company(
             db,
             start,
@@ -9030,8 +9066,8 @@ async def fetch_plan_fact(
             OPZ_QTY_CODE,
             _countable_manual_months(start, end, factual_at),
         )
-    for branch_id in company_ids:
-        if not level_view:
+    for branch_id in staff_company_ids:
+        if not staff_view:
             facts_by_company[branch_id][REVIEWS_QTY_CODE] = review_facts_by_company.get(branch_id, 0.0)
             _apply_manual_opz(facts_by_company[branch_id], manual_opz_by_company.get(branch_id, 0.0))
         staff_groups_by_company[branch_id] = await _staff_plan_groups_for_branch(
@@ -9052,7 +9088,7 @@ async def fetch_plan_fact(
         )
 
     groups: list[dict[str, Any]] = []
-    if company_ids and not level_view:
+    if company_ids and not staff_view:
         network_plan = _sum_metric_components([plans_by_company.get(branch_id, {}) for branch_id in company_ids])
         # The network row is the sum of the branch rows, including the two average-check
         # components: the numerator is a sum of payment amounts, and the denominator counts
@@ -9073,7 +9109,7 @@ async def fetch_plan_fact(
             'metrics': _metric_cells(network_plan, network_fact),
         })
 
-    for branch in ([] if level_view else branches):
+    for branch in ([] if staff_view else branches):
         branch_id = int(branch['id'])
         groups.append({
             'company_id': branch_id,
@@ -9087,15 +9123,18 @@ async def fetch_plan_fact(
 
     all_staff_groups = [
         group
-        for branch_id in company_ids
+        for branch_id in staff_company_ids
         for group in staff_groups_by_company.get(branch_id, [])
     ]
     level_filter = None
     if level_view:
         all_staff_groups, level_filter = await _filter_groups_by_level(db, all_staff_groups, end, staff_position_ids)
         groups = all_staff_groups
+    elif staff_group is not None:
+        all_staff_groups = [group for group in all_staff_groups if group.get('staff_id') in staff_group]
+        groups = all_staff_groups
     extra_revenue_result = (
-        await _extra_service_revenue_by_staff(db, start, end, company_ids, factual_at) if for_ratings else None
+        await _extra_service_revenue_by_staff(db, start, end, staff_company_ids, factual_at) if for_ratings else None
     )
     diagnostics = []
     branch_title_by_id = {int(branch['id']): branch['title'] for branch in branches}
@@ -9122,16 +9161,19 @@ async def fetch_plan_fact(
     payload = {
         'period': {'start': start.isoformat(), 'end': end.isoformat()},
         'plan_period': {'start': plan_start.isoformat(), 'end': plan_end.isoformat()},
-        'view_scope': 'staff' if level_view else 'branch',
+        'view_scope': 'staff' if staff_view else 'branch',
         'metrics': list(PLAN_FACT_METRICS),
         'metric_sets': _metric_sets_payload(),
         'diagnostics': diagnostics,
         'goods_kpi_execution': _goods_kpi_execution_payload(all_staff_groups),
         'groups': groups,
     }
-    if level_view:
+    if staff_view:
         payload['plan_rules'] = None
+    if level_view:
         payload['level_filter'] = level_filter
+    if staff_group is not None:
+        payload['staff_filter'] = staff_filter_echo(staff_group)
     if for_ratings:
         payload['staff_leaderboards'] = _staff_leaderboards_payload(
             all_staff_groups,

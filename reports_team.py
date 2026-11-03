@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 
-from dashboard_service import fetch_plan_fact
+from dashboard_service import StaffSelection, fetch_plan_fact
 from report_payload import (
     MONEY_FORMAT,
     NUMBER_FORMAT,
@@ -28,6 +28,8 @@ logger = logging.getLogger('yclients.reports')
 LEVEL_HIDDEN_TABLES = frozenset({
     'extra_services_admin', 'cosmo_admin', 'opz_admin', 'reviews_admin', 'avg_check_plan_branch',
 })
+# A chosen group keeps the administrator boards (they are people), but a branch total says nothing about it.
+GROUP_HIDDEN_TABLES = frozenset({'avg_check_plan_branch'})
 
 
 def _is_retryable(error: BaseException) -> bool:
@@ -44,7 +46,8 @@ def _is_retryable(error: BaseException) -> bool:
 
 async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
     base = req.base
-    start, end, company_id, staff_id = req.start, req.end, req.company_id, req.staff_id
+    start, end, company_id = req.start, req.end, req.company_id
+    staff_id: StaffSelection | None = req.staff_id
     started_at = time.perf_counter()
     try:
         plan = await fetch_plan_fact(
@@ -80,6 +83,7 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
         )
     boards = plan.get('staff_leaderboards', {})
     level_filter = plan.get('level_filter')
+    staff_filter = plan.get('staff_filter')
     partial_reasons = set(boards.get('_partial_reasons') or [])
     if partial_reasons:
         base['source_status'] = 'partial'
@@ -115,6 +119,15 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
                 'Рейтинги администраторов и итоги по барбершопам скрыты: у них нет роли.'
             ),
         })
+    elif staff_filter is not None:
+        base['notes'].append({
+            'kind': 'info',
+            'title': 'Рейтинги выбранных сотрудников',
+            'text': (
+                f'Показаны только выбранные сотрудники ({staff_filter["staff_count"]}). '
+                'Итоги по барбершопам скрыты: они описывают не только этих людей.'
+            ),
+        })
     elif any(
         boards.get(key)
         for key in (
@@ -130,7 +143,7 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
                 'ОПЗ и допуслуги — к записям под ответственностью администратора.'
             ),
         })
-    if staff_id is not None:
+    if isinstance(staff_id, int):
         # An administrator has no revenue metric (cosmetics is theirs): no revenue card rather than a zero.
         selected_admin = any(group.get('category') == 'administrator' for group in plan.get('groups') or [])
         base['cards'] = [] if selected_admin else [
@@ -296,4 +309,6 @@ async def build_staff_leaderboard(req: ReportRequest) -> dict[str, Any]:
     if level_filter is not None:
         # Administrators have no level, and a branch total says nothing about one level of its barbers.
         base['tables'] = [item for item in base['tables'] if item['id'] not in LEVEL_HIDDEN_TABLES]
+    elif staff_filter is not None:
+        base['tables'] = [item for item in base['tables'] if item['id'] not in GROUP_HIDDEN_TABLES]
     return base

@@ -28,6 +28,10 @@ SYSTEM_SCHEMA = 'system'
 # keeps INTEGER while PostgreSQL gets BIGINT.
 BigIntPK = BigInteger().with_variant(Integer, 'sqlite')
 
+# `staff.source_type` of the synthetic row a portal account gets per branch (`portal_staff_sync`), as opposed to
+# the rows that come from YClients. A row linked to a portal user is the portal's own only when it carries this.
+SOURCE_PORTAL = 'portal'
+
 
 def _source_type_column() -> Column:
     """A fresh 'source_type' Column for one table.
@@ -610,6 +614,23 @@ PORTAL_ROLES = ('platform_admin', 'owner', 'branch_admin', 'manager', 'admin', '
 # Roles whose synthetic `staff` mirror row (`portal_staff_sync`) is an account, not a person of the branch:
 # no analytics counts it as staff. `admin` and `barber` mirrors do stay staff.
 PORTAL_MIRROR_POSITIONS = frozenset(PORTAL_ROLES) - {'admin', 'barber'}
+
+# YClients keeps service rows in `staff`: the waiting list and «Администратор…» placeholders. They are nobody's chair,
+# so analytics skips them and no portal account can be made for or linked to them. One rule, whatever reads it.
+WAITLIST_STAFF_NAME = 'лист ожидания'
+ADMIN_PLACEHOLDER_STAFF_PREFIX = 'администратор'
+
+
+def is_waitlist_staff_name(value) -> bool:
+    return str(value or '').strip().casefold() == WAITLIST_STAFF_NAME
+
+
+def is_admin_placeholder_staff_name(value) -> bool:
+    return str(value or '').strip().casefold().startswith(ADMIN_PLACEHOLDER_STAFF_PREFIX)
+
+
+def is_service_staff_name(value) -> bool:
+    return is_waitlist_staff_name(value) or is_admin_placeholder_staff_name(value)
 
 
 class PortalMetricVisibility(Base):

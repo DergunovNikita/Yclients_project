@@ -102,7 +102,8 @@
     "select": "Выберите…",
     "search": "Поиск…",
     "nothingFound": "Ничего не найдено",
-    "selectedCount": "Выбрано: {count}"
+    "selectedCount": "Выбрано: {count}",
+    "clearSelection": "Сбросить выбор"
   },
   "roles": {
     "platform_admin": "Платформенный администратор",
@@ -323,6 +324,8 @@
     "allLevels": "Все роли",
     "levelScope": "Роль: {title} · {count} чел.",
     "levelScopeDescription": "Показатели ниже посчитаны по барберам этой роли выбранных филиалов; ссылки на отчёты у карточек, которые не умеют фильтровать по роли, убраны.",
+    "staffGroupScope": "Выбрано сотрудников: {count}",
+    "staffGroupScopeDescription": "Показатели ниже посчитаны суммарно по визитам выбранных сотрудников как мастеров.",
     "staffRoleAdministrator": "администратор",
     "staffRoleBarber": "барбер",
     "staffRoleMixed": "барбер/админ",
@@ -639,6 +642,7 @@
     "distribute": "Разослать",
     "done": "Готово",
     "createUserTitle": "Новый пользователь",
+    "createUserStaffHint": "Барберов и администраторов заводите из сотрудника YClients: меню строки сотрудника → «Создать аккаунт».",
     "password": "Пароль",
     "passwordPlaceholder": "опционально; иначе используется ссылка-приглашение",
     "name": "Имя",
@@ -666,6 +670,16 @@
     "errorsCount": "Ошибок: {count}",
     "staffNoAccount": "staff · без аккаунта",
     "createAccount": "Создать аккаунт",
+    "linkToYclients": "Привязать к YClients",
+    "linkStaffTitle": "Сотрудник YClients",
+    "linkStaffLead": "{name}: цифры аккаунта берутся из строки сотрудника в YClients. Выберите её в каждом филиале. Служебная строка аккаунта в филиале закроется, а введённые на ней отзывы и доп. ОПЗ перейдут на выбранную строку.",
+    "linkStaffPick": "Выберите сотрудника",
+    "linkStaffAction": "Привязать",
+    "unlinkStaffAction": "Открепить",
+    "linkStaffNone": "В филиале нет свободных сотрудников YClients",
+    "linkStaffFired": "уволен",
+    "staffLinked": "Привязан сотрудник YClients «{staff}». Перенесено ручных значений: {count}.",
+    "staffUnlinked": "Сотрудник YClients «{staff}» откреплён.",
     "edit": "Редактировать",
     "confirmed": "подтверждён",
     "pending": "ожидает",
@@ -691,14 +705,25 @@
     "credentialsDeleted": "YClients credentials удалены",
     "userCreated": "Пользователь {email} создан",
     "selectTenantForSettings": "Выберите business tenant для настроек.",
-    "businessTenantSelected": "Business tenant выбран"
+    "businessTenantSelected": "Business tenant выбран",
+    "passwordRequiredPlaceholder": "минимум 8 символов",
+    "staffAccountPasswordOptional": "Необязательно: без пароля сотруднику уйдёт письмо-приглашение.",
+    "staffAccountPasswordRequired": "Письма с приглашением на этом сервере не отправляются — задайте пароль (от 8 символов) и передайте его сотруднику.",
+    "passwordTooShort": "Пароль — не короче 8 символов.",
+    "passwordTooLong": "Пароль слишком длинный: не больше 72 байт.",
+    "needsStaffLink": "Не привязан к YClients",
+    "needsStaffLinkHint": "В части филиалов у учётки нет сотрудника YClients — показатели нулевые. Нажмите, чтобы привязать.",
+    "invitesUnavailable": "Письма с приглашением на этом сервере не отправляются: передайте логин и пароль сотруднику лично.",
+    "invitesUnavailableShort": "Почта не настроена"
   },
   "authErrors": {
     "invalidCredentials": "Неверный email или пароль.",
     "accountDisabled": "Аккаунт отключён.",
     "temporaryUnavailable": "Сервис временно недоступен. Попробуйте ещё раз чуть позже.",
     "serviceUnavailable": "Сервис временно недоступен. Обновите страницу.",
-    "authenticationRequired": "Требуется вход."
+    "authenticationRequired": "Требуется вход.",
+    "network": "Нет связи с сервером. Проверьте подключение и повторите попытку.",
+    "invalidEmail": "Некорректный email: адрес должен выглядеть как name@company.ru."
   },
   "reauth": {
     "title": "Повторный вход",
@@ -774,5 +799,14 @@
   "demo": {
     "viewDemo": "Смотреть демо",
     "banner": "Демо-режим · данные вымышленные"
+  },
+  "errorDetails": {
+    "toggle": "Подробности ошибки",
+    "request": "Запрос",
+    "response": "Ответ",
+    "noResponse": "нет ответа",
+    "server": "Сервер",
+    "browser": "Браузер",
+    "time": "Время"
   }
 }

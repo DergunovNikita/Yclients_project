@@ -723,3 +723,64 @@ async def test_postgres_branch_order_puts_the_saved_order_first_and_unsaved_bran
             assert sort_orders == [None] * 5
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_postgres_racing_links_give_a_row_and_a_branch_to_one_winner(pg_session_factory):
+    """The claim is a guarded UPDATE and the account row is locked: SQLite has neither, only here is the race real."""
+    import asyncio
+
+    from portal_staff_link import StaffLinkConflict, link_staff
+
+    async_url = make_url(TEST_DATABASE_URL).set(drivername='postgresql+asyncpg')
+    engine = create_async_engine(async_url)
+
+    def account(user_id, role='admin'):
+        return PortalUser(
+            id=user_id, portal_account_id=1, email=f'user{user_id}@example.com', password_hash='x', role=role,
+            is_active=True, created_at=datetime(2026, 1, 1),
+        )
+
+    async def attempt(user_id, staff_id):
+        async with AsyncSession(engine) as db:
+            user = await db.get(PortalUser, user_id)
+            try:
+                await link_staff(
+                    db, actor_user_id=1, user=user, staff_id=staff_id, user_branch_ids=[1], scope_branch_ids=[1]
+                )
+                await db.commit()
+                return 'linked'
+            except StaffLinkConflict:
+                await db.rollback()
+                return 'conflict'
+
+    try:
+        async with AsyncSession(engine) as db:
+            db.add_all([Group(id=1, title='G1'), PortalAccount(id=1, label='Tenant', created_at=datetime(2026, 1, 1))])
+            await db.flush()
+            db.add(Company(id=1, title='Salon', group_id=1))
+            await db.flush()
+            db.add_all([
+                PortalBranch(portal_account_id=1, company_id=1),
+                account(1, 'owner'), account(10), account(11),
+                Staff(id=100, external_id=100, name='Anna', position='Администратор', company_id=1),
+                Staff(id=101, external_id=101, name='Boris', position='Администратор', company_id=1),
+                Staff(id=102, external_id=102, name='Vera', position='Администратор', company_id=1),
+            ])
+            await db.commit()
+
+        # Two accounts, one row.
+        first = await asyncio.gather(attempt(10, 100), attempt(11, 100))
+        assert sorted(first) == ['conflict', 'linked']
+        winner, loser = (10, 11) if first[0] == 'linked' else (11, 10)
+        # One account, two rows of the same branch.
+        second = await asyncio.gather(attempt(loser, 101), attempt(loser, 102))
+        assert sorted(second) == ['conflict', 'linked']
+        async with AsyncSession(engine) as db:
+            rows = (
+                await db.execute(select(Staff.id, Staff.portal_user_id).where(Staff.portal_user_id.is_not(None)))
+            ).all()
+        assert sorted((row.portal_user_id, row.id) for row in rows if row.portal_user_id == winner) == [(winner, 100)]
+        assert len([row for row in rows if row.portal_user_id == loser]) == 1
+    finally:
+        await engine.dispose()

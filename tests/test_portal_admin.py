@@ -58,6 +58,8 @@ async def tenant_db(async_session, monkeypatch):
     monkeypatch.setattr(
         auth_routes, 'get_async_session_factory', lambda: async_sessionmaker(async_session.bind, expire_on_commit=False)
     )
+    # The test environment has no SMTP, so mail would be console-only; these tests are about accounts, not delivery.
+    monkeypatch.setattr(auth_routes, 'email_is_deliverable', lambda: True)
     async_session.add(Group(id=1, title='G1'))
     async_session.add_all([Company(id=1, title='Branch 1', group_id=1), Company(id=2, title='Branch 2', group_id=1)])
     async_session.add(PortalAccount(id=1, label='Tenant', created_at=utcnow()))

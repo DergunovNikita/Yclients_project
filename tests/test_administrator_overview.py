@@ -240,9 +240,10 @@ async def _bundle_as(async_session, monkeypatch, role, *, user_id, linked_staff_
         yield async_session
 
     app.dependency_overrides[api.get_async_db] = override_db
-    params = {'start_date': '2025-03-01', 'end_date': '2025-03-31', 'company_id': 1, 'period_preset': 'month'}
-    if linked_staff_id is None:
-        params['staff_id'] = ADMIN_ID
+    params = {
+        'start_date': '2025-03-01', 'end_date': '2025-03-31', 'company_id': 1, 'period_preset': 'month',
+        'staff_id': ADMIN_ID,
+    }
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
             response = await client.get(
@@ -280,14 +281,14 @@ async def test_a_manager_loses_the_money_the_default_hides_and_keeps_the_rest(as
 
 
 @pytest.mark.asyncio
-async def test_the_administrator_himself_sees_no_money_by_default(async_session, monkeypatch):
+async def test_the_administrator_himself_sees_only_the_cosmetics_money_by_default(async_session, monkeypatch):
     await _seed(async_session, manual=[_manual(3, 3.0)])
 
     data = await _bundle_as(async_session, monkeypatch, 'admin', user_id=502, linked_staff_id=ADMIN_ID)
 
     metrics = data['summary']['administrator_personal']['metrics']
-    assert not MONEY_CODES & set(metrics)
+    assert MONEY_CODES & set(metrics) == {'cosmo_sum'}
     assert metrics['opz_qty']['value'] == 5.0
-    assert 'revenue' not in data['summary']
+    assert 'total' not in data['summary']['revenue']
     assert all('revenue' not in row for row in data['revenue_daily'])
     assert sum(row['opz_qty'] for row in data['revenue_daily']) == 2

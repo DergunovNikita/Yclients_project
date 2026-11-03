@@ -18,7 +18,9 @@ import { intlLocale, t } from '../i18n.js';
 import { branchesForPeriod } from '../reportingWindow.js';
 import { staffOption } from '../staffLabel.js';
 import { mountLoader } from '../loader.js';
-import { chosenLevel, levelSelection, selectableLevelOptions } from '../staffLevels.js';
+import { chosenLevels, levelIdsParam, levelSelection, selectableLevelOptions } from '../staffLevels.js';
+import { enhanceSelect, refreshSelect } from '../customSelect.js';
+import { idListParam, keepListed, parseIdList, selectedValues, setSelectedValues } from '../multiSelect.js';
 import {
   DEFAULT_GRANULARITY,
   REPORT_FILTER_KEYS,
@@ -37,7 +39,6 @@ import {
   reportPeriodIsValid,
   reportRequestFilters,
   reportStaffApplies,
-  staffSelectionForOptions,
 } from '../dashboardRequestState.js';
 
 // The one place a filter key is tied to its input: everything else walks
@@ -46,8 +47,8 @@ import {
 const FILTER_INPUTS = {
   start_date: 'start',
   end_date: 'end',
-  company_id: 'branch',
-  staff_id: 'staff',
+  company_ids: 'branch',
+  staff_ids: 'staff',
   granularity: 'granularity',
   staff_position_ids: 'level',
 };
@@ -80,10 +81,12 @@ function uniqueSorted(values) {
   return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru'));
 }
 
-function optionHtml(value, label, selectedValue, name = null, key = null) {
+// `selected` is one value or, for a multiple select, the list of them.
+function optionHtml(value, label, selected, name = null, key = null) {
   const nameAttr = name === null ? '' : ` data-name="${escapeHtml(name)}"`;
   const keyAttr = key === null ? '' : ` data-key="${escapeHtml(key)}"`;
-  return `<option value="${escapeHtml(value)}"${nameAttr}${keyAttr}${String(value) === String(selectedValue) ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+  const isSelected = [].concat(selected).map(String).includes(String(value));
+  return `<option value="${escapeHtml(value)}"${nameAttr}${keyAttr}${isSelected ? ' selected' : ''}>${escapeHtml(label)}</option>`;
 }
 
 function reportMatches(report, filters, favorites) {
@@ -114,9 +117,17 @@ function reportIdFromLocation() {
   return decodePathSegment(path.slice('/reports/'.length).split('/')[0] || '');
 }
 
+// The branch select is filled from the link right away; the staff and level selects are filled by loadStaff, which
+// reads their lists first (an option that is not rendered yet cannot be selected).
+const LIST_FILTER_KEYS = new Set(['company_ids', 'staff_ids', 'staff_position_ids']);
+
 function applyReportParamsFromLocation(els) {
   const filters = reportFiltersFromParams(new URLSearchParams(window.location.search));
-  REPORT_FILTER_KEYS.forEach((key) => { els[FILTER_INPUTS[key]].value = filters[key]; });
+  REPORT_FILTER_KEYS.forEach((key) => {
+    if (!LIST_FILTER_KEYS.has(key)) els[FILTER_INPUTS[key]].value = filters[key];
+  });
+  setSelectedValues(els.branch, parseIdList(filters.company_ids));
+  refreshSelect(els.branch);
   els.compareStart.value = filters.compare_start_date;
   els.compareEnd.value = filters.compare_end_date;
   els.compareEnabled.checked = filters.compare_enabled;
@@ -169,6 +180,13 @@ export function initReports({
     dataLabels: document.getElementById('report-data-labels'),
   };
   if (!els.view) return null;
+
+  // Branch, employee and level are multiple selects (empty = all). The change fires when the menu closes, so
+  // picking several entries costs one reload.
+  const multiSelectOptions = { commitOnClose: true, clearable: true };
+  enhanceSelect(els.branch, { placeholder: t('dash.allBranches'), ...multiSelectOptions });
+  enhanceSelect(els.staff, { placeholder: t('dash.allStaff'), ...multiSelectOptions });
+  enhanceSelect(els.level, { placeholder: t('dash.allLevels'), ...multiSelectOptions });
 
   publishFilterHeight(els.viewer, els.view.querySelector('.report-filter-row'));
   // Between the filters and the report: everything it covers or dims is the report content that follows.
@@ -411,30 +429,41 @@ export function initReports({
   }
 
   function renderBranches() {
-    const selected = els.branch.value;
+    const selected = selectedValues(els.branch);
     const options = branchesForPeriod(state.branches, els.start.value, els.end.value);
-    els.branch.innerHTML = optionHtml('', t('dash.allBranches'), selected)
-      + options.map((branch) => optionHtml(branch.id, branch.title, selected)).join('');
-    // A branch the new period cannot reach falls back to the whole scope: leaving it
+    els.branch.innerHTML = options.map((branch) => optionHtml(branch.id, branch.title, '')).join('');
+    // A branch the new period cannot reach drops out of the selection (none left: the whole scope): leaving it
     // selected would filter the report by a branch that is no longer in the list.
-    if (selected && !options.some((branch) => String(branch.id) === selected)) els.branch.value = '';
+    setSelectedValues(els.branch, keepListed(selected, options.map((branch) => branch.id)));
+    refreshSelect(els.branch);
   }
 
+  const branchKey = () => idListParam(selectedValues(els.branch));
+
   function staffParamsKey() {
-    return `${els.branch.value}|${els.start.value}|${els.end.value}`;
+    return `${branchKey()}|${els.start.value}|${els.end.value}`;
+  }
+
+  // What each filter key currently holds, as a request and a link carry it.
+  function filterValue(key) {
+    if (key === 'company_ids' || key === 'staff_ids') return idListParam(selectedValues(els[FILTER_INPUTS[key]]));
+    if (key === 'staff_position_ids') return levelIdsParam(selectedValues(els.level));
+    return els[FILTER_INPUTS[key]].value;
   }
 
   // The selection is passed in rather than read back off the select: a staff id that
-  // belongs to another branch matches no option yet and the select reports '' for it,
+  // belongs to another branch matches no option yet and the select reports nothing for it,
   // which silently widened a per-employee link to the whole branch.
-  // A person and a level exclude each other, so a level only survives when no person is asked for.
-  // `desiredLevel` is `{ value, key }`: the select's own choice carries the key (kept across scopes), a link only ids.
-  function renderLevels(desiredLevel) {
+  // People and levels exclude each other, so levels only survive when no person is asked for.
+  // `desiredLevels` are `{ value, key }` entries: the select's own choice carries the key (kept across scopes), a link only ids.
+  function renderLevels(desiredLevels) {
     const options = selectableLevelOptions(state.staffItems, currentUser());
-    const selected = levelSelection(options, desiredLevel);
-    els.level.innerHTML = optionHtml('', t('dash.allLevels'), selected, null, '')
-      + options.map((option) => optionHtml(option.value, option.label, selected, null, option.key)).join('');
-    els.level.value = selected;
+    const selected = levelSelection(options, desiredLevels);
+    els.level.innerHTML = options
+      .map((option) => optionHtml(option.value, option.label, selected, null, option.key))
+      .join('');
+    setSelectedValues(els.level, selected);
+    refreshSelect(els.level);
     updateLevelField(options.length > 0);
   }
 
@@ -445,13 +474,15 @@ export function initReports({
     els.levelField.hidden = !visible;
   }
 
-  async function loadStaff(desiredStaffId = els.staff.value, desiredLevel = chosenLevel(els.level)) {
+  async function loadStaff(desiredStaffIds = selectedValues(els.staff), desiredLevels = chosenLevels(els.level)) {
     // The list itself depends only on branch + period. Unchanged since the last successful
     // load (e.g. another report card in the same scope, or a back/forward that repeats it),
-    // it only needs the selection moved to whatever id this location asks for.
+    // it only needs the selection moved to whatever ids this location asks for.
     if (state.staffLoaded && state.staffParamsKey === staffParamsKey()) {
-      els.staff.value = staffSelectionForOptions(desiredStaffId, state.staffIds);
-      renderLevels(els.staff.value ? {} : desiredLevel);
+      const kept = keepListed(desiredStaffIds, state.staffIds);
+      setSelectedValues(els.staff, kept);
+      refreshSelect(els.staff);
+      renderLevels(kept.length ? [] : desiredLevels);
       return 'ready';
     }
     state.staffLoaded = false;
@@ -460,7 +491,7 @@ export function initReports({
     const request = staffRequests.start();
     try {
       const payload = await fetchJson('/dashboard/staff', {
-        company_id: els.branch.value,
+        company_ids: branchKey(),
         start_date: els.start.value,
         end_date: els.end.value,
       }, {
@@ -469,25 +500,27 @@ export function initReports({
       });
       if (!request.isCurrent()) return 'superseded';
       const staff = payload.data || [];
-      const selected = staffSelectionForOptions(desiredStaffId, staff.map((person) => person.id));
-      els.staff.innerHTML = optionHtml('', t('dash.allStaff'), selected)
-        + staff.map((person) => {
-          const { name, text } = staffOption(person, {
-            branchTitle: els.branch.value ? '' : person.company_title || String(person.company_id),
-            translate: t,
-          });
-          return optionHtml(person.id, text, selected, name);
-        }).join('');
+      const selected = keepListed(desiredStaffIds, staff.map((person) => person.id));
+      // The branch is named in the label unless exactly one is chosen: the list then spans several.
+      const singleBranch = selectedValues(els.branch).length === 1;
+      els.staff.innerHTML = staff.map((person) => {
+        const { name, text } = staffOption(person, {
+          branchTitle: singleBranch ? '' : person.company_title || String(person.company_id),
+          translate: t,
+        });
+        return optionHtml(person.id, text, selected, name);
+      }).join('');
+      refreshSelect(els.staff);
       state.staffLoaded = true;
       state.staffIds = staff.map((person) => person.id);
       state.staffItems = staff;
-      renderLevels(selected ? {} : desiredLevel);
+      renderLevels(selected.length ? [] : desiredLevels);
       state.staffParamsKey = staffParamsKey();
       clearFilterWarning();
       return 'ready';
     } catch (error) {
       if (isSupersededRequest(error) || !request.isCurrent()) return 'superseded';
-      showFilterWarning(error.message, () => loadStaff(desiredStaffId, desiredLevel));
+      showFilterWarning(error.message, () => loadStaff(desiredStaffIds, desiredLevels));
       return 'failed';
     } finally {
       if (request.isCurrent()) request.finish();
@@ -559,7 +592,7 @@ export function initReports({
 
   function currentFilters() {
     const filters = {};
-    REPORT_FILTER_KEYS.forEach((key) => { filters[key] = els[FILTER_INPUTS[key]].value; });
+    REPORT_FILTER_KEYS.forEach((key) => { filters[key] = filterValue(key); });
     filters.granularity = filters.granularity || DEFAULT_GRANULARITY;
     return {
       ...filters,
@@ -592,7 +625,7 @@ export function initReports({
     return reportLinkSearch({
       filters: {
         ...currentFilters(),
-        ...(state.staffApplies ? {} : { staff_id: '' }),
+        ...(state.staffApplies ? {} : { staff_ids: '' }),
         ...(state.levelApplies ? {} : { staff_position_ids: '' }),
         // The select is shared like the staff one: a report without it must not write it into its link.
         ...(state.granularityApplies ? {} : { granularity: '' }),
@@ -775,8 +808,8 @@ export function initReports({
     compareWindowIsOurs = loaded.ours;
     syncCompareDefaults();
     syncMonthPicker();
-    const requestedCompanyId = requested.company_id;
-    const requestedStaffId = requested.staff_id;
+    const requestedCompanyIds = parseIdList(requested.company_ids);
+    const requestedStaffIds = parseIdList(requested.staff_ids);
     const showBlockedScope = () => {
       // An earlier openReport (back/forward while it was loading) is still current and would render over this message.
       reportRequests.abort();
@@ -804,22 +837,25 @@ export function initReports({
       }
     };
     if (!reportScopedFilterAllowsLoad(
-      requestedCompanyId,
+      requestedCompanyIds,
       state.branchesLoaded,
       state.branches.map((branch) => branch.id),
     )) {
       showBlockedScope();
       return;
     }
-    const expectedBranch = els.branch.value;
-    // A link naming a person wins over a level: the two never filter together.
-    const staffStatus = await loadStaff(requestedStaffId, requestedStaffId ? {} : { value: requested.staff_position_ids });
+    const expectedBranch = branchKey();
+    // A link naming people wins over a level: the two never filter together.
+    const staffStatus = await loadStaff(
+      requestedStaffIds,
+      requestedStaffIds.length || !requested.staff_position_ids ? [] : [{ value: requested.staff_position_ids }],
+    );
     if (staffStatus === 'superseded') return;
-    if (!reportScopedFilterAllowsLoad(requestedStaffId, state.staffLoaded, state.staffIds)) {
+    if (!reportScopedFilterAllowsLoad(requestedStaffIds, state.staffLoaded, state.staffIds)) {
       showBlockedScope();
       return;
     }
-    if (!staffRefreshAllowsDataLoad(staffStatus, expectedBranch, els.branch.value)) return;
+    if (!staffRefreshAllowsDataLoad(staffStatus, expectedBranch, branchKey())) return;
     const reportId = reportIdFromLocation();
     if (reportId) {
       await openReport(reportId, false);
@@ -867,15 +903,13 @@ export function initReports({
   // The report is requested with the staff select as it stands, so the list for the new
   // scope has to settle first: loadStaff may fall back to "all" for an employee absent from it.
   async function reloadWithRefreshedStaff() {
-    const expectedBranch = els.branch.value;
+    const expectedBranch = branchKey();
     const staffStatus = await loadStaff();
-    if (!staffRefreshAllowsDataLoad(staffStatus, expectedBranch, els.branch.value)) return;
+    if (!staffRefreshAllowsDataLoad(staffStatus, expectedBranch, branchKey())) return;
     reloadActiveReport();
   }
-  els.branch.addEventListener('change', () => {
-    els.staff.value = '';
-    return reloadWithRefreshedStaff();
-  });
+  // The staff list reloads for the chosen branches; the chosen people absent from it drop out of the selection.
+  els.branch.addEventListener('change', reloadWithRefreshedStaff);
   [els.start, els.end].forEach((input) => {
     input.addEventListener('change', () => {
       state.periodPreset = '';
@@ -899,12 +933,16 @@ export function initReports({
   });
   // A half-written window asks for nothing until its other bound is typed in;
   // reportCompareParams is the only gate, so the checkbox is left as the user set it.
+  function clearSelection(select) {
+    setSelectedValues(select, []);
+    refreshSelect(select);
+  }
   els.staff.addEventListener('change', () => {
-    if (els.staff.value) els.level.value = '';
+    if (selectedValues(els.staff).length) clearSelection(els.level);
     reloadActiveReport();
   });
   els.level.addEventListener('change', () => {
-    if (els.level.value) els.staff.value = '';
+    if (selectedValues(els.level).length) clearSelection(els.staff);
     reloadActiveReport();
   });
   [els.granularity, els.compareEnabled, els.compareStart, els.compareEnd].forEach((input) => {

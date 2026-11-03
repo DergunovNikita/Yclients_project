@@ -328,27 +328,32 @@
       color: #172033;
     }
 
-    .toolbar .custom-select {
+    .toolbar .custom-select,
+    .report-filter-row .custom-select {
       width: 100%;
       text-transform: none;
       font-weight: 400;
     }
 
-    .toolbar .custom-select__trigger {
+    .toolbar .custom-select__trigger,
+    .report-filter-row .custom-select__trigger {
       min-height: 40px;
       border-radius: 6px;
       font-size: 13px;
     }
 
-    .toolbar .custom-select__option {
+    .toolbar .custom-select__option,
+    .report-filter-row .custom-select__option {
       font-size: 12px;
     }
 
-    .toolbar .custom-select__menu {
+    .toolbar .custom-select__menu,
+    .report-filter-row .custom-select__menu {
       min-width: max(100%, 260px);
     }
 
-    .toolbar .custom-select__search {
+    .toolbar .custom-select__search,
+    .report-filter-row .custom-select__search {
       font-size: 12px;
     }
 
@@ -2202,21 +2207,15 @@
         </label>
         <label>
           <span data-i18n="dash.branch">Filiale</span>
-          <select id="overview-branch">
-            <option value="" data-i18n="dash.allBranches">Tutte le filiali</option>
-          </select>
+          <select id="overview-branch" multiple></select>
         </label>
         <label>
           <span data-i18n="dash.worker">Operatore</span>
-          <select id="overview-staff">
-            <option value="" data-i18n="dash.allWorkers">Tutti gli operatori</option>
-          </select>
+          <select id="overview-staff" multiple></select>
         </label>
         <label hidden>
           <span data-i18n="dash.level">Ruolo</span>
-          <select id="overview-level">
-            <option value="" data-i18n="dash.allLevels">Tutti i ruoli</option>
-          </select>
+          <select id="overview-level" multiple></select>
         </label>
         <button type="button" id="overview-load" data-i18n="dash.refresh">Aggiorna</button>
       </section>
@@ -2356,21 +2355,15 @@
         </label>
         <label>
           <span data-i18n="dash.branch">Filiale</span>
-          <select id="plan-branch">
-            <option value="" data-i18n="dash.allBranches">Tutte le filiali</option>
-          </select>
+          <select id="plan-branch" multiple></select>
         </label>
         <label>
           <span data-i18n="dash.worker">Operatore</span>
-          <select id="plan-staff">
-            <option value="" data-i18n="dash.allWorkers">Tutti gli operatori</option>
-          </select>
+          <select id="plan-staff" multiple></select>
         </label>
         <label hidden>
           <span data-i18n="dash.level">Ruolo</span>
-          <select id="plan-level">
-            <option value="" data-i18n="dash.allLevels">Tutti i ruoli</option>
-          </select>
+          <select id="plan-level" multiple></select>
         </label>
         <button type="button" id="plan-load" data-i18n="dash.refresh">Aggiorna</button>
         <div class="plan-column-picker" id="plan-column-picker">
@@ -2681,21 +2674,15 @@
           </label>
           <label>
             <span data-i18n="dash.branch">Filiale</span>
-            <select id="report-branch">
-              <option value="" data-i18n="dash.allBranches">Tutte le filiali</option>
-            </select>
+            <select id="report-branch" multiple></select>
           </label>
           <label>
             <span data-i18n="dash.staff">Dipendente</span>
-            <select id="report-staff">
-              <option value="" data-i18n="dash.allStaff">Tutti i dipendenti</option>
-            </select>
+            <select id="report-staff" multiple></select>
           </label>
           <label id="report-level-field" hidden>
             <span data-i18n="dash.level">Ruolo</span>
-            <select id="report-level">
-              <option value="" data-i18n="dash.allLevels">Tutti i ruoli</option>
-            </select>
+            <select id="report-level" multiple></select>
           </label>
           <label>
             <span data-i18n="dash.granularity">Granularità</span>

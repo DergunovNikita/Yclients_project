@@ -16,6 +16,7 @@ from dashboard_service import (
     SERVICE_SOLD_ITEM_TYPE,
     DateRange,
     ReportingWindow,
+    StaffSelection,
     _appointment_factual_at_condition,
     _average_check_block,
     _business_financial_master_condition,
@@ -27,6 +28,7 @@ from dashboard_service import (
     _pct_change,
     _physical_account_condition,
     _source_coverage_status,
+    _staff_match,
     business_appointment_condition,
     factual_branch_date,
     fetch_opz_year_facts,
@@ -190,7 +192,7 @@ def _aggregate_daily(rows: list[dict[str, Any]], granularity: str) -> list[dict[
 async def _year_over_year_activity_bounds(
     db: AsyncSession,
     company_id: int | None,
-    staff_id: int | None,
+    staff_id: StaffSelection | None,
     allowed_company_ids: list[int],
     now: datetime,
 ) -> tuple[date, dict[str, Any]] | None:
@@ -210,7 +212,7 @@ async def _year_over_year_activity_bounds(
     if scope is not None:
         appointment_conditions.append(scope)
     if staff_id is not None:
-        appointment_conditions.append(Appointment.staff_id == staff_id)
+        appointment_conditions.append(_staff_match(Appointment.staff_id, staff_id))
     appointment_bounds = (
         await db.execute(
             select(
@@ -238,7 +240,7 @@ async def _year_over_year_activity_bounds(
     if scope is not None:
         service_conditions.append(scope)
     if staff_id is not None:
-        service_conditions.append(Appointment.staff_id == staff_id)
+        service_conditions.append(_staff_match(Appointment.staff_id, staff_id))
     service_bounds = (
         await db.execute(
             select(
@@ -299,7 +301,7 @@ async def _year_over_year_activity_bounds(
     if scope is not None:
         goods_conditions.append(scope)
     if staff_id is not None:
-        goods_conditions.append(GoodTransaction.master_id == staff_id)
+        goods_conditions.append(_staff_match(GoodTransaction.master_id, staff_id))
     goods_bounds = (
         await db.execute(
             select(

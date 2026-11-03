@@ -104,17 +104,23 @@ export const ADMIN_SCHEDULE = {
   administrator_personal: { staff_id: 7, company_id: 1, metrics: ADMIN_BLOCK_METRICS, opz_manual_qty: 1 },
 };
 
-// Manager default: money hidden, so every revenue field is null and the block is flagged.
+// What a role without the `revenue` metric receives: the block stays, holding only the count keys.
+export const REVENUE_COUNTS_ONLY = {
+  appointments: FULL.revenue.appointments,
+  appointments_change_pct: FULL.revenue.appointments_change_pct,
+  service_count: FULL.revenue.service_count,
+  service_count_change_pct: FULL.revenue.service_count_change_pct,
+  goods_count: FULL.revenue.goods_count,
+  goods_count_change_pct: FULL.revenue.goods_count_change_pct,
+  extra_service_count: FULL.revenue.extra_service_count,
+  extra_service_count_change_pct: FULL.revenue.extra_service_count_change_pct,
+};
+
+// Manager default: money hidden, the block is flagged and carries counts only.
 export const ADMIN_SCHEDULE_FINANCIALS_HIDDEN = {
   ...ADMIN_SCHEDULE,
   financials_hidden: true,
-  revenue: {
-    ...FULL.revenue,
-    total: null,
-    service_revenue: null,
-    goods_revenue: null,
-    extra_service_revenue: null,
-  },
+  revenue: REVENUE_COUNTS_ONLY,
   average_check: { ...FULL.average_check, total: null, services: null, goods: null, extra_services: null },
   administrator_personal: {
     ...ADMIN_SCHEDULE.administrator_personal,
@@ -125,6 +131,9 @@ export const ADMIN_SCHEDULE_FINANCIALS_HIDDEN = {
   appointments_breakdown: { source_status: 'unavailable' },
 };
 
+// Same hiding on a non-administrator Overview, without an average-check block either.
+export const REVENUE_HIDDEN = { ...FULL, financials_hidden: true, revenue: REVENUE_COUNTS_ONLY, average_check: undefined };
+
 export const NO_BLOCKS = { appointments_breakdown: { source_status: 'local', local_reason: 'upstream_error' } };
 
 export const SUMMARIES = {
@@ -132,5 +141,6 @@ export const SUMMARIES = {
   partialAverageCheck: PARTIAL_AVERAGE_CHECK,
   adminSchedule: ADMIN_SCHEDULE,
   adminScheduleFinancialsHidden: ADMIN_SCHEDULE_FINANCIALS_HIDDEN,
+  revenueHidden: REVENUE_HIDDEN,
   noBlocks: NO_BLOCKS,
 };

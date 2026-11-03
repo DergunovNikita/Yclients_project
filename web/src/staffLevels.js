@@ -1,11 +1,15 @@
 // Barber levels («ТОП-барбер», «ПРЕМИУМ-барбер») are YClients positions. One title can sit under several position
 // ids, so a level option stands for a SET of ids: its value is the sorted ids joined by commas, the very string
 // `staff_position_ids` carries to the API. The id set differs per scope (the network, one branch), so what the user
-// chose is remembered by the level `key`: the select carries it on each option as `data-key`.
+// chose is remembered by the level `key`: the select carries it on each option as `data-key`. The select is multiple:
+// several chosen levels ask for the union of their id sets.
+
+import { selectedValues } from './multiSelect.js';
 
 const LEVEL_CATEGORIES = new Set(['barber', 'mixed']);
-// Roles clamped to their own staff row: the server ignores a level for them (as it does a chosen colleague).
-const PERSONAL_ROLES = new Set(['admin', 'barber']);
+// Roles clamped to their own staff row: the server ignores a level for them (as it does a chosen colleague). The
+// administrator is not one of them: like a manager they pick any branch, person and level inside their own branches.
+const PERSONAL_ROLES = new Set(['barber']);
 
 function compareText(left, right) {
   return left.localeCompare(right, 'ru');
@@ -44,9 +48,14 @@ export function levelOptions(staffItems = []) {
     .sort((left, right) => compareText(left.label, right.label) || compareText(left.key, right.key));
 }
 
-/** A personal role (`admin`, `barber`) sees only its own row, so a level would pick nothing for it. */
+/** The role clamped to its own staff rows by the server (`barber`). */
+export function isPersonalRole(user) {
+  return PERSONAL_ROLES.has(user?.role);
+}
+
+/** A personal role sees only its own row, so a level would pick nothing for it. */
 export function canPickLevel(user) {
-  return !PERSONAL_ROLES.has(user?.role);
+  return !isPersonalRole(user);
 }
 
 /**
@@ -57,37 +66,57 @@ export function selectableLevelOptions(staffItems = [], user = null) {
   return canPickLevel(user) && staffItems.length > 1 ? levelOptions(staffItems) : [];
 }
 
-/** What a level select currently stands for: its id set and the level key of the selected option. */
-export function chosenLevel(select) {
-  return { value: select?.value || '', key: select?.selectedOptions?.[0]?.dataset?.key || '' };
+/** What a level select currently stands for: the id set and the level key of every selected option. */
+export function chosenLevels(select) {
+  return Array.from(select?.options || [])
+    .filter((option) => option.selected && option.value !== '')
+    .map((option) => ({ value: option.value, key: option.dataset?.key || '' }));
 }
 
-/**
- * The option value to select after the options were rebuilt, `''` («all levels») when the level is gone.
- *
- * With a `key` the level is looked up by it, whatever ids it has in the new scope. Without one (a link carries only
- * ids) the option with exactly those ids wins, otherwise the one sharing the most of them.
- *
- * @param {{key: string, value: string}[]} options
- * @param {{value?: string, key?: string}} previous
- */
-export function levelSelection(options, { value = '', key = '' } = {}) {
-  if (key) return options.find((option) => option.key === key)?.value ?? '';
-  const ids = String(value ?? '').split(',').filter(Boolean);
-  if (!ids.length) return '';
-  const wanted = [...new Set(ids.map(Number))].sort((a, b) => a - b).join(',');
-  const exact = options.find((option) => option.value === wanted);
-  if (exact) return exact.value;
+function idsOf(value) {
+  return String(value ?? '').split(',').filter(Boolean);
+}
+
+// Level options a link's id set stands for: those entirely inside it (a union of levels), otherwise the one sharing
+// the most ids (a link written for another scope's id set of the same level).
+function optionValuesForIds(options, value) {
+  const wanted = new Set(idsOf(value).map(Number).filter(Number.isFinite));
+  if (!wanted.size) return [];
+  const inside = options.filter((option) => idsOf(option.value).every((id) => wanted.has(Number(id))));
+  if (inside.length) return inside.map((option) => option.value);
   let best = null;
   let bestShared = 0;
   options.forEach((option) => {
-    const shared = option.value.split(',').filter((id) => ids.includes(id)).length;
+    const shared = idsOf(option.value).filter((id) => wanted.has(Number(id))).length;
     if (shared > bestShared) {
       best = option;
       bestShared = shared;
     }
   });
-  return best ? best.value : '';
+  return best ? [best.value] : [];
+}
+
+/**
+ * The option values to select after the options were rebuilt; a level that is gone drops out of the selection.
+ *
+ * An entry with a `key` is looked up by it, whatever ids the level has in the new scope. One without (a link carries
+ * only ids) maps to the options its ids cover.
+ *
+ * @param {{key: string, value: string}[]} options
+ * @param {{value?: string, key?: string}[]} previous
+ * @returns {string[]} In option order.
+ */
+export function levelSelection(options, previous = []) {
+  const chosen = new Set();
+  (previous || []).forEach(({ value = '', key = '' } = {}) => {
+    if (key) {
+      const option = options.find((candidate) => candidate.key === key);
+      if (option) chosen.add(option.value);
+      return;
+    }
+    optionValuesForIds(options, value).forEach((optionValue) => chosen.add(optionValue));
+  });
+  return options.map((option) => option.value).filter((value) => chosen.has(value));
 }
 
 // Reports whose catalog entry offers the level filter (`filters.staff_level` on the server). The Overview has no
@@ -105,7 +134,14 @@ export function levelReportParams(reportId, levelFilter) {
   return LEVEL_FILTER_REPORTS.has(reportId) && ids ? { staff_position_ids: ids } : null;
 }
 
-/** The `staff_position_ids` a request carries: a chosen person wins over a level, as on the server. */
+/** The ids of several level options as one `staff_position_ids` value: their union, sorted numerically. */
+export function levelIdsParam(optionValues) {
+  const ids = new Set();
+  (optionValues || []).forEach((value) => idsOf(value).forEach((id) => ids.add(Number(id))));
+  return [...ids].sort((a, b) => a - b).join(',');
+}
+
+/** The `staff_position_ids` a request carries: chosen people win over levels, as on the server. */
 export function levelRequestParam(filter) {
-  return filter?.staff?.value ? '' : filter?.level?.value || '';
+  return selectedValues(filter?.staff).length ? '' : levelIdsParam(selectedValues(filter?.level));
 }

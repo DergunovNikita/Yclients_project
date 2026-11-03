@@ -37,6 +37,8 @@ from models import PortalBranch, PortalEmailToken, PortalUser, PortalUserBranch,
 TOKEN_PURPOSE_VERIFY = 'verify'
 TOKEN_PURPOSE_RESET = 'reset'
 TOKEN_TTL_HOURS = {'verify': 48, 'reset': 2}
+# An invite waits for whenever the person reads their mail; a reset link the user asked for a minute ago does not.
+INVITE_TTL_HOURS = 72
 PORTAL_PASSWORD_MIN_LENGTH = 8
 # bcrypt 5 raises on longer input and older versions truncate silently; neither is acceptable.
 PASSWORD_MAX_BYTES = 72
@@ -122,9 +124,11 @@ async def invalidate_email_tokens(db: AsyncSession, user_id: int, purpose: str, 
     )
 
 
-async def create_email_token(db: AsyncSession, user_id: int, purpose: str, *, commit: bool = True) -> str:
+async def create_email_token(
+    db: AsyncSession, user_id: int, purpose: str, *, commit: bool = True, ttl_hours: int | None = None
+) -> str:
     raw = secrets.token_urlsafe(32)
-    ttl = TOKEN_TTL_HOURS[purpose]
+    ttl = ttl_hours or TOKEN_TTL_HOURS[purpose]
     now = utcnow()
     await invalidate_email_tokens(db, user_id, purpose, now=now)
     db.add(
@@ -234,6 +238,11 @@ def _email_delivery_mode() -> str:
     return 'smtp'
 
 
+def email_is_deliverable() -> bool:
+    """True when mail really leaves the server; in console mode an invite or reset link reaches nobody."""
+    return _email_delivery_mode() == 'smtp'
+
+
 def send_auth_email(to_email: str, subject: str, body: str) -> None:
     if _email_delivery_mode() == 'console':
         # The body carries a bearer token (reset/invite/verify link); anyone who reads the container
@@ -271,12 +280,13 @@ async def _send_token_email(
     page: str,
     subject: str,
     body: Callable[[str, str], str],
+    ttl_hours: int | None = None,
 ) -> None:
     """Issue a single-use token, mail its link and commit; any failure rolls the whole thing back.
 
     `body` gets the greeting name and the link. The caller stamps its own `*_sent_at` column.
     """
-    token = await create_email_token(db, user.id, purpose, commit=False)
+    token = await create_email_token(db, user.id, purpose, commit=False, ttl_hours=ttl_hours)
     link = _email_link(page, token)
     name = (user.full_name or user.email).strip()
     try:
@@ -329,11 +339,12 @@ async def send_account_invite_email(db: AsyncSession, user: PortalUser) -> None:
         purpose=TOKEN_PURPOSE_RESET,
         page='/reset-password.html',
         subject='Доступ к YClients Portal',
+        ttl_hours=INVITE_TTL_HOURS,
         body=lambda name, link: (
             f'Здравствуйте, {name}!\n\n'
             'Для вас создан аккаунт на портале.\n\n'
             f'Логин: {user.email}\n'
-            'Чтобы задать пароль, перейдите по ссылке (действует 2 часа):\n'
+            f'Чтобы задать пароль, перейдите по ссылке (действует {INVITE_TTL_HOURS} часа):\n'
             f'{link}\n\n'
             'Если вы не ожидали это письмо, просто проигнорируйте его.\n'
         ),

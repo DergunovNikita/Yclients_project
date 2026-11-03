@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import PortalUser, PortalUserBranch, Staff
+from models import SOURCE_PORTAL, PortalUser, PortalUserBranch, Staff, is_service_staff_name
 
 # Attempts to claim a synthetic staff id before giving up; a retry only follows a lost race.
 STAFF_ID_ATTEMPTS = 3
@@ -41,6 +41,7 @@ async def _add_portal_staff(db: AsyncSession, *, name: str, role: str, company_i
             position=role,
             company_id=company_id,
             portal_user_id=user_id,
+            source_type=SOURCE_PORTAL,
             fired=0,
             bookable=True,
         )
@@ -63,27 +64,48 @@ def _assign(row: Staff, **values) -> bool:
     return changed
 
 
+def is_mirror_row(row: Staff) -> bool:
+    """The portal's own synthetic row. Twin of `mirror_staff_clause`: change both together."""
+    return row.source_type == SOURCE_PORTAL or (row.portal_user_id is not None and row.external_id is None)
+
+
 def _is_crm_row(row: Staff, portal_user_id: int) -> bool:
-    return int(row.id) == int(portal_user_id) and row.external_id is not None
+    return row.portal_user_id == portal_user_id and not is_mirror_row(row)
+
+
+def mirror_staff_clause():
+    """Rows the portal made: marked `source_type = 'portal'`, or linked to a user without a YClients `external_id`.
+
+    The second half is for the deploy window between migration `0062` and the restart of the API: code that predates
+    the marker still inserts its mirrors as `'yclients'` and never gives them an `external_id`, while every row of
+    YClients (the sync, adoption by `0033`, the demo seed) has one.
+    """
+    return or_(Staff.source_type == SOURCE_PORTAL, and_(Staff.portal_user_id.is_not(None), Staff.external_id.is_(None)))
+
+
+def yclients_staff_clause():
+    """Rows that come from YClients — everything but the portal's mirrors. YClients decides their `fired`."""
+    return ~mirror_staff_clause()
 
 
 def crm_staff_clause(portal_user_id: int):
-    return and_(Staff.id == portal_user_id, Staff.external_id.is_not(None))
+    """A row of YClients linked to the user: provisioned from it, or linked by an admin (`portal_staff_link`)."""
+    return and_(Staff.portal_user_id == portal_user_id, yclients_staff_clause())
 
 
 def _portal_owned_staff_clause(portal_user_id: int):
     """Rows this module created — the only ones whose `fired` the portal may change.
 
-    A portal account provisioned from a real employee reuses the staff id as the portal
-    user id (portal_account_provision.provision_staff_account), so that row is the CRM
-    record and YClients owns its `fired`. Firing it because the account is scoped to
-    other branches made a working employee disappear from the «Работник» filter.
+    A portal account provisioned from a real employee points at that employee's row
+    (portal_account_provision.provision_staff_account), and an admin can link an existing
+    YClients row to an account the same way, so YClients owns that row's `fired` and name.
+    Firing it because the account is scoped to other branches made a working employee
+    disappear from the «Работник» filter.
 
-    The CRM row is told by `external_id` as well as by the id: a mirror row takes max(id)+1 from the
-    same number space as portal user ids and can land on its own user's id, but it never has an
-    `external_id`.
+    The CRM row is told by `source_type`, not by id: a mirror row takes max(id)+1 from the same number space as
+    portal user ids and can land on its own user's id, and a linked row has any id at all.
     """
-    return and_(Staff.portal_user_id == portal_user_id, ~crm_staff_clause(portal_user_id))
+    return and_(Staff.portal_user_id == portal_user_id, mirror_staff_clause())
 
 
 async def sync_portal_user_staff(
@@ -114,7 +136,10 @@ async def sync_portal_user_staff(
         return False
 
     name = staff_display_name(user)
-    by_company = {row.company_id: row for row in linked}
+    by_company: dict[int | None, Staff] = {}
+    for row in sorted(linked, key=lambda item: (_is_crm_row(item, user.id), item.fired != 1, item.id)):
+        # One row stands for the branch: a linked YClients row over a mirror, a live one over a fired one.
+        by_company[row.company_id] = row
     target_companies = set(company_ids)
 
     changed = False
@@ -129,8 +154,10 @@ async def sync_portal_user_staff(
         else:
             changed |= _assign(row, name=name, position=user.role, fired=0, bookable=True)
 
-    for company_id, row in by_company.items():
-        if company_id not in target_companies and not _is_crm_row(row, user.id):
+    for row in linked:
+        if _is_crm_row(row, user.id):
+            continue
+        if row.company_id not in target_companies or by_company[row.company_id] is not row:
             changed |= _assign(row, fired=1)
     return changed
 
@@ -138,7 +165,7 @@ async def sync_portal_user_staff(
 async def detach_portal_user_staff(db: AsyncSession, portal_user_id: int) -> None:
     """Before a portal user is deleted: fire the rows the portal made and release the CRM row.
 
-    The CRM row (staff.id == portal_user.id, has an external_id) belongs to YClients, so it stays, but its link
+    The CRM row (linked, not a mirror) belongs to YClients, so it stays, but its link
     must go: left pointing at a dead id it would be hidden from the unlinked list and refuse a new account.
     """
     await db.execute(
@@ -199,9 +226,12 @@ async def list_unlinked_staff(
         .where(
             Staff.fired == 0,
             Staff.portal_user_id.is_(None),
+            # A retired mirror a concurrent sync woke up again is nobody's chair either.
+            yclients_staff_clause(),
         )
         .order_by(Staff.company_id.asc(), Staff.name.asc(), Staff.id.asc())
     )
     if allowed_company_ids is not None:
         stmt = stmt.where(Staff.company_id.in_(allowed_company_ids))
-    return (await db.execute(stmt)).scalars().all()
+    # The waiting list and «Администратор…» placeholders are service rows, not people to give a login.
+    return [row for row in (await db.execute(stmt)).scalars() if not is_service_staff_name(row.name)]

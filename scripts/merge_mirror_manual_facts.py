@@ -1,8 +1,10 @@
 """Move manual facts entered on a portal account's mirror `staff` row to the person's real YClients row.
 
-Mirror rows of owners, branch admins and managers are not staff (`models.PORTAL_MIRROR_POSITIONS`),
-so a manual value left on one stops counting. This adds each non-zero value of the mirror to the
-same month and metric of the real row in the same branch; the mirror rows themselves stay untouched.
+Mirror rows (`source_type = 'portal'`; those of owners, branch admins and managers are not staff at all,
+`models.PORTAL_MIRROR_POSITIONS`) stop counting once the account is tied to the real row, so a manual value left on
+one is lost. This adds each non-zero value of the mirror to the same month and metric of the real row in the same
+branch; the mirror rows themselves stay untouched. The admin «link to YClients» action (`portal_staff_link`) uses the
+same `apply_moves`, and there the mirror's values are deleted once moved.
 
 Run: ``python -m scripts.merge_mirror_manual_facts --map <mirror_staff_id>:<real_staff_id> [--map ...]``
 Prints a plan and writes nothing; add ``--apply`` to write. One transaction, every moved value leaves a
@@ -16,7 +18,7 @@ import sys
 from dataclasses import dataclass
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from clock import utcnow
@@ -24,9 +26,14 @@ from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 from database import build_async_database_url
 from models import PORTAL_MIRROR_POSITIONS, ManualFactMetric, PortalAuditEvent, Staff
 from portal_audit import log_portal_audit
+from portal_staff_sync import is_mirror_row
 
 AUDIT_ACTION = 'manual_fact.merged_from_mirror'
 AUDIT_TARGET_TYPE = 'manual_fact_metric'
+
+
+def _is_mirror(row: Staff) -> bool:
+    return is_mirror_row(row) or row.position in PORTAL_MIRROR_POSITIONS
 
 
 class MergeRefused(Exception):
@@ -81,9 +88,9 @@ async def _validated_staff(db: AsyncSession, mappings: dict[int, int]) -> dict[i
         source, target = rows.get(source_id), rows.get(target_id)
         if source is None or target is None:
             raise MergeRefused(f'Staff {source_id if source is None else target_id} not found')
-        if source.position not in PORTAL_MIRROR_POSITIONS:
+        if not _is_mirror(source):
             raise MergeRefused(f'Staff {source_id} is not a portal mirror row (position {source.position!r})')
-        if target.position in PORTAL_MIRROR_POSITIONS:
+        if _is_mirror(target):
             raise MergeRefused(f'Staff {target_id} is itself a portal mirror row (position {target.position!r})')
         if int(source.company_id) != int(target.company_id):
             raise MergeRefused(
@@ -159,8 +166,19 @@ async def plan_moves(db: AsyncSession, mappings: dict[int, int], *, lock: bool =
     return moves
 
 
-async def apply_moves(db: AsyncSession, mappings: dict[int, int]) -> list[Move]:
-    """Add every planned value to its target row in the caller's transaction; the caller commits."""
+async def apply_moves(
+    db: AsyncSession,
+    mappings: dict[int, int],
+    *,
+    actor_user_id: int | None = None,
+    portal_account_id: int | None = None,
+    delete_sources: bool = False,
+) -> list[Move]:
+    """Add every planned value to its target row in the caller's transaction; the caller commits.
+
+    `delete_sources` removes every manual value of the mirror rows afterwards (zero ones too): the caller retires the
+    mirror, and a value left on it would be counted, or shown in the editor, as a person who does not exist.
+    """
     moves = await plan_moves(db, mappings, lock=True)
     now = utcnow()
     for move in moves:
@@ -183,8 +201,8 @@ async def apply_moves(db: AsyncSession, mappings: dict[int, int]) -> list[Move]:
             target.updated_by_user_id = None
         await log_portal_audit(
             db,
-            actor_user_id=None,
-            portal_account_id=None,
+            actor_user_id=actor_user_id,
+            portal_account_id=portal_account_id,
             action=AUDIT_ACTION,
             target_type=AUDIT_TARGET_TYPE,
             target_id=str(move.source_row_id),
@@ -199,6 +217,8 @@ async def apply_moves(db: AsyncSession, mappings: dict[int, int]) -> list[Move]:
                 'target_after': move.target_after,
             },
         )
+    if delete_sources:
+        await db.execute(delete(ManualFactMetric).where(ManualFactMetric.staff_id.in_(sorted(mappings))))
     await db.flush()
     return moves
 

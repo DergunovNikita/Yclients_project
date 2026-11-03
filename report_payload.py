@@ -12,6 +12,8 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dashboard_service import StaffSelection
+
 MONEY_FORMAT = 'money'
 NUMBER_FORMAT = 'number'
 PERCENT_FORMAT = 'percent'
@@ -45,7 +47,8 @@ class ReportRequest:
     start: date
     end: date
     company_id: int | None
-    staff_id: int | None
+    # One person or a group (`StaffSelection`): never `int()` it or compare it with `==`, use `_staff_match`.
+    staff_id: StaffSelection | None
     granularity: str
     allowed_company_ids: list[int]
     factual_at: datetime

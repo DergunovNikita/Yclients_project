@@ -3,7 +3,8 @@ import test from 'node:test';
 
 import {
   canPickLevel,
-  chosenLevel,
+  chosenLevels,
+  levelIdsParam,
   levelOptions,
   levelReportParams,
   levelRequestParam,
@@ -75,17 +76,26 @@ test('a list of one person offers no level to choose', () => {
   assert.equal(selectableLevelOptions([barber(1, 1, 'a', 'A'), barber(2, 2, 'b', 'B')]).length, 2);
 });
 
-test('a chosen level that the list no longer offers falls back to all levels', () => {
-  const options = [{ key: 'топбарбер', value: '7,12', label: 'ТОП-барбер' }];
-  assert.equal(levelSelection(options, { value: '7,12' }), '7,12');
-  assert.equal(levelSelection(options, { value: '9' }), '');
-  assert.equal(levelSelection(options, { key: 'бренд', value: '7,12' }), '');
-  assert.equal(levelSelection(options, { value: '' }), '');
-  assert.equal(levelSelection(options, {}), '');
-  assert.equal(levelSelection(options, undefined), '');
+test('a chosen level that the list no longer offers drops out of the selection', () => {
+  const options = [
+    { key: 'топбарбер', value: '7,12', label: 'ТОП-барбер' },
+    { key: 'барбер', value: '3', label: 'Барбер' },
+  ];
+  assert.deepEqual(levelSelection(options, [{ value: '7,12' }]), ['7,12']);
+  assert.deepEqual(levelSelection(options, [{ value: '9' }]), []);
+  assert.deepEqual(levelSelection(options, [{ key: 'бренд', value: '7,12' }]), []);
+  // The levels that are still listed stay chosen, in option order.
+  assert.deepEqual(
+    levelSelection(options, [{ key: 'барбер', value: '3' }, { key: 'бренд', value: '5' }, { key: 'топбарбер', value: '7,12' }]),
+    ['7,12', '3'],
+  );
+  assert.deepEqual(levelSelection(options, [{ value: '' }]), []);
+  assert.deepEqual(levelSelection(options, [{}]), []);
+  assert.deepEqual(levelSelection(options, []), []);
+  assert.deepEqual(levelSelection(options, undefined), []);
 });
 
-test('the level chosen in the network survives a narrower scope by its key, not by its ids', () => {
+test('the levels chosen in the network survive a narrower scope by their keys, not by their ids', () => {
   const network = levelOptions([
     barber(1, 141895, 'топбарбер', 'ТОП-барбер'),
     barber(2, 443000, 'топбарбер', 'ТОП-барбер'),
@@ -99,36 +109,50 @@ test('the level chosen in the network survives a narrower scope by its key, not 
     barber(3, 100, 'барбер', 'Барбер'),
   ]);
   // The ids differ in the branch; the selection follows the key and so sends the branch's own id set.
-  assert.equal(levelSelection(oneBranch, { key: chosen.key, value: chosen.value }), '443000');
+  assert.deepEqual(levelSelection(oneBranch, [{ key: chosen.key, value: chosen.value }]), ['443000']);
   // A branch without that level falls back to all levels.
-  assert.equal(levelSelection(levelOptions([barber(3, 100, 'барбер', 'Барбер'), barber(4, 101, 'барбер', 'Барбер')]),
-    { key: chosen.key, value: chosen.value }), '');
+  assert.deepEqual(levelSelection(levelOptions([barber(3, 100, 'барбер', 'Барбер'), barber(4, 101, 'барбер', 'Барбер')]),
+    [{ key: chosen.key, value: chosen.value }]), []);
 });
 
-test('a link carries only ids: they map to the option with the same ids, else the one sharing most of them', () => {
+test('a link carries only ids: they map to the levels they cover, else to the one sharing most of them', () => {
   const options = levelOptions([
     barber(1, 1, 'a', 'A'), barber(2, 2, 'a', 'A'), barber(3, 3, 'b', 'B'), barber(4, 4, 'c', 'C'),
   ]);
-  assert.equal(levelSelection(options, { value: '2,1' }), '1,2');
-  assert.equal(levelSelection(options, { value: '2' }), '1,2');
-  assert.equal(levelSelection(options, { value: '3,99' }), '3');
-  assert.equal(levelSelection(options, { value: '99' }), '');
-  assert.equal(levelSelection(options, { value: 'abc' }), '');
+  assert.deepEqual(levelSelection(options, [{ value: '2,1' }]), ['1,2']);
+  assert.deepEqual(levelSelection(options, [{ value: '2' }]), ['1,2']);
+  assert.deepEqual(levelSelection(options, [{ value: '3,99' }]), ['3']);
+  assert.deepEqual(levelSelection(options, [{ value: '99' }]), []);
+  assert.deepEqual(levelSelection(options, [{ value: 'abc' }]), []);
+  // Several levels in one link: the union of their ids selects each of them.
+  assert.deepEqual(levelSelection(options, [{ value: '1,2,4' }]), ['1,2', '4']);
 });
 
-test('chosenLevel reads the key off the selected option', () => {
-  const select = { value: '7', selectedOptions: [{ dataset: { key: 'топбарбер' } }] };
-  assert.deepEqual(chosenLevel(select), { value: '7', key: 'топбарбер' });
-  assert.deepEqual(chosenLevel({ value: '', selectedOptions: [{ dataset: { key: '' } }] }), { value: '', key: '' });
-  assert.deepEqual(chosenLevel({ value: '', selectedOptions: [] }), { value: '', key: '' });
-  assert.deepEqual(chosenLevel(null), { value: '', key: '' });
+const option = (value, selected, key = '') => ({ value, selected, dataset: { key } });
+
+test('chosenLevels reads the key off every selected option and skips the rest', () => {
+  const select = { options: [option('7', true, 'топбарбер'), option('3', false, 'барбер'), option('9', true, 'премиум')] };
+  assert.deepEqual(chosenLevels(select), [{ value: '7', key: 'топбарбер' }, { value: '9', key: 'премиум' }]);
+  assert.deepEqual(chosenLevels({ options: [option('7', false, 'топбарбер')] }), []);
+  assert.deepEqual(chosenLevels(null), []);
 });
 
-test('a chosen person wins over a level in the request', () => {
-  assert.equal(levelRequestParam({ staff: { value: '' }, level: { value: '7,12' } }), '7,12');
-  assert.equal(levelRequestParam({ staff: { value: '5' }, level: { value: '7,12' } }), '');
-  assert.equal(levelRequestParam({ staff: { value: '' }, level: { value: '' } }), '');
-  assert.equal(levelRequestParam({ staff: { value: '' } }), '');
+test('chosen levels ask for the union of their id sets, sorted numerically', () => {
+  assert.equal(levelIdsParam(['100,9', '12', '9']), '9,12,100');
+  assert.equal(levelIdsParam(['7,12']), '7,12');
+  assert.equal(levelIdsParam([]), '');
+  assert.equal(levelIdsParam(undefined), '');
+});
+
+test('chosen people win over levels in the request', () => {
+  const select = (...values) => ({ options: values.map((value) => option(value, true)) });
+  const none = { options: [option('5', false)] };
+  assert.equal(levelRequestParam({ staff: none, level: select('7,12') }), '7,12');
+  assert.equal(levelRequestParam({ staff: none, level: select('7,12', '3') }), '3,7,12');
+  assert.equal(levelRequestParam({ staff: select('5'), level: select('7,12') }), '');
+  assert.equal(levelRequestParam({ staff: select('5', '6'), level: select('7,12') }), '');
+  assert.equal(levelRequestParam({ staff: none, level: none }), '');
+  assert.equal(levelRequestParam({ staff: none }), '');
 });
 
 test('under a level filter an Overview card links only to a report that filters by level, and carries it', () => {
@@ -139,13 +163,11 @@ test('under a level filter an Overview card links only to a report that filters 
   assert.equal(levelReportParams('staff_leaderboard', { position_ids: [] }), null);
 });
 
-test('a personal role is offered no level: the server would ignore it', () => {
+test('the barber role is offered no level: the server would ignore it; the administrator picks one like a manager', () => {
   const items = [barber(1, 1, 'a', 'A'), barber(2, 2, 'b', 'B')];
-  ['admin', 'barber'].forEach((role) => {
-    assert.equal(canPickLevel({ role }), false);
-    assert.deepEqual(selectableLevelOptions(items, { role }), []);
-  });
-  ['platform_admin', 'owner', 'branch_admin', 'manager', undefined].forEach((role) => {
+  assert.equal(canPickLevel({ role: 'barber' }), false);
+  assert.deepEqual(selectableLevelOptions(items, { role: 'barber' }), []);
+  ['platform_admin', 'owner', 'branch_admin', 'manager', 'admin', undefined].forEach((role) => {
     assert.equal(canPickLevel({ role }), true);
     assert.equal(selectableLevelOptions(items, { role }).length, 2);
   });

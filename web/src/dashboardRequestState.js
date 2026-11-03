@@ -1,4 +1,6 @@
 import { tableHasRows } from './reports/ranking.js';
+import { idListParam, parseIdList, selectedValues } from './multiSelect.js';
+import { levelRequestParam } from './staffLevels.js';
 
 export function apiStatusForHttpStatus(status) {
   if (status === 401) return 'auth_required';
@@ -45,23 +47,29 @@ export const DEFAULT_GRANULARITY = 'day';
 export const REPORT_FILTER_KEYS = [
   'start_date',
   'end_date',
-  'company_id',
-  'staff_id',
+  'company_ids',
+  'staff_ids',
   'granularity',
   'staff_position_ids',
 ];
+
+// Links written before the filters became lists carry one `company_id` / `staff_id`; they read as a list of one.
+const LEGACY_SCALAR_KEYS = { company_ids: 'company_id', staff_ids: 'staff_id' };
 
 /**
  * Filter values a report URL asks for.
  *
  * Absent means empty, never "keep what the form happens to hold": going back to an
- * entry that carried no staff_id must drop the staff filter of the report left behind,
+ * entry that carried no staff filter must drop the one of the report left behind,
  * not inherit it and then write it into that entry.
  */
 export function reportFiltersFromParams(params) {
   const value = (key) => params.get(key) || '';
   const filters = {};
-  REPORT_FILTER_KEYS.forEach((key) => { filters[key] = value(key); });
+  REPORT_FILTER_KEYS.forEach((key) => {
+    const legacy = LEGACY_SCALAR_KEYS[key];
+    filters[key] = legacy ? idListParam(parseIdList(value(key) || value(legacy))) : value(key);
+  });
   filters.granularity = filters.granularity || DEFAULT_GRANULARITY;
   const compare = comparePeriod(value('compare_start_date'), value('compare_end_date'));
   const periodPreset = value('period_preset');
@@ -176,7 +184,7 @@ export function reportRequestFilters({
 }) {
   // The staff select is shared between reports, so a report that has no staff filter must not
   // inherit the one picked on another: it would travel in the request and in the link.
-  const scoped = staffApplies ? filters : { ...filters, staff_id: '' };
+  const scoped = staffApplies ? filters : { ...filters, staff_ids: '' };
   if (periodApplies || !fallbackPeriod) return scoped;
   return { ...scoped, start_date: fallbackPeriod.start, end_date: fallbackPeriod.end };
 }
@@ -243,23 +251,28 @@ export function staffRefreshAllowsDataLoad(status, expectedBranch, currentBranch
 }
 
 /**
- * Staff option to select once a branch's list has been rendered.
+ * Whether every id a link names is offered by the list (`optionIds`), which must have loaded.
  *
- * Taken from the id the URL asked for rather than from the select, which reports '' for
- * an id whose option does not exist yet and would widen a per-employee link to the
- * whole branch.
+ * `requested` is one id or a list; nothing requested always passes. A link naming something outside the list is a
+ * scope the user cannot see, so it is blocked rather than widened to the whole list.
  */
-export function staffSelectionForOptions(requestedStaffId, optionIds) {
-  if (!requestedStaffId) return '';
-  return (optionIds || []).some((id) => String(id) === String(requestedStaffId))
-    ? String(requestedStaffId)
-    : '';
+export function reportScopedFilterAllowsLoad(requested, optionsLoaded, optionIds) {
+  const wanted = [].concat(requested ?? []).map(String).filter(Boolean);
+  if (!wanted.length) return true;
+  const listed = new Set((optionIds || []).map(String));
+  return Boolean(optionsLoaded) && wanted.every((id) => listed.has(id));
 }
 
-export function reportScopedFilterAllowsLoad(requestedId, optionsLoaded, optionIds) {
-  if (!requestedId) return true;
-  return Boolean(optionsLoaded)
-    && (optionIds || []).some((optionId) => String(optionId) === String(requestedId));
+/**
+ * Scope part of the `/dashboard/bundle` and plan/fact queries: the chosen branches, people and levels of a filter
+ * (`{ branch, staff, level }` selects). Empty selections are left out by the request; one id is a list of one.
+ */
+export function scopeParams(filter) {
+  return {
+    company_ids: idListParam(selectedValues(filter.branch)),
+    staff_ids: idListParam(selectedValues(filter.staff)),
+    staff_position_ids: levelRequestParam(filter),
+  };
 }
 
 export function reportDataCacheKey(params = {}) {

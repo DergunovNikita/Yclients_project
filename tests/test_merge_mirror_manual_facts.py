@@ -137,3 +137,22 @@ async def test_a_legacy_month_split_over_two_source_rows_is_refused(async_sessio
 
     with pytest.raises(merge.MergeRefused, match='several rows'):
         await merge.plan_moves(async_session, {MIRROR: REAL})
+
+
+@pytest.mark.asyncio
+async def test_an_admin_mirror_is_a_mirror_by_its_source_and_can_be_emptied_into_the_real_row(async_session):
+    await _seed(async_session)
+    async_session.add(Staff(id=30, name='Admin mirror', position='admin', company_id=1, source_type='portal'))
+    await async_session.flush()
+    async_session.add_all([_fact(30, AUG, 'reviews_qty', 3.0), _fact(30, SEP, 'opz_qty', 0.0)])
+    await async_session.commit()
+
+    await merge.apply_moves(async_session, {30: REAL}, actor_user_id=5, portal_account_id=1, delete_sources=True)
+    await async_session.commit()
+
+    assert await _values(async_session, REAL) == {(AUG[0], 'reviews_qty'): 11.0}
+    # Every value leaves the mirror, the zero one too; the move is attributed to whoever asked for it.
+    assert await _values(async_session, 30) == {}
+    events = (await async_session.execute(select(PortalAuditEvent).where(PortalAuditEvent.action == merge.AUDIT_ACTION)
+                                          )).scalars().all()
+    assert [(event.actor_user_id, event.portal_account_id) for event in events] == [(5, 1)]

@@ -69,11 +69,10 @@ async def _plan_fact(session, ctx):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('role', ['barber', 'admin'])
-async def test_plan_fact_of_a_personal_role_carries_no_branch_totals(async_session, role):
+async def test_plan_fact_of_a_personal_role_carries_no_branch_totals(async_session):
     await _seed_two_barbers(async_session)
     ctx = AccessContext.from_user(
-        user_id=7, role=role, portal_account_id=1, company_ids=[1], staff_id=1, staff_keys=((1, 1),)
+        user_id=7, role='barber', portal_account_id=1, company_ids=[1], staff_id=1, staff_keys=((1, 1),)
     )
 
     response = await _plan_fact(async_session, ctx)

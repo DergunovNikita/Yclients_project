@@ -78,7 +78,7 @@ async def _user_from_token(
             for company_id, row_staff_id in staff_rows
             if company_id is not None
         )
-        # The `effective_staff_id` clamp must land inside the assigned branches. A provisioned
+        # The `effective_staff_selection` clamp must land inside the assigned branches. A provisioned
         # employee keeps the CRM row of the branch they left (portal_staff_sync keeps it alive
         # on purpose) and that row always has the lower id, so taking the first one blindly
         # made every dashboard query answer `unknown staff_id`. Falling back to any row still

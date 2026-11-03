@@ -51,7 +51,7 @@
         </label>
         <div class="admin-card__header-actions">
           <button type="button" class="btn btn--ghost" id="provision-accounts" hidden data-i18n="admin.provisionAccounts">Crea account con email</button>
-          <button type="button" class="btn btn--primary" id="open-create-user" data-i18n="admin.createUser">Crea utente</button>
+          <button type="button" class="btn btn--primary" id="open-create-user" hidden data-i18n="admin.createUser">Crea utente</button>
         </div>
       </div>
       <div class="admin-table-wrap">
@@ -183,6 +183,7 @@
         <button type="button" class="admin-modal__close" id="close-create-user" data-i18n-attr="aria-label:common.close" aria-label="Chiudi">×</button>
       </header>
       <div class="alert error" id="create-error" hidden></div>
+      <p class="admin-modal__confirm-text" data-i18n="admin.createUserStaffHint">Barbieri e amministratori si creano dalla riga del dipendente YClients: menu della riga → «Crea account».</p>
       <form class="admin-toolbar admin-toolbar--create" id="create-user-form">
         <label><span data-i18n="common.email">Email</span><input type="email" id="create-email" required autocomplete="off" placeholder="user@company.com" /></label>
         <label><span data-i18n="admin.password">Password</span><input type="password" id="create-password" minlength="8" autocomplete="new-password" placeholder="opzionale" data-i18n-attr="placeholder:admin.passwordPlaceholder" /></label>
@@ -229,6 +230,8 @@
       <form class="admin-toolbar admin-toolbar--create" id="create-staff-account-form">
         <label><span data-i18n="admin.name">Nome</span><input type="text" id="create-staff-account-name" disabled /></label>
         <label><span data-i18n="common.email">Email</span><input type="email" id="create-staff-account-email" required autocomplete="off" placeholder="user@company.com" /></label>
+        <label><span data-i18n="admin.password">Password</span><input type="password" id="create-staff-account-password" minlength="8" autocomplete="new-password" /></label>
+        <p class="admin-modal__hint" id="create-staff-account-password-hint"></p>
         <label><span data-i18n="admin.role">Ruolo</span><select id="create-staff-account-role"></select></label>
         <label><span data-i18n="admin.branches">Filiali</span><select id="create-staff-account-branches" multiple></select></label>
         <div class="admin-modal__actions">
@@ -236,6 +239,20 @@
           <button type="submit" class="btn btn--primary" id="create-staff-account" data-i18n="admin.create">Crea</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <div class="admin-modal" id="link-staff-modal" hidden>
+    <div class="admin-modal__backdrop" data-close-modal="link-staff"></div>
+    <div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="link-staff-title">
+      <header class="admin-modal__header">
+        <h2 id="link-staff-title" data-i18n="admin.linkStaffTitle">Dipendente YClients</h2>
+        <button type="button" class="admin-modal__close" id="close-link-staff" data-i18n-attr="aria-label:common.close" aria-label="Chiudi">×</button>
+      </header>
+      <div class="alert error" id="link-staff-error" hidden></div>
+      <div class="alert success" id="link-staff-success" hidden></div>
+      <p class="admin-modal__confirm-text" id="link-staff-lead"></p>
+      <div class="staff-links" id="link-staff-list"></div>
     </div>
   </div>
 

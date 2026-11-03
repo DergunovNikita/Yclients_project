@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import and_, case, exists, func, select
 from sqlalchemy.orm import aliased
 
-from dashboard_service import _company_scope_clause, day_window, reporting_window_clause
+from dashboard_service import _company_scope_clause, _staff_match, day_window, reporting_window_clause
 from models import Comment, Company, Staff
 from report_common import percent
 from report_payload import (
@@ -59,7 +59,7 @@ def _review_conditions(req: ReportRequest) -> list[Any]:
     if scope is not None:
         conditions.append(scope)
     if req.staff_id is not None:
-        conditions.append(Comment.master_id == req.staff_id)
+        conditions.append(_staff_match(Comment.master_id, req.staff_id))
     return conditions
 
 
@@ -162,6 +162,10 @@ async def build_nps_dashboard(req: ReportRequest) -> dict[str, Any]:
         base['notes'].append({
             'kind': 'info',
             'title': 'Фильтр по сотруднику',
-            'text': 'Показаны отзывы, оставленные этому мастеру; отзывы о филиале без мастера не входят.',
+            'text': (
+                'Показаны отзывы, оставленные '
+                f'{"выбранным мастерам" if isinstance(req.staff_id, frozenset) else "этому мастеру"}; '
+                'отзывы о филиале без мастера не входят.'
+            ),
         })
     return base

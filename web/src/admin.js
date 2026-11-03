@@ -11,7 +11,8 @@ import {
 } from './auth.js';
 import { createModalManager, tenantRequestGuard } from './adminPage.js';
 import { buildCsv } from './adminSecurity.js';
-import { withBusyButton } from './formHelpers.js';
+import { renderAlert } from './errorDetails.js';
+import { looksLikeEmail, passwordProblem, withBusyButton } from './formHelpers.js';
 import { escapeHtml } from './html.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, roleLabel, t } from './i18n.js';
 import { formatBranchDateTime } from './timestamps.js';
@@ -30,6 +31,11 @@ const usersSearch = document.getElementById('users-search');
 const createModal = document.getElementById('create-user-modal');
 const editModal = document.getElementById('edit-user-modal');
 const createStaffAccountModal = document.getElementById('create-staff-account-modal');
+const linkStaffModal = document.getElementById('link-staff-modal');
+const linkStaffErrorEl = document.getElementById('link-staff-error');
+const linkStaffSuccessEl = document.getElementById('link-staff-success');
+const linkStaffLead = document.getElementById('link-staff-lead');
+const linkStaffList = document.getElementById('link-staff-list');
 const deleteConfirmModal = document.getElementById('delete-confirm-modal');
 const credentialsModal = document.getElementById('credentials-modal');
 const credentialsMessage = document.getElementById('credentials-message');
@@ -78,6 +84,8 @@ const createStaffAccountName = document.getElementById('create-staff-account-nam
 const createStaffAccountEmail = document.getElementById('create-staff-account-email');
 const createStaffAccountRoleSelect = document.getElementById('create-staff-account-role');
 const createStaffAccountBranchSelect = document.getElementById('create-staff-account-branches');
+const createStaffAccountPassword = document.getElementById('create-staff-account-password');
+const createStaffAccountPasswordHint = document.getElementById('create-staff-account-password-hint');
 const saveBtn = document.getElementById('save-user');
 const adminRoleLabel = document.getElementById('admin-role-label');
 const openCreateUserBtn = document.getElementById('open-create-user');
@@ -111,6 +119,7 @@ let currentUserId = null;
 let currentUserRole = null;
 let editingUserId = null;
 let pendingStaffAccountId = null;
+let linkingUser = null;
 let pendingDelete = null;
 let initialPasswords = [];
 let yclientsCredentials = [];
@@ -127,15 +136,21 @@ function hideFieldError(el) {
   el.hidden = true;
 }
 
-function showFieldError(el, message) {
-  el.textContent = message;
-  el.hidden = false;
+// What the form can tell before the request: the address looks like one, the password fits what the server accepts.
+function formInputProblem(email, password = '') {
+  if (!looksLikeEmail(email)) return t('authErrors.invalidEmail');
+  const passwordKey = passwordProblem(password);
+  return passwordKey ? t(passwordKey) : null;
 }
 
-function showError(message) {
+// `source` is a message or a caught error: an error with `details` gets the «i» control (errorDetails.js).
+function showFieldError(el, source) {
+  renderAlert(el, source);
+}
+
+function showError(source) {
   hideAlerts();
-  errorEl.textContent = message;
-  errorEl.hidden = false;
+  renderAlert(errorEl, source);
 }
 
 function showSuccess(message) {
@@ -186,6 +201,11 @@ function canManageUsers() {
     return adminMeta.can_manage_users;
   }
   return ADMIN_ROLES.has(currentUserRole || adminMeta?.role);
+}
+
+// Only an explicit `false` counts: the server refuses a password-less account itself, this just saves the round trip.
+function invitesDeliverable() {
+  return adminMeta?.invites_deliverable !== false;
 }
 
 function canManageYclientsCredentials() {
@@ -270,7 +290,8 @@ function applyAdminMeta() {
   const canManage = canManageUsers();
   const roles = canManage ? adminMeta?.assignable_roles || [] : [];
   renderTenantSwitcher();
-  renderRoleOptions(createRoleSelect, createRoleDropdown, roles);
+  // The server refuses these here: a staff account must come from its YClients row, or it reads zeros.
+  renderRoleOptions(createRoleSelect, createRoleDropdown, roles.filter((role) => !STAFF_ACCOUNT_ROLES.includes(role)));
   renderBranchOptions(createBranchSelect, createBranchDropdown);
 
   if (adminRoleLabel) {
@@ -279,8 +300,9 @@ function applyAdminMeta() {
   if (openCreateUserBtn) {
     openCreateUserBtn.hidden = !canManage;
   }
+  // Bulk creation sends an invite to each address; with mail that never leaves it would only create accounts nobody can open.
   if (provisionAccountsBtn) {
-    provisionAccountsBtn.hidden = !canManage;
+    provisionAccountsBtn.hidden = !canManage || !invitesDeliverable();
   }
   if (yclientsCredentialsSection) {
     yclientsCredentialsSection.hidden = !canManageYclientsCredentials();
@@ -291,6 +313,9 @@ function applyAdminMeta() {
   renderBranchOptions(yclientsCredentialBranchSelect, yclientsCredentialBranchDropdown);
   if (users.length) {
     renderUsers();
+  }
+  if (initialPasswords.length) {
+    renderInitialPasswordsTable();
   }
 }
 
@@ -328,6 +353,9 @@ function openCreateModal() {
     createRoleSelect.selectedIndex = 0;
     createRoleDropdown.syncFromNative();
   }
+  // Without mail the password is the only way into the account, so the form asks for it.
+  createPassword.required = !invitesDeliverable();
+  createPassword.placeholder = t(invitesDeliverable() ? 'admin.passwordPlaceholder' : 'admin.passwordRequiredPlaceholder');
   modals.open(createModal);
   createEmail.focus();
 }
@@ -368,6 +396,10 @@ function openCreateStaffAccountModal(staff) {
   createStaffAccountRoleSelect.value = staff.suggested_role || 'barber';
   createStaffAccountRoleDropdown.syncFromNative();
   renderBranchOptions(createStaffAccountBranchSelect, createStaffAccountBranchDropdown, staff.company_ids || []);
+  const passwordRequired = !invitesDeliverable();
+  createStaffAccountPassword.required = passwordRequired;
+  createStaffAccountPassword.placeholder = t(passwordRequired ? 'admin.passwordRequiredPlaceholder' : 'admin.passwordPlaceholder');
+  createStaffAccountPasswordHint.textContent = t(passwordRequired ? 'admin.staffAccountPasswordRequired' : 'admin.staffAccountPasswordOptional');
   modals.open(createStaffAccountModal);
   createStaffAccountEmail.focus();
 }
@@ -377,6 +409,129 @@ function closeCreateStaffAccountModal() {
   pendingStaffAccountId = null;
   hideFieldError(createStaffAccountErrorEl);
 }
+
+function canLinkStaff(user) {
+  return Boolean(user?.is_portal_user && user.manageable && STAFF_ACCOUNT_ROLES.includes(user.role));
+}
+
+function staffLinkLabel(row) {
+  const title = [row.name, row.position].filter(Boolean).join(' · ');
+  return row.fired ? `${title} (${t('admin.linkStaffFired')})` : title;
+}
+
+function renderStaffLinks(branchLinks) {
+  linkStaffList.innerHTML = branchLinks
+    .map(({ company_id: companyId, linked, candidates }) => {
+      let body;
+      if (linked.length) {
+        body = linked
+          .map(
+            (row) => `
+        <div class="staff-link__row">
+          <span>${escapeHtml(staffLinkLabel(row))}</span>
+          <button type="button" class="btn btn--ghost" data-unlink-staff="${escapeHtml(row.staff_id)}">${t('admin.unlinkStaffAction')}</button>
+        </div>`,
+          )
+          .join('');
+      } else if (candidates.length) {
+        body = `
+        <div class="staff-link__row">
+          <select data-link-select>
+            <option value="">${t('admin.linkStaffPick')}</option>
+            ${candidates.map((row) => `<option value="${escapeHtml(row.staff_id)}">${escapeHtml(staffLinkLabel(row))}</option>`).join('')}
+          </select>
+          <button type="button" class="btn btn--primary" data-link-staff>${t('admin.linkStaffAction')}</button>
+        </div>`;
+      } else {
+        body = `<span class="staff-link__empty">${t('admin.linkStaffNone')}</span>`;
+      }
+      return `
+      <section class="staff-link">
+        <div class="staff-link__branch">${escapeHtml(branchTitles([companyId]))}</div>
+        ${body}
+      </section>`;
+    })
+    .join('');
+}
+
+// The answer of an earlier request must not repaint the modal after it was closed or opened for another account.
+async function loadStaffLinks() {
+  const user = linkingUser;
+  if (!user) return;
+  const payload = await authFetch(`/auth/admin/users/${user.id}/staff-links`);
+  if (linkingUser === user) renderStaffLinks(payload.data.branches);
+}
+
+async function openLinkStaffModal(user) {
+  if (!canLinkStaff(user)) return;
+  linkingUser = user;
+  hideFieldError(linkStaffErrorEl);
+  linkStaffSuccessEl.hidden = true;
+  linkStaffLead.textContent = t('admin.linkStaffLead', { name: user.full_name || user.email });
+  linkStaffList.replaceChildren();
+  modals.open(linkStaffModal);
+  try {
+    await loadStaffLinks();
+  } catch (error) {
+    showFieldError(linkStaffErrorEl, error);
+  }
+}
+
+function closeLinkStaffModal() {
+  modals.close(linkStaffModal);
+  linkingUser = null;
+  hideFieldError(linkStaffErrorEl);
+  linkStaffSuccessEl.hidden = true;
+}
+
+// Link and unlink share the refresh: `request` returns the success message. On a refusal (409: somebody took the row
+// first) the list is reread too, so the choice on screen is the one the server offers now.
+async function changeStaffLink(button, request) {
+  const user = linkingUser;
+  hideFieldError(linkStaffErrorEl);
+  linkStaffSuccessEl.hidden = true;
+  const show = (el, source) => {
+    if (linkingUser !== user) return;
+    renderAlert(el, source);
+  };
+  try {
+    show(linkStaffSuccessEl, await withBusyButton(button, () => request(user)));
+  } catch (error) {
+    show(linkStaffErrorEl, error);
+  }
+  try {
+    await loadStaffLinks();
+  } catch (error) {
+    show(linkStaffErrorEl, error);
+  }
+  // The «not linked» badge of the row follows the links just changed; a failed reread only leaves it stale until the next load.
+  loadUsers().catch(() => {});
+}
+
+linkStaffList.addEventListener('click', async (event) => {
+  const linkButton = event.target.closest('[data-link-staff]');
+  const unlinkButton = event.target.closest('[data-unlink-staff]');
+  if (linkButton) {
+    const select = linkButton.closest('.staff-link__row').querySelector('[data-link-select]');
+    const staffId = Number(select.value);
+    if (!staffId) return;
+    const staff = select.selectedOptions[0].textContent;
+    await changeStaffLink(linkButton, async (user) => {
+      const payload = await authFetch(`/auth/admin/users/${user.id}/staff-links`, {
+        method: 'POST',
+        body: JSON.stringify({ staff_id: staffId }),
+      });
+      return t('admin.staffLinked', { staff, count: payload.data.moved_fact_values });
+    });
+  } else if (unlinkButton) {
+    const staffId = Number(unlinkButton.dataset.unlinkStaff);
+    const staff = unlinkButton.closest('.staff-link__row').querySelector('span').textContent;
+    await changeStaffLink(unlinkButton, async (user) => {
+      await authFetch(`/auth/admin/users/${user.id}/staff-links/${staffId}`, { method: 'DELETE' });
+      return t('admin.staffUnlinked', { staff });
+    });
+  }
+});
 
 function openDeleteConfirm({ id, label }) {
   pendingDelete = { id };
@@ -416,8 +571,12 @@ function showCredentialsModal(items) {
         </div>`
     )
     .join('');
+  // Sending is the modal's second action; with mail that never leaves it would only report invites nobody gets.
+  distributeCredentialsBtn.hidden = !invitesDeliverable();
+  // «Use these emails to send password links» would contradict the note that nothing is sent.
+  const hint = t(invitesDeliverable() ? 'admin.saveCredentialsHint' : 'admin.invitesUnavailable');
   credentialsMessage.innerHTML = `
-    <p class="admin-modal__confirm-text">${escapeHtml(t('admin.saveCredentialsHint'))}</p>
+    <p class="admin-modal__confirm-text">${escapeHtml(hint)}</p>
     <div class="credentials-list">${rows}</div>
   `;
   modals.open(credentialsModal);
@@ -447,13 +606,12 @@ function saveCredentialsAsCsv() {
 }
 
 async function distributeCredentials() {
-  if (!currentCredentialsItems.length) return;
+  if (!currentCredentialsItems.length || !invitesDeliverable()) return;
   hideCredentialsAlerts();
 
   const userIds = currentCredentialsItems.map((item) => item.user_id).filter(Boolean);
   if (!userIds.length) {
-    credentialsErrorEl.textContent = t('admin.noUserIdsForDistribution');
-    credentialsErrorEl.hidden = false;
+    renderAlert(credentialsErrorEl, t('admin.noUserIdsForDistribution'));
     return;
   }
 
@@ -474,13 +632,11 @@ async function distributeCredentials() {
       credentialsSuccessEl.textContent = parts.join('. ');
       credentialsSuccessEl.hidden = false;
       if (errors?.length) {
-        credentialsErrorEl.textContent = errors.map((item) => `${item.email}: ${item.reason}`).join('; ');
-        credentialsErrorEl.hidden = false;
+        renderAlert(credentialsErrorEl, errors.map((item) => `${item.email}: ${item.reason}`).join('; '));
       }
     });
   } catch (error) {
-    credentialsErrorEl.textContent = error.message;
-    credentialsErrorEl.hidden = false;
+    renderAlert(credentialsErrorEl, error);
   }
 }
 
@@ -495,6 +651,7 @@ const modals = createModalManager([
   { modal: credentialsModal, close: closeCredentialsModal },
   { modal: deleteConfirmModal, close: closeDeleteConfirm },
   { modal: createStaffAccountModal, close: closeCreateStaffAccountModal },
+  { modal: linkStaffModal, close: closeLinkStaffModal },
   { modal: editModal, close: closeEditModal },
   { modal: createModal, close: closeCreateModal },
 ], document.body);
@@ -525,6 +682,18 @@ function roleBadge(role) {
   };
   const cls = classes[role] || 'role-badge';
   return `<span class="${escapeHtml(cls)}">${escapeHtml(roleLabel(role))}</span>`;
+}
+
+// An admin/barber account with no YClients row in some of its branches reads zeros there. The badge is the way to fix it:
+// it opens the same link modal as the row menu.
+function needsLinkBadge(user) {
+  if (!user?.needs_staff_link || !STAFF_ACCOUNT_ROLES.includes(user.role)) return '';
+  const label = escapeHtml(t('admin.needsStaffLink'));
+  const hint = escapeHtml(t('admin.needsStaffLinkHint'));
+  if (user.manageable && canManageUsers() && canLinkStaff(user)) {
+    return `<button type="button" class="role-badge role-badge--warn" data-link-user="${escapeHtml(user.id)}" title="${hint}">${label}</button>`;
+  }
+  return `<span class="role-badge role-badge--warn" title="${hint}">${label}</span>`;
 }
 
 function branchTitles(companyIds) {
@@ -606,6 +775,7 @@ function renderUsers() {
             if (user.is_portal_user) {
               actions = renderRowMenu(`
       <button type="button" class="row-menu__item" role="menuitem" data-edit-user="${escapeHtml(user.id)}">${t('admin.edit')}</button>
+      ${canLinkStaff(user) ? `<button type="button" class="row-menu__item" role="menuitem" data-link-user="${escapeHtml(user.id)}">${t('admin.linkToYclients')}</button>` : ''}
       <button type="button" class="row-menu__item row-menu__item--danger" role="menuitem" data-delete-user="${escapeHtml(user.id)}">${t('admin.delete')}</button>`);
             } else {
               actions = renderRowMenu(`
@@ -617,7 +787,7 @@ function renderUsers() {
         <td>${escapeHtml(user.staff_id ?? user.id ?? '—')}</td>
         <td>${user.is_portal_user ? escapeHtml(user.email) : '—'}${user.id === currentUserId ? ` <span class="user-you">${escapeHtml(t('admin.you'))}</span>` : ''}</td>
         <td>${escapeHtml(user.full_name || '—')}</td>
-        <td>${roleBadge(user.role)}</td>
+        <td>${roleBadge(user.role)}${needsLinkBadge(user)}</td>
         <td><span class="status-dot ${user.email_verified ? 'ok' : ''}">${user.is_portal_user ? escapeHtml(user.email_verified ? t('admin.confirmed') : t('admin.pending')) : '—'}</span></td>
         <td>${escapeHtml(branchTitles(user.company_ids))}</td>
         <td class="admin-table__cell-actions">${actions}</td>
@@ -649,6 +819,11 @@ function filterInitialPasswords(rows, query) {
   });
 }
 
+function resendCell(row) {
+  if (!invitesDeliverable()) return `<span class="admin-card__hint">${escapeHtml(t('admin.invitesUnavailableShort'))}</span>`;
+  return `<button type="button" class="btn btn--ghost btn--small" data-resend-invite="${escapeHtml(row.user_id)}">${t('admin.resendInvite')}</button>`;
+}
+
 function renderInitialPasswordsTable() {
   if (!canManageUsers()) {
     initialPasswordsSection.hidden = true;
@@ -669,7 +844,7 @@ function renderInitialPasswordsTable() {
         <td>${escapeHtml(branchTitles(row.company_ids))}</td>
         <td>${escapeHtml(formatBranchDateTime(row.password_reset_sent_at) || '—')}</td>
         <td class="admin-table__cell-actions">
-          <button type="button" class="btn btn--ghost btn--small" data-resend-invite="${escapeHtml(row.user_id)}">${t('admin.resendInvite')}</button>
+          ${resendCell(row)}
         </td>
       </tr>`
         )
@@ -689,7 +864,7 @@ async function loadInitialPasswords() {
 }
 
 async function resendInvite(userId, button) {
-  if (!userId) return;
+  if (!userId || !invitesDeliverable()) return;
   try {
     await withBusyButton(button, async () => {
       const payload = await authFetch('/auth/admin/distribute-credentials', {
@@ -705,7 +880,7 @@ async function resendInvite(userId, button) {
       await loadInitialPasswords();
     });
   } catch (error) {
-    showError(error.message);
+    showError(error);
   }
 }
 
@@ -715,11 +890,8 @@ function hideYclientsCredentialsError() {
   }
 }
 
-function showYclientsCredentialsError(message) {
-  if (yclientsCredentialsError) {
-    yclientsCredentialsError.textContent = message;
-    yclientsCredentialsError.hidden = false;
-  }
+function showYclientsCredentialsError(source) {
+  renderAlert(yclientsCredentialsError, source);
 }
 
 function renderYclientsCredentialsTable() {
@@ -827,10 +999,7 @@ async function saveMetricVisibility(role) {
     }
     await loadMetricVisibility();
   } catch (error) {
-    if (metricVisibilityError) {
-      metricVisibilityError.textContent = error.message;
-      metricVisibilityError.hidden = false;
-    }
+    renderAlert(metricVisibilityError, error);
   }
 }
 
@@ -882,7 +1051,7 @@ async function loadUsers() {
 }
 
 async function provisionAllAccounts() {
-  if (!canManageUsers()) return;
+  if (!canManageUsers() || !invitesDeliverable()) return;
   hideAlerts();
   try {
     await withBusyButton(provisionAccountsBtn, async () => {
@@ -896,14 +1065,14 @@ async function provisionAllAccounts() {
       await Promise.all([loadUsers(), loadInitialPasswords()]);
     });
   } catch (error) {
-    showError(error.message);
+    showError(error);
   }
 }
 
 // Role and branches are always passed in: a staff member whose email is already on file is
 // created straight from the row menu without opening the modal, and reading the modal's
 // controls there would hand them whatever the last opened modal happened to leave behind.
-async function createStaffAccount(staffId, { email = null, role, companyIds } = {}) {
+async function createStaffAccount(staffId, { email = null, role, companyIds, password = null } = {}) {
   const selected = users.find((user) => user.staff_id === staffId);
   if (!selected?.manageable) return;
 
@@ -915,6 +1084,7 @@ async function createStaffAccount(staffId, { email = null, role, companyIds } = 
         // Omitted on the quick path — the server derives it from the CRM position.
         role: role || null,
         email: email || selected.email,
+        password: password || null,
         company_ids: companyIds || [],
       }),
     });
@@ -924,9 +1094,9 @@ async function createStaffAccount(staffId, { email = null, role, companyIds } = 
     await Promise.all([loadUsers(), loadInitialPasswords()]);
   } catch (error) {
     if (!createStaffAccountModal.hidden) {
-      showFieldError(createStaffAccountErrorEl, error.message);
+      showFieldError(createStaffAccountErrorEl, error);
     } else {
-      showError(error.message);
+      showError(error);
     }
   }
 }
@@ -941,7 +1111,7 @@ async function deleteUser(userId) {
     showSuccess(t('admin.userDeleted', { email: selected.email }));
     await loadUsers();
   } catch (error) {
-    showError(error.message);
+    showError(error);
   }
 }
 
@@ -981,6 +1151,12 @@ tableBody.addEventListener('click', async (event) => {
   const editBtn = event.target.closest('[data-edit-user]');
   const createAccountBtn = event.target.closest('[data-create-account]');
   const deleteBtn = event.target.closest('[data-delete-user]');
+  const linkBtn = event.target.closest('[data-link-user]');
+  if (linkBtn) {
+    closeAllRowMenus();
+    await openLinkStaffModal(users.find((item) => item.id === Number(linkBtn.dataset.linkUser)));
+    return;
+  }
   if (editBtn) {
     closeAllRowMenus();
     const user = users.find((item) => item.id === Number(editBtn.dataset.editUser));
@@ -991,7 +1167,9 @@ tableBody.addEventListener('click', async (event) => {
     closeAllRowMenus();
     const staffId = Number(createAccountBtn.dataset.createAccount);
     const staff = users.find((item) => item.staff_id === staffId);
-    if (staff?.can_create_account) {
+    // The invite is the only way into an account made without a password, so the quick path exists only while it can be
+    // delivered; otherwise the modal asks for the password.
+    if (staff?.can_create_account && invitesDeliverable()) {
       // No modal on this path, so nobody picked a role: leave it out and let the server
       // derive it from the CRM position, the same rule bulk provisioning uses.
       await createStaffAccount(staffId, { companyIds: staff.company_ids || [] });
@@ -1021,8 +1199,14 @@ createStaffAccountForm?.addEventListener('submit', async (event) => {
     showFieldError(createStaffAccountErrorEl, t('admin.realStaffEmailRequired'));
     return;
   }
+  const problem = formInputProblem(email, createStaffAccountPassword.value);
+  if (problem) {
+    showFieldError(createStaffAccountErrorEl, problem);
+    return;
+  }
   await createStaffAccount(pendingStaffAccountId, {
     email,
+    password: createStaffAccountPassword.value,
     role: createStaffAccountRoleSelect.value,
     companyIds: Array.from(createStaffAccountBranchSelect.selectedOptions).map((option) => Number(option.value)),
   });
@@ -1032,6 +1216,11 @@ editForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!editingUserId) return;
   hideFieldError(editErrorEl);
+  const problem = formInputProblem(editEmail.value.trim());
+  if (problem) {
+    showFieldError(editErrorEl, problem);
+    return;
+  }
   try {
     await withBusyButton(saveBtn, async () => {
       const company_ids = Array.from(editBranchSelect.selectedOptions).map((option) => Number(option.value));
@@ -1049,7 +1238,7 @@ editForm.addEventListener('submit', async (event) => {
       await loadUsers();
     });
   } catch (error) {
-    showFieldError(editErrorEl, error.message);
+    showFieldError(editErrorEl, error);
   }
 });
 
@@ -1068,7 +1257,7 @@ async function testDraftYclientsCredential() {
       showSuccess(t('admin.credentialsValid'));
     });
   } catch (error) {
-    showYclientsCredentialsError(error.message);
+    showYclientsCredentialsError(error);
   }
 }
 
@@ -1116,7 +1305,7 @@ async function saveYclientsCredential(event) {
       await loadYclientsCredentials();
     });
   } catch (error) {
-    showYclientsCredentialsError(error.message);
+    showYclientsCredentialsError(error);
   }
 }
 
@@ -1137,7 +1326,7 @@ yclientsCredentialsBody?.addEventListener('click', async (event) => {
       });
       showSuccess(t('admin.credentialsValid'));
     } catch (error) {
-      showYclientsCredentialsError(error.message);
+      showYclientsCredentialsError(error);
     } finally {
       testBtn.disabled = false;
     }
@@ -1152,7 +1341,7 @@ yclientsCredentialsBody?.addEventListener('click', async (event) => {
       showSuccess(t('admin.credentialsDeleted'));
       await loadYclientsCredentials();
     } catch (error) {
-      showYclientsCredentialsError(error.message);
+      showYclientsCredentialsError(error);
     } finally {
       deleteBtn.disabled = false;
     }
@@ -1162,6 +1351,11 @@ yclientsCredentialsBody?.addEventListener('click', async (event) => {
 createForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   hideFieldError(createErrorEl);
+  const problem = formInputProblem(createEmail.value.trim(), createPassword.value);
+  if (problem) {
+    showFieldError(createErrorEl, problem);
+    return;
+  }
   try {
     await withBusyButton(createBtn, async () => {
       const company_ids = Array.from(createBranchSelect.selectedOptions).map((option) => Number(option.value));
@@ -1183,7 +1377,7 @@ createForm.addEventListener('submit', async (event) => {
       await Promise.all([loadUsers(), loadInitialPasswords()]);
     });
   } catch (error) {
-    showFieldError(createErrorEl, error.message);
+    showFieldError(createErrorEl, error);
   }
 });
 
@@ -1218,6 +1412,8 @@ deleteConfirmModal.querySelector('[data-close-modal="delete"]').addEventListener
 createModal.querySelector('[data-close-modal="create"]').addEventListener('click', closeCreateModal);
 editModal.querySelector('[data-close-modal="edit"]').addEventListener('click', closeEditModal);
 createStaffAccountModal.querySelector('[data-close-modal="create-staff-account"]').addEventListener('click', closeCreateStaffAccountModal);
+linkStaffModal.querySelector('[data-close-modal="link-staff"]').addEventListener('click', closeLinkStaffModal);
+document.getElementById('close-link-staff').addEventListener('click', closeLinkStaffModal);
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
@@ -1252,7 +1448,7 @@ async function init() {
       logout();
       return;
     }
-    showError(error.message);
+    showError(error);
   }
 }
 
@@ -1264,7 +1460,7 @@ tenantSelect?.addEventListener('change', async () => {
     await reloadTenantScopedAdminData();
     if (isCurrentTenant()) showSuccess(t('admin.businessTenantSelected'));
   } catch (error) {
-    if (isCurrentTenant()) showError(error.message);
+    if (isCurrentTenant()) showError(error);
   }
 });
 

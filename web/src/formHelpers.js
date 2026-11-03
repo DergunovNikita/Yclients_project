@@ -31,3 +31,22 @@ export function togglePasswordVisibility(input, button) {
   input.type = visible ? 'password' : 'text';
   button.textContent = visible ? t('common.showPassword') : t('common.hidePassword');
 }
+
+// `type="email"` in a browser accepts «user@host»; an address people can receive mail at has a dotted domain. A hint
+// before the request, not validation: the server decides.
+export function looksLikeEmail(value) {
+  return /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/.test(String(value || '').trim());
+}
+
+const MAX_PASSWORD_BYTES = 72;
+const MIN_PASSWORD_LENGTH = 8;
+
+// The server hashes with bcrypt: shorter than 8 or longer than 72 BYTES (not characters) is refused with a 422.
+// Returns the i18n key of the problem, or null for an acceptable (or empty, i.e. not entered) password.
+export function passwordProblem(password) {
+  if (!password) return null;
+  // Characters as the server counts them (code points), not UTF-16 units: an emoji is one.
+  if (Array.from(password).length < MIN_PASSWORD_LENGTH) return 'admin.passwordTooShort';
+  if (new TextEncoder().encode(password).length > MAX_PASSWORD_BYTES) return 'admin.passwordTooLong';
+  return null;
+}

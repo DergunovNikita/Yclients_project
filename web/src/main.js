@@ -14,7 +14,7 @@ import {
 // Side-effect only: registers the global responsive tick/legend plugin shared with the
 // report viewer's charts.js — see chartResponsive.js for how/why it applies before layout.
 import './chartResponsive.js';
-import { enhanceSelect } from './customSelect.js';
+import { enhanceSelect, setSelectExclusive } from './customSelect.js';
 import { mountJumpNav } from './jumpNav.js';
 import { planBoard } from './planBoard.js';
 import {
@@ -42,6 +42,7 @@ import {
   latestServiceManagementTimestamp,
   mergeServiceManagementResult,
   reportSearchParams,
+  scopeParams,
   serviceManagementChanges,
   serviceManagementControls,
   serviceManagementLoadAllowed,
@@ -104,12 +105,14 @@ import { bindDraftFlush, createDraftController, fingerprint } from './editorDraf
 import { formatBranchDateTime } from './timestamps.js';
 import { branchRowTitle, staffOption } from './staffLabel.js';
 import {
-  chosenLevel,
+  canPickLevel,
+  chosenLevels,
   levelReportParams,
-  levelRequestParam,
   levelSelection,
   selectableLevelOptions,
 } from './staffLevels.js';
+import { idListParam, keepListed, selectedValues, setSelectedValues } from './multiSelect.js';
+import { isMultiBranchAdministrator, personalBranchSelection } from './personalScope.js';
 import { initReports } from './reports/index.js';
 import { applyTranslations, getLocale, mountLanguageSwitcher, roleLabel, t } from './i18n.js';
 import {
@@ -286,14 +289,26 @@ const filterEls = {
   },
 };
 
+// Branch, worker and level are multiple selects (empty = all): the change fires when the menu closes, so picking
+// several entries costs one reload. The manual-fact editors keep single selects.
+const MULTI_SELECT_OPTIONS = { commitOnClose: true, clearable: true };
 const customFilterDropdowns = {};
 Object.values(filterEls).forEach((filter) => {
-  customFilterDropdowns[filter.branch.id] = enhanceSelect(filter.branch, { placeholder: t('dash.allBranches') });
+  customFilterDropdowns[filter.branch.id] = enhanceSelect(filter.branch, {
+    placeholder: t('dash.allBranches'),
+    ...MULTI_SELECT_OPTIONS,
+  });
   if (filter.staff) {
-    customFilterDropdowns[filter.staff.id] = enhanceSelect(filter.staff, { placeholder: t('dash.allWorkers') });
+    customFilterDropdowns[filter.staff.id] = enhanceSelect(filter.staff, {
+      placeholder: t('dash.allWorkers'),
+      ...MULTI_SELECT_OPTIONS,
+    });
   }
   if (filter.level) {
-    customFilterDropdowns[filter.level.id] = enhanceSelect(filter.level, { placeholder: t('dash.allLevels') });
+    customFilterDropdowns[filter.level.id] = enhanceSelect(filter.level, {
+      placeholder: t('dash.allLevels'),
+      ...MULTI_SELECT_OPTIONS,
+    });
   }
 });
 
@@ -341,7 +356,13 @@ let hiddenPlanMetricCodes = new Set();
 const PLAN_VIEW_KEY = 'portal-plan-fact-view/v1';
 const PLAN_VIEW_MODES = ['table', 'board'];
 let planViewMode = readPlanViewMode();
+// The own staff rows of a personal account holding administrator rows in several branches, once startSession found it: its branch
+// and employee selects on the Overview and Plan/fact then hold one choice (applyPersonalBranchDefault). Null for everyone else.
+let multiBranchAdministratorRows = null;
+const singleBranchViewFilters = () => [filterEls.overview, filterEls.plan];
 const loadedStaffFilters = new WeakSet();
+// The last staff list each filter received (`/dashboard/staff`).
+const staffItemsByFilter = new WeakMap();
 const staffRequestScopes = new WeakMap();
 const viewRequestScopes = {
   overview: createLatestRequestScope(),
@@ -654,7 +675,10 @@ function applyFinancialVisibility(summary) {
   // An administrator's sections by master contradict his own block: he is rarely the master of a visit.
   const administrator = usesAdministratorSchedule(summary);
   setOverviewSectionHidden('revenue', financialsHidden || administrator);
-  setOverviewSectionHidden('services', financialsHidden || administrator);
+  // Without the revenue metric the section keeps its count cards (services and goods sold); the panels below them
+  // are all money (charts and tables of revenue), so they go, and a section left with no card goes entirely.
+  setOverviewSectionHidden('services', administrator || (financialsHidden && !servicesCards(summary).cards.length));
+  els.servicesDetails.hidden = financialsHidden;
   setOverviewSectionHidden('appointments', administrator);
   setOverviewSectionHidden('clients', administrator);
   els.kpi.hidden = administrator;
@@ -908,8 +932,8 @@ function overviewReportUrl(reportId, levelFilter) {
     ...levelParams,
     start_date: filter.start.value,
     end_date: filter.end.value,
-    company_id: filter.branch.value,
-    staff_id: filter.staff.value,
+    company_ids: idListParam(selectedValues(filter.branch)),
+    staff_ids: idListParam(selectedValues(filter.staff)),
     granularity: 'month',
     // The report recomputes the same new/repeat deltas, so it has to measure against the
     // same baseline as the card that links to it.
@@ -943,9 +967,37 @@ function renderLevelScope(levelFilter) {
   els.staffPersonalDescription.textContent = t('dash.levelScopeDescription');
 }
 
+// Several chosen people are one group, as a role is: the title counts them, the server's echo says how many it found.
+function renderStaffGroupScope(staffFilter, chosenCount) {
+  els.staffPersonalScope.hidden = false;
+  els.staffPersonalScope.removeAttribute('data-jump-target');
+  els.staffAdminMetrics.hidden = true;
+  els.staffAdminOpz.hidden = true;
+  opzChartHome.appendChild(els.opzChartPanel);
+  els.staffPersonalTitle.textContent = t('dash.staffGroupScope', {
+    count: formatNumber(staffFilter?.staff_count ?? chosenCount),
+  });
+  els.staffPersonalDescription.textContent = t('dash.staffGroupScopeDescription');
+}
+
+// A personal account on an administrator row is clamped to it without choosing it: the server answers in administrator mode and
+// the page names them from the one row their list holds. `null` for everyone else (a chosen person comes from the select).
+function personalAdministratorName(summary) {
+  if (canPickLevel(currentUser) || !usesAdministratorSchedule(summary)) return null;
+  const rows = staffItemsByFilter.get(filterEls.overview) || [];
+  return rows.length === 1 ? rows[0].name : t('dash.worker');
+}
+
 function renderStaffPersonalScope(summary) {
-  const selectedOption = filterEls.overview.staff.selectedOptions[0];
-  const hasSelectedStaff = Boolean(filterEls.overview.staff.value && selectedOption);
+  const selectedOptions = Array.from(filterEls.overview.staff.selectedOptions);
+  // A group the server clamps a personal role to (its own rows in several branches) is not a choice: no «chosen» title.
+  if (selectedOptions.length > 1) {
+    renderStaffGroupScope(summary.staff_filter, selectedOptions.length);
+    return;
+  }
+  const selectedOption = selectedOptions[0];
+  const ownName = selectedOption ? null : personalAdministratorName(summary);
+  const hasSelectedStaff = Boolean(selectedOption) || ownName !== null;
   if (!hasSelectedStaff && summary.level_filter) {
     renderLevelScope(summary.level_filter);
     return;
@@ -959,7 +1011,7 @@ function renderStaffPersonalScope(summary) {
   els.staffAdminOpz.hidden = !administrator;
   (administrator ? els.staffAdminOpz : opzChartHome).appendChild(els.opzChartPanel);
   if (!hasSelectedStaff) return;
-  const name = selectedOption.dataset.name || t('dash.worker');
+  const name = selectedOption?.dataset.name || ownName || t('dash.worker');
   els.staffPersonalTitle.textContent = t(administrator ? 'dash.administratorMetricsTitle' : 'dash.personalMetricsTitle', {
     name,
   });
@@ -989,6 +1041,7 @@ function renderStaffBranchMetrics(summary) {
   }
 
   const selectedStaff = filterEls.overview.staff.selectedOptions[0]?.dataset.name
+    || personalAdministratorName(summary)
     || t('dash.worker');
   els.staffBranchTitle.textContent = t('dash.branchShiftMetricsTitle', { name: selectedStaff });
   renderCards(els.staffBranchMetrics, staffBranchCards(summary));
@@ -1555,8 +1608,8 @@ function renderPlanInsights(planFact) {
   destroyChart('goodsKpi');
   if (!els.planInsights) return;
 
-  // The goods KPI is a branch figure: next to the rows of one level it would describe other people.
-  const goodsKpis = planFact?.level_filter ? [] : planFact?.goods_kpi_execution || [];
+  // The goods KPI is a branch figure: next to the rows of one level or of chosen people it would describe other people.
+  const goodsKpis = planFact?.level_filter || planFact?.staff_filter ? [] : planFact?.goods_kpi_execution || [];
   const selectedStaffPlan = planFact?.selected_staff_plan;
   const panels = [];
 
@@ -1960,8 +2013,12 @@ function renderPlanFact(planFact) {
   const planPeriod = planFact?.plan_period;
   const planPeriodText = planPeriod ? t('dash.planPeriodMeta', { start: planPeriod.start, end: planPeriod.end }) : '';
   const selectedStaff = planFact?.selected_staff;
+  const staffGroup = planFact?.staff_filter;
+  const staffText = staffGroup
+    ? t('dash.staffGroupScope', { count: formatNumber(staffGroup.staff_count) })
+    : selectedStaff?.name || t('dash.staffPlural');
   const scopeText = planFact?.view_scope === 'staff'
-    ? `${planFact.branch?.title || (planFact.level_filter ? t('dash.allBranches') : t('dash.branch'))} · ${selectedStaff?.name || t('dash.staffPlural')}`
+    ? `${planFact.branch?.title || (planFact.level_filter || staffGroup ? t('dash.allBranches') : t('dash.branch'))} · ${staffText}`
     : t('dash.networkAndBranches');
   els.planMeta.textContent = t('dash.planMeta', { scope: scopeText, count: groups.length, period: planPeriodText });
   syncPlanTableStickyOffsets();
@@ -2519,7 +2576,7 @@ function renderBundle(bundle) {
   renderClientsMetrics(summary);
   if (summary.financials_hidden) {
     renderRevenueMetrics({});
-    renderServicesMetrics({});
+    renderServicesMetrics(summary);
     destroyChart('revenue');
     destroyChart('services');
     renderServicesTable([]);
@@ -2579,8 +2636,14 @@ function filterPeriod(filter) {
   return range || { start: '', end: '' };
 }
 
+// A single select (the editors, the services catalogue) lists «all» as its empty option; a multiple one shows it as
+// the placeholder when nothing is chosen.
+function allOption(select, label) {
+  return select.multiple ? '' : `<option value="">${label}</option>`;
+}
+
 function fillBranchSelect(select, branches) {
-  select.innerHTML = `<option value="">${t('dash.allBranches')}</option>`;
+  select.innerHTML = allOption(select, t('dash.allBranches'));
   branches.forEach((branch) => {
     const option = document.createElement('option');
     option.value = branch.id;
@@ -2590,45 +2653,49 @@ function fillBranchSelect(select, branches) {
 }
 
 function renderBranchOptions(filter) {
-  const selected = filter.branch.value;
+  const selected = selectedValues(filter.branch);
   const { start, end } = filterPeriod(filter);
   const options = branchesForPeriod(branchOptions, start, end);
   fillBranchSelect(filter.branch, options);
-  // A branch the new period cannot reach falls back to the whole scope, the same way an
+  // A branch the new period cannot reach drops out of the selection (none left: the whole scope), the same way an
   // unknown id always has: keeping it selected would filter by a branch that is not listed.
-  filter.branch.value = options.some((branch) => String(branch.id) === selected) ? selected : '';
+  const kept = keepListed(selected, options.map((branch) => branch.id));
+  setSelectedValues(filter.branch, multiBranchAdministratorRows && singleBranchViewFilters().includes(filter)
+    ? personalBranchSelection(currentUser, multiBranchAdministratorRows, options, kept)
+    : kept);
   customFilterDropdowns[filter.branch.id]?.refresh();
 }
 
 // The level select is built from the staff list the worker select shows, so both follow the same period and branch.
-// The chosen level is kept by its key: the id set differs between the network and one branch. A level the new list
-// no longer has falls back to «all levels»; with nothing to choose the select is hidden.
+// The chosen levels are kept by their keys: the id set differs between the network and one branch. A level the new list
+// no longer has drops out of the selection (none left: all levels); with nothing to choose the select is hidden.
 function renderLevelOptions(filter, staffItems) {
   if (!filter.level) return;
   const options = selectableLevelOptions(staffItems, currentUser);
-  const selected = levelSelection(options, chosenLevel(filter.level));
-  filter.level.innerHTML = [{ key: '', value: '', label: t('dash.allLevels') }, ...options]
+  const selected = levelSelection(options, chosenLevels(filter.level));
+  filter.level.innerHTML = options
     .map((option) => `<option value="${escapeHtml(option.value)}" data-key="${escapeHtml(option.key)}">${escapeHtml(option.label)}</option>`)
     .join('');
-  filter.level.value = selected;
+  setSelectedValues(filter.level, selected);
   customFilterDropdowns[filter.level.id]?.refresh();
   const field = filter.level.closest('label');
   if (field) field.hidden = !options.length;
   filter.level.closest('.toolbar')?.classList.toggle('toolbar--level', options.length > 0);
 }
 
-// A person and a level exclude each other: the last choice wins and clears the other select.
+function clearSelection(select) {
+  setSelectedValues(select, []);
+  customFilterDropdowns[select.id]?.refresh();
+}
+
+// People and levels exclude each other: the last choice wins and clears the other select.
 function bindStaffLevelExclusion(filter, load) {
-  const clear = (select) => {
-    select.value = '';
-    customFilterDropdowns[select.id]?.refresh();
-  };
   filter.staff.addEventListener('change', () => {
-    if (filter.staff.value) clear(filter.level);
+    if (selectedValues(filter.staff).length) clearSelection(filter.level);
     load();
   });
   filter.level.addEventListener('change', () => {
-    if (filter.level.value) clear(filter.staff);
+    if (selectedValues(filter.level).length) clearSelection(filter.staff);
     load();
   });
 }
@@ -2640,7 +2707,7 @@ async function loadStaff(filter, { force = false } = {}) {
   try {
     const { start, end } = filterPeriod(filter);
     const payload = await fetchJson('/dashboard/staff', {
-      company_id: filter.branch.value,
+      company_ids: idListParam(selectedValues(filter.branch)),
       start_date: start,
       end_date: end,
     }, {
@@ -2650,29 +2717,30 @@ async function loadStaff(filter, { force = false } = {}) {
     });
     if (!request.isCurrent()) return 'superseded';
     // Read after the response: a choice made while the list was loading has already reloaded the data.
-    const selected = filter.staff.value;
+    const selected = selectedValues(filter.staff);
     const staffOptions = payload.data || [];
     const defaultLabel = filter === filterEls.reviewFacts || filter === filterEls.opzFacts
       ? t('dash.allStaff')
       : t('dash.allWorkers');
-    filter.staff.innerHTML = `<option value="">${defaultLabel}</option>`;
+    filter.staff.innerHTML = allOption(filter.staff, defaultLabel);
+    // The branch is named in the label unless exactly one is chosen: the list then spans several.
+    const singleBranch = selectedValues(filter.branch).length === 1;
     staffOptions.forEach((staff) => {
       const option = document.createElement('option');
       option.value = staff.id;
       const { name, text } = staffOption(staff, {
-        branchTitle: filter.branch.value
-          ? ''
-          : branchRowTitle(staff, t),
+        branchTitle: singleBranch ? '' : branchRowTitle(staff, t),
         translate: t,
       });
       option.textContent = text;
       option.dataset.name = name;
       filter.staff.appendChild(option);
     });
-    filter.staff.value = staffOptions.some((staff) => String(staff.id) === selected) ? selected : '';
+    setSelectedValues(filter.staff, keepListed(selected, staffOptions.map((staff) => staff.id)));
     customFilterDropdowns[filter.staff.id]?.refresh();
     renderLevelOptions(filter, staffOptions);
     loadedStaffFilters.add(filter);
+    staffItemsByFilter.set(filter, staffOptions);
     clearFilterWarning(filter.staff);
     return 'ready';
   } catch (error) {
@@ -2684,12 +2752,14 @@ async function loadStaff(filter, { force = false } = {}) {
   }
 }
 
+// The list reloads for the chosen branches and the chosen people absent from it drop out of the selection (loadStaff).
+// An editor's single select keeps clearing the person: their rows belong to the branch picked, not to «all».
 async function refreshStaffForBranch(filter, loadView) {
-  const expectedBranch = filter.branch.value;
-  filter.staff.value = '';
-  customFilterDropdowns[filter.staff.id]?.refresh();
+  const branchKey = () => idListParam(selectedValues(filter.branch));
+  const expectedBranch = branchKey();
+  if (!filter.staff.multiple) clearSelection(filter.staff);
   const status = await loadStaff(filter, { force: true });
-  if (!staffRefreshAllowsDataLoad(status, expectedBranch, filter.branch.value)) return;
+  if (!staffRefreshAllowsDataLoad(status, expectedBranch, branchKey())) return;
   await loadView();
 }
 
@@ -2701,6 +2771,37 @@ function filterForView(view) {
   return filterEls.overview;
 }
 
+// A personal administrator with rows in several branches is on ONE branch of the Overview and Plan/fact (see
+// personalScope.js): both views open on the branch he works in now, and their branch and employee selects take a single
+// choice, so neither a ticked pair nor «all» can clamp the request to a group of his own rows. Decided once, after the
+// branch and staff lists exist and before the first data request: not inside loadBranches(), which runs concurrently
+// with the staff list (see startSession). The staff list of a filter that received a branch is stale (it spans both), so
+// it is dropped and, for the active view, reloaded here. The reports viewer is not restricted: reports always count
+// by the master of a visit, and the group of his own rows is exactly what that reading means.
+async function applyPersonalBranchDefault() {
+  if (canPickLevel(currentUser)) return;
+  await loadStaff(filterEls.overview);
+  const ownStaff = staffItemsByFilter.get(filterEls.overview) || [];
+  if (!isMultiBranchAdministrator(currentUser, ownStaff)) return;
+  multiBranchAdministratorRows = ownStaff;
+  singleBranchViewFilters().forEach((filter) => {
+    const { start, end } = filterPeriod(filter);
+    const selected = selectedValues(filter.branch);
+    const next = personalBranchSelection(currentUser, ownStaff, branchesForPeriod(branchOptions, start, end), selected);
+    if (idListParam(next) !== idListParam(selected)) {
+      setSelectedValues(filter.branch, next);
+      customFilterDropdowns[filter.branch.id]?.refresh();
+      loadedStaffFilters.delete(filter);
+    }
+    setSelectExclusive(filter.branch);
+    setSelectExclusive(filter.staff);
+  });
+  const active = filterForView(activeView);
+  if (singleBranchViewFilters().includes(active) && !loadedStaffFilters.has(active)) {
+    await loadStaff(active);
+  }
+}
+
 async function ensureStaffForView(view) {
   if (view === 'planSettings' || view === 'serviceManagement' || view === 'reports' || view === 'yandexPayFacts') return;
   await loadStaff(filterForView(view));
@@ -2710,8 +2811,7 @@ function filterParams(filter) {
   return {
     start_date: filter.start.value,
     end_date: filter.end.value,
-    company_id: filter.branch.value,
-    staff_id: filter.staff.value,
+    ...scopeParams(filter),
   };
 }
 
@@ -2832,11 +2932,8 @@ async function loadPlanFact() {
   // Sync status is independent of the view payload, so start it in parallel. It never rejects.
   const syncStatus = loadSyncStatus();
   try {
-    // The level rides along on these two requests only (plan/fact and the Overview bundle), never on the rest.
-    const payload = await fetchJson('/dashboard/widget/plan_fact', {
-      ...filterParams(filter),
-      staff_position_ids: levelRequestParam(filter),
-    }, {
+    // The scope (branches, people, levels) rides along on these two requests only (plan/fact and the Overview bundle).
+    const payload = await fetchJson('/dashboard/widget/plan_fact', filterParams(filter), {
       retry: () => loadPlanFact(),
       signal: request.signal,
     });
@@ -2869,7 +2966,6 @@ async function loadDashboard() {
   try {
     const payload = await fetchJson('/dashboard/bundle', {
       ...filterParams(filter),
-      staff_position_ids: levelRequestParam(filter),
       period_preset: overviewPreset,
     }, {
       retry: () => loadDashboard(),
@@ -3059,18 +3155,20 @@ async function startSession() {
   const existingPosition = Number(history.state?.[HISTORY_POSITION_KEY]);
   historyPosition = Number.isFinite(existingPosition) ? existingPosition : 0;
   replaceDashboardHistory({ view: activeView });
-  // Safe to run concurrently because loadStaff() reads filter.branch.value SYNCHRONOUSLY,
-  // before its first await, so the value it sends is deterministically '' regardless of
+  // Safe to run concurrently because loadStaff() reads the branch selection SYNCHRONOUSLY,
+  // before its first await, so the value it sends is deterministically empty regardless of
   // which request resolves first. That synchronous read is the load-bearing part, not the
   // emptiness of the select: the later read (after the /dashboard/staff await, where the
   // label is built) IS order-dependent, and is benign today only because renderBranchOptions
-  // also resolves to '' on a cold start. Give loadBranches() a preselected branch — a
+  // also resolves to an empty selection on a cold start. Give loadBranches() a preselected branch — a
   // restored selection, a single-branch tenant — and that later read becomes a
-  // network-timing race. Re-check it before adding any such preselection.
+  // network-timing race. Re-check it before adding any such preselection: the one that exists
+  // (applyPersonalBranchDefault) runs after both lists have arrived, never inside loadBranches().
   // The first paint waits for the branch and staff lists before the view's own request begins.
   viewLoaders[activeView]?.start('first');
   try {
     await Promise.all([loadBranches(), ensureStaffForView(activeView)]);
+    await applyPersonalBranchDefault();
     await loadCurrentView();
   } catch (error) {
     viewLoaders[activeView]?.stop();

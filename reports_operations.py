@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dashboard_service import (
     COMPLETED_ATTENDANCE,
+    StaffSelection,
     _branch_timezone,
     _company_timezone_names,
     _local_moment,
@@ -463,7 +464,7 @@ async def _staff_rows(
     start: date,
     end: date,
     company_id: int | None,
-    staff_id: int | None,
+    staff_id: StaffSelection | None,
     allowed_company_ids: list[int],
     factual_at: datetime,
 ) -> list[dict[str, Any]]:

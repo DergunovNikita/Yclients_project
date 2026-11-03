@@ -14,12 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dashboard_service import (
     COMPLETED_ATTENDANCE,
     DateRange,
+    StaffSelection,
     _appointment_factual_at_condition,
     _company_scope_clause,
     _DayShift,
     _physical_account_condition,
     _service_paid_filters,
     _service_revenue_union,
+    _staff_match,
     business_appointment_condition,
     factual_branch_date,
     fetch_client_mix_metrics,
@@ -109,7 +111,7 @@ async def _clients_rows(
     start: date,
     end: date,
     company_id: int | None,
-    staff_id: int | None,
+    staff_id: StaffSelection | None,
     allowed_company_ids: list[int],
     factual_at: datetime,
 ) -> list[dict[str, Any]]:
@@ -431,7 +433,7 @@ async def _cohort_rows(req: ReportRequest, first_from: date, first_to: date) -> 
         .group_by(clients.c.company_id, year, month)
     )
     if req.staff_id is not None:
-        stmt = stmt.where(clients.c.first_staff_id == req.staff_id)
+        stmt = stmt.where(_staff_match(clients.c.first_staff_id, req.staff_id))
     return (await req.db.execute(stmt)).all()
 
 
@@ -530,7 +532,8 @@ async def build_retention_3_6_12(req: ReportRequest) -> dict[str, Any]:
             'kind': 'info',
             'title': 'Фильтр по мастеру',
             'text': (
-                'В когорту входят клиенты, чей первый визит в филиале был у выбранного мастера; '
+                'В когорту входят клиенты, чей первый визит в филиале был у '
+                f'{"одного из выбранных мастеров" if isinstance(req.staff_id, frozenset) else "выбранного мастера"}; '
                 'возвращение засчитывается к любому мастеру филиала.'
             ),
         })
@@ -589,7 +592,7 @@ async def build_revenue_at_risk(req: ReportRequest) -> dict[str, Any]:
         ranked.c.date <= _churn_cutoff(ranked.c.company_id, horizons, today),
     )
     if req.staff_id is not None:
-        churned_stmt = churned_stmt.where(ranked.c.staff_id == req.staff_id)
+        churned_stmt = churned_stmt.where(_staff_match(ranked.c.staff_id, req.staff_id))
     # Read twice below (revenue and the grouping); a CTE keeps the window function to one pass.
     churned = churned_stmt.cte('churned')
 
@@ -666,7 +669,7 @@ async def build_revenue_at_risk(req: ReportRequest) -> dict[str, Any]:
         .group_by(Appointment.company_id, Appointment.client_id)
     )
     if req.staff_id is not None:
-        period_clients = period_clients.where(Appointment.staff_id == req.staff_id)
+        period_clients = period_clients.where(_staff_match(Appointment.staff_id, req.staff_id))
     share_base_clients = int(await req.db.scalar(select(func.count()).select_from(period_clients.subquery())) or 0)
 
     months: dict[date, dict[str, Any]] = {}
@@ -771,7 +774,8 @@ async def build_revenue_at_risk(req: ReportRequest) -> dict[str, Any]:
             'kind': 'info',
             'title': 'Фильтр по мастеру',
             'text': (
-                'Показаны клиенты, чей последний визит в филиале был у выбранного мастера. '
+                'Показаны клиенты, чей последний визит в филиале был у '
+                f'{"одного из выбранных мастеров" if isinstance(req.staff_id, frozenset) else "выбранного мастера"}. '
                 'Доля — от клиентов, которых мастер обслужил в периоде.'
             ),
         })

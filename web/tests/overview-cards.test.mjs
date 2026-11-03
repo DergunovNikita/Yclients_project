@@ -188,6 +188,18 @@ test('without the summary blocks the cards are left out instead of failing', () 
   assert.doesNotThrow(() => cards.clientsCards(SUMMARIES.noBlocks, reportUrl));
 });
 
+test('a role without revenue keeps the count cards and loses only the money ones', () => {
+  const summary = SUMMARIES.revenueHidden;
+  assert.deepEqual(labelsOf(cards.kpiCards(summary)), ['Посещенные записи']);
+  assert.deepEqual(cards.revenueCards(summary), []);
+  assert.deepEqual(labelsOf(cards.servicesCards(summary).cards), [
+    'Кол-во оказанных услуг',
+    'Кол-во проданных товаров',
+    'Кол-во оказанных доп. услуг',
+    'Доп. услуги от посещений',
+  ]);
+});
+
 test('a partial average check is named differently from a complete one', () => {
   const average = (summary) => cards.kpiCards(summary).map((card) => card.label);
   assert.notDeepEqual(average(SUMMARIES.partialAverageCheck), average(SUMMARIES.full));

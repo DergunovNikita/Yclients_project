@@ -72,7 +72,8 @@ DEFAULT_ROLE_MONEY_CODES: dict[str, frozenset[str]] = {
     'branch_admin': ALL_MONEY_CODES,
     # Средний чек менеджеру нужен для разговора со сменой, выручка филиала — нет.
     'manager': frozenset({'avg_check'}),
-    'admin': frozenset(),
+    # Космо-сумма у администратора — его личная метрика (продажи косметики); выручки и среднего чека у него нет.
+    'admin': frozenset({'cosmo_sum'}),
     'barber': frozenset(),
 }
 

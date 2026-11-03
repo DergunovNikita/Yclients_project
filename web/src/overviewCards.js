@@ -59,6 +59,12 @@ function presentCards(cards) {
   return cards.filter((card) => card.present !== false);
 }
 
+// A role without the revenue metric still gets `summary.revenue`, holding only the counts (visits, clients, services sold):
+// a card is shown when ITS field arrived, not when the block did, so the money cards drop out and the count cards stay.
+function hasField(block, key) {
+  return block !== null && block !== undefined && Object.hasOwn(block, key);
+}
+
 export function usesAdministratorSchedule(summary) {
   return summary?.service_attribution?.mode === 'administrator_schedule';
 }
@@ -150,13 +156,13 @@ export function kpiCards(summary) {
       value: formatMoney(revenue.total),
       change: revenue.change_pct,
       current: revenue.total,
-      present: Boolean(revenueBlock),
+      present: hasField(revenueBlock, 'total'),
     }),
     metricCard('VisitedAppointments', {
       value: formatNumber(revenue.appointments),
       change: revenue.appointments_change_pct,
       current: revenue.appointments,
-      present: Boolean(revenueBlock),
+      present: hasField(revenueBlock, 'appointments'),
     }),
     metricCard(partial ? 'AverageCheckTotalPartial' : 'AverageCheckTotal', {
       value: formatMoney(averageCheck.total),
@@ -178,26 +184,28 @@ export function staffBranchCards(summary) {
 }
 
 export function revenueCards(summary) {
-  if (!summary.revenue) return [];
   const revenue = summary.revenue;
   const administratorSchedule = usesAdministratorSchedule(summary);
-  return [
+  return presentCards([
     metricCard('ServiceRevenue', {
-      value: formatMoney(revenue.service_revenue),
-      change: revenue.service_revenue_change_pct,
-      current: revenue.service_revenue,
+      value: formatMoney(revenue?.service_revenue),
+      change: revenue?.service_revenue_change_pct,
+      current: revenue?.service_revenue,
+      present: hasField(revenue, 'service_revenue'),
     }),
     metricCard('GoodsRevenue', {
-      value: formatMoney(revenue.goods_revenue),
-      change: revenue.goods_revenue_change_pct,
-      current: revenue.goods_revenue,
+      value: formatMoney(revenue?.goods_revenue),
+      change: revenue?.goods_revenue_change_pct,
+      current: revenue?.goods_revenue,
+      present: hasField(revenue, 'goods_revenue'),
     }),
     ...(administratorSchedule ? [] : [metricCard('ExtraServiceRevenue', {
-      value: formatMoney(revenue.extra_service_revenue),
-      change: revenue.extra_service_revenue_change_pct,
-      current: revenue.extra_service_revenue,
+      value: formatMoney(revenue?.extra_service_revenue),
+      change: revenue?.extra_service_revenue_change_pct,
+      current: revenue?.extra_service_revenue,
+      present: hasField(revenue, 'extra_service_revenue'),
     })]),
-  ];
+  ]);
 }
 
 /** Services section cards and the number of grid columns they need. */
@@ -207,7 +215,6 @@ export function servicesCards(summary) {
   const revenue = revenueBlock || {};
   const averageCheck = averageCheckBlock || {};
   const visitMetrics = summary.visit_metrics || {};
-  const revenuePresent = Boolean(revenueBlock);
   const averageCheckPresent = Boolean(averageCheckBlock);
   // One column per kind of sale: counts fill the first row, each average check sits
   // right under its own count, so the grid needs as many columns as visible kinds.
@@ -217,7 +224,7 @@ export function servicesCards(summary) {
         value: formatNumber(revenue.service_count),
         change: revenue.service_count_change_pct,
         current: revenue.service_count,
-        present: revenuePresent,
+        present: hasField(revenueBlock, 'service_count'),
       }),
       average: metricCard('ServiceAverageCheck', {
         value: formatMoney(averageCheck.services),
@@ -231,7 +238,7 @@ export function servicesCards(summary) {
         value: formatNumber(revenue.goods_count),
         change: revenue.goods_count_change_pct,
         current: revenue.goods_count,
-        present: revenuePresent,
+        present: hasField(revenueBlock, 'goods_count'),
       }),
       average: metricCard('GoodsAverageCheck', {
         value: formatMoney(averageCheck.goods),
@@ -242,7 +249,8 @@ export function servicesCards(summary) {
       share: metricCard('GoodsRevenueShare', {
         value: formatMetricValue(goodsRevenueShare(revenue), 'percent'),
         note: t('dash.ofTotalRevenue'),
-        present: revenuePresent,
+        // The share is made of money: it needs both the total and the goods revenue.
+        present: hasField(revenueBlock, 'total') && hasField(revenueBlock, 'goods_revenue'),
       }),
     },
     {
@@ -250,7 +258,7 @@ export function servicesCards(summary) {
         value: formatNumber(revenue.extra_service_count),
         change: revenue.extra_service_count_change_pct,
         current: revenue.extra_service_count,
-        present: revenuePresent,
+        present: hasField(revenueBlock, 'extra_service_count'),
       }),
       average: metricCard('ExtraServiceAverageCheck', {
         value: formatMoney(averageCheck.extra_services),

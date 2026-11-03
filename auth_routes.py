@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import asynccontextmanager
 from clock import utcnow
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Path, Request, Response
 from pydantic import AfterValidator, BaseModel, EmailStr, Field
 from sqlalchemy import func, inspect as sa_inspect, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_deps import forbid_demo, get_current_user, get_dashboard_access, require_roles
@@ -24,7 +26,7 @@ from auth_hierarchy import (
     can_manage_user,
     validate_company_ids_for_role,
 )
-from auth_scope import AccessContext, can_view_branch_payments, manual_fact_staff_keys
+from auth_scope import BRANCH_SCOPE_ROLES, AccessContext, can_view_branch_payments, manual_fact_staff_keys
 from auth_service import (
     DUMMY_PASSWORD_HASH,
     PORTAL_PASSWORD_MIN_LENGTH,
@@ -34,6 +36,7 @@ from auth_service import (
     consume_email_token,
     create_access_token,
     email_cooldown_active,
+    email_is_deliverable,
     generate_bootstrap_password,
     hash_password,
     invalidate_email_tokens,
@@ -63,7 +66,7 @@ from auth_sessions import (
 )
 from dashboard_service import manual_fact_entry_keys
 from database import get_async_db, get_async_session_factory
-from models import Company, PortalAccount, PortalBranch, PortalUser, PortalUserBranch, Staff
+from models import Company, PortalAccount, PortalBranch, PortalUser, PortalUserBranch, Staff, is_service_staff_name
 from portal_audit import log_portal_audit
 from portal_account_provision import (
     ProvisionConflict,
@@ -71,11 +74,22 @@ from portal_account_provision import (
     provision_staff_account,
     role_for_staff,
 )
+from portal_staff_link import (
+    LINKABLE_ROLES,
+    StaffLinkConflict,
+    StaffLinkNotFound,
+    StaffLinkRefused,
+    link_staff,
+    list_staff_links,
+    unlink_staff,
+)
 from portal_staff_sync import (
     detach_portal_user_staff,
+    is_mirror_row,
     list_unlinked_staff,
     sync_all_portal_users_staff,
     sync_portal_user_staff,
+    yclients_staff_clause,
 )
 from yclients_credential_routes import router as credential_router
 from config import (
@@ -159,6 +173,16 @@ class AdminUserUpdateRequest(BaseModel):
     company_ids: CompanyIds | None = None
 
 
+# Ids of the staff-link routes are INTEGER columns: a larger number would reach the database and answer 500.
+INT32_MAX = 2**31 - 1
+LinkUserId = Annotated[int, Path(ge=1, le=INT32_MAX)]
+LinkStaffId = Annotated[int, Path(ge=1, le=INT32_MAX)]
+
+
+class AdminStaffLinkRequest(BaseModel):
+    staff_id: int = Field(ge=1, le=INT32_MAX)
+
+
 class AdminUserCreateRequest(BaseModel):
     email: EmailStr
     password: NewPassword | None = None
@@ -176,6 +200,7 @@ def _user_payload(
     staff_id: int | None = None,
     manual_fact_scope: str | None = None,
     branch_payments_access: bool | None = None,
+    needs_staff_link: bool = False,
 ) -> dict:
     payload = {
         'id': user.id,
@@ -193,6 +218,7 @@ def _user_payload(
         'is_portal_user': True,
         'manageable': manageable,
         'password_changed': user.password_changed_at is not None,
+        'needs_staff_link': needs_staff_link,
     }
     return payload
 
@@ -231,6 +257,7 @@ async def _load_manageable_staff(
                 Staff.id == staff_id,
                 Staff.portal_user_id.is_(None),
                 Staff.fired == 0,
+                yclients_staff_clause(),
             )
         )
     ).scalar_one_or_none()
@@ -239,6 +266,8 @@ async def _load_manageable_staff(
     if staff.company_id not in actor_branch_ids:
         # 404 for every role: "exists in a branch you cannot reach" must look like "does not exist".
         raise HTTPException(status_code=404, detail='Staff member not found')
+    if is_service_staff_name(staff.name):
+        raise HTTPException(status_code=400, detail='Service staff rows cannot have an account')
     return staff
 
 
@@ -767,6 +796,7 @@ async def admin_meta(
             'assignable_roles': assignable_roles(actor.role),
             'portal_account_id': actor.portal_account_id,
             'company_ids': None if actor.role == 'platform_admin' else branch_ids,
+            'invites_deliverable': email_is_deliverable(),
         },
     }
 
@@ -803,20 +833,38 @@ async def admin_list_portal_accounts(
     }
 
 
-async def _load_staff_ids_by_portal_user(db: AsyncSession, portal_user_ids: list[int]) -> dict[int, int]:
+async def _load_staff_links(
+    db: AsyncSession, portal_user_ids: list[int]
+) -> tuple[dict[int, int], dict[int, set[int]]]:
+    """Per user: the id of the first live staff row, and the branches that hold a linked row of YClients.
+
+    A mirror row is the portal's own placeholder, not a link; a fired linked row still counts, as it does for
+    `portal_staff_link` (a branch with one takes no second link).
+    """
     if not portal_user_ids:
-        return {}
+        return {}, {}
     rows = (
         await db.execute(
-            select(Staff.id, Staff.portal_user_id)
-            .where(Staff.portal_user_id.in_(portal_user_ids), Staff.fired == 0)
+            select(
+                Staff.id,
+                Staff.portal_user_id,
+                Staff.company_id,
+                Staff.fired,
+                Staff.source_type,
+                Staff.external_id,
+            )
+            .where(Staff.portal_user_id.in_(portal_user_ids))
             .order_by(Staff.id.asc())
         )
     ).all()
-    mapping: dict[int, int] = {}
-    for staff_id, portal_user_id in rows:
-        mapping.setdefault(portal_user_id, staff_id)
-    return mapping
+    staff_ids: dict[int, int] = {}
+    linked_companies: dict[int, set[int]] = {}
+    for row in rows:
+        if not row.fired:
+            staff_ids.setdefault(row.portal_user_id, row.id)
+        if not is_mirror_row(row):
+            linked_companies.setdefault(row.portal_user_id, set()).add(row.company_id)
+    return staff_ids, linked_companies
 
 
 async def _load_access_branch_ids_by_user(db: AsyncSession, users: list[PortalUser]) -> dict[int, list[int]]:
@@ -847,6 +895,16 @@ async def _load_access_branch_ids_by_user(db: AsyncSession, users: list[PortalUs
     return result
 
 
+def _needs_staff_link(user: PortalUser, branch_ids: list[int], linked_companies: set[int]) -> bool:
+    """An admin or barber account gets its own numbers through a YClients row; with none in a branch it has none."""
+    return (
+        user.role in LINKABLE_ROLES
+        and user.is_active
+        and not user.is_demo
+        and not set(branch_ids) <= linked_companies
+    )
+
+
 @router.get('/admin/users')
 async def admin_list_users(
     x_portal_account_id: int | None = Header(default=None),
@@ -865,7 +923,7 @@ async def admin_list_users(
             await db.commit()
 
     payload = []
-    staff_ids_by_user = await _load_staff_ids_by_portal_user(db, [user.id for user in users])
+    staff_ids_by_user, linked_companies_by_user = await _load_staff_links(db, [user.id for user in users])
     branch_ids_by_user = await _load_access_branch_ids_by_user(db, users)
     for user in users:
         branch_ids = branch_ids_by_user[user.id]
@@ -879,6 +937,7 @@ async def admin_list_users(
                     branch_ids,
                     manageable=manageable,
                     staff_id=staff_ids_by_user.get(user.id),
+                    needs_staff_link=_needs_staff_link(user, branch_ids, linked_companies_by_user.get(user.id, set())),
                 )
             )
 
@@ -897,6 +956,14 @@ async def admin_create_user(
 ):
     actor_branch_ids = await load_user_access_branch_ids(db, actor)
     assert_can_assign_role(actor.role, body.role)
+    if body.role not in BRANCH_SCOPE_ROLES:
+        # A personal role sees only its own staff row; made here it would get an empty mirror row and read zeros.
+        raise HTTPException(
+            status_code=400, detail='Barber and administrator accounts are created from a YClients staff member'
+        )
+    if not body.password and not email_is_deliverable():
+        # Without a password the account waits for an invite that never leaves this server: nobody could sign in.
+        raise HTTPException(status_code=400, detail='A password is required for this account')
     validate_company_ids_for_role(actor.role, actor_branch_ids, body.role, body.company_ids)
 
     portal_account_id = actor.portal_account_id
@@ -1088,6 +1155,106 @@ async def admin_delete_user(
     return {'success': True, 'message': 'User deleted'}
 
 
+async def _load_staff_link_target(
+    db: AsyncSession, actor: PortalUser, user_id: int
+) -> tuple[PortalUser, list[int], list[int]]:
+    """The account whose staff links an admin edits, with its branches and the branches the actor may touch."""
+    user = (await db.execute(select(PortalUser).where(PortalUser.id == user_id))).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail='User not found')
+    if user.id == actor.id:
+        raise HTTPException(status_code=403, detail='Cannot manage your own account here')
+    if not _same_tenant(actor, user):
+        raise HTTPException(status_code=404, detail='User not found')
+    actor_branch_ids = await load_user_access_branch_ids(db, actor)
+    user_branch_ids = await load_user_access_branch_ids(db, user)
+    assert_can_manage_user(actor.role, actor_branch_ids, user.role, user_branch_ids)
+    # A platform_admin has no branches of its own: the user's tenant is its scope.
+    scope_branch_ids = (
+        await load_portal_account_branch_ids(db, user.portal_account_id)
+        if actor.role == 'platform_admin'
+        else actor_branch_ids
+    )
+    return user, user_branch_ids, scope_branch_ids
+
+
+@asynccontextmanager
+async def _staff_link_errors(db: AsyncSession):
+    """Refusals of the link service as HTTP errors; the transaction is dropped, nothing of a refused call stays."""
+    try:
+        yield
+    except (StaffLinkNotFound, StaffLinkConflict, StaffLinkRefused) as exc:
+        await db.rollback()
+        status = 404 if isinstance(exc, StaffLinkNotFound) else 409 if isinstance(exc, StaffLinkConflict) else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        # Lost a race on a unique index (two first entries of the same manual value): the other writer won.
+        await db.rollback()
+        raise HTTPException(status_code=409, detail='The staff data changed meanwhile; reload and try again') from exc
+
+
+@router.get('/admin/users/{user_id}/staff-links')
+async def admin_list_staff_links(
+    user_id: LinkUserId,
+    actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_async_db),
+):
+    user, user_branch_ids, scope_branch_ids = await _load_staff_link_target(db, actor, user_id)
+    async with _staff_link_errors(db):
+        branches = await list_staff_links(db, user, user_branch_ids, scope_branch_ids)
+    return {'success': True, 'data': {'user_id': user.id, 'branches': branches}}
+
+
+@router.post('/admin/users/{user_id}/staff-links', dependencies=[Depends(forbid_demo)])
+async def admin_link_staff(
+    user_id: LinkUserId,
+    body: AdminStaffLinkRequest,
+    actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_async_db),
+):
+    user, user_branch_ids, scope_branch_ids = await _load_staff_link_target(db, actor, user_id)
+    async with _staff_link_errors(db):
+        result = await link_staff(
+            db,
+            actor_user_id=actor.id,
+            user=user,
+            staff_id=body.staff_id,
+            user_branch_ids=user_branch_ids,
+            scope_branch_ids=scope_branch_ids,
+        )
+        await db.commit()
+    return {
+        'success': True,
+        'data': {
+            'staff_id': result.staff_id,
+            'company_id': result.company_id,
+            'retired_staff_ids': result.retired_staff_ids,
+            'moved_fact_values': result.moved_fact_values,
+        },
+    }
+
+
+@router.delete('/admin/users/{user_id}/staff-links/{staff_id}', dependencies=[Depends(forbid_demo)])
+async def admin_unlink_staff(
+    user_id: LinkUserId,
+    staff_id: LinkStaffId,
+    actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_async_db),
+):
+    user, user_branch_ids, scope_branch_ids = await _load_staff_link_target(db, actor, user_id)
+    async with _staff_link_errors(db):
+        company_id = await unlink_staff(
+            db,
+            actor_user_id=actor.id,
+            user=user,
+            staff_id=staff_id,
+            user_branch_ids=user_branch_ids,
+            scope_branch_ids=scope_branch_ids,
+        )
+        await db.commit()
+    return {'success': True, 'data': {'staff_id': staff_id, 'company_id': company_id}}
+
+
 def _provisioned_payload(account) -> dict:
     return {
         'staff_id': account.staff_id,
@@ -1105,6 +1272,9 @@ async def admin_provision_accounts(
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
+    if not email_is_deliverable():
+        # Accounts made in bulk get no password: the invite mail is the only way in, and here it reaches nobody.
+        raise HTTPException(status_code=400, detail='Bulk account creation needs e-mail delivery')
     actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
     allowed = actor_branch_ids
     created, errors = await provision_all_unlinked_staff(db, allowed)
@@ -1133,6 +1303,11 @@ async def admin_create_staff_account(
     # the CRM position decides — the same rule bulk provisioning follows.
     role = body.role or role_for_staff(staff)
     assert_can_assign_role(actor.role, role)
+    if role not in LINKABLE_ROLES:
+        raise HTTPException(status_code=400, detail='A staff account is either admin or barber')
+    if not body.password and not email_is_deliverable():
+        # No mail leaves this server, so an account without a password is one nobody can sign into.
+        raise HTTPException(status_code=400, detail='A password is required for this account')
     company_ids = body.company_ids if body.company_ids is not None else [staff.company_id]
     validate_company_ids_for_role(actor.role, actor_branch_ids, role, company_ids)
     await _validate_company_ids_in_tenant(
@@ -1172,7 +1347,7 @@ async def admin_list_initial_passwords(
         PortalUser.is_demo.is_(False),
         PortalUser.last_login_at.is_(None),
     )
-    staff_ids_by_user = await _load_staff_ids_by_portal_user(db, [user.id for user in users])
+    staff_ids_by_user, _ = await _load_staff_links(db, [user.id for user in users])
     branch_ids_by_user = await _load_access_branch_ids_by_user(db, users)
 
     payload = []
@@ -1203,6 +1378,9 @@ async def admin_distribute_credentials(
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
+    if not email_is_deliverable():
+        # In console mode a send "succeeds" without reaching anyone, and the admin would report invites that never left.
+        raise HTTPException(status_code=400, detail='Invite e-mails need e-mail delivery')
     active_portal_account_id = await _active_admin_portal_account_id(db, actor, x_portal_account_id)
     actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
     unique_ids = sorted(set(body.user_ids))

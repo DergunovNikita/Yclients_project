@@ -1,5 +1,6 @@
 import './reauth.css';
 import { togglePasswordVisibility } from './formHelpers.js';
+import { buildErrorDetails, isInvalidEmailPayload } from './errorDetails.js';
 import { t } from './i18n.js';
 import { clearAllDrafts } from './editorDrafts.js';
 import { startIdleSession } from './idleSession.js';
@@ -461,6 +462,7 @@ async function parsePayload(response) {
 }
 
 function errorMessage(response, payload) {
+  if (response.status === 422 && isInvalidEmailPayload(payload)) return t('authErrors.invalidEmail');
   let message = payload.detail || payload.message || `HTTP ${response.status}`;
   if (Array.isArray(message)) {
     message = message.map((item) => item.msg || JSON.stringify(item)).join('; ');
@@ -806,12 +808,39 @@ export async function requestWithReauth(path, options = {}, requestFn = doFetch,
   return response;
 }
 
+// A rejected fetch (server down, no network, blocked request) says only «Failed to fetch» in the browser's words. The
+// caller gets a translated message instead; the browser's own text stays in `details`, which the error banners show.
+// Errors that carry a verdict of their own (an aborted request, a session transition) pass through untouched.
+function failureWithDetails(error, path, options) {
+  if (error?.name === 'AbortError' || error?.name === 'SessionTransitionError') return error;
+  const details = buildErrorDetails({
+    method: options.method,
+    path,
+    status: error?.status,
+    browserMessage: error instanceof TypeError ? error.message : '',
+  });
+  if (error instanceof TypeError) {
+    const networkError = new Error(t('authErrors.network'), { cause: error });
+    networkError.code = 'network';
+    networkError.details = details;
+    return networkError;
+  }
+  if (error instanceof Error && !error.details) error.details = details;
+  return error;
+}
+
 export async function authFetch(path, options = {}) {
-  const response = await requestWithReauth(path, options, doFetch);
+  let response;
+  try {
+    response = await requestWithReauth(path, options, doFetch);
+  } catch (error) {
+    throw failureWithDetails(error, path, options);
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(errorMessage(response, payload));
     error.status = response.status;
+    error.details = buildErrorDetails({ method: options.method, path, status: response.status, payload });
     throw error;
   }
   const requestPath = normalizedPath(path);

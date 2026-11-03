@@ -13,6 +13,23 @@ export function enhanceSelect(selectEl, options = {}) {
   return instance;
 }
 
+/**
+ * Make a multiple select hold exactly one choice: picking replaces the selection, the chosen option cannot be unpicked
+ * and the «clear selection» button goes away. For a user who must not combine entries (see personalScope.js).
+ */
+export function setSelectExclusive(selectEl, exclusive = true) {
+  const instance = registry.get(selectEl);
+  if (!instance) return;
+  instance.exclusive = exclusive;
+  if (exclusive) instance.keepOneSelected();
+  instance.syncFromNative();
+}
+
+/** Rebuild the dropdown of a select whose options or selection were changed from code. */
+export function refreshSelect(selectEl) {
+  registry.get(selectEl)?.refresh();
+}
+
 function normalizeSearch(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -33,10 +50,15 @@ export function appendOptionContent(item, labelText, multiple) {
 }
 
 class CustomSelect {
-  constructor(selectEl, { placeholder = t('common.select') } = {}) {
+  // Options (multiple selects only): `commitOnClose` fires `change` when the menu closes instead of on every tick, so
+  // picking several entries of a filter costs one reload; `clearable` adds a «clear selection» button to the menu.
+  constructor(selectEl, { placeholder = t('common.select'), commitOnClose = false, clearable = false } = {}) {
     this.select = selectEl;
     this.multiple = selectEl.multiple;
     this.placeholder = placeholder;
+    this.commitOnClose = this.multiple && commitOnClose;
+    this.pendingChange = false;
+    this.exclusive = false;
     this.open = false;
     this.searchQuery = '';
 
@@ -73,6 +95,16 @@ class CustomSelect {
     this.searchInput.autocomplete = 'off';
     this.searchInput.setAttribute('aria-label', t('common.search'));
     this.searchWrap.appendChild(this.searchInput);
+
+    if (this.multiple && clearable) {
+      this.clearButton = document.createElement('button');
+      this.clearButton.type = 'button';
+      this.clearButton.className = 'custom-select__clear';
+      this.clearButton.textContent = t('common.clearSelection');
+      this.clearButton.hidden = true;
+      this.clearButton.addEventListener('click', () => this.clearSelection());
+      this.searchWrap.appendChild(this.clearButton);
+    }
 
     this.list = document.createElement('ul');
     this.list.className = 'custom-select__list';
@@ -118,6 +150,15 @@ class CustomSelect {
       event.stopPropagation();
     };
 
+    // The native select is clipped but still focusable (a click on its label, Tab): Shift+arrows there tick a second
+    // option behind the menu's back, Ctrl+Space unticks the only one. This listener is registered before the page's
+    // own, so they read exactly one choice.
+    this.select.addEventListener('change', () => {
+      if (!this.exclusive) return;
+      if (!this.select.selectedOptions.length) this.restoreKnownSelection();
+      this.keepOneSelected();
+      this.syncFromNative();
+    });
     this.trigger.addEventListener('click', this.onTriggerClick);
     this.searchInput.addEventListener('input', this.onSearchInput);
     this.searchInput.addEventListener('click', (event) => event.stopPropagation());
@@ -164,6 +205,39 @@ class CustomSelect {
     this.resetSearch();
     document.removeEventListener('click', this.onOutsideClick);
     document.removeEventListener('keydown', this.onKeydown);
+    if (this.pendingChange) {
+      this.pendingChange = false;
+      this.select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+
+  notifyChange() {
+    if (this.commitOnClose && this.open) {
+      this.pendingChange = true;
+      return;
+    }
+    this.select.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // Of several chosen options keep the one the user just added, else the first.
+  keepOneSelected() {
+    const chosen = Array.from(this.select.selectedOptions);
+    if (chosen.length <= 1) return;
+    const known = new Set(this.knownSelection || []);
+    const keep = chosen.find((option) => !known.has(option.value)) || chosen[0];
+    Array.from(this.select.options).forEach((option) => { option.selected = option === keep; });
+  }
+
+  restoreKnownSelection() {
+    const known = new Set(this.knownSelection || []);
+    const back = Array.from(this.select.options).find((option) => known.has(option.value));
+    if (back) back.selected = true;
+  }
+
+  clearSelection() {
+    Array.from(this.select.options).forEach((option) => { option.selected = false; });
+    this.syncFromNative();
+    this.notifyChange();
   }
 
   resetSearch() {
@@ -232,9 +306,17 @@ class CustomSelect {
     if (this.multiple) {
       const option = Array.from(this.select.options).find((entry) => entry.value === value);
       if (!option) return;
+      if (this.exclusive) {
+        const unchanged = option.selected && this.select.selectedOptions.length === 1;
+        Array.from(this.select.options).forEach((entry) => { entry.selected = entry === option; });
+        this.syncFromNative();
+        if (!unchanged) this.notifyChange();
+        this.close();
+        return;
+      }
       option.selected = !option.selected;
       this.syncFromNative();
-      this.select.dispatchEvent(new Event('change', { bubbles: true }));
+      this.notifyChange();
       return;
     }
 
@@ -257,6 +339,8 @@ class CustomSelect {
   syncDisplay() {
     if (this.multiple) {
       const selected = Array.from(this.select.selectedOptions);
+      this.knownSelection = selected.map((option) => option.value);
+      if (this.clearButton) this.clearButton.hidden = this.exclusive || !selected.length;
       if (!selected.length) {
         this.valueEl.textContent = this.placeholder;
         this.root.classList.remove('has-value');

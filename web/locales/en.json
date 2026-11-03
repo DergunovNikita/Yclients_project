@@ -102,7 +102,8 @@
     "select": "Select…",
     "search": "Search…",
     "nothingFound": "Nothing found",
-    "selectedCount": "Selected: {count}"
+    "selectedCount": "Selected: {count}",
+    "clearSelection": "Clear selection"
   },
   "roles": {
     "platform_admin": "Platform administrator",
@@ -323,6 +324,8 @@
     "allLevels": "All roles",
     "levelScope": "Role: {title} · {count} staff",
     "levelScopeDescription": "The figures below cover the barbers of this role in the selected branches; cards whose reports cannot filter by role have no report link.",
+    "staffGroupScope": "Employees selected: {count}",
+    "staffGroupScopeDescription": "The figures below add up the visits of the selected employees as masters.",
     "staffRoleAdministrator": "administrator",
     "staffRoleBarber": "barber",
     "staffRoleMixed": "barber/admin",
@@ -639,6 +642,7 @@
     "distribute": "Distribute",
     "done": "Done",
     "createUserTitle": "New user",
+    "createUserStaffHint": "Create barbers and administrators from their YClients staff row: row menu → “Create account”.",
     "password": "Password",
     "passwordPlaceholder": "optional; otherwise invite link is used",
     "name": "Name",
@@ -666,6 +670,16 @@
     "errorsCount": "Errors: {count}",
     "staffNoAccount": "staff · no account",
     "createAccount": "Create account",
+    "linkToYclients": "Link to YClients",
+    "linkStaffTitle": "YClients employee",
+    "linkStaffLead": "{name}: the account shows the numbers of the employee row in YClients. Pick it in each branch. The account's service row in the branch is closed and the reviews and extra OPZ entered on it move to the chosen row.",
+    "linkStaffPick": "Pick an employee",
+    "linkStaffAction": "Link",
+    "unlinkStaffAction": "Unlink",
+    "linkStaffNone": "No free YClients employees in this branch",
+    "linkStaffFired": "dismissed",
+    "staffLinked": "YClients employee \"{staff}\" linked. Manual values moved: {count}.",
+    "staffUnlinked": "YClients employee \"{staff}\" unlinked.",
     "edit": "Edit",
     "confirmed": "confirmed",
     "pending": "pending",
@@ -691,14 +705,25 @@
     "credentialsDeleted": "YClients credentials deleted",
     "userCreated": "User {email} created",
     "selectTenantForSettings": "Select a business tenant for settings.",
-    "businessTenantSelected": "Business tenant selected"
+    "businessTenantSelected": "Business tenant selected",
+    "passwordRequiredPlaceholder": "at least 8 characters",
+    "staffAccountPasswordOptional": "Optional: without a password the employee gets an invitation email.",
+    "staffAccountPasswordRequired": "Invitation emails are not sent on this server — set a password (8+ characters) and hand it to the employee.",
+    "passwordTooShort": "The password must be at least 8 characters.",
+    "passwordTooLong": "The password is too long: 72 bytes at most.",
+    "needsStaffLink": "Not linked to YClients",
+    "needsStaffLinkHint": "In some branches this account has no YClients staff row, so its numbers are zero. Click to link.",
+    "invitesUnavailable": "Invite e-mails are not sent from this server: hand the login and password to the person directly.",
+    "invitesUnavailableShort": "Mail is not set up"
   },
   "authErrors": {
     "invalidCredentials": "Invalid email or password.",
     "accountDisabled": "Account disabled.",
     "temporaryUnavailable": "The service is temporarily unavailable. Please try again shortly.",
     "serviceUnavailable": "The service is temporarily unavailable. Refresh the page.",
-    "authenticationRequired": "Authentication required."
+    "authenticationRequired": "Authentication required.",
+    "network": "No connection to the server. Check your connection and try again.",
+    "invalidEmail": "Invalid email: the address must look like name@company.com."
   },
   "reauth": {
     "title": "Sign in again",
@@ -774,5 +799,14 @@
   "demo": {
     "viewDemo": "View demo",
     "banner": "Demo mode · fictional data"
+  },
+  "errorDetails": {
+    "toggle": "Error details",
+    "request": "Request",
+    "response": "Response",
+    "noResponse": "no response",
+    "server": "Server",
+    "browser": "Browser",
+    "time": "Time"
   }
 }

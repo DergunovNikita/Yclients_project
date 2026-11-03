@@ -48,6 +48,8 @@ async def auth_db(async_session, monkeypatch):
     monkeypatch.setattr(
         auth_routes, 'get_async_session_factory', lambda: async_sessionmaker(async_session.bind, expire_on_commit=False)
     )
+    # The test environment has no SMTP, so mail would be console-only; most tests are about accounts, not mail.
+    monkeypatch.setattr(auth_routes, 'email_is_deliverable', lambda: True)
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Branch 1', group_id=1))
     async_session.add(Company(id=2, title='Branch 2', group_id=1))
@@ -1809,7 +1811,7 @@ async def test_owner_creates_manager(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_owner_can_assign_multiple_branches_to_manager_and_viewer(auth_db, monkeypatch):
+async def test_owner_can_assign_multiple_branches_to_manager_and_branch_admin(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     token = await issue_access_token(auth_db, 1, 'owner')
 
@@ -1834,10 +1836,10 @@ async def test_owner_can_assign_multiple_branches_to_manager_and_viewer(auth_db,
             '/auth/admin/users',
             headers={'Authorization': f'Bearer {token}'},
             json={
-                'email': 'multibranch.viewer@example.com',
+                'email': 'multibranch.branch-admin@example.com',
                 'password': 'Viewer12345!',
-                'full_name': 'Multi Branch Viewer',
-                'role': 'barber',
+                'full_name': 'Multi Branch Admin',
+                'role': 'branch_admin',
                 'company_ids': [1, 2],
             },
         )
@@ -1914,7 +1916,7 @@ async def test_owner_update_user_email_rejects_duplicate(auth_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_branch_admin_creates_viewer_in_own_branch(auth_db, monkeypatch):
+async def test_branch_admin_creates_manager_in_own_branch(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     token = await issue_access_token(auth_db, 3, 'branch_admin')
 
@@ -1930,12 +1932,12 @@ async def test_branch_admin_creates_viewer_in_own_branch(auth_db, monkeypatch):
             json={
                 'email': 'viewer@example.com',
                 'password': 'Viewer12345!',
-                'role': 'barber',
+                'role': 'manager',
                 'company_ids': [1],
             },
         )
         assert created.status_code == 200
-        assert created.json()['data']['role'] == 'barber'
+        assert created.json()['data']['role'] == 'manager'
 
     app.dependency_overrides.clear()
 
@@ -1983,7 +1985,7 @@ async def test_branch_admin_cannot_create_user_in_foreign_branch(auth_db, monkey
             json={
                 'email': 'foreign@example.com',
                 'password': 'Viewer12345!',
-                'role': 'barber',
+                'role': 'manager',
                 'company_ids': [2],
             },
         )
@@ -2880,6 +2882,172 @@ async def test_create_account_without_any_email_answers_400_not_a_conflict(auth_
 
 
 @pytest.mark.asyncio
+async def test_create_account_takes_only_admin_or_barber(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add(
+        Staff(id=9031, name='Chair', email='chair31@example.com', position='Барбер', company_id=1, fired=0,
+              bookable=True)
+    )
+    await auth_db.commit()
+    headers = await _bearer(auth_db, 1, 'owner')
+
+    async with _Api(auth_db) as client:
+        refused = await client.post('/auth/admin/staff/9031/create-account', headers=headers, json={'role': 'manager'})
+        accepted = await client.post('/auth/admin/staff/9031/create-account', headers=headers, json={'role': 'admin'})
+
+    assert refused.status_code == 400
+    assert accepted.status_code == 200, accepted.text
+
+
+@pytest.mark.asyncio
+async def test_service_staff_rows_are_never_offered_or_given_an_account(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    auth_db.add_all([
+        Staff(id=9041, name='Лист ожидания', email='waitlist@example.com', company_id=1, fired=0, bookable=True),
+        Staff(id=9042, name='Администратор Ковалевской', email='desk@example.com', company_id=1, fired=0,
+              bookable=True),
+        Staff(id=9043, name='Real Barber', email='real.barber@example.com', position='Барбер', company_id=1, fired=0,
+              bookable=True),
+    ])
+    await auth_db.commit()
+    headers = await _bearer(auth_db, 1, 'owner')
+
+    async with _Api(auth_db) as client:
+        listing = await client.get('/auth/admin/users', headers=headers)
+        direct = []
+        for staff_id in (9041, 9042):
+            response = await client.post(
+                f'/auth/admin/staff/{staff_id}/create-account', headers=headers, json={'role': 'barber'}
+            )
+            direct.append(response.status_code)
+        bulk = await client.post('/auth/admin/provision-accounts', headers=headers)
+
+    unlinked = {row['staff_id'] for row in listing.json()['data'] if not row['is_portal_user']}
+    assert 9043 in unlinked and not {9041, 9042} & unlinked
+    assert direct == [400, 400]
+    assert [item['staff_id'] for item in bulk.json()['data']['created']] == [9043]
+    assert bulk.json()['data']['errors'] == []
+    rows = {row.id: row.portal_user_id for row in (await auth_db.execute(select(Staff))).scalars() if row.id > 9000}
+    assert rows[9041] is None and rows[9042] is None
+
+
+def test_email_is_deliverable_only_when_smtp_mail_really_leaves(monkeypatch):
+    import auth_service
+
+    monkeypatch.setattr(auth_service, 'AUTH_CONSOLE_EMAIL', False)
+    monkeypatch.setattr(auth_service, 'smtp_is_configured', lambda: True)
+    assert auth_service.email_is_deliverable() is True
+
+    monkeypatch.setattr(auth_service, 'smtp_is_configured', lambda: False)
+    assert auth_service.email_is_deliverable() is False
+
+    monkeypatch.setattr(auth_service, 'smtp_is_configured', lambda: True)
+    monkeypatch.setattr(auth_service, 'AUTH_CONSOLE_EMAIL', True)
+    assert auth_service.email_is_deliverable() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('deliverable', [True, False])
+async def test_admin_meta_says_whether_invites_are_delivered(auth_db, monkeypatch, deliverable):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setattr(auth_routes, 'email_is_deliverable', lambda: deliverable)
+    headers = await _bearer(auth_db, 1, 'owner')
+
+    async with _Api(auth_db) as client:
+        meta = await client.get('/auth/admin/meta', headers=headers)
+
+    assert meta.status_code == 200
+    assert meta.json()['data']['invites_deliverable'] is deliverable
+
+
+@pytest.mark.asyncio
+async def test_without_delivered_mail_an_account_needs_a_password_and_bulk_is_refused(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setattr(auth_routes, 'email_is_deliverable', lambda: False)
+    auth_db.add_all([
+        Staff(id=9051, name='Chair', email='chair51@example.com', position='Барбер', company_id=1, fired=0,
+              bookable=True),
+        Staff(id=9052, name='Chair Two', email='chair52@example.com', position='Барбер', company_id=1, fired=0,
+              bookable=True),
+    ])
+    await auth_db.commit()
+    headers = await _bearer(auth_db, 1, 'owner')
+
+    async with _Api(auth_db) as client:
+        no_password = await client.post(
+            '/auth/admin/staff/9051/create-account', headers=headers, json={'role': 'barber'}
+        )
+        with_password = await client.post(
+            '/auth/admin/staff/9051/create-account',
+            headers=headers,
+            json={'role': 'barber', 'password': 'Chair51Password!'},
+        )
+        bulk = await client.post('/auth/admin/provision-accounts', headers=headers)
+        login = await client.post('/auth/login', json={'email': 'chair51@example.com', 'password': 'Chair51Password!'})
+
+    assert no_password.status_code == 400
+    assert with_password.status_code == 200, with_password.text
+    assert bulk.status_code == 400
+    # The refused bulk run made nothing, and the account made with a password can be signed into.
+    assert await auth_db.get(PortalUser, 9052) is None
+    assert login.status_code == 200, login.text
+
+
+@pytest.mark.asyncio
+async def test_a_user_without_a_password_is_refused_when_mail_cannot_leave(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setattr(auth_routes, 'email_is_deliverable', lambda: False)
+    headers = await _bearer(auth_db, 1, 'owner')
+    body = {'email': 'new.manager@example.com', 'full_name': 'New Manager', 'role': 'manager', 'company_ids': [1]}
+
+    async with _Api(auth_db) as client:
+        no_password = await client.post('/auth/admin/users', headers=headers, json=body)
+        with_password = await client.post(
+            '/auth/admin/users', headers=headers, json={**body, 'password': 'Manager12345!'}
+        )
+        login = await client.post('/auth/login', json={'email': body['email'], 'password': 'Manager12345!'})
+
+    assert no_password.status_code == 400
+    assert with_password.status_code == 200, with_password.text
+    assert login.status_code == 200, login.text
+
+
+@pytest.mark.asyncio
+async def test_distribute_credentials_is_refused_when_mail_cannot_leave(auth_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setattr(auth_routes, 'email_is_deliverable', lambda: False)
+    sent = []
+
+    async def fake_send(db, user):
+        sent.append(user.email)
+
+    monkeypatch.setattr(auth_routes, 'send_account_invite_email', fake_send)
+    auth_db.add(
+        PortalUser(
+            id=14,
+            portal_account_id=1,
+            email='invitee@example.com',
+            password_hash=hash_password('Invitee123!'),
+            full_name='Invitee',
+            role='manager',
+            is_active=True,
+            email_verified_at=utcnow(),
+            created_at=utcnow(),
+        )
+    )
+    auth_db.add(PortalUserBranch(user_id=14, company_id=1))
+    await auth_db.commit()
+    headers = await _bearer(auth_db, 1, 'owner')
+
+    async with _Api(auth_db) as client:
+        response = await client.post('/auth/admin/distribute-credentials', headers=headers, json={'user_ids': [14]})
+
+    assert response.status_code == 400
+    assert response.json()['detail'] == 'Invite e-mails need e-mail delivery'
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_mass_provision_requires_real_staff_email(auth_db, monkeypatch):
     monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
     auth_db.add(
@@ -3329,7 +3497,8 @@ def test_access_context_money_metric_helpers():
     barber = AccessContext.from_user(4, 'barber', 1, [1])
     admin = AccessContext.from_user(5, 'admin', 1, [1])
     assert barber.money_metrics == frozenset()
-    assert admin.money_metrics == barber.money_metrics
+    # Equal rank, different sight: an administrator reads the branch and so sees cosmetics money; a barber sees none.
+    assert admin.money_metrics == frozenset({'cosmo_sum'})
 
     branch_admin = AccessContext.from_user(2, 'branch_admin', 1, [1])
     assert branch_admin.money_metrics == ALL_MONEY_CODES
@@ -3340,6 +3509,49 @@ def test_access_context_money_metric_helpers():
     assert can_view_money_metric(partial, 'revenue') is False
     assert can_view_financials(partial) is False
     assert hidden_money_codes(partial) == ALL_MONEY_CODES - {'avg_check'}
+
+
+async def _create_then_relabel(client, token: str, email: str, role: str) -> dict:
+    """A portal-only admin/barber: create-user refuses the pair now, but older accounts got there by a role edit."""
+    headers = {'Authorization': f'Bearer {token}'}
+    created = await client.post(
+        '/auth/admin/users',
+        headers=headers,
+        json={'email': email, 'password': 'PairTest12345!', 'full_name': email, 'role': 'manager', 'company_ids': [1]},
+    )
+    assert created.status_code == 200, created.text
+    user_id = created.json()['data']['id']
+    relabeled = await client.patch(f'/auth/admin/users/{user_id}', headers=headers, json={'role': role})
+    assert relabeled.status_code == 200, relabeled.text
+    return relabeled.json()['data']
+
+
+@pytest.mark.asyncio
+async def test_create_user_refuses_barber_and_administrator(auth_db, monkeypatch):
+    """Made here they would get an empty mirror staff row and read zeros; they come from their YClients row."""
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    token = await issue_access_token(auth_db, 1, 'owner')
+
+    async def override_db():
+        yield auth_db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        statuses = [
+            (
+                await client.post(
+                    '/auth/admin/users',
+                    headers={'Authorization': f'Bearer {token}'},
+                    json={'email': f'{role}.refused@example.com', 'role': role, 'company_ids': [1]},
+                )
+            ).status_code
+            for role in ('admin', 'barber')
+        ]
+    app.dependency_overrides.clear()
+
+    assert statuses == [400, 400]
+    refused = await auth_db.execute(select(PortalUser).where(PortalUser.email.like('%.refused@example.com')))
+    assert refused.scalars().all() == []
 
 
 @pytest.mark.asyncio
@@ -3356,19 +3568,7 @@ async def test_admin_and_barber_are_one_rank_under_two_names(auth_db, monkeypatc
     created = {}
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         for role in ('admin', 'barber'):
-            response = await client.post(
-                '/auth/admin/users',
-                headers={'Authorization': f'Bearer {token}'},
-                json={
-                    'email': f'{role}.pair@example.com',
-                    'password': 'PairTest12345!',
-                    'full_name': f'Pair {role}',
-                    'role': role,
-                    'company_ids': [1],
-                },
-            )
-            assert response.status_code == 200, response.text
-            created[role] = response.json()['data']
+            created[role] = await _create_then_relabel(client, token, f'{role}.pair@example.com', role)
 
         # The rank tie is what makes the pair equal, so nothing about the name `admin` may
         # read as an administrator: the gates are membership in USER_ADMIN_ROLES, not a string.
@@ -3410,7 +3610,7 @@ async def test_admin_and_barber_are_one_rank_under_two_names(auth_db, monkeypatc
     assert creations == [403, 403]
     assert visibility.status_code == 200
     default_money = visibility.json()['data']['roles']
-    assert default_money['admin'] == default_money['barber']
+    assert default_money['barber'] == [] and default_money['admin'] == ['cosmo_sum']
     assert created['admin']['company_ids'] == created['barber']['company_ids'] == [1]
     # Both appear in the «Работник» filter; only the label they carry differs.
     positions = {
@@ -3449,19 +3649,7 @@ async def test_the_label_is_what_opens_the_manual_fact_tabs(auth_db, monkeypatch
     scopes = {}
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         for role in ('admin', 'barber'):
-            created = await client.post(
-                '/auth/admin/users',
-                headers={'Authorization': f'Bearer {owner_token}'},
-                json={
-                    'email': f'{role}.tabs@example.com',
-                    'password': 'TabsTest12345!',
-                    'full_name': f'Tabs {role}',
-                    'role': role,
-                    'company_ids': [1],
-                },
-            )
-            assert created.status_code == 200, created.text
-            user_id = created.json()['data']['id']
+            user_id = (await _create_then_relabel(client, owner_token, f'{role}.tabs@example.com', role))['id']
             me = await client.get(
                 '/auth/me',
                 headers={'Authorization': f'Bearer {await issue_access_token(auth_db, user_id, role)}'},
@@ -3497,7 +3685,7 @@ async def test_portal_staff_sync_keeps_yclients_row_of_out_of_scope_branch(auth_
               fired=0, bookable=True, portal_user_id=9101, external_id=9101),
         # Mirror row created by the portal for a branch that is being dropped.
         Staff(id=9102, name='Worker', position='manager', company_id=2,
-              fired=0, bookable=True, portal_user_id=9101),
+              fired=0, bookable=True, portal_user_id=9101, source_type='portal'),
     ])
     await auth_db.commit()
 
@@ -3512,7 +3700,7 @@ async def test_portal_staff_sync_keeps_yclients_row_of_out_of_scope_branch(auth_
 
 @pytest.mark.asyncio
 async def test_a_mirror_row_whose_id_collides_with_its_user_is_still_portal_owned(auth_db):
-    """Mirror rows and portal user ids share one number space; only `external_id` tells the CRM row apart."""
+    """Mirror rows and portal user ids share one number space; only `source_type` tells the mirror from the CRM row."""
     from portal_staff_sync import detach_portal_user_staff, sync_portal_user_staff
 
     user = PortalUser(
@@ -3527,9 +3715,9 @@ async def test_a_mirror_row_whose_id_collides_with_its_user_is_still_portal_owne
         created_at=utcnow(),
     )
     auth_db.add(user)
-    # Fresh mirror row that took max(id)+1 and landed on its own user's id: no external_id.
+    # Fresh mirror row that took max(id)+1 and landed on its own user's id.
     auth_db.add(Staff(id=9111, name='Worker', position='manager', company_id=1, fired=0, bookable=True,
-                      portal_user_id=9111))
+                      portal_user_id=9111, source_type='portal'))
     await auth_db.commit()
 
     user.role = 'branch_admin'
@@ -3643,7 +3831,8 @@ async def test_me_ignores_a_staff_row_outside_the_assigned_branches(auth_db, mon
     )
     # The row the portal created in the branch they were moved to.
     auth_db.add(
-        Staff(id=9203, name='Moved', position='barber', company_id=2, fired=0, portal_user_id=9103)
+        Staff(id=9203, name='Moved', position='barber', company_id=2, fired=0, portal_user_id=9103,
+              source_type='portal')
     )
     auth_db.add(PortalUserBranch(user_id=9103, company_id=2))
     await auth_db.commit()
@@ -4289,6 +4478,34 @@ async def test_email_is_sent_off_the_event_loop_thread(auth_db, monkeypatch):
 
     assert len(sent_from) == 2
     assert threading.get_ident() not in sent_from
+
+
+@pytest.mark.asyncio
+async def test_invite_link_outlives_a_reset_link(auth_db, monkeypatch):
+    """An invite is read whenever the person gets to their mail; two hours would expire it overnight."""
+    import auth_service
+
+    bodies = []
+    monkeypatch.setattr(auth_service, 'send_auth_email', lambda to, subject, body: bodies.append(body))
+    user = await auth_db.get(PortalUser, 1)
+
+    async def live_token_hours() -> float:
+        token = (
+            await auth_db.execute(
+                select(PortalEmailToken)
+                .where(PortalEmailToken.user_id == 1, PortalEmailToken.used_at.is_(None))
+                .order_by(PortalEmailToken.id.desc())
+            )
+        ).scalars().first()
+        return (token.expires_at - token.created_at).total_seconds() / 3600
+
+    await auth_service.send_password_reset_email(auth_db, user)
+    reset_hours = await live_token_hours()
+    await auth_service.send_account_invite_email(auth_db, user)
+    invite_hours = await live_token_hours()
+
+    assert (reset_hours, invite_hours) == (2, 72)
+    assert '72 часа' in bodies[-1]
 
 
 # ---------- AUTH-19: the password CLI signs the user out everywhere ----------
