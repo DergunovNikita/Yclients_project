@@ -1,8 +1,10 @@
 [Unit]
-Description=Run YClients BI incremental sync every 4 hours
+Description=Run YClients BI incremental sync hourly by day, every 4 hours at night
 
 [Timer]
-OnCalendar=*-*-* 00,04,08,12,16,20:00:00
+# Moscow time: hourly while the branches work, then 02:35 and 06:35.
+OnCalendar=*-*-* 08..22:35:00 Europe/Moscow
+OnCalendar=*-*-* 02,06:35:00 Europe/Moscow
 Persistent=true
 Unit=yclients-sync-incremental@%i.service
 

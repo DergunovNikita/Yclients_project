@@ -2,8 +2,8 @@
 
 Three sync schedules, from cheapest to most expensive:
 
-- `yclients-sync-incremental@` — every few hours; re-reads only `SYNC_LOOKBACK_DAYS`
-  around the last checkpoint.
+- `yclients-sync-incremental@` — hourly by day, every four hours at night; re-reads only
+  `SYNC_LOOKBACK_DAYS` around the last checkpoint.
 - `yclients-sync-refresh@` — nightly; drops and reloads the trailing
   `SYNC_REFRESH_DAYS` window, so payments registered after the incremental lookback
   closed still arrive, and rows YClients has deleted stop lingering.

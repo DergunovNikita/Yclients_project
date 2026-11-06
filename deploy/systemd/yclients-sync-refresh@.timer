@@ -2,7 +2,7 @@
 Description=Run YClients BI nightly rolling refresh sync
 
 [Timer]
-OnCalendar=*-*-* 02:00:00
+OnCalendar=*-*-* 05:00:00 Europe/Moscow
 Persistent=true
 Unit=yclients-sync-refresh@%i.service
 
