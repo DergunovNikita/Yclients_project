@@ -2415,6 +2415,7 @@
             <button type="button" class="secondary" data-plan-view="table" aria-pressed="true" data-i18n="dash.planViewTable">Tabella</button>
             <button type="button" class="secondary" data-plan-view="board" aria-pressed="false" data-i18n="dash.planViewBoard">Piani</button>
           </div>
+          <button type="button" class="secondary" id="plan-snapshot" data-i18n="snapshot.button" hidden>Istantanea</button>
         </div>
         <div id="plan-fact-table"></div>
       </div>
@@ -2747,6 +2748,30 @@
         <button type="submit" class="secondary" value="leave" data-i18n="dash.unsavedChangesLeave">Esci</button>
         <button type="submit" value="stay" id="unsaved-changes-stay" data-i18n="dash.unsavedChangesStay" autofocus>Rimani</button>
       </form>
+    </div>
+  </dialog>
+  <dialog
+    class="table-snapshot-dialog"
+    id="table-snapshot-dialog"
+    aria-modal="true"
+    aria-labelledby="table-snapshot-title"
+  >
+    <div class="table-snapshot-dialog__content">
+      <h2 id="table-snapshot-title" data-i18n="snapshot.title">Istantanea della tabella</h2>
+      <p class="table-snapshot-dialog__caption" id="table-snapshot-caption"></p>
+      <p class="table-snapshot-dialog__hint" id="table-snapshot-hint" data-i18n="snapshot.hint">
+        Tutta la tabella in una sola immagine. Ingrandiscila con le dita o inviala in una chat.
+      </p>
+      <div class="table-snapshot-dialog__stage" id="table-snapshot-stage">
+        <img id="table-snapshot-image" alt="" />
+      </div>
+      <p class="table-snapshot-dialog__message" id="table-snapshot-message" role="status" hidden></p>
+      <div class="table-snapshot-dialog__actions">
+        <button type="button" id="table-snapshot-share" data-i18n="snapshot.share" hidden>Invia</button>
+        <button type="button" class="secondary" id="table-snapshot-png" data-i18n="snapshot.downloadPng">Scarica PNG</button>
+        <button type="button" class="secondary" id="table-snapshot-pdf" data-i18n="snapshot.pdf">PDF</button>
+        <button type="button" class="secondary" id="table-snapshot-close" data-i18n="common.close">Chiudi</button>
+      </div>
     </div>
   </dialog>
   <script type="module" src="/src/main.js"></script>

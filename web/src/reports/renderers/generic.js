@@ -125,6 +125,7 @@ function renderTables(tables = [], comparison = null) {
           <div class="reports-panel__actions">
             ${rankingControl}
             <span data-ranking-count>${rowsCountText(rows.length)}</span>
+            ${(rows.length || ranking) ? `<button type="button" class="secondary snapshot-btn" data-report-snapshot${rows.length ? '' : ' hidden'}>${t('snapshot.button')}</button>` : ''}
           </div>
         </div>
         ${(rows.length || ranking) ? `
@@ -160,10 +161,12 @@ function wireRankingTables(container, tables = [], comparison = null) {
       const body = panel.querySelector('tbody');
       const empty = panel.querySelector('[data-ranking-empty]');
       const count = panel.querySelector('[data-ranking-count]');
+      const snapshot = panel.querySelector('[data-report-snapshot]');
       if (body) body.innerHTML = renderTableRows(rows, table.columns || [], table, comparisonTableFor(comparison, table));
       if (scroll) scroll.hidden = rows.length === 0;
       if (empty) empty.hidden = rows.length > 0;
       if (count) count.textContent = rowsCountText(rows.length);
+      if (snapshot) snapshot.hidden = rows.length === 0;
     });
   });
 }

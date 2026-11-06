@@ -808,5 +808,17 @@
     "server": "Server",
     "browser": "Browser",
     "time": "Ora"
+  },
+  "snapshot": {
+    "button": "Istantanea",
+    "title": "Istantanea della tabella",
+    "hint": "Tutta la tabella in una sola immagine. Ingrandiscila con le dita o inviala in una chat.",
+    "share": "Invia",
+    "downloadPng": "Scarica PNG",
+    "pdf": "PDF",
+    "failed": "Impossibile creare l’istantanea della tabella",
+    "moduleFailed": "Impossibile caricare il modulo delle istantanee — ricarica la pagina",
+    "pdfFailed": "Impossibile preparare il PDF",
+    "shareFailed": "Impossibile inviare. Scarica il file e invialo manualmente"
   }
 }

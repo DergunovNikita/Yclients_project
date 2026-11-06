@@ -100,6 +100,8 @@ import { formatInputNumber } from './manualFactInput.js';
 import { createManualEditors } from './manualEditors.js';
 import './editorDrafts.css';
 import './loader.css';
+import './tableSnapshot.css';
+import { openTableSnapshot } from './tableSnapshot.js';
 import { mountLoader, stopLoaderWithRequest } from './loader.js';
 import { bindDraftFlush, createDraftController, fingerprint } from './editorDrafts.js';
 import { formatBranchDateTime } from './timestamps.js';
@@ -179,6 +181,7 @@ const els = {
   planInsights: document.getElementById('plan-insights'),
   shell: document.querySelector('.shell'),
   planFactTable: document.getElementById('plan-fact-table'),
+  planSnapshot: document.getElementById('plan-snapshot'),
   planFactTitle: document.getElementById('plan-fact-title'),
   planViewButtons: document.querySelectorAll('[data-plan-view]'),
   planColumnPicker: document.getElementById('plan-column-picker'),
@@ -1969,6 +1972,25 @@ function renderPlanBoard(planFact) {
   return sections.map((boardSection) => renderPlanBoardSection(boardSection, isBranchView)).join('');
 }
 
+// Nothing to take a picture of until a table is on screen (empty period, nothing rendered yet).
+function syncPlanSnapshotButton() {
+  els.planSnapshot.hidden = !els.planFactTable.querySelector('table');
+}
+
+function openPlanSnapshot() {
+  // The heading is hidden over the board (the pressed "Планы" button names the view), but the picture has no buttons.
+  const heading = els.planFactTitle.textContent.trim();
+  const title = planViewMode === 'board' ? `${heading} · ${t('dash.planViewBoard')}` : heading;
+  const meta = els.planMeta.textContent.trim();
+  openTableSnapshot({
+    nodes: [els.planFactTable],
+    title,
+    meta,
+    fileParts: [title, meta],
+    trigger: els.planSnapshot,
+  });
+}
+
 function renderPlanFact(planFact) {
   const groups = planFact?.groups || [];
   const metrics = planFact?.metrics || [];
@@ -1978,6 +2000,7 @@ function renderPlanFact(planFact) {
     renderPlanInsights(null);
     els.planFactTable.innerHTML = `${diagnosticsHtml}<div class="empty">${t('dash.noPlanForPeriod')}</div>`;
     els.planMeta.textContent = '';
+    syncPlanSnapshotButton();
     return;
   }
   // The charts compare plan with fact; the board is plan-only.
@@ -2022,6 +2045,7 @@ function renderPlanFact(planFact) {
     : t('dash.networkAndBranches');
   els.planMeta.textContent = t('dash.planMeta', { scope: scopeText, count: groups.length, period: planPeriodText });
   syncPlanTableStickyOffsets();
+  syncPlanSnapshotButton();
 }
 
 function renderPlanSettingInput(scope, row, field) {
@@ -3253,6 +3277,7 @@ bindStaffLevelExclusion(filterEls.plan, () => loadPlanFact());
 els.planViewButtons.forEach((button) => {
   button.addEventListener('click', () => setPlanViewMode(button.dataset.planView));
 });
+els.planSnapshot.addEventListener('click', openPlanSnapshot);
 syncPlanViewButtons();
 updatePlanColumnPickerState();
 els.planColumnToggle.addEventListener('click', () => {

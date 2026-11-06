@@ -808,5 +808,17 @@
     "server": "Server",
     "browser": "Browser",
     "time": "Time"
+  },
+  "snapshot": {
+    "button": "Snapshot",
+    "title": "Table snapshot",
+    "hint": "The whole table in one picture. Pinch to zoom in, or send it to a chat.",
+    "share": "Send",
+    "downloadPng": "Download PNG",
+    "pdf": "PDF",
+    "failed": "Could not take a snapshot of the table",
+    "moduleFailed": "Could not load the snapshot module — reload the page",
+    "pdfFailed": "Could not prepare the PDF",
+    "shareFailed": "Could not send. Download the file and send it manually"
   }
 }

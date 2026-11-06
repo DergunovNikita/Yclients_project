@@ -18,6 +18,7 @@ import { intlLocale, t } from '../i18n.js';
 import { branchesForPeriod } from '../reportingWindow.js';
 import { staffOption } from '../staffLabel.js';
 import { mountLoader } from '../loader.js';
+import { openTableSnapshot } from '../tableSnapshot.js';
 import { chosenLevels, levelIdsParam, levelSelection, selectableLevelOptions } from '../staffLevels.js';
 import { enhanceSelect, refreshSelect } from '../customSelect.js';
 import { idListParam, keepListed, parseIdList, selectedValues, setSelectedValues } from '../multiSelect.js';
@@ -900,6 +901,24 @@ export function initReports({
     showCatalog();
   });
   els.refresh.addEventListener('click', reloadActiveReport);
+  // One table of the open report: the report's title and period caption it, the table's own title says which one.
+  els.content.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-report-snapshot]');
+    const scroll = button?.closest('[data-report-table]')?.querySelector('.reports-table-scroll');
+    if (!scroll || scroll.hidden) return;
+    const reportTitle = els.viewerTitle.textContent.trim();
+    const tableTitle = button.closest('.reports-panel__head').querySelector('h3').textContent.trim();
+    const meta = [tableTitle === reportTitle ? '' : tableTitle, els.viewerSubtitle.textContent.trim()]
+      .filter(Boolean)
+      .join(' · ');
+    openTableSnapshot({
+      nodes: [scroll],
+      title: reportTitle,
+      meta,
+      fileParts: [reportTitle, tableTitle],
+      trigger: button,
+    });
+  });
   // The report is requested with the staff select as it stands, so the list for the new
   // scope has to settle first: loadStaff may fall back to "all" for an employee absent from it.
   async function reloadWithRefreshedStaff() {
