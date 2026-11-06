@@ -1996,9 +1996,10 @@ function renderPlanFact(planFact) {
   const metrics = planFact?.metrics || [];
   // The board is plan-only: the fact-based diagnostics belong to the table.
   const diagnosticsHtml = planViewMode === 'board' ? '' : renderPlanDiagnostics(planFact?.diagnostics || []);
+  const withoutRowsHtml = renderStaffWithoutRowsNote(planFact?.staff_without_rows);
   if (!groups.length && !planFact?.parent_group) {
     renderPlanInsights(null);
-    els.planFactTable.innerHTML = `${diagnosticsHtml}<div class="empty">${t('dash.noPlanForPeriod')}</div>`;
+    els.planFactTable.innerHTML = `${diagnosticsHtml}<div class="empty">${t('dash.noPlanForPeriod')}</div>${withoutRowsHtml}`;
     els.planMeta.textContent = '';
     syncPlanSnapshotButton();
     return;
@@ -2008,7 +2009,7 @@ function renderPlanFact(planFact) {
 
   const metricSets = planFact?.metric_sets || {};
   if (planViewMode === 'board') {
-    els.planFactTable.innerHTML = renderPlanBoard(planFact);
+    els.planFactTable.innerHTML = renderPlanBoard(planFact) + withoutRowsHtml;
   } else if (planFact?.view_scope === 'staff') {
     const sections = [];
     if (planFact.selected_staff_plan) {
@@ -2028,7 +2029,7 @@ function renderPlanFact(planFact) {
 
     els.planFactTable.innerHTML = diagnosticsHtml + (
       sections.join('') || `<div class="empty">${t('dash.noStaffForBranch')}</div>`
-    );
+    ) + withoutRowsHtml;
   } else {
     els.planFactTable.innerHTML = diagnosticsHtml + renderPlanTable(groups, metrics);
   }
@@ -2046,6 +2047,13 @@ function renderPlanFact(planFact) {
   els.planMeta.textContent = t('dash.planMeta', { scope: scopeText, count: groups.length, period: planPeriodText });
   syncPlanTableStickyOffsets();
   syncPlanSnapshotButton();
+}
+
+// Chosen people with no plan and no visits in the period have no row; name them instead of dropping them silently.
+function renderStaffWithoutRowsNote(people) {
+  if (!people?.length) return '';
+  const names = people.map((person) => person.name || `#${person.staff_id}`).join(', ');
+  return `<p class="plan-footnote">${escapeHtml(t('dash.staffWithoutRows', { names }))}</p>`;
 }
 
 function renderPlanSettingInput(scope, row, field) {

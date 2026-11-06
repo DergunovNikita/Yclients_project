@@ -376,6 +376,23 @@ async def test_plan_fact_for_a_staff_list_inside_one_branch_keeps_the_branch_and
 
 
 @pytest.mark.asyncio
+async def test_plan_fact_names_the_chosen_people_who_have_no_row(async_session):
+    await _seed(async_session)
+    async_session.add(Staff(id=9, name='Idle barber', position='Барбер', company_id=1))
+    await async_session.commit()
+
+    for params in ({'staff_ids': '2,9'}, {'company_id': 1, 'staff_ids': '2,9'}):
+        chosen = await _data(async_session, PLAN_FACT, **PERIOD, **params)
+        assert _staff_ids(chosen) == [2]
+        assert chosen['staff_without_rows'] == [{'staff_id': 9, 'name': 'Idle barber'}]
+
+    one = await _data(async_session, PLAN_FACT, **PERIOD, staff_id=9)
+    assert one['groups'] == [] and one['staff_without_rows'] == [{'staff_id': 9, 'name': 'Idle barber'}]
+    everyone_shown = await _data(async_session, PLAN_FACT, **PERIOD, staff_ids='2,4,7')
+    assert 'staff_without_rows' not in everyone_shown
+
+
+@pytest.mark.asyncio
 async def test_a_chosen_group_in_the_plan_fact_wins_over_the_level(async_session):
     await _seed(async_session)
 

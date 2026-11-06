@@ -8860,6 +8860,23 @@ def staff_filter_echo(staff_ids: Collection[int]) -> dict[str, Any]:
     return {'staff_ids': sorted(staff_ids), 'staff_count': len(staff_ids)}
 
 
+async def _staff_without_rows(
+    db: AsyncSession, chosen_ids: Collection[int], groups: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Chosen people the Plan/fact has no row for: no plan and no visits in the period (`_is_visible_staff_row`).
+
+    Without them named, a chosen barber on leave silently vanished from the table under «3 selected».
+    """
+    shown = {group.get('staff_id') for group in groups}
+    missing = sorted(set(chosen_ids) - shown)
+    if not missing:
+        return []
+    rows = (await db.execute(
+        select(Staff.id, Staff.name).where(Staff.id.in_(missing)).order_by(Staff.name.asc(), Staff.id.asc())
+    )).all()
+    return [{'staff_id': int(row.id), 'name': row.name} for row in rows]
+
+
 async def fetch_plan_fact(
     db: AsyncSession,
     start: date,
@@ -8890,6 +8907,9 @@ async def fetch_plan_fact(
     A `staff_id` that is a group of people (`frozenset`, see `StaffSelection`) is the same kind of view as the level
     filter, over exactly those people whatever their category: staff rows only, no branch row or diagnostics, and
     `plan_rules` only where one branch is shown. It wins over `staff_position_ids` and is echoed as `staff_filter`.
+
+    Chosen people (the group, or the one selected `staff_id`) the period has no row for are named in
+    `staff_without_rows`; the key is present only when there are any.
     """
     factual_at = factual_at or factual_now()
     staff_group = staff_id if isinstance(staff_id, frozenset) else None
@@ -9013,6 +9033,10 @@ async def fetch_plan_fact(
             payload['level_filter'] = level_filter
         if staff_group is not None:
             payload['staff_filter'] = staff_filter_echo(staff_group)
+        chosen_ids = staff_group if staff_group is not None else ([staff_id] if selected_staff is not None else [])
+        if chosen_ids and not for_ratings:
+            if without_rows := await _staff_without_rows(db, chosen_ids, groups):
+                payload['staff_without_rows'] = without_rows
         if for_ratings:
             payload['staff_leaderboards'] = _staff_leaderboards_payload(
                 groups,
@@ -9174,6 +9198,8 @@ async def fetch_plan_fact(
         payload['level_filter'] = level_filter
     if staff_group is not None:
         payload['staff_filter'] = staff_filter_echo(staff_group)
+        if not for_ratings and (without_rows := await _staff_without_rows(db, staff_group, groups)):
+            payload['staff_without_rows'] = without_rows
     if for_ratings:
         payload['staff_leaderboards'] = _staff_leaderboards_payload(
             all_staff_groups,
