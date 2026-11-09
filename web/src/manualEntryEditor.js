@@ -6,7 +6,8 @@ import { t } from './i18n.js';
 
 /**
  * @param config.view         view name for request scoping and `viewsWithData`
- * @param config.filter       the pickers: `{ month, branch, load }` plus `staff` where the editor has one
+ * @param config.filter       the pickers: `{ <periodField>, branch, load }` plus `staff` where the editor has one
+ * @param config.periodField  name of the period picker in `filter` and in the filter scope: `'month'` (default) or `'day'`
  * @param config.editorEl     container whose `input` events mark the draft dirty
  * @param config.saveButton   inline save button
  * @param config.path         endpoint, GET and POST alike
@@ -18,7 +19,7 @@ import { t } from './i18n.js';
  *                            refused (and already reported), otherwise it is the `request()` result
  * @param config.conflictMessageKey  what a 409 tells the user
  * @param config.onInput      optional, runs on every `input` event before the dirty check
- * @param config.emptyMonthRestores  a cleared month picker puts the loaded month back instead of loading
+ * @param config.emptyPeriodRestores  a cleared period picker puts the loaded period back instead of loading
  * @param config.draft        optional, with `host.drafts`: keeps what was typed across a reload. `{ id, collect, apply }` —
  *                            `collect()` lists every row as `{ key, cells, server, previous }` (`previous` is what the
  *                            row's `previous_value` would be), `apply([{ key, cells }])` types the cells back in
@@ -29,6 +30,7 @@ import { t } from './i18n.js';
  */
 export function createManualEntryEditor(config, host) {
   const { filter } = config;
+  const field = config.periodField || 'month';
   const drafts = config.draft ? host.drafts || null : null;
   const editor = {
     rows: [],
@@ -42,14 +44,14 @@ export function createManualEntryEditor(config, host) {
 
   // The pickers as they read now, as opposed to `loadedFilters`: what the rows were fetched or saved for.
   editor.filters = () => ({
-    month: filter.month.value,
+    [field]: filter[field].value,
     branch: filter.branch.value,
     ...(filter.staff ? { staff: filter.staff.value } : {}),
   });
 
   editor.restoreFilters = () => {
     if (!editor.loadedFilters) return;
-    filter.month.value = editor.loadedFilters.month;
+    filter[field].value = editor.loadedFilters[field];
     filter.branch.value = editor.loadedFilters.branch;
     if (filter.staff) filter.staff.value = editor.loadedFilters.staff;
     host.filterDropdowns[filter.branch.id]?.refresh();
@@ -150,7 +152,7 @@ export function createManualEntryEditor(config, host) {
     }
   };
 
-  // Someone saved the same month between our load and our save. Their value wins; what we typed
+  // Someone saved the same period between our load and our save. Their value wins; what we typed
   // is not merged in, because the sum of two people's edits is nobody's intent.
   async function recoverFromConflict() {
     if (editor.loadedFilters) drafts?.clear(config.draft.id, editor.loadedFilters);
@@ -204,16 +206,16 @@ export function createManualEntryEditor(config, host) {
 
   editor.bind = () => {
     filter.load.addEventListener('click', () => host.guard.run(() => editor.load()));
-    filter.month.addEventListener('change', async () => {
-      const requestedMonth = filter.month.value;
-      // A half-typed month has no data to ask for; leave the editor on the month it holds.
-      if (config.emptyMonthRestores && !requestedMonth) {
+    filter[field].addEventListener('change', async () => {
+      const requestedPeriod = filter[field].value;
+      // A half-typed period has no data to ask for; leave the editor on the one it holds.
+      if (config.emptyPeriodRestores && !requestedPeriod) {
         editor.restoreFilters();
         return;
       }
       await guarded(async () => {
-        filter.month.value = requestedMonth;
-        // The branch and worker lists depend on the month, and only a month the user kept may rebuild them.
+        filter[field].value = requestedPeriod;
+        // The branch and worker lists depend on the period, and only a period the user kept may rebuild them.
         if ((await host.refilterForPeriod(filter)) === false) return;
         await editor.load();
       });

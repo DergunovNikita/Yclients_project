@@ -156,3 +156,120 @@ async def test_an_admin_mirror_is_a_mirror_by_its_source_and_can_be_emptied_into
     events = (await async_session.execute(select(PortalAuditEvent).where(PortalAuditEvent.action == merge.AUDIT_ACTION)
                                           )).scalars().all()
     assert [(event.actor_user_id, event.portal_account_id) for event in events] == [(5, 1)]
+
+
+def _day(day):
+    return (date(2026, 11, day), date(2026, 11, day))
+
+
+async def _rows(db, staff_id):
+    rows = (await db.execute(
+        select(ManualFactMetric).where(ManualFactMetric.staff_id == staff_id).order_by(
+            ManualFactMetric.period_start, ManualFactMetric.period_end, ManualFactMetric.metric_code)
+    )).scalars().all()
+    return [(row.period_start, row.period_end, row.metric_code, row.value) for row in rows]
+
+
+@pytest.mark.asyncio
+async def test_daily_rows_merge_into_the_same_day_and_create_missing_days(async_session):
+    await _seed(async_session)
+    async_session.add_all([
+        _fact(MIRROR, _day(1), 'reviews_qty', 2.0),
+        _fact(MIRROR, _day(5), 'reviews_qty', 3.0),
+        _fact(REAL, _day(1), 'reviews_qty', 4.0),
+    ])
+    await async_session.commit()
+
+    await merge.apply_moves(async_session, {MIRROR: REAL})
+    await async_session.commit()
+
+    assert [row for row in await _rows(async_session, REAL) if row[0].month == 11] == [
+        (date(2026, 11, 1), date(2026, 11, 1), 'reviews_qty', 6.0),
+        (date(2026, 11, 5), date(2026, 11, 5), 'reviews_qty', 3.0),
+    ]
+    events = (await async_session.execute(select(PortalAuditEvent).where(PortalAuditEvent.action == merge.AUDIT_ACTION)
+                                          )).scalars().all()
+    assert {(e.metadata_json['period_start'], e.metadata_json['period_end']) for e in events} >= {
+        ('2026-11-01', '2026-11-01'), ('2026-11-05', '2026-11-05'), ('2026-08-01', '2026-08-31'),
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_month_row_and_a_daily_row_on_the_first_are_distinct_periods(async_session):
+    await _seed(async_session)
+    # Legacy August on the mirror, a daily row on 1 November on the mirror and on the target: different months.
+    async_session.add_all([_fact(MIRROR, _day(1), 'reviews_qty', 1.0), _fact(REAL, _day(1), 'reviews_qty', 10.0)])
+    await async_session.commit()
+
+    moves = await merge.plan_moves(async_session, {MIRROR: REAL})
+
+    by_period = {(m.period_start, m.period_end): (m.target_before, m.target_after) for m in moves}
+    assert by_period[AUG] == (8.0, 13.0)
+    assert by_period[_day(1)] == (10.0, 11.0)
+    table = merge.format_moves(moves)
+    assert '2026-11-01' in table and '2026-08 ' in table
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mirror_daily', [True, False])
+async def test_mixing_month_and_daily_rows_in_one_month_is_refused_and_writes_nothing(async_session, mirror_daily):
+    await _seed(async_session)
+    mirror_period, real_period = (_day(3), (date(2026, 11, 1), date(2026, 11, 30))) if mirror_daily else (
+        (date(2026, 11, 1), date(2026, 11, 30)), _day(3))
+    async_session.add_all([_fact(MIRROR, mirror_period, 'opz_qty', 2.0), _fact(REAL, real_period, 'opz_qty', 7.0)])
+    await async_session.commit()
+    before, mirror_before = await _rows(async_session, REAL), await _rows(async_session, MIRROR)
+
+    with pytest.raises(merge.MergeRefused, match='opz_qty 2026-11'):
+        await merge.apply_moves(async_session, {MIRROR: REAL}, delete_sources=True)
+    await async_session.rollback()
+
+    assert await _rows(async_session, REAL) == before
+    assert await _rows(async_session, MIRROR) == mirror_before
+    assert (await async_session.execute(select(PortalAuditEvent))).first() is None
+
+
+@pytest.mark.asyncio
+async def test_a_mirror_mixing_both_kinds_in_one_month_is_refused(async_session):
+    await _seed(async_session)
+    async_session.add_all([
+        _fact(MIRROR, (date(2026, 11, 1), date(2026, 11, 30)), 'opz_qty', 2.0), _fact(MIRROR, _day(3), 'opz_qty', 1.0),
+    ])
+    await async_session.commit()
+
+    with pytest.raises(merge.MergeRefused, match='both a whole-month row and daily rows'):
+        await merge.plan_moves(async_session, {MIRROR: REAL})
+
+
+@pytest.mark.asyncio
+async def test_other_metrics_do_not_trigger_the_mixing_refusal(async_session):
+    await _seed(async_session)
+    async_session.add_all([_fact(MIRROR, _day(3), 'opz_qty', 2.0), _fact(REAL, (date(2026, 11, 1), date(2026, 11, 30)),
+                                                                      'reviews_qty', 7.0)])
+    await async_session.commit()
+
+    moves = await merge.plan_moves(async_session, {MIRROR: REAL})
+
+    assert (_day(3), 'opz_qty') in {((m.period_start, m.period_end), m.metric_code) for m in moves}
+
+
+@pytest.mark.asyncio
+async def test_a_zero_row_of_the_other_kind_does_not_block_the_merge_nor_receive_it(async_session):
+    await _seed(async_session)
+    nov = (date(2026, 11, 1), date(2026, 11, 30))
+    async_session.add_all([
+        _fact(MIRROR, _day(3), 'opz_qty', 2.0), _fact(REAL, nov, 'opz_qty', 0.0),
+        _fact(MIRROR, nov, 'reviews_qty', 6.0), _fact(REAL, _day(1), 'reviews_qty', 0.0),
+    ])
+    await async_session.commit()
+
+    await merge.apply_moves(async_session, {MIRROR: REAL})
+    await async_session.commit()
+
+    nov_rows = [row for row in await _rows(async_session, REAL) if row[0].month == 11]
+    assert sorted(nov_rows) == sorted([
+        (date(2026, 11, 1), nov[1], 'opz_qty', 0.0),
+        (date(2026, 11, 1), date(2026, 11, 1), 'reviews_qty', 0.0),
+        (date(2026, 11, 1), nov[1], 'reviews_qty', 6.0),
+        (date(2026, 11, 3), date(2026, 11, 3), 'opz_qty', 2.0),
+    ])

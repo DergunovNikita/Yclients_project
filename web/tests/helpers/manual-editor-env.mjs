@@ -23,13 +23,13 @@ export function makeEnv() {
   };
   const filterEls = {
     reviewFacts: {
-      month: picker('review-month', '2026-09'),
+      day: picker('review-day', '2026-09-15'),
       branch: picker('review-branch', ''),
       staff: picker('review-staff', ''),
       load: button('Refresh'),
     },
     opzFacts: {
-      month: picker('opz-month', '2026-09'),
+      day: picker('opz-day', '2026-09-15'),
       branch: picker('opz-branch', ''),
       staff: picker('opz-staff', ''),
       load: button('Refresh'),
@@ -119,7 +119,7 @@ export function makeEnv() {
         finish: () => log.push(['requestFinish', id]),
       };
     },
-    setFilterLoading: (filter, isLoading) => log.push(['setFilterLoading', filter.load === undefined ? '?' : filter.month.id, isLoading]),
+    setFilterLoading: (filter, isLoading) => log.push(['setFilterLoading', filter.load === undefined ? '?' : (filter.day || filter.month).id, isLoading]),
     loadSyncStatus: async () => {
       log.push(['loadSyncStatus']);
     },
@@ -129,7 +129,7 @@ export function makeEnv() {
     setLoadedApiState: (data, options) => log.push(['setLoadedApiState', data, options]),
     // The real one clears the staff pick, reloads the list, then runs the view's own load.
     refreshStaffForBranch: async (filter, loadView) => {
-      log.push(['refreshStaffForBranch', filter.month.id]);
+      log.push(['refreshStaffForBranch', (filter.day || filter.month).id]);
       filter.staff.value = '';
       await loadView();
     },

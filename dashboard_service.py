@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from bisect import bisect_right
 from calendar import monthrange
 from collections import defaultdict
@@ -2363,14 +2364,13 @@ async def fetch_summary(
         staff_id,
         factual_at,
     )
-    prev_manual_opz = (
-        0.0
-        if staff_id is not None
-        else await _manual_opz_months_total(
-            db,
-            appointment_company_ids,
-            _previous_period_countable_months(start, end, factual_at),
-        )
+    prev_manual_opz = await _manual_opz_scope_total(
+        db,
+        prev_dr.start,
+        prev_dr.end,
+        appointment_company_ids,
+        staff_id,
+        factual_at,
     )
     # Coverage does not depend on the period, so both blocks share one read of it.
     covered_ranges = await _personal_account_coverage(db, appointment_company_ids)
@@ -5630,13 +5630,13 @@ def _countable_manual_months(
     end: date,
     factual_at: Optional[datetime] = None,
 ) -> set[date]:
-    """Months whose manual value the period is allowed to count, keyed by their 1st day.
+    """Legacy month rows the period is allowed to count, keyed by the month's 1st day.
 
-    A monthly value cannot be split, so it counts only where a whole month is the honest
-    answer: the period covers the month, or it reaches today while starting no later than
-    the 1st of that month — the month-to-date view the dashboard opens with, where a monthly
-    plan meets an unfinished month. A past week would otherwise import a whole month of
-    top-ups into seven days; early in a month, month-to-date is genuinely a few days long.
+    Daily rows need no such set (see `_manual_row_counts`). A whole-month value cannot be split,
+    so it counts only where a whole month is the honest answer: the period covers the
+    month, or it reaches today while starting no later than the 1st of that month — the
+    month-to-date view the dashboard opens with. A past week would otherwise import a whole
+    month of top-ups into seven days; early in a month, month-to-date is genuinely a few days long.
     """
     today = factual_branch_date(factual_at)
     countable: set[date] = set()
@@ -5655,6 +5655,38 @@ def _countable_manual_months(
     return countable
 
 
+def _manual_row_counts_clause(start: date, end: date, legacy_months: set[date]) -> Any:
+    """SQL form of `_manual_row_counts`."""
+    daily = and_(
+        ManualFactMetric.period_start == ManualFactMetric.period_end,
+        ManualFactMetric.period_start >= start,
+        ManualFactMetric.period_start <= end,
+    )
+    if not legacy_months:
+        return daily
+    return or_(
+        daily,
+        and_(
+            ManualFactMetric.period_start != ManualFactMetric.period_end,
+            ManualFactMetric.period_start.in_(sorted(legacy_months)),
+        ),
+    )
+
+
+def _manual_row_counts(row: Any, start: date, end: date, legacy_months: set[date]) -> bool:
+    """Whether a stored manual value counts for the window [start, end].
+
+    Editors write one row per day, so a daily row counts when its day lies in the window. Rows
+    entered before that are whole months (`period_start != period_end`) and are indivisible, so
+    they count only for the months in `legacy_months` (`_countable_manual_months`). The rule is
+    the same for `reviews_qty` and `opz_qty`; the SQL twin is `_manual_row_counts_clause`.
+    """
+    period_start = _coerce_date(row.period_start)
+    if period_start == _coerce_date(row.period_end):
+        return start <= period_start <= end
+    return period_start in legacy_months
+
+
 async def _manual_fact_values_by_staff(
     db: AsyncSession,
     start: date,
@@ -5662,29 +5694,25 @@ async def _manual_fact_values_by_staff(
     company_id: int,
     staff_ids: list[int],
     metric_code: str,
-    countable_months: Optional[set[date]] = None,
+    legacy_months: set[date],
 ) -> dict[int, float]:
-    """Manual facts of one branch's staff over the months the period touches.
+    """Manual facts of one branch's staff that count for the window (`_manual_row_counts`).
 
-    Which months those are depends on the metric. Without `countable_months` every month
-    the period overlaps counts whole — that is `reviews_qty`, where a monthly plan must not
-    stand against a zero fact in a month-to-date view. `opz_qty` passes an explicit set
-    instead (`_countable_manual_months`), because it is added to a calculated fact that is
-    itself limited to the period.
+    `legacy_months` is decided once for the whole period, while the window here is a role segment
+    of it. Segments are whole month slices, so keeping only the legacy months inside the segment
+    lands each month in exactly one segment instead of in every segment its staff appears in.
     """
     if not staff_ids:
         return {}
-    if countable_months is not None and not countable_months:
-        return {}
     window_start, window_end = _month_window(start, end)
+    segment_legacy = {month for month in legacy_months if window_start <= month <= window_end}
     stmt = (
         select(
             ManualFactMetric.staff_id,
             func.coalesce(func.sum(ManualFactMetric.value), 0.0).label('value'),
         )
         .where(
-            ManualFactMetric.period_start >= window_start,
-            ManualFactMetric.period_end <= window_end,
+            _manual_row_counts_clause(start, end, segment_legacy),
             tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(
                 [(company_id, staff_id) for staff_id in staff_ids]
             ),
@@ -5693,8 +5721,6 @@ async def _manual_fact_values_by_staff(
         )
         .group_by(ManualFactMetric.company_id, ManualFactMetric.staff_id)
     )
-    if countable_months is not None:
-        stmt = stmt.where(ManualFactMetric.period_start.in_(sorted(countable_months)))
     return {int(row.staff_id): float(row.value or 0.0) for row in (await db.execute(stmt)).all()}
 
 
@@ -5702,9 +5728,11 @@ async def _manual_fact_rows_for_role_periods(
     db: AsyncSession,
     role_periods_by_company: dict[int, dict[int, list[tuple[date, date]]]],
     metric_code: str,
-    countable_months: Optional[set[date]] = None,
+    start: date,
+    end: date,
+    legacy_months: set[date],
 ) -> list[Any]:
-    """Stored rows of months in which the staff member was an administrator.
+    """Stored rows that count for the window, in periods in which the staff member was an administrator.
 
     Every surface that shows a manual fact reads it through this filter, so a value left
     behind by someone who stopped being an administrator cannot count on one screen and
@@ -5717,18 +5745,6 @@ async def _manual_fact_rows_for_role_periods(
     ]
     if not pairs:
         return []
-    period_start = min(
-        start
-        for staff_periods in role_periods_by_company.values()
-        for periods in staff_periods.values()
-        for start, _ in periods
-    )
-    period_end = max(
-        end
-        for staff_periods in role_periods_by_company.values()
-        for periods in staff_periods.values()
-        for _, end in periods
-    )
     rows = (
         await db.execute(
             select(
@@ -5738,8 +5754,7 @@ async def _manual_fact_rows_for_role_periods(
                 ManualFactMetric.period_end,
                 ManualFactMetric.value,
             ).where(
-                ManualFactMetric.period_start <= period_end,
-                ManualFactMetric.period_end >= period_start,
+                _manual_row_counts_clause(start, end, legacy_months),
                 tuple_(ManualFactMetric.company_id, ManualFactMetric.staff_id).in_(pairs),
                 ManualFactMetric.metric_code == metric_code,
                 reporting_window_clause(
@@ -5751,7 +5766,7 @@ async def _manual_fact_rows_for_role_periods(
     ).all()
     return [
         row for row in rows
-        if (countable_months is None or _coerce_date(row.period_start) in countable_months)
+        if _manual_row_counts(row, start, end, legacy_months)
         and any(
             role_start <= row.period_end and role_end >= row.period_start
             for role_start, role_end in role_periods_by_company
@@ -5765,12 +5780,14 @@ async def _manual_fact_values_for_role_periods(
     db: AsyncSession,
     role_periods_by_company: dict[int, dict[int, list[tuple[date, date]]]],
     metric_code: str,
-    countable_months: Optional[set[date]] = None,
+    start: date,
+    end: date,
+    legacy_months: set[date],
 ) -> dict[int, float]:
-    """Sum monthly manual facts per branch over the administrator months only."""
+    """Sum counting manual facts per branch over the administrator months only."""
     totals = {company_id: 0.0 for company_id in role_periods_by_company}
     for row in await _manual_fact_rows_for_role_periods(
-        db, role_periods_by_company, metric_code, countable_months
+        db, role_periods_by_company, metric_code, start, end, legacy_months
     ):
         totals[int(row.company_id)] = totals.get(int(row.company_id), 0.0) + float(row.value or 0.0)
     return totals
@@ -5781,9 +5798,9 @@ async def _manual_opz_scope_keys(
     start: date,
     end: date,
     company_ids: list[int],
-    countable_months: Optional[set[date]] = None,
+    legacy_months: set[date],
 ) -> list[tuple[int, int]]:
-    """(branch, staff) pairs that carry a stored top-up in the months the period touches.
+    """(branch, staff) pairs that carry a counting top-up in the window.
 
     Resolving administrator role periods costs queries per branch, so the dashboard first
     asks who has anything at all — an empty top-up then stays a single query, and a filled
@@ -5791,24 +5808,17 @@ async def _manual_opz_scope_keys(
     """
     if not company_ids:
         return []
-    window_start, window_end = _month_window(start, end)
-    filters = [
-        ManualFactMetric.period_start <= window_end,
-        ManualFactMetric.period_end >= window_start,
-        ManualFactMetric.company_id.in_(company_ids),
-        ManualFactMetric.metric_code == OPZ_QTY_CODE,
-        # A stored zero adds nothing, and the editor keeps writing them: counting it as a
-        # value would make every branch resolve role periods to add 0.0.
-        ManualFactMetric.value != 0,
-    ]
-    if countable_months is not None:
-        if not countable_months:
-            return []
-        filters.append(ManualFactMetric.period_start.in_(sorted(countable_months)))
     rows = (
         await db.execute(
             select(ManualFactMetric.company_id, ManualFactMetric.staff_id)
-            .where(*filters)
+            .where(
+                _manual_row_counts_clause(start, end, legacy_months),
+                ManualFactMetric.company_id.in_(company_ids),
+                ManualFactMetric.metric_code == OPZ_QTY_CODE,
+                # A stored zero adds nothing, and the editor keeps writing them: counting it as a
+                # value would make every branch resolve role periods to add 0.0.
+                ManualFactMetric.value != 0,
+            )
             .distinct()
         )
     ).all()
@@ -5838,33 +5848,6 @@ async def _administrator_role_periods_for_keys(
     }
 
 
-def _shift_month_start(month_start: date, months_back: int) -> date:
-    shifted = month_start
-    for _ in range(months_back):
-        shifted = (shifted - timedelta(days=1)).replace(day=1)
-    return shifted
-
-
-def _previous_period_countable_months(
-    start: date,
-    end: date,
-    factual_at: Optional[datetime] = None,
-) -> set[date]:
-    """Months the previous window weighs against the current one.
-
-    The same number of months, immediately before the current ones. This stays separate
-    from `previous_period()`, which now steps back by calendar units for the presets but
-    still by days for `week` and for windows carrying no preset — and a manual month
-    is indivisible, so a baseline that starts mid-month counts nothing at all. Comparing
-    an equal count of months keeps the delta about the months, not about where the window
-    happens to cut.
-    """
-    current = _countable_manual_months(start, end, factual_at)
-    if not current:
-        return set()
-    return {_shift_month_start(month_start, len(current)) for month_start in current}
-
-
 async def _manual_opz_by_month(
     db: AsyncSession,
     start: date,
@@ -5872,59 +5855,21 @@ async def _manual_opz_by_month(
     company_ids: list[int],
     factual_at: Optional[datetime] = None,
 ) -> dict[date, float]:
-    """Manual OPZ of the countable months, keyed by the 1st day of each month."""
+    """Counting manual OPZ of the window, keyed by the 1st day of the month each row belongs to."""
     if not company_ids:
         return {}
-    countable_months = _countable_manual_months(start, end, factual_at)
-    if not countable_months:
-        return {}
-    keys = await _manual_opz_scope_keys(db, start, end, company_ids, countable_months)
+    legacy_months = _countable_manual_months(start, end, factual_at)
+    keys = await _manual_opz_scope_keys(db, start, end, company_ids, legacy_months)
     if not keys:
         return {}
     role_periods = await _administrator_role_periods_for_keys(db, start, end, keys)
     totals: dict[date, float] = {}
     for row in await _manual_fact_rows_for_role_periods(
-        db, role_periods, OPZ_QTY_CODE, countable_months
+        db, role_periods, OPZ_QTY_CODE, start, end, legacy_months
     ):
-        month_start = _coerce_date(row.period_start)
+        month_start = _coerce_date(row.period_start).replace(day=1)
         totals[month_start] = totals.get(month_start, 0.0) + float(row.value or 0.0)
     return totals
-
-
-async def _manual_opz_months_total(
-    db: AsyncSession,
-    company_ids: list[int],
-    countable_months: set[date],
-    role_window: Optional[tuple[date, date]] = None,
-) -> float:
-    """Manual OPZ of the given calendar months across the scope.
-
-    `role_window` is the period the administrator roles are resolved over. Plan/fact uses
-    the selected period, so the overview passes it too — the staff set depends on the
-    window, and two windows would let the same month admit different administrators on the
-    two screens. Months outside any period (the baseline of a previous period) fall back to
-    their own span.
-    """
-    if not company_ids or not countable_months:
-        return 0.0
-    window_start = min(countable_months)
-    last_month = max(countable_months)
-    window_end = date(
-        last_month.year, last_month.month, monthrange(last_month.year, last_month.month)[1]
-    )
-    keys = await _manual_opz_scope_keys(
-        db, window_start, window_end, company_ids, countable_months
-    )
-    if not keys:
-        return 0.0
-    role_start, role_end = role_window or (window_start, window_end)
-    totals = await _manual_fact_values_for_role_periods(
-        db,
-        await _administrator_role_periods_for_keys(db, role_start, role_end, keys),
-        OPZ_QTY_CODE,
-        countable_months,
-    )
-    return float(sum(totals.values()))
 
 
 async def _manual_opz_scope_total(
@@ -5935,20 +5880,31 @@ async def _manual_opz_scope_total(
     staff_id: Optional[StaffSelection] = None,
     factual_at: Optional[datetime] = None,
 ) -> float:
-    """Manual OPZ of a selected period, counted the way Plan/fact counts it for a branch.
+    """Manual OPZ of a window, counted the way Plan/fact counts it for a branch.
+
+    Administrator roles are resolved over the same window Plan/fact uses: the staff set depends
+    on the window, and two windows would let the same row admit different administrators on the
+    two screens. The Overview's baseline calls this with its previous window.
 
     A staff filter is left out on purpose: the calculated half of a filtered overview is
     attributed to the barber of the visit, so adding the administrator's top-up would
     produce a number that reconciles with neither their Plan/fact row nor the branch.
     """
-    if staff_id is not None:
+    if staff_id is not None or not company_ids:
         return 0.0
-    return await _manual_opz_months_total(
+    legacy_months = _countable_manual_months(start, end, factual_at)
+    keys = await _manual_opz_scope_keys(db, start, end, company_ids, legacy_months)
+    if not keys:
+        return 0.0
+    totals = await _manual_fact_values_for_role_periods(
         db,
-        company_ids,
-        _countable_manual_months(start, end, factual_at),
-        role_window=(start, end),
+        await _administrator_role_periods_for_keys(db, start, end, keys),
+        OPZ_QTY_CODE,
+        start,
+        end,
+        legacy_months,
     )
+    return float(sum(totals.values()))
 
 
 def _apply_manual_opz(fact: dict[str, float], manual_value: float) -> None:
@@ -6843,16 +6799,13 @@ async def _administrator_personal_block(
 ) -> tuple[dict[str, Any], float, float]:
     """An administrator's own row of Plan/fact for the two Overview windows, so both screens agree.
 
-    Reads `_staff_plan_groups_for_branch`, the Plan/fact path itself, once per window; the previous one weighs the
-    months `_previous_period_countable_months` names, as the Overview's own delta does. `calculated_opz` is the
+    Reads `_staff_plan_groups_for_branch`, the Plan/fact path itself, once per window, each counting its manual
+    values by the rule of its own window, as the Overview's own delta does. `calculated_opz` is the
     calculated OPZ of both windows (the split's sum): what Plan/fact adds on top of it is the manual top-up, which
     is returned for each window next to the block so the total OPZ of the cards can be built from the same parts.
     """
     facts = []
-    for window, countable_months in (
-        (current_dr, None),
-        (prev_dr, _previous_period_countable_months(current_dr.start, current_dr.end, factual_at)),
-    ):
+    for window in (current_dr, prev_dr):
         plan_start, plan_end = await _resolve_plan_period(db, window.start, window.end, [branch_id])
         groups = await _staff_plan_groups_for_branch(
             db,
@@ -6863,7 +6816,6 @@ async def _administrator_personal_block(
             branch_id,
             staff_id,
             factual_at=factual_at,
-            countable_manual_months=countable_months,
         )
         cells = {cell['code']: cell['fact'] for cell in groups[0]['metrics']} if groups else None
         # A row Plan/fact does not list is a person with no facts: zeros, not blanks.
@@ -6904,8 +6856,8 @@ async def fetch_administrator_opz_daily(
 ) -> dict[date, tuple[int, int]]:
     """The employee's calculated OPZ per day as the Overview cards count it: `day → (events, visits)`.
 
-    The manual top-up is one number per month and cannot be spread over days, so the series sums to the cards'
-    calculated part, not to their total.
+    Manual values stay out of the series (it is shared with the financial overview report), so it sums to the
+    cards' calculated part, not to their total.
     """
     factual_at = factual_at or factual_now()
     plan_start, plan_end = await _resolve_plan_period(db, start, end, [branch_id])
@@ -6939,13 +6891,8 @@ async def _staff_plan_groups_for_branch(
     company_title: str | None = None,
     opz_events: list[OpzEvent] | None = None,
     factual_at: Optional[datetime] = None,
-    countable_manual_months: Optional[set[date]] = None,
 ) -> list[dict[str, Any]]:
-    """Plan/fact rows of a branch's staff.
-
-    `countable_manual_months` replaces the months whose manual OPZ the period may count; the Overview passes the
-    baseline months of its previous window, which `_countable_manual_months` would not find for a cut-off window.
-    """
+    """Plan/fact rows of a branch's staff."""
     factual_at = factual_at or factual_now()
     # Categories, attribution and facts are calculated for the whole branch, and only
     # the rendered rows are filtered afterwards. Narrowing the staff scope earlier
@@ -6962,10 +6909,9 @@ async def _staff_plan_groups_for_branch(
         opz_events = await _opz_events(
             db, start, end, branch_id, factual_at=factual_at
         )
-    # The month set is decided once for the whole period: a role segment is a slice of it,
+    # The legacy month set is decided once for the whole period: a role segment is a slice of it,
     # and deciding per slice would let a partial period claim a whole month after all.
-    if countable_manual_months is None:
-        countable_manual_months = _countable_manual_months(start, end, factual_at)
+    legacy_manual_months = _countable_manual_months(start, end, factual_at)
     fact_components_by_staff: dict[int, list[dict[str, float]]] = {
         sid: [] for sid in staff_ids
     }
@@ -7013,6 +6959,7 @@ async def _staff_plan_groups_for_branch(
             branch_id,
             admin_staff_ids,
             REVIEWS_QTY_CODE,
+            legacy_manual_months,
         )
         admin_manual_opz_by_staff = await _manual_fact_values_by_staff(
             db,
@@ -7021,7 +6968,7 @@ async def _staff_plan_groups_for_branch(
             branch_id,
             admin_staff_ids,
             OPZ_QTY_CODE,
-            countable_manual_months,
+            legacy_manual_months,
         )
         segment_facts = await _staff_fact_components_by_branch(
             db,
@@ -8142,30 +8089,58 @@ async def save_plan_settings(
     )
 
 
+MANUAL_DAY_FORMAT = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _parse_manual_day(raw: Any) -> date:
+    """The editors' day: strictly `YYYY-MM-DD`, and never later than the branch's today.
+
+    `strptime` alone also takes `2026-1-5`, and the SPA sends one canonical form.
+    """
+    text = str(raw or '').strip()
+    try:
+        if not MANUAL_DAY_FORMAT.match(text):
+            raise ValueError
+        day = datetime.strptime(text, '%Y-%m-%d').date()
+    except ValueError:
+        raise ValueError('day must be in YYYY-MM-DD format') from None
+    if day > factual_branch_date():
+        raise ValueError('day is in the future')
+    return day
+
+
+def _manual_month_bounds(day: date) -> tuple[date, date]:
+    return date(day.year, day.month, 1), date(day.year, day.month, monthrange(day.year, day.month)[1])
+
+
+def _not_mirror_row_clause() -> Any:
+    return ~exists(select(1).where(Staff.id == ManualFactMetric.staff_id, ~_counts_as_staff()))
+
+
 async def _stored_manual_facts(
     db: AsyncSession,
-    month_start: date,
-    month_end: date,
+    day: date,
     company_ids: list[int],
     metric_code: str,
 ) -> dict[tuple[int, int], list[ManualFactMetric]]:
-    """Stored rows of one month, without the reporting-start cut.
+    """Rows stored for exactly this day, without the reporting-start cut.
 
     The editor shows everything that is stored, including values the dashboard refuses to
     count: a value nobody can see is also a value nobody can correct. The one exception is a value
     left on a portal account's mirror row: those rows are not staff, so they are neither shown nor
-    writable (the reports ignore them too).
+    writable (the reports ignore them too). Other days and legacy whole-month rows are not
+    returned: a save replaces what this returns, and must never touch them.
     """
     if not company_ids:
         return {}
     rows = (
         await db.execute(
             select(ManualFactMetric).where(
-                ManualFactMetric.period_start >= month_start,
-                ManualFactMetric.period_end <= month_end,
+                ManualFactMetric.period_start == day,
+                ManualFactMetric.period_end == day,
                 ManualFactMetric.company_id.in_(company_ids),
                 ManualFactMetric.metric_code == metric_code,
-                ~exists(select(1).where(Staff.id == ManualFactMetric.staff_id, ~_counts_as_staff())),
+                _not_mirror_row_clause(),
             )
         )
     ).scalars().all()
@@ -8173,6 +8148,49 @@ async def _stored_manual_facts(
     for item in rows:
         out.setdefault((int(item.company_id), int(item.staff_id)), []).append(item)
     return out
+
+
+async def _manual_month_values(
+    db: AsyncSession,
+    day: date,
+    company_ids: list[int],
+    metric_code: str,
+) -> tuple[dict[tuple[int, int], float], dict[tuple[int, int], float]]:
+    """Per (branch, staff): the sum of daily rows over the month of `day`, and the legacy whole-month value.
+
+    Legacy rows are those of the month that span more than one day. A legacy zero adds nothing and cannot
+    double count a daily value, so it is treated as absent: a key without a non-zero one is not in the second dict.
+    """
+    if not company_ids:
+        return {}, {}
+    month_start, month_end = _manual_month_bounds(day)
+    rows = (
+        await db.execute(
+            select(
+                ManualFactMetric.company_id,
+                ManualFactMetric.staff_id,
+                ManualFactMetric.period_start,
+                ManualFactMetric.period_end,
+                ManualFactMetric.value,
+            ).where(
+                ManualFactMetric.period_start >= month_start,
+                ManualFactMetric.period_end <= month_end,
+                ManualFactMetric.company_id.in_(company_ids),
+                ManualFactMetric.metric_code == metric_code,
+                _not_mirror_row_clause(),
+            )
+        )
+    ).all()
+    daily: dict[tuple[int, int], float] = {}
+    legacy: dict[tuple[int, int], float] = {}
+    for row in rows:
+        key = (int(row.company_id), int(row.staff_id))
+        is_daily = _coerce_date(row.period_start) == _coerce_date(row.period_end)
+        if not is_daily and not row.value:
+            continue
+        target = daily if is_daily else legacy
+        target[key] = target.get(key, 0.0) + float(row.value or 0.0)
+    return daily, legacy
 
 
 async def manual_fact_entry_keys(
@@ -8259,7 +8277,7 @@ async def _attach_manual_fact_authors(
 
 async def _fetch_manual_facts(
     db: AsyncSession,
-    month: str,
+    day: str,
     metric_code: str,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
@@ -8269,11 +8287,19 @@ async def _fetch_manual_facts(
     *,
     portal_account_id: Optional[int],
 ) -> dict[str, Any]:
-    month_start, month_end = _plan_month_range(month)
+    """Editor rows for one day; the month of that day supplies the roster and the month totals.
+
+    Plans are monthly, so who is an administrator is answered for the calendar month, not for
+    the day. `value` is the day's own stored value; `month_value` sums the daily rows of the
+    whole month; `legacy_month_value` is a whole-month row from before daily entry, and a row
+    that has one cannot be entered by day (`editable: false`).
+    """
+    target = _parse_manual_day(day)
+    month_start, month_end = _manual_month_bounds(target)
     branches = await fetch_branches(db, allowed_company_ids, force_allowed=force_allowed)
-    # A branch that left the tenant is not ours to enter facts for; a month before it opened
+    # A branch that left the tenant is not ours to enter facts for; a day before it opened
     # still is, and its stored value keeps showing with `counted: false` so it can be fixed.
-    branches = await branches_not_yet_left(db, branches, month_start)
+    branches = await branches_not_yet_left(db, branches, target)
     if company_id is not None:
         branches = [branch for branch in branches if int(branch['id']) == company_id]
     if allowed_staff_keys is not None:
@@ -8283,17 +8309,19 @@ async def _fetch_manual_facts(
         branches = [branch for branch in branches if int(branch['id']) in owned_company_ids]
     company_ids = [int(branch['id']) for branch in branches]
     empty_payload = {
+        'day': target.isoformat(),
         'month': _month_value(month_start),
-        'period': {'start': month_start.isoformat(), 'end': month_end.isoformat()},
+        'period': {'start': target.isoformat(), 'end': target.isoformat()},
         'metric_code': metric_code,
         'total_value': 0.0,
+        'month_total_value': 0.0,
         'rows': [],
     }
     if not company_ids:
         return empty_payload
 
     admin_ids_by_company = await _admin_staff_ids_by_company(db, month_start, month_end, company_ids)
-    stored = await _stored_manual_facts(db, month_start, month_end, company_ids, metric_code)
+    stored = await _stored_manual_facts(db, target, company_ids, metric_code)
     keys = {
         (company, staff)
         for company, staff_ids in admin_ids_by_company.items()
@@ -8306,6 +8334,7 @@ async def _fetch_manual_facts(
     if not keys:
         return empty_payload
 
+    month_daily, month_legacy = await _manual_month_values(db, target, company_ids, metric_code)
     titles = {int(branch['id']): branch['title'] for branch in branches}
     staff_info = {
         int(row.id): row
@@ -8324,6 +8353,7 @@ async def _fetch_manual_facts(
             continue
         items = stored.get((company, staff), [])
         latest = max(items, key=lambda item: item.updated_at, default=None)
+        legacy = month_legacy.get((company, staff))
         payload_rows.append({
             'company_id': company,
             'company_title': titles.get(company),
@@ -8333,8 +8363,12 @@ async def _fetch_manual_facts(
             'is_active': staff in admin_ids_by_company.get(company, []),
             # `None`, not `0`: the editor posts back every row it renders, so an empty cell
             # returning a zero would read as an edit and take the author of every untouched
-            # row on the first save of the month. Nothing entered is not a value of zero.
+            # row on the first save of the day. Nothing entered is not a value of zero.
             'value': _round_half_up_int(sum(float(item.value or 0.0) for item in items)) if items else None,
+            # What a whole-month Plan/fact counts for the person: the legacy value stands in for the days.
+            'month_value': _round_half_up_int(month_daily.get((company, staff), 0.0) + (legacy or 0.0)),
+            'legacy_month_value': _round_half_up_int(legacy) if legacy is not None else None,
+            'editable': legacy is None,
             'updated_at': latest.updated_at.isoformat() if latest is not None else None,
             'updated_by': latest.updated_by_user_id if latest is not None else None,
         })
@@ -8346,13 +8380,14 @@ async def _fetch_manual_facts(
     return {
         **empty_payload,
         'total_value': _round_half_up_int(sum(float(row['value'] or 0.0) for row in payload_rows)),
+        'month_total_value': _round_half_up_int(sum(row['month_value'] for row in payload_rows)),
         'rows': payload_rows,
     }
 
 
 async def fetch_manual_review_facts(
     db: AsyncSession,
-    month: str,
+    day: str,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
@@ -8363,7 +8398,7 @@ async def fetch_manual_review_facts(
 ) -> dict[str, Any]:
     return await _fetch_manual_facts(
         db,
-        month,
+        day,
         REVIEWS_QTY_CODE,
         company_id,
         staff_id,
@@ -8376,26 +8411,20 @@ async def fetch_manual_review_facts(
 
 async def _admin_opz_current_values(
     db: AsyncSession,
-    month_start: date,
-    month_end: date,
+    day: date,
     company_ids: list[int],
 ) -> dict[tuple[int, int], float]:
-    """Calculated OPZ per administrator, taken from the Plan/fact distribution itself.
+    """Calculated OPZ of one day per administrator, taken from the Plan/fact distribution itself.
 
+    Same call chain as a single-branch Plan/fact over the window day..day, plan period included.
     The whole staff set of the branch takes part even when the editor is filtered down to
     one row: narrowing it earlier would hand the remaining administrators events that are
     not theirs.
     """
     values: dict[tuple[int, int], float] = {}
     for company_id in company_ids:
-        totals = await _admin_opz_by_staff_for_period(
-            db,
-            month_start,
-            month_end,
-            month_start,
-            month_end,
-            company_id,
-        )
+        plan_start, plan_end = await _resolve_plan_period(db, day, day, [company_id])
+        totals = await _admin_opz_by_staff_for_period(db, day, day, plan_start, plan_end, company_id)
         for staff_id, value in totals.items():
             values[(int(company_id), int(staff_id))] = float(value)
     return values
@@ -8403,41 +8432,34 @@ async def _admin_opz_current_values(
 
 async def _countable_manual_opz_keys(
     db: AsyncSession,
-    month_start: date,
-    month_end: date,
+    day: date,
     company_ids: list[int],
 ) -> set[tuple[int, int]]:
-    """(branch, staff) pairs whose value for this month would reach the reports.
+    """(branch, staff) pairs whose value for this day would reach the reports.
 
     Answered from the roles and the reporting window alone, without looking at what is
     stored: the editor has to warn before a value is typed, not after it is saved.
     """
     if not company_ids:
         return set()
-    # Same cut as `reporting_window_clause(company_id, period_end)`, in Python: the flag is
-    # answered before a row exists, so there is nothing to filter in SQL. The month is
-    # anchored on its last day on both sides, exactly as that clause anchors the stored row.
+    # Same cut as `reporting_window_clause(company_id, period_end)` applied to a daily row
+    # (its end is the day), in Python: the flag is answered before a row exists.
     reporting_windows = await fetch_reporting_windows(db, company_ids)
-    role_periods = await _administrator_role_periods_by_company(
-        db, month_start, month_end, company_ids
-    )
+    role_periods = await _administrator_role_periods_by_company(db, day, day, company_ids)
     keys: set[tuple[int, int]] = set()
     for company_id, staff_periods in role_periods.items():
         window = reporting_windows.get(int(company_id))
-        if window is not None and not window.covers(month_end):
+        if window is not None and not window.covers(day):
             continue
         for staff_id, periods in staff_periods.items():
-            if any(
-                period_start <= month_end and period_end >= month_start
-                for period_start, period_end in periods
-            ):
+            if any(period_start <= day <= period_end for period_start, period_end in periods):
                 keys.add((int(company_id), int(staff_id)))
     return keys
 
 
 async def fetch_manual_opz_facts(
     db: AsyncSession,
-    month: str,
+    day: str,
     company_id: Optional[int] = None,
     staff_id: Optional[int] = None,
     allowed_company_ids: Optional[list[int]] = None,
@@ -8446,10 +8468,10 @@ async def fetch_manual_opz_facts(
     *,
     portal_account_id: Optional[int],
 ) -> dict[str, Any]:
-    """Editor payload for additional OPZ: calculated value, manual top-up and their sum."""
+    """Editor payload for additional OPZ of one day: calculated value, manual top-up and their sum."""
     payload = await _fetch_manual_facts(
         db,
-        month,
+        day,
         OPZ_QTY_CODE,
         company_id,
         staff_id,
@@ -8458,20 +8480,15 @@ async def fetch_manual_opz_facts(
         allowed_staff_keys=allowed_staff_keys,
         portal_account_id=portal_account_id,
     )
-    month_start, month_end = _plan_month_range(month)
+    target = _parse_manual_day(day)
     company_ids = sorted({int(row['company_id']) for row in payload['rows']})
     # Only the branches actually rendered: a staff filter or a branch without
     # administrators must not drag the whole network through the distribution.
-    current_values = await _admin_opz_current_values(
-        db,
-        month_start,
-        month_end,
-        company_ids,
-    )
+    current_values = await _admin_opz_current_values(db, target, company_ids)
     # A value only reaches the reports through the administrator months and the
-    # reporting-start cut. The flag answers "would a value entered here count?", so the
+    # reporting window. The flag answers "would a value entered here count?", so the
     # editor can say so before the value is typed, not after it is saved and dropped.
-    counted_keys = await _countable_manual_opz_keys(db, month_start, month_end, company_ids)
+    counted_keys = await _countable_manual_opz_keys(db, target, company_ids)
     for row in payload['rows']:
         key = (int(row['company_id']), int(row['staff_id']))
         current = current_values.get(key, 0.0)
@@ -8505,7 +8522,7 @@ class ManualFactConflict(Exception):
 
 
 class ManualFactRowNotOpen(ValueError):
-    """The row exists but is not open for entry in the requested month.
+    """The row exists but is not open for entry on the requested day.
 
     Its own type because the editors are reachable by rank-and-file staff now: the detailed
     reason belongs in the log, not in the sentence the SPA prints to whoever pressed Save.
@@ -8524,7 +8541,7 @@ def _stored_manual_value(
 
 
 def _parse_manual_value(raw: Any, metric_code: str, staff_id: int) -> float | None:
-    """A posted cell as the editor shows it: `None` (nothing entered) or a whole month count."""
+    """A posted cell as the editor shows it: `None` (nothing entered) or a whole count for the day."""
     if raw in (None, ''):
         return None
     try:
@@ -8542,7 +8559,7 @@ def _parse_manual_value(raw: Any, metric_code: str, staff_id: int) -> float | No
 
 async def _write_manual_facts(
     db: AsyncSession,
-    month: str,
+    day: str,
     metric_code: str,
     company_id: Optional[int],
     staff_id: Optional[int],
@@ -8554,17 +8571,22 @@ async def _write_manual_facts(
     actor_user_id: Optional[int],
     portal_account_id: Optional[int],
 ) -> None:
-    """Write the changed rows of one month in one transaction, or refuse the whole batch.
+    """Write the changed rows of one day in one transaction, or refuse the whole batch.
 
     Each row carries `previous_value`, the value the editor showed when it loaded; it is the
     optimistic lock. Rows whose value equals it are not touched, so the author column keeps
     meaning "who last changed this" even though the editor posts every row it renders.
 
+    Only rows of exactly this day are read and replaced; other days and legacy whole-month rows are
+    never touched. A row whose month still holds a legacy value cannot be edited by day (the two
+    would add up), and a branch whose reporting window ended before the day is closed.
+
     Raises:
-        ValueError: invalid month, row or value (`ManualFactRowNotOpen` for a closed row).
+        ValueError: invalid day, row or value (`ManualFactRowNotOpen` for a closed row).
         ManualFactConflict: a row was changed by someone else since the editor loaded it.
     """
-    month_start, month_end = _plan_month_range(month)
+    target = _parse_manual_day(day)
+    month_start, _ = _manual_month_bounds(target)
     scoped_company_id = int(company_id) if company_id is not None else None
     scoped_staff_id = int(staff_id) if staff_id is not None else None
     normalized_items: dict[tuple[int, int], tuple[float | None, float | None]] = {}
@@ -8598,11 +8620,12 @@ async def _write_manual_facts(
         if invalid_company_ids:
             raise ValueError(f'company is not allowed: {invalid_company_ids[0]}')
 
+    month_end = _manual_month_bounds(target)[1]
     admin_ids_by_company = await _admin_staff_ids_by_company(
         db, month_start, month_end, item_company_ids
     )
-    stored = await _stored_manual_facts(db, month_start, month_end, item_company_ids, metric_code)
-    # Staff who already have a value stay editable even after they stop being administrators —
+    stored = await _stored_manual_facts(db, target, item_company_ids, metric_code)
+    # Staff who already have a value that day stay editable even after they stop being administrators —
     # otherwise their value would keep counting in the branch total with no way to clear it.
     valid_staff_keys = {
         (company, staff)
@@ -8657,16 +8680,25 @@ async def _write_manual_facts(
     if not changed_items:
         return
 
-    # Same upper cut as the editor's own listing (`branches_not_yet_left`): months after a branch
+    # Same upper cut as the editor's own listing (`branches_not_yet_left`): days after a branch
     # left the tenant are not ours to enter, and a value written there could never be shown again.
     windows = await fetch_reporting_windows(db, sorted({company for company, _ in changed_items}))
     for company, staff in sorted(changed_items):
         window = windows.get(company)
-        if window is not None and window.end is not None and window.end < month_start:
-            raise ManualFactRowNotOpen(f'company {company} left the tenant before {month_start:%Y-%m}, staff {staff}')
+        if window is not None and window.end is not None and window.end < target:
+            raise ManualFactRowNotOpen(f'company {company} left the tenant before {target.isoformat()}, staff {staff}')
+    # A whole-month value from before daily entry still covers this month: a day value next to it
+    # would be counted on top. The editor shows such a row as closed; an untouched one is ignored above.
+    changed_company_ids = sorted({company for company, _ in changed_items})
+    _, legacy_values = await _manual_month_values(db, target, changed_company_ids, metric_code)
+    for company, staff in sorted(changed_items):
+        if (company, staff) in legacy_values:
+            raise ManualFactRowNotOpen(
+                f'staff {staff} in company {company} holds a whole-month value for {month_start:%Y-%m}'
+            )
 
-    # Rewritten as delete + insert, not update: a legacy month may still be split over several
-    # rows, and the new value replaces them all. Each deleted row is guarded by the exact value
+    # Rewritten as delete + insert, not update, so the new value replaces whatever the day holds.
+    # Each deleted row is guarded by the exact value
     # read above, so a concurrent save that slipped in after the read leaves the count short.
     # Keys go in sorted order: two saves over the same rows then wait on each other in one
     # direction only, where payload order (the editor's row order) could cross the waits into
@@ -8689,8 +8721,8 @@ async def _write_manual_facts(
             continue
         db.add(
             ManualFactMetric(
-                period_start=month_start,
-                period_end=month_end,
+                period_start=target,
+                period_end=target,
                 company_id=item_company_id,
                 staff_id=item_staff_id,
                 metric_code=metric_code,
@@ -8703,7 +8735,7 @@ async def _write_manual_facts(
         try:
             await db.flush()
         except IntegrityError:
-            # Someone inserted the same (month, branch, staff) row between our read and our write.
+            # Someone inserted the same (day, branch, staff) row between our read and our write.
             await db.rollback()
             raise ManualFactConflict(MANUAL_FACT_CONFLICT_DETAIL) from None
 
@@ -8713,9 +8745,10 @@ async def _write_manual_facts(
         portal_account_id=portal_account_id,
         action='manual_fact.updated',
         target_type='manual_fact',
-        target_id=_month_value(month_start),
+        target_id=target.isoformat(),
         metadata={
             'metric_code': metric_code,
+            'day': target.isoformat(),
             'company_ids': sorted({company for company, _ in changed_items}),
             # Pairs, not bare staff ids: one save may span branches.
             'rows': [[company, staff] for company, staff in sorted(changed_items)],
@@ -8731,7 +8764,7 @@ async def _write_manual_facts(
 
 async def save_manual_facts(
     db: AsyncSession,
-    month: str,
+    day: str,
     metric_code: str,
     company_id: Optional[int],
     staff_id: Optional[int],
@@ -8746,7 +8779,7 @@ async def save_manual_facts(
     """Save one metric's editor rows and return the editor as the next GET would show it."""
     await _write_manual_facts(
         db,
-        month,
+        day,
         metric_code,
         company_id,
         staff_id,
@@ -8760,7 +8793,7 @@ async def save_manual_facts(
     fetch_editor = fetch_manual_opz_facts if metric_code == OPZ_QTY_CODE else fetch_manual_review_facts
     return await fetch_editor(
         db,
-        month,
+        day,
         int(company_id) if company_id is not None else None,
         int(staff_id) if staff_id is not None else None,
         allowed_company_ids=allowed_company_ids,
@@ -8791,17 +8824,23 @@ async def _branch_row_and_diagnostics(
         factual_at=factual_at,
     )
     role_periods_by_company = await _administrator_role_periods_by_company(db, start, end, [branch_id])
+    legacy_manual_months = _countable_manual_months(start, end, factual_at)
     branch_review_facts = await _manual_fact_values_for_role_periods(
         db,
         role_periods_by_company,
         REVIEWS_QTY_CODE,
+        start,
+        end,
+        legacy_manual_months,
     )
     branch_fact[REVIEWS_QTY_CODE] = branch_review_facts.get(branch_id, 0.0)
     branch_manual_opz = await _manual_fact_values_for_role_periods(
         db,
         role_periods_by_company,
         OPZ_QTY_CODE,
-        _countable_manual_months(start, end, factual_at),
+        start,
+        end,
+        legacy_manual_months,
     )
     _apply_manual_opz(branch_fact, branch_manual_opz.get(branch_id, 0.0))
     parent_group = {
@@ -9079,16 +9118,22 @@ async def fetch_plan_fact(
             end,
             company_ids,
         )
+        legacy_manual_months = _countable_manual_months(start, end, factual_at)
         review_facts_by_company = await _manual_fact_values_for_role_periods(
             db,
             role_periods_by_company,
             REVIEWS_QTY_CODE,
+            start,
+            end,
+            legacy_manual_months,
         )
         manual_opz_by_company = await _manual_fact_values_for_role_periods(
             db,
             role_periods_by_company,
             OPZ_QTY_CODE,
-            _countable_manual_months(start, end, factual_at),
+            start,
+            end,
+            legacy_manual_months,
         )
     for branch_id in staff_company_ids:
         if not staff_view:

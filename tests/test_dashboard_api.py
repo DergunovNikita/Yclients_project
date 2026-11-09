@@ -5409,7 +5409,7 @@ async def test_linked_viewer_dashboard_metrics_are_staff_scoped(async_session, m
         )
         manager_review_facts = await client.get(
             '/dashboard/plan/reviews_fact',
-            params={'month': '2025-01'},
+            params={'day': '2025-01-15'},
             headers={'Authorization': f'Bearer {manager_token}'},
         )
         owner_bundle = await client.get(
@@ -7351,7 +7351,7 @@ async def test_manual_facts_save_rejects_foreign_company_when_branch_company_ids
         response = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-05',
+                'day': '2025-05-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 7}],
             },
@@ -8450,14 +8450,14 @@ async def test_manual_review_facts_feed_plan_fact_for_administrators(async_sessi
         save_response = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-10',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 7}],
             },
         )
         editor_response = await client.get(
             '/dashboard/plan/reviews_fact',
-            params={'month': '2025-01', 'company_id': 1},
+            params={'day': '2025-01-10', 'company_id': 1},
         )
         plan_response = await client.get(
             '/dashboard/widget/plan_fact',
@@ -8469,7 +8469,11 @@ async def test_manual_review_facts_feed_plan_fact_for_administrators(async_sessi
         )
         mid_month_response = await client.get(
             '/dashboard/widget/plan_fact',
-            params={'start_date': '2025-01-01', 'end_date': '2025-01-13', 'company_id': 1},
+            params={'start_date': '2025-01-10', 'end_date': '2025-01-10', 'company_id': 1},
+        )
+        other_days_response = await client.get(
+            '/dashboard/widget/plan_fact',
+            params={'start_date': '2025-01-11', 'end_date': '2025-01-11', 'company_id': 1},
         )
     app.dependency_overrides.clear()
 
@@ -8481,8 +8485,8 @@ async def test_manual_review_facts_feed_plan_fact_for_administrators(async_sessi
     saved_rows = (
         await async_session.execute(
                 select(ManualFactMetric).where(
-                    ManualFactMetric.period_start == date(2025, 1, 1),
-                    ManualFactMetric.period_end == date(2025, 1, 31),
+                    ManualFactMetric.period_start == date(2025, 1, 10),
+                    ManualFactMetric.period_end == date(2025, 1, 10),
                 ManualFactMetric.company_id == 1,
                 ManualFactMetric.staff_id == 2,
                 ManualFactMetric.metric_code == 'reviews_qty',
@@ -8511,17 +8515,16 @@ async def test_manual_review_facts_feed_plan_fact_for_administrators(async_sessi
     assert network_cells['reviews_qty']['fact'] == 7.0
     assert branch_cells['reviews_qty']['fact'] == 7.0
 
-    # The month-to-date period the dashboard opens with must not zero the monthly fact.
+    # The value belongs to its day: a window holding that day counts it, a window without it does not.
     assert mid_month_response.status_code == 200
-    mid_month_data = mid_month_response.json()['data']
-    mid_month_parent = {cell['code']: cell for cell in mid_month_data['parent_group']['metrics']}
-    mid_month_admin = next(
-        group for group in mid_month_data['groups'] if group['category'] == 'administrator'
-    )
-    mid_month_admin_cells = {cell['code']: cell for cell in mid_month_admin['metrics']}
+    mid_month_parent = {cell['code']: cell for cell in mid_month_response.json()['data']['parent_group']['metrics']}
     assert mid_month_parent['reviews_qty']['fact'] == 7.0
-    assert mid_month_admin_cells['reviews_qty']['fact'] == 7.0
-    assert mid_month_admin_cells['reviews_qty']['completion_pct'] == 70.0
+    assert other_days_response.status_code == 200
+    other_days = other_days_response.json()['data']
+    other_days_parent = {cell['code']: cell for cell in other_days['parent_group']['metrics']}
+    other_days_admin = next(group for group in other_days['groups'] if group['category'] == 'administrator')
+    assert other_days_parent['reviews_qty']['fact'] == 0.0
+    assert {cell['code']: cell for cell in other_days_admin['metrics']}['reviews_qty']['fact'] == 0.0
 
 
 @pytest.mark.asyncio
@@ -8591,19 +8594,19 @@ async def test_manual_opz_facts_add_to_calculated_opz(async_session):
         )
         baseline_editor = await client.get(
             '/dashboard/plan/opz_fact',
-            params={'month': '2025-01', 'company_id': 1},
+            params={'day': '2025-01-10', 'company_id': 1},
         )
         save_response = await client.post(
             '/dashboard/plan/opz_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-10',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 3}],
             },
         )
         editor_response = await client.get(
             '/dashboard/plan/opz_fact',
-            params={'month': '2025-01', 'company_id': 1},
+            params={'day': '2025-01-10', 'company_id': 1},
         )
         plan_response = await client.get(
             '/dashboard/widget/plan_fact',
@@ -8617,13 +8620,13 @@ async def test_manual_opz_facts_add_to_calculated_opz(async_session):
             client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
         )
-        mid_month_response = await client.get(
+        after_day_response = await client.get(
             '/dashboard/widget/plan_fact',
-            params={'start_date': '2025-01-01', 'end_date': '2025-01-13', 'company_id': 1},
+            params={'start_date': '2025-01-11', 'end_date': '2025-01-13', 'company_id': 1},
         )
-        mid_month_summary = await get_summary(
+        after_day_summary = await get_summary(
             client,
-            params={'start_date': '2025-01-01', 'end_date': '2025-01-13', 'company_id': 1},
+            params={'start_date': '2025-01-11', 'end_date': '2025-01-13', 'company_id': 1},
         )
     app.dependency_overrides.clear()
 
@@ -8656,8 +8659,8 @@ async def test_manual_opz_facts_add_to_calculated_opz(async_session):
     saved_rows = (
         await async_session.execute(
             select(ManualFactMetric).where(
-                ManualFactMetric.period_start == date(2025, 1, 1),
-                ManualFactMetric.period_end == date(2025, 1, 31),
+                ManualFactMetric.period_start == date(2025, 1, 10),
+                ManualFactMetric.period_end == date(2025, 1, 10),
                 ManualFactMetric.company_id == 1,
                 ManualFactMetric.staff_id == 2,
                 ManualFactMetric.metric_code == 'opz_qty',
@@ -8692,15 +8695,14 @@ async def test_manual_opz_facts_add_to_calculated_opz(async_session):
     assert summary_data['revenue']['appointments'] == 1
     assert summary_data['visit_metrics']['opz_pct'] == pytest.approx(400.0)
 
-    # A past window shorter than the month gets the calculated part only: a monthly value
-    # cannot be split, and importing all of it into 13 days would overstate the fact.
-    assert mid_month_response.status_code == 200
-    mid_month_cells = {
+    # The top-up belongs to its day: a window that does not hold the day counts neither it nor the event.
+    assert after_day_response.status_code == 200
+    after_day_cells = {
         cell['code']: cell
-        for cell in mid_month_response.json()['data']['parent_group']['metrics']
+        for cell in after_day_response.json()['data']['parent_group']['metrics']
     }
-    assert mid_month_cells['opz_qty']['fact'] == 1.0
-    assert mid_month_summary.json()['data']['visit_metrics']['opz_qty'] == 1.0
+    assert after_day_cells['opz_qty']['fact'] == 0.0
+    assert after_day_summary.json()['data']['visit_metrics']['opz_qty'] == 0.0
 
 
 @pytest.mark.asyncio
@@ -8734,8 +8736,8 @@ async def test_manual_opz_facts_cleared_value_restores_calculated_fact(async_ses
             attendance=0,
         ),
         ManualFactMetric(
-            period_start=date(2025, 1, 1),
-            period_end=date(2025, 1, 31),
+            period_start=date(2025, 1, 10),
+            period_end=date(2025, 1, 10),
             company_id=1,
             staff_id=2,
             metric_code='opz_qty',
@@ -8754,26 +8756,26 @@ async def test_manual_opz_facts_cleared_value_restores_calculated_fact(async_ses
         negative_response = await client.post(
             '/dashboard/plan/opz_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-10',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': -1}],
             },
         )
-        invalid_month_response = await client.get(
+        invalid_day_response = await client.get(
             '/dashboard/plan/opz_fact',
-            params={'month': '2025-01-01', 'company_id': 1},
+            params={'day': '2025-01', 'company_id': 1},
         )
         # A non-finite number passes `value < 0`, so it needs its own guard to stay a 400.
         not_a_number_response = await client.post(
             '/dashboard/plan/opz_fact',
-            content='{"month": "2025-01", "company_id": 1, "items": '
+            content='{"day": "2025-01-10", "company_id": 1, "items": '
                     '[{"company_id": 1, "staff_id": 2, "value": NaN}]}',
             headers={'Content-Type': 'application/json'},
         )
         cleared_response = await client.post(
             '/dashboard/plan/opz_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-10',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': None, 'previous_value': 5}],
             },
@@ -8785,7 +8787,7 @@ async def test_manual_opz_facts_cleared_value_restores_calculated_fact(async_ses
     app.dependency_overrides.clear()
 
     assert negative_response.status_code == 400
-    assert invalid_month_response.status_code == 400
+    assert invalid_day_response.status_code == 400
     assert not_a_number_response.status_code == 400
     assert cleared_response.status_code == 200
     cleared_row = cleared_response.json()['data']['rows'][0]
@@ -8904,25 +8906,31 @@ async def test_manual_opz_editor_column_matches_plan_fact_admin_row(async_sessio
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        editor_response = await client.get(
-            '/dashboard/plan/opz_fact',
-            params={'month': '2025-01', 'company_id': 1},
-        )
-        plan_response = await client.get(
-            '/dashboard/widget/plan_fact',
-            params={'start_date': '2025-01-01', 'end_date': '2025-01-31', 'company_id': 1},
-        )
+        editor_by_day = {}
+        plan_by_day = {}
+        for day in ('2025-01-10', '2025-01-11'):
+            editor_by_day[day] = await client.get(
+                '/dashboard/plan/opz_fact',
+                params={'day': day, 'company_id': 1},
+            )
+            plan_by_day[day] = await client.get(
+                '/dashboard/widget/plan_fact',
+                params={'start_date': day, 'end_date': day, 'company_id': 1},
+            )
     app.dependency_overrides.clear()
 
-    editor_rows = editor_response.json()['data']['rows']
-    assert [(row['staff_id'], row['current_value']) for row in editor_rows] == [(3, 1.0)]
-
-    admin_group = next(
-        group for group in plan_response.json()['data']['groups']
-        if group['category'] == 'administrator'
-    )
-    admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
-    assert admin_cells['opz_qty']['fact'] == editor_rows[0]['current_value']
+    # Day by day: the fired barber's event on the 10th never reaches an administrator row,
+    # the active barber's event on the 11th does — and the editor says exactly what Plan/fact says.
+    expected = {'2025-01-10': 0.0, '2025-01-11': 1.0}
+    for day, current in expected.items():
+        editor_rows = editor_by_day[day].json()['data']['rows']
+        assert [(row['staff_id'], row['current_value']) for row in editor_rows] == [(3, current)]
+        admin_group = next(
+            group for group in plan_by_day[day].json()['data']['groups']
+            if group['category'] == 'administrator'
+        )
+        admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
+        assert admin_cells['opz_qty']['fact'] == editor_rows[0]['current_value']
 
 
 @pytest.mark.asyncio
@@ -8933,8 +8941,8 @@ async def test_manual_opz_facts_can_filter_by_staff(async_session):
         Staff(id=2, name='Admin one', position='Администратор', company_id=1, fired=0),
         Staff(id=3, name='Admin two', position='Администратор', company_id=1, fired=0),
         ManualFactMetric(
-            period_start=date(2025, 1, 1),
-            period_end=date(2025, 1, 31),
+            period_start=date(2025, 1, 10),
+            period_end=date(2025, 1, 10),
             company_id=1,
             staff_id=3,
             metric_code='opz_qty',
@@ -8952,16 +8960,16 @@ async def test_manual_opz_facts_can_filter_by_staff(async_session):
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         all_staff = await client.get(
             '/dashboard/plan/opz_fact',
-            params={'month': '2025-01', 'company_id': 1},
+            params={'day': '2025-01-10', 'company_id': 1},
         )
         single_staff = await client.get(
             '/dashboard/plan/opz_fact',
-            params={'month': '2025-01', 'company_id': 1, 'staff_id': 3},
+            params={'day': '2025-01-10', 'company_id': 1, 'staff_id': 3},
         )
         foreign_staff_save = await client.post(
             '/dashboard/plan/opz_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-10',
                 'company_id': 1,
                 'staff_id': 3,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 1}],
@@ -9146,12 +9154,11 @@ async def test_manual_opz_counts_only_whole_or_running_months(async_session, mon
     assert await opz_qty('2025-02-01', '2025-02-02') == 2.0
     assert await opz_qty('2025-01-27', '2025-02-02') == 2.0
 
-    # The previous window of a month-to-date period is the tail of the previous month and
-    # would count nothing on its own, so the delta weighs month against month: February's
-    # 2 against January's 3, not against zero.
+    # The baseline is the previous window itself: for 1-2 February that is the tail of January,
+    # which holds no whole month, so the legacy value of January is not weighed against it.
     month_to_date = metrics_by_period[('2025-02-01', '2025-02-02')]
     assert month_to_date['opz_qty'] == 2.0
-    assert month_to_date['opz_qty_change_pct'] == pytest.approx(-33.33)
+    assert month_to_date['opz_qty_change_pct'] is None
 
 
 @pytest.mark.asyncio
@@ -9256,7 +9263,7 @@ async def test_manual_opz_fact_write_is_scoped_to_the_user_branches(async_sessio
         foreign_branch = await client.post(
             '/dashboard/plan/opz_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 2,
                 'items': [{'company_id': 2, 'staff_id': 3, 'value': 1}],
             },
@@ -9264,12 +9271,12 @@ async def test_manual_opz_fact_write_is_scoped_to_the_user_branches(async_sessio
         active['role'] = 'manager'
         manager_read = await client.get(
             '/dashboard/plan/opz_fact',
-            params={'month': '2025-01', 'company_id': 1},
+            params={'day': '2025-01-15', 'company_id': 1},
         )
         manager_write = await client.post(
             '/dashboard/plan/opz_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 1}],
             },
@@ -9277,7 +9284,7 @@ async def test_manual_opz_fact_write_is_scoped_to_the_user_branches(async_sessio
         manager_foreign_branch = await client.post(
             '/dashboard/plan/opz_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 2,
                 'items': [{'company_id': 2, 'staff_id': 3, 'value': 1}],
             },
@@ -9334,7 +9341,7 @@ async def test_a_personal_role_without_a_staff_row_sees_nothing(async_session):
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         branch_wide = await get_summary(client, params=params)
         colleague = await get_summary(client, params={**params, 'staff_id': 2})
-        editor = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01'})
+        editor = await client.get('/dashboard/plan/reviews_fact', params={'day': '2025-01-15'})
     app.dependency_overrides.clear()
 
     assert branch_wide.status_code == 403
@@ -9371,15 +9378,15 @@ async def test_manual_facts_are_self_scoped_for_a_staff_member(async_session):
     app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        own_rows = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01'})
+        own_rows = await client.get('/dashboard/plan/reviews_fact', params={'day': '2025-01-15'})
         colleague_rows = await client.get(
             '/dashboard/plan/reviews_fact',
-            params={'month': '2025-01', 'staff_id': 3},
+            params={'day': '2025-01-15', 'staff_id': 3},
         )
         own_write = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 4}],
             },
@@ -9387,7 +9394,7 @@ async def test_manual_facts_are_self_scoped_for_a_staff_member(async_session):
         colleague_write = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 3, 'value': 9}],
             },
@@ -9396,18 +9403,18 @@ async def test_manual_facts_are_self_scoped_for_a_staff_member(async_session):
         colleague_filter_write = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'staff_id': 3,
                 'items': [{'company_id': 1, 'staff_id': 3, 'value': 9}],
             },
         )
         # The additional-OPZ editor runs its own enrichment over the same filtered rows.
-        own_opz_rows = await client.get('/dashboard/plan/opz_fact', params={'month': '2025-01'})
+        own_opz_rows = await client.get('/dashboard/plan/opz_fact', params={'day': '2025-01-15'})
         own_opz_write = await client.post(
             '/dashboard/plan/opz_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 2}],
             },
@@ -9415,7 +9422,7 @@ async def test_manual_facts_are_self_scoped_for_a_staff_member(async_session):
         colleague_opz_write = await client.post(
             '/dashboard/plan/opz_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 3, 'value': 2}],
             },
@@ -9472,7 +9479,7 @@ async def test_manual_facts_cover_every_branch_a_staff_member_works_in(async_ses
     app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        rows = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01'})
+        rows = await client.get('/dashboard/plan/reviews_fact', params={'day': '2025-01-15'})
     app.dependency_overrides.clear()
 
     assert rows.status_code == 200
@@ -9521,7 +9528,7 @@ async def test_manual_fact_write_records_the_author(async_session):
         saved = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 6}],
             },
@@ -9546,7 +9553,8 @@ async def test_manual_fact_write_records_the_author(async_session):
     assert len(events) == 1
     assert events[0].actor_user_id == 10
     assert events[0].target_type == 'manual_fact'
-    assert events[0].target_id == '2025-01'
+    assert events[0].target_id == '2025-01-15'
+    assert events[0].metadata_json['day'] == '2025-01-15'
     assert events[0].metadata_json['metric_code'] == 'reviews_qty'
     assert events[0].metadata_json['rows'] == [[1, 2]]
     assert events[0].metadata_json['cleared'] == []
@@ -9561,8 +9569,8 @@ async def _seed_two_admins_with_a_value(async_session, value=5.0):
     ])
     await async_session.flush()
     async_session.add(ManualFactMetric(
-        period_start=date(2025, 1, 1),
-        period_end=date(2025, 1, 31),
+        period_start=date(2025, 1, 15),
+        period_end=date(2025, 1, 15),
         company_id=1,
         staff_id=2,
         metric_code='reviews_qty',
@@ -9610,14 +9618,14 @@ async def test_manual_fact_stale_editor_does_not_undo_a_concurrent_save(async_se
     app.dependency_overrides[dashboard_routes.get_dashboard_access] = override_access
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        loaded_by_a = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01', 'company_id': 1})
+        loaded_by_a = await client.get('/dashboard/plan/reviews_fact', params={'day': '2025-01-15', 'company_id': 1})
         rows_a = loaded_by_a.json()['data']['rows']
 
         active['user'] = 400
         b_save = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 7, 'previous_value': 5}],
             },
@@ -9629,7 +9637,7 @@ async def test_manual_fact_stale_editor_does_not_undo_a_concurrent_save(async_se
         a_unrelated = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [
                     {
@@ -9646,7 +9654,7 @@ async def test_manual_fact_stale_editor_does_not_undo_a_concurrent_save(async_se
         a_stale_edit = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [
                     {'company_id': 1, 'staff_id': 2, 'value': 6, 'previous_value': 5},
@@ -9691,7 +9699,7 @@ async def test_manual_fact_batch_writes_rows_in_key_order(async_session):
         response = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [
                     {'company_id': 1, 'staff_id': 4, 'value': 1, 'previous_value': None},
@@ -9724,8 +9732,8 @@ async def test_manual_fact_save_racing_a_concurrent_write_is_a_conflict(async_se
         stored = await original(db, *args, **kwargs)
         if race == 'first_insert':
             db.add(ManualFactMetric(
-                period_start=date(2025, 1, 1),
-                period_end=date(2025, 1, 31),
+                period_start=date(2025, 1, 15),
+                period_end=date(2025, 1, 15),
                 company_id=1,
                 staff_id=3,
                 metric_code='reviews_qty',
@@ -9755,7 +9763,7 @@ async def test_manual_fact_save_racing_a_concurrent_write_is_a_conflict(async_se
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         response = await client.post(
             '/dashboard/plan/reviews_fact',
-            json={'month': '2025-01', 'company_id': 1, 'items': [item]},
+            json={'day': '2025-01-15', 'company_id': 1, 'items': [item]},
         )
     app.dependency_overrides.clear()
     monkeypatch.undo()
@@ -9783,8 +9791,8 @@ async def test_manual_fact_conflict_on_insert_undoes_the_delete_of_the_same_batc
     async def stored_then_concurrent_insert(db, *args, **kwargs):
         stored = await original(db, *args, **kwargs)
         db.add(ManualFactMetric(
-            period_start=date(2025, 1, 1),
-            period_end=date(2025, 1, 31),
+            period_start=date(2025, 1, 15),
+            period_end=date(2025, 1, 15),
             company_id=1,
             staff_id=3,
             metric_code='reviews_qty',
@@ -9806,7 +9814,7 @@ async def test_manual_fact_conflict_on_insert_undoes_the_delete_of_the_same_batc
         response = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [
                     {'company_id': 1, 'staff_id': 2, 'value': 6, 'previous_value': 5},
@@ -9842,11 +9850,11 @@ async def test_manual_fact_save_without_previous_value_reads_as_an_empty_cell(as
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         overwrite = await client.post(
             '/dashboard/plan/reviews_fact',
-            json={'month': '2025-01', 'company_id': 1, 'items': [{'company_id': 1, 'staff_id': 2, 'value': 1}]},
+            json={'day': '2025-01-15', 'company_id': 1, 'items': [{'company_id': 1, 'staff_id': 2, 'value': 1}]},
         )
         fill = await client.post(
             '/dashboard/plan/reviews_fact',
-            json={'month': '2025-01', 'company_id': 1, 'items': [{'company_id': 1, 'staff_id': 3, 'value': 2}]},
+            json={'day': '2025-01-15', 'company_id': 1, 'items': [{'company_id': 1, 'staff_id': 3, 'value': 2}]},
         )
     app.dependency_overrides.clear()
 
@@ -9873,7 +9881,7 @@ async def test_manual_fact_save_without_previous_value_ignores_untouched_stored_
         response = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [
                     {'company_id': 1, 'staff_id': 2, 'value': 5},
@@ -9907,7 +9915,7 @@ async def test_manual_fact_save_without_previous_value_cannot_silently_drop_a_cl
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         response = await client.post(
             '/dashboard/plan/reviews_fact',
-            json={'month': '2025-01', 'company_id': 1, 'items': [{'company_id': 1, 'staff_id': 2, 'value': None}]},
+            json={'day': '2025-01-15', 'company_id': 1, 'items': [{'company_id': 1, 'staff_id': 2, 'value': None}]},
         )
     app.dependency_overrides.clear()
 
@@ -9928,8 +9936,8 @@ async def test_manual_fact_save_of_a_row_cleared_meanwhile_is_a_conflict_not_a_c
     async_session.add(Staff(id=4, name='Gone', position='Барбер', company_id=1, fired=0))
     await async_session.flush()
     async_session.add(ManualFactMetric(
-        period_start=date(2025, 1, 1),
-        period_end=date(2025, 1, 31),
+        period_start=date(2025, 1, 15),
+        period_end=date(2025, 1, 15),
         company_id=1,
         staff_id=4,
         metric_code='reviews_qty',
@@ -9945,12 +9953,12 @@ async def test_manual_fact_save_of_a_row_cleared_meanwhile_is_a_conflict_not_a_c
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        loaded = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01', 'company_id': 1})
+        loaded = await client.get('/dashboard/plan/reviews_fact', params={'day': '2025-01-15', 'company_id': 1})
         rows = loaded.json()['data']['rows']
         cleared = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 4, 'value': None, 'previous_value': 3}],
             },
@@ -9958,7 +9966,7 @@ async def test_manual_fact_save_of_a_row_cleared_meanwhile_is_a_conflict_not_a_c
         stale = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [
                     {
@@ -10000,7 +10008,7 @@ async def test_manual_fact_untouched_empty_row_that_closed_meanwhile_does_not_fa
         untouched = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [
                     {'company_id': 1, 'staff_id': 3, 'value': 2, 'previous_value': None},
@@ -10011,7 +10019,7 @@ async def test_manual_fact_untouched_empty_row_that_closed_meanwhile_does_not_fa
         entered = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 4, 'value': 1, 'previous_value': None}],
             },
@@ -10122,7 +10130,7 @@ async def test_manual_fact_save_keeps_the_author_of_an_untouched_row(async_sessi
         own = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 5}],
             },
@@ -10140,7 +10148,7 @@ async def test_manual_fact_save_keeps_the_author_of_an_untouched_row(async_sessi
         branch_save = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [
                     {'company_id': 1, 'staff_id': 2, 'value': 5, 'previous_value': 5},
@@ -10151,12 +10159,12 @@ async def test_manual_fact_save_keeps_the_author_of_an_untouched_row(async_sessi
         # Press Save again with exactly what the editor renders — the payload the SPA builds
         # from every row it drew, untouched cells included. Nothing may reach the journal.
         reloaded = await client.get(
-            '/dashboard/plan/reviews_fact', params={'month': '2025-01', 'company_id': 1}
+            '/dashboard/plan/reviews_fact', params={'day': '2025-01-15', 'company_id': 1}
         )
         noop_save = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [
                     {
@@ -10173,7 +10181,7 @@ async def test_manual_fact_save_keeps_the_author_of_an_untouched_row(async_sessi
         clear_save = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [
                     {'company_id': 1, 'staff_id': 2, 'value': 5, 'previous_value': 5},
@@ -10251,12 +10259,12 @@ async def test_manual_facts_are_closed_to_a_user_without_a_staff_row(async_sessi
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         for metric in ('reviews_fact', 'opz_fact'):
             responses[f'get {metric}'] = await client.get(
-                f'/dashboard/plan/{metric}', params={'month': '2025-01'}
+                f'/dashboard/plan/{metric}', params={'day': '2025-01-15'}
             )
             responses[f'post {metric}'] = await client.post(
                 f'/dashboard/plan/{metric}',
                 json={
-                    'month': '2025-01',
+                    'day': '2025-01-15',
                     'company_id': 1,
                     'items': [{'company_id': 1, 'staff_id': 2, 'value': 1}],
                 },
@@ -10306,7 +10314,7 @@ async def test_manual_fact_write_matches_the_branch_of_the_owned_row(async_sessi
         crossed = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 5, 'value': 3}],
             },
@@ -10314,7 +10322,7 @@ async def test_manual_fact_write_matches_the_branch_of_the_owned_row(async_sessi
         own = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 2,
                 'items': [{'company_id': 2, 'staff_id': 5, 'value': 3}],
             },
@@ -10348,7 +10356,7 @@ async def test_manual_fact_write_without_a_portal_user_keeps_the_branch_scope(as
         saved = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 3}],
             },
@@ -10429,8 +10437,8 @@ async def test_manual_fact_author_of_another_tenant_stays_anonymous(async_sessio
     async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
     async_session.add(
         ManualFactMetric(
-            period_start=date(2025, 1, 1),
-            period_end=date(2025, 1, 31),
+            period_start=date(2025, 1, 15),
+            period_end=date(2025, 1, 15),
             company_id=1,
             staff_id=2,
             metric_code='reviews_qty',
@@ -10443,7 +10451,7 @@ async def test_manual_fact_author_of_another_tenant_stays_anonymous(async_sessio
     await async_session.commit()
 
     scoped = await dashboard_service.fetch_manual_review_facts(
-        async_session, '2025-01', company_id=1, portal_account_id=1
+        async_session, '2025-01-15', company_id=1, portal_account_id=1
     )
     assert [(row['updated_by'], row['updated_by_name']) for row in scoped['rows']] == [(500, None)]
 
@@ -10488,7 +10496,7 @@ async def test_manual_fact_author_resolves_for_a_platform_admin(async_session):
         saved = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 4}],
             },
@@ -10534,7 +10542,7 @@ async def test_manual_fact_route_hides_the_reason_a_row_is_closed(async_session)
             responses[metric] = await client.post(
                 f'/dashboard/plan/{metric}',
                 json={
-                    'month': '2025-01',
+                    'day': '2025-01-15',
                     'company_id': 1,
                     'items': [{'company_id': 1, 'staff_id': 4, 'value': 1}],
                 },
@@ -10562,7 +10570,7 @@ async def test_manual_fact_service_refuses_a_foreign_row_without_the_router(asyn
     with pytest.raises(ValueError, match='not editable by this user'):
         await dashboard_service.save_manual_facts(
             async_session,
-            '2025-01',
+            '2025-01-15',
             dashboard_service.REVIEWS_QTY_CODE,
             1,
             None,
@@ -10577,7 +10585,7 @@ async def test_manual_fact_service_refuses_a_foreign_row_without_the_router(asyn
 
     saved = await dashboard_service.save_manual_facts(
         async_session,
-        '2025-01',
+        '2025-01-15',
         dashboard_service.REVIEWS_QTY_CODE,
         1,
         None,
@@ -10640,8 +10648,8 @@ async def test_manual_opz_editor_totals_count_only_what_reports_count(async_sess
     await async_session.flush()
     async_session.add_all([
         ManualFactMetric(
-            period_start=date(2025, 1, 1),
-            period_end=date(2025, 1, 31),
+            period_start=date(2025, 1, 15),
+            period_end=date(2025, 1, 15),
             company_id=1,
             staff_id=2,
             metric_code='opz_qty',
@@ -10649,8 +10657,8 @@ async def test_manual_opz_editor_totals_count_only_what_reports_count(async_sess
             updated_at=datetime(2025, 1, 20, 10, 0, 0),
         ),
         ManualFactMetric(
-            period_start=date(2025, 1, 1),
-            period_end=date(2025, 1, 31),
+            period_start=date(2025, 1, 15),
+            period_end=date(2025, 1, 15),
             company_id=1,
             staff_id=3,
             metric_code='opz_qty',
@@ -10658,8 +10666,8 @@ async def test_manual_opz_editor_totals_count_only_what_reports_count(async_sess
             updated_at=datetime(2025, 1, 20, 10, 0, 0),
         ),
         ManualFactMetric(
-            period_start=date(2025, 1, 1),
-            period_end=date(2025, 1, 31),
+            period_start=date(2025, 1, 15),
+            period_end=date(2025, 1, 15),
             company_id=1,
             staff_id=4,
             metric_code='opz_qty',
@@ -10677,7 +10685,7 @@ async def test_manual_opz_editor_totals_count_only_what_reports_count(async_sess
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         editor_response = await client.get(
             '/dashboard/plan/opz_fact',
-            params={'month': '2025-01', 'company_id': 1},
+            params={'day': '2025-01-15', 'company_id': 1},
         )
         summary_response = await get_summary(
             client,
@@ -10787,51 +10795,30 @@ async def test_manual_opz_delta_compares_like_periods(async_session, monkeypatch
     async def override_db():
         yield async_session
 
-    async def metrics(start_date, end_date):
+    async def metrics(start_date, end_date, preset=None):
         app.dependency_overrides[api.get_async_db] = override_db
         transport = ASGITransport(app=app)
+        params = {'start_date': start_date, 'end_date': end_date, 'company_id': 1}
+        if preset:
+            params['period_preset'] = preset
         async with AsyncClient(transport=transport, base_url='http://test') as client:
-            response = await get_summary(
-                client,
-                params={'start_date': start_date, 'end_date': end_date, 'company_id': 1},
-            )
+            response = await get_summary(client, params=params)
         app.dependency_overrides.clear()
         return response.json()['data']['visit_metrics']
 
-    one_month = await metrics('2025-12-01', '2025-12-31')
-    assert (one_month['opz_qty'], one_month['opz_qty_change_pct']) == (10.0, 0.0)
-
-    quarter = await metrics('2025-10-01', '2025-12-31')
-    assert (quarter['opz_qty'], quarter['opz_qty_change_pct']) == (30.0, 0.0)
-
-    # Manual months are indivisible, so a baseline that starts mid-month counts nothing.
-    # These selections carry no preset, and a window spanning several months still steps
-    # back by days, so the manual-fact baseline computes its own whole months instead.
+    # The baseline is the previous window itself, so a month row counts there only when that
+    # window covers the whole month: the month preset steps back by whole months.
     for short_month, days in (('02', 28), ('04', 30), ('09', 30), ('11', 30)):
-        selected = await metrics(f'2025-{short_month}-01', f'2025-{short_month}-{days}')
+        selected = await metrics(f'2025-{short_month}-01', f'2025-{short_month}-{days}', 'month')
         assert (selected['opz_qty'], selected['opz_qty_change_pct']) == (10.0, 0.0)
 
-    # A rolling window that crosses a month boundary counts the running month, so its
-    # baseline is the month before it — one month against one month, not against nothing.
-    monkeypatch.setattr(dashboard_service, 'factual_now', lambda: datetime(2025, 12, 2, 12, 0))
-    crossing_week = await metrics('2025-11-26', '2025-12-02')
-    assert (crossing_week['opz_qty'], crossing_week['opz_qty_change_pct']) == (10.0, 0.0)
-
-    month_to_date = await metrics('2025-12-01', '2025-12-02')
-    assert (month_to_date['opz_qty'], month_to_date['opz_qty_change_pct']) == (10.0, 0.0)
-
-    # A window that ends mid-month gets the same treatment as one that ends on the last
-    # day: quarter-to-date is weighed against the three months before it, not against two.
-    monkeypatch.setattr(dashboard_service, 'factual_now', lambda: datetime(2025, 12, 15, 12, 0))
-    quarter_to_date = await metrics('2025-10-01', '2025-12-15')
-    assert (quarter_to_date['opz_qty'], quarter_to_date['opz_qty_change_pct']) == (30.0, 0.0)
-    year_to_date = await metrics('2025-01-01', '2025-12-15')
-    assert (year_to_date['opz_qty'], year_to_date['opz_qty_change_pct']) == (120.0, 0.0)
-    rolling_month = await metrics('2025-11-16', '2025-12-15')
-    assert (rolling_month['opz_qty'], rolling_month['opz_qty_change_pct']) == (10.0, 0.0)
-
-    year = await metrics('2025-01-01', '2025-12-31')
+    year = await metrics('2025-01-01', '2025-12-31', 'year')
     assert (year['opz_qty'], year['opz_qty_change_pct']) == (120.0, 0.0)
+
+    # Without a preset the equal-length window before February is 4-31 January: no whole
+    # month, so the baseline has no top-up and the delta reads as a zero base, not as growth.
+    unanchored = await metrics('2025-02-01', '2025-02-28')
+    assert (unanchored['opz_qty'], unanchored['opz_qty_change_pct']) == (10.0, None)
 
 
 @pytest.mark.asyncio
@@ -10890,8 +10877,8 @@ async def test_manual_opz_respects_the_branch_reporting_start(async_session):
     await async_session.flush()
     async_session.add_all([
         ManualFactMetric(
-            period_start=date(2025, 1, 1),
-            period_end=date(2025, 1, 31),
+            period_start=date(2025, 1, 15),
+            period_end=date(2025, 1, 15),
             company_id=1,
             staff_id=2,
             metric_code='opz_qty',
@@ -10899,8 +10886,8 @@ async def test_manual_opz_respects_the_branch_reporting_start(async_session):
             updated_at=datetime(2025, 1, 20, 10, 0, 0),
         ),
         ManualFactMetric(
-            period_start=date(2025, 7, 1),
-            period_end=date(2025, 7, 31),
+            period_start=date(2025, 7, 15),
+            period_end=date(2025, 7, 15),
             company_id=1,
             staff_id=2,
             metric_code='opz_qty',
@@ -10926,11 +10913,11 @@ async def test_manual_opz_respects_the_branch_reporting_start(async_session):
         )
         editor_before = await client.get(
             '/dashboard/plan/opz_fact',
-            params={'month': '2025-01', 'company_id': 1},
+            params={'day': '2025-01-15', 'company_id': 1},
         )
         editor_after = await client.get(
             '/dashboard/plan/opz_fact',
-            params={'month': '2025-07', 'company_id': 1},
+            params={'day': '2025-07-15', 'company_id': 1},
         )
         plan_before = await client.get(
             '/dashboard/widget/plan_fact',
@@ -10971,8 +10958,8 @@ async def test_manual_facts_respect_the_branch_reporting_end(async_session):
     await async_session.flush()
     async_session.add_all([
         ManualFactMetric(
-            period_start=date(2025, 7, 1),
-            period_end=date(2025, 7, 31),
+            period_start=date(2025, 7, 15),
+            period_end=date(2025, 7, 15),
             company_id=1,
             staff_id=2,
             metric_code='opz_qty',
@@ -10980,8 +10967,8 @@ async def test_manual_facts_respect_the_branch_reporting_end(async_session):
             updated_at=datetime(2025, 7, 20, 10, 0, 0),
         ),
         ManualFactMetric(
-            period_start=date(2025, 9, 1),
-            period_end=date(2025, 9, 30),
+            period_start=date(2025, 9, 15),
+            period_end=date(2025, 9, 15),
             company_id=1,
             staff_id=2,
             metric_code='opz_qty',
@@ -11007,11 +10994,11 @@ async def test_manual_facts_respect_the_branch_reporting_end(async_session):
         )
         editor_before = await client.get(
             '/dashboard/plan/opz_fact',
-            params={'month': '2025-07', 'company_id': 1},
+            params={'day': '2025-07-15', 'company_id': 1},
         )
         editor_after = await client.get(
             '/dashboard/plan/opz_fact',
-            params={'month': '2025-09', 'company_id': 1},
+            params={'day': '2025-09-15', 'company_id': 1},
         )
     app.dependency_overrides.clear()
 
@@ -11033,8 +11020,8 @@ async def test_manual_review_facts_can_filter_by_staff(async_session):
     async_session.add(Staff(id=2, name='Admin 1', position='Администратор', company_id=1, fired=0))
     async_session.add(Staff(id=3, name='Admin 2', position='Администратор', company_id=1, fired=0))
     async_session.add(ManualFactMetric(
-        period_start=date(2025, 1, 1),
-        period_end=date(2025, 1, 1),
+        period_start=date(2025, 1, 15),
+        period_end=date(2025, 1, 15),
         company_id=1,
         staff_id=2,
         metric_code='reviews_qty',
@@ -11053,7 +11040,7 @@ async def test_manual_review_facts_can_filter_by_staff(async_session):
         filtered_response = await client.get(
             '/dashboard/plan/reviews_fact',
             params={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'staff_id': 2,
             },
@@ -11061,7 +11048,7 @@ async def test_manual_review_facts_can_filter_by_staff(async_session):
         save_response = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-01',
+                'day': '2025-01-15',
                 'company_id': 1,
                 'staff_id': 3,
                 'items': [{'company_id': 1, 'staff_id': 3, 'value': 9}],
@@ -11079,22 +11066,29 @@ async def test_manual_review_facts_can_filter_by_staff(async_session):
 
 
 @pytest.mark.asyncio
-async def test_manual_review_facts_use_one_value_per_month(async_session):
+async def test_manual_review_facts_month_value_sums_the_daily_rows(async_session):
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
     async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
     async_session.add_all([
         ManualFactMetric(
-            period_start=date(2025, 6, day),
-            period_end=date(2025, 6, day),
+            period_start=day,
+            period_end=day,
             company_id=1,
             staff_id=2,
             metric_code='reviews_qty',
-            value=float(day),
-            source='legacy',
-            updated_at=datetime(2025, 6, day, 0, 0, 0),
+            value=value,
+            source='dashboard',
+            updated_at=datetime(2025, 7, 5),
         )
-        for day in range(1, 5)
+        for day, value in (
+            (date(2025, 5, 31), 50.0),
+            (date(2025, 6, 1), 1.0),
+            (date(2025, 6, 2), 2.0),
+            (date(2025, 6, 3), 3.0),
+            (date(2025, 6, 4), 4.0),
+            (date(2025, 7, 1), 70.0),
+        )
     ])
     await async_session.commit()
 
@@ -11104,78 +11098,57 @@ async def test_manual_review_facts_use_one_value_per_month(async_session):
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        legacy_response = await client.get(
-            '/dashboard/plan/reviews_fact',
-            params={'month': '2025-06', 'company_id': 1},
-        )
+        before = await client.get('/dashboard/plan/reviews_fact', params={'day': '2025-06-03', 'company_id': 1})
         save_response = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-06',
+                'day': '2025-06-03',
                 'company_id': 1,
-                'items': [{'company_id': 1, 'staff_id': 2, 'value': 12, 'previous_value': 10}],
+                'items': [{'company_id': 1, 'staff_id': 2, 'value': 7, 'previous_value': 3}],
             },
         )
-        full_response = await client.get(
-            '/dashboard/plan/reviews_fact',
-            params={'month': '2025-06', 'company_id': 1},
-        )
-        other_month_response = await client.get(
-            '/dashboard/plan/reviews_fact',
-            params={'month': '2025-07', 'company_id': 1},
-        )
-        partial_response = await client.get(
-            '/dashboard/widget/plan_fact',
-            params={'start_date': '2025-06-03', 'end_date': '2025-06-04', 'company_id': 1},
-        )
-        network_response = await client.get(
-            '/dashboard/widget/plan_fact',
-            params={'start_date': '2025-06-01', 'end_date': '2025-06-05'},
-        )
-        next_month_response = await client.get(
-            '/dashboard/widget/plan_fact',
-            params={'start_date': '2025-07-01', 'end_date': '2025-07-31', 'company_id': 1},
-        )
+        empty_day = await client.get('/dashboard/plan/reviews_fact', params={'day': '2025-06-10', 'company_id': 1})
+        plan_by_window = {}
+        for window in (('2025-06-03', '2025-06-03'), ('2025-06-04', '2025-06-04'), ('2025-06-01', '2025-06-30')):
+            response = await client.get(
+                '/dashboard/widget/plan_fact',
+                params={'start_date': window[0], 'end_date': window[1], 'company_id': 1},
+            )
+            plan_by_window[window] = {
+                cell['code']: cell['fact'] for cell in response.json()['data']['parent_group']['metrics']
+            }
     app.dependency_overrides.clear()
 
-    assert legacy_response.json()['data']['rows'][0]['value'] == 10.0
+    before_data = before.json()['data']
+    assert (before_data['day'], before_data['month'], before_data['period']) == (
+        '2025-06-03', '2025-06', {'start': '2025-06-03', 'end': '2025-06-03'}
+    )
+    # The month sums June's daily rows only: neither 31 May nor 1 July.
+    before_row = before_data['rows'][0]
+    assert (before_row['value'], before_row['month_value'], before_row['legacy_month_value']) == (3.0, 10.0, None)
+    assert (before_data['total_value'], before_data['month_total_value']) == (3.0, 10.0)
+
     assert save_response.status_code == 200
+    saved_row = save_response.json()['data']['rows'][0]
+    assert (saved_row['value'], saved_row['month_value']) == (7.0, 14.0)
 
-    full_data = full_response.json()['data']
-    assert full_data['month'] == '2025-06'
-    assert full_data['total_value'] == 12.0
-    assert full_data['rows'][0]['value'] == 12.0
-    assert other_month_response.json()['data']['rows'][0]['value'] is None
+    # A day nobody entered stays empty, not zero, while the month total still shows.
+    empty_row = empty_day.json()['data']['rows'][0]
+    assert (empty_row['value'], empty_row['month_value'], empty_row['editable']) == (None, 14.0, True)
 
-    # Any period inside the month sees the whole month, and only that month.
-    partial_data = partial_response.json()['data']
-    parent_cells = {cell['code']: cell for cell in partial_data['parent_group']['metrics']}
-    admin_group = next(group for group in partial_data['groups'] if group['category'] == 'administrator')
-    admin_cells = {cell['code']: cell for cell in admin_group['metrics']}
-    assert parent_cells['reviews_qty']['fact'] == 12.0
-    assert admin_cells['reviews_qty']['fact'] == 12.0
-
-    network_cells = {cell['code']: cell for cell in network_response.json()['data']['groups'][0]['metrics']}
-    assert network_cells['reviews_qty']['fact'] == 12.0
-
-    next_month_cells = {
-        cell['code']: cell
-        for cell in next_month_response.json()['data']['parent_group']['metrics']
-    }
-    assert next_month_cells['reviews_qty']['fact'] == 0.0
-
-    # Saving collapses the legacy per-day rows into a single month-anchored row.
-    stored_rows = (
+    # Saving the 3rd rewrote that day only: the neighbours kept their values, the 3rd reaches Plan/fact.
+    assert plan_by_window[('2025-06-03', '2025-06-03')]['reviews_qty'] == 7.0
+    assert plan_by_window[('2025-06-04', '2025-06-04')]['reviews_qty'] == 4.0
+    assert plan_by_window[('2025-06-01', '2025-06-30')]['reviews_qty'] == 14.0
+    stored = (
         await async_session.execute(
-            select(ManualFactMetric).where(
-                ManualFactMetric.company_id == 1,
-                ManualFactMetric.staff_id == 2,
-                ManualFactMetric.metric_code == 'reviews_qty',
-            )
+            select(ManualFactMetric.period_start, ManualFactMetric.value)
+            .where(ManualFactMetric.period_start >= date(2025, 6, 1), ManualFactMetric.period_start <= date(2025, 6, 4))
+            .order_by(ManualFactMetric.period_start)
         )
-    ).scalars().all()
-    assert [(row.period_start, row.period_end, row.value) for row in stored_rows] == [
-        (date(2025, 6, 1), date(2025, 6, 30), 12.0)
+    ).all()
+    assert [(row.period_start, row.value) for row in stored] == [
+        (date(2025, 6, 1), 1.0), (date(2025, 6, 2), 2.0), (date(2025, 6, 3), 7.0), (date(2025, 6, 4), 4.0)
     ]
 
 
@@ -11192,14 +11165,14 @@ async def test_manual_review_facts_period_validation(async_session):
     app.dependency_overrides[api.get_async_db] = override_db
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
-        invalid_month_response = await client.get(
+        invalid_day_response = await client.get(
             '/dashboard/plan/reviews_fact',
-            params={'month': '2025-06-01', 'company_id': 1},
+            params={'day': '2025-06', 'company_id': 1},
         )
         negative_response = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-06',
+                'day': '2025-06-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': -1}],
             },
@@ -11207,14 +11180,14 @@ async def test_manual_review_facts_period_validation(async_session):
         zero_response = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-06',
+                'day': '2025-06-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 0}],
             },
         )
     app.dependency_overrides.clear()
 
-    assert invalid_month_response.status_code == 400
+    assert invalid_day_response.status_code == 400
     assert negative_response.status_code == 400
     assert zero_response.status_code == 200
     zero_row = zero_response.json()['data']['rows'][0]
@@ -11249,19 +11222,19 @@ async def test_manual_review_facts_follow_the_plan_staff_category(async_session)
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         editor_response = await client.get(
             '/dashboard/plan/reviews_fact',
-            params={'month': '2025-03', 'company_id': 1},
+            params={'day': '2025-03-15', 'company_id': 1},
         )
         save_response = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-03',
+                'day': '2025-03-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 5, 'value': 6}],
             },
         )
         plan_response = await client.get(
             '/dashboard/widget/plan_fact',
-            params={'start_date': '2025-03-01', 'end_date': '2025-03-20', 'company_id': 1},
+            params={'start_date': '2025-03-01', 'end_date': '2025-03-31', 'company_id': 1},
         )
     app.dependency_overrides.clear()
 
@@ -11287,8 +11260,8 @@ async def test_manual_review_facts_keep_branch_total_equal_to_staff_rows(async_s
     async_session.add(Staff(id=3, name='Ex Admin', position='Барбер', company_id=1, fired=0))
     async_session.add_all([
         ManualFactMetric(
-            period_start=date(2025, 4, 1),
-            period_end=date(2025, 4, 30),
+            period_start=date(2025, 4, 15),
+            period_end=date(2025, 4, 15),
             company_id=1,
             staff_id=staff_id,
             metric_code='reviews_qty',
@@ -11308,7 +11281,7 @@ async def test_manual_review_facts_keep_branch_total_equal_to_staff_rows(async_s
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         editor_response = await client.get(
             '/dashboard/plan/reviews_fact',
-            params={'month': '2025-04', 'company_id': 1},
+            params={'day': '2025-04-15', 'company_id': 1},
         )
         plan_response = await client.get(
             '/dashboard/widget/plan_fact',
@@ -11317,7 +11290,7 @@ async def test_manual_review_facts_keep_branch_total_equal_to_staff_rows(async_s
         clear_response = await client.post(
             '/dashboard/plan/reviews_fact',
             json={
-                'month': '2025-04',
+                'day': '2025-04-15',
                 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 3, 'value': None, 'previous_value': 4}],
             },
@@ -11358,8 +11331,8 @@ async def test_manual_review_facts_respect_reporting_start_date(async_session):
     async_session.add(Staff(id=2, name='Admin', position='Администратор', company_id=1, fired=0))
     async_session.add_all([
         ManualFactMetric(
-            period_start=date(2025, month, 1),
-            period_end=date(2025, month, monthrange(2025, month)[1]),
+            period_start=date(2025, month, 15),
+            period_end=date(2025, month, 15),
             company_id=1,
             staff_id=2,
             metric_code='reviews_qty',
@@ -11387,7 +11360,7 @@ async def test_manual_review_facts_respect_reporting_start_date(async_session):
         )
         editor_response = await client.get(
             '/dashboard/plan/reviews_fact',
-            params={'month': '2025-04', 'company_id': 1},
+            params={'day': '2025-04-15', 'company_id': 1},
         )
     app.dependency_overrides.clear()
 
@@ -14090,8 +14063,8 @@ async def test_plan_fact_uses_standalone_input_category_for_former_admin(async_s
             updated_at=datetime(2025, 1, 1),
         ),
         ManualFactMetric(
-            period_start=date(2025, 1, 1),
-            period_end=date(2025, 1, 31),
+            period_start=date(2025, 1, 15),
+            period_end=date(2025, 1, 15),
             company_id=1,
             staff_id=2,
             metric_code='reviews_qty',
@@ -14110,7 +14083,7 @@ async def test_plan_fact_uses_standalone_input_category_for_former_admin(async_s
     )
     editor = await dashboard_service.fetch_manual_review_facts(
         async_session,
-        '2025-01',
+        '2025-01-15',
         company_id=1,
         portal_account_id=None,
     )

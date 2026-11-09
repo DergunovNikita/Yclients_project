@@ -185,11 +185,12 @@ async def test_the_manual_fact_editor_of_a_linked_account_edits_the_real_row(lin
 
     assert (await _link(db, REAL_ANNA)).status_code == 200
     editor = await _request(
-        db, ADMIN, 'admin', 'GET', '/dashboard/plan/reviews_fact', params={'month': '2025-03', 'company_id': 1}
+        db, ADMIN, 'admin', 'GET', '/dashboard/plan/reviews_fact', params={'day': '2025-03-15', 'company_id': 1}
     )
 
     assert editor.status_code == 200, editor.text
-    assert {row['staff_id']: row['value'] for row in editor.json()['data']['rows']} == {REAL_ANNA: 4.0}
+    # The merged value is a whole-month row, so the editor shows it as the real row's legacy value.
+    assert {row['staff_id']: row['legacy_month_value'] for row in editor.json()['data']['rows']} == {REAL_ANNA: 4.0}
 
 
 @pytest.mark.asyncio
@@ -409,3 +410,24 @@ async def test_service_rows_are_not_listed_as_staff_without_an_account(link_db):
     unlinked = {row['staff_id'] for row in listing.json()['data'] if not row['is_portal_user']}
     assert {REAL_ANNA, REAL_BORIS} <= unlinked
     assert not {WAITLIST, PLACEHOLDER} & unlinked
+
+
+@pytest.mark.asyncio
+async def test_linking_is_refused_when_the_move_would_mix_month_and_daily_rows(link_db):
+    db = link_db
+    mirror = await _mirror_id(db, ADMIN, 1)
+    november = (date(2026, 11, 1), date(2026, 11, 30))
+    db.add_all([
+        ManualFactMetric(period_start=november[0], period_end=november[1], company_id=1, staff_id=mirror,
+                         metric_code='reviews_qty', value=2.0, updated_at=datetime(2026, 11, 8)),
+        ManualFactMetric(period_start=date(2026, 11, 3), period_end=date(2026, 11, 3), company_id=1,
+                         staff_id=REAL_ANNA, metric_code='reviews_qty', value=1.0, updated_at=datetime(2026, 11, 8)),
+    ])
+    await db.commit()
+
+    response = await _link(db, REAL_ANNA)
+
+    assert response.status_code == 409, response.text
+    assert (await db.get(Staff, REAL_ANNA)).portal_user_id is None
+    assert (await db.get(Staff, mirror)).fired == 0
+    assert (await _facts(db, mirror)) == {(november[0], 'reviews_qty'): 2.0}

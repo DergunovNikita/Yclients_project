@@ -103,8 +103,8 @@ async def test_an_administrator_still_enters_manual_facts_for_themselves_only(as
         try:
             async with client:
                 return await client.post('/dashboard/plan/reviews_fact', json={
-                    'month': '2025-03', 'company_id': company_id,
-                    'items': [{'company_id': company_id, 'staff_id': staff_id, 'value': 4.0, 'previous_value': 5.0}],
+                    'day': '2025-04-14', 'company_id': company_id,
+                    'items': [{'company_id': company_id, 'staff_id': staff_id, 'value': 4.0, 'previous_value': None}],
                 })
         finally:
             app.dependency_overrides.clear()
@@ -113,7 +113,7 @@ async def test_an_administrator_still_enters_manual_facts_for_themselves_only(as
     colleague = await save(1, 1)
     own = await save(1, ADMIN_STAFF_ID)
     read = await _get(
-        async_session, '/dashboard/plan/reviews_fact', _admin(), month='2025-03', company_id=1, staff_id=1
+        async_session, '/dashboard/plan/reviews_fact', _admin(), day='2025-04-14', company_id=1, staff_id=1
     )
 
     assert colleague.status_code == 403 and colleague.json()['detail'] == 'Staff member not allowed'

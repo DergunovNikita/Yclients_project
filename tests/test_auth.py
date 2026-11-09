@@ -3845,7 +3845,7 @@ async def test_me_ignores_a_staff_row_outside_the_assigned_branches(auth_db, mon
     async with AsyncClient(transport=transport, base_url='http://test') as client:
         headers = {'Authorization': f'Bearer {await issue_access_token(auth_db, 9103, "barber")}'}
         me = await client.get('/auth/me', headers=headers)
-        editor = await client.get('/dashboard/plan/reviews_fact', params={'month': '2025-01'}, headers=headers)
+        editor = await client.get('/dashboard/plan/reviews_fact', params={'day': '2025-01-15'}, headers=headers)
         summary = await get_summary(
             client,
             params={'start_date': '2025-01-01', 'end_date': '2025-01-31'},

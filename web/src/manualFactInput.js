@@ -47,14 +47,14 @@ export function buildManualFactItems(rows, rawByKey) {
 }
 
 /**
- * The month / branch / staff a save is addressed to: the ones the rows were loaded for. The
- * pickers may already show another month (reload in flight or failed), and `previous_value`
- * only means anything against the month it came from.
+ * The day / branch / staff a save is addressed to: the ones the rows were loaded for. The
+ * pickers may already show another day (reload in flight or failed), and `previous_value`
+ * only means anything against the day it came from.
  */
 export function manualFactSaveScope(loadedFilters, liveFilters) {
   const filters = loadedFilters || liveFilters;
   return {
-    month: filters.month,
+    day: filters.day,
     company_id: filters.branch ? Number(filters.branch) : null,
     staff_id: filters.staff ? Number(filters.staff) : null,
   };

@@ -143,7 +143,7 @@ class ManualFactItem(BaseModel):
 
 
 class ManualFactsPayload(BaseModel):
-    month: str
+    day: str
     company_id: int | None = None
     staff_id: int | None = None
     items: list[ManualFactItem]
@@ -958,7 +958,7 @@ async def _manual_fact_get(
     db: AsyncSession,
     ctx: AccessContext,
     fetch_fn: Callable[..., Any],
-    month: str,
+    day: str,
     company_id: int | None,
     staff_id: int | None,
 ) -> dict[str, Any]:
@@ -976,7 +976,7 @@ async def _manual_fact_get(
     with _value_error_as_400():
         data = await fetch_fn(
             db,
-            month,
+            day,
             scope['company_id'],
             staff_id,
             allowed_company_ids=branch_ids,
@@ -991,7 +991,7 @@ async def _manual_fact_post(
     db: AsyncSession,
     ctx: AccessContext,
     metric_code: str,
-    month: str,
+    day: str,
     company_id: int | None,
     staff_id: int | None,
     items: list[Any],
@@ -1011,7 +1011,7 @@ async def _manual_fact_post(
         try:
             data = await save_manual_facts(
                 db,
-                month,
+                day,
                 metric_code,
                 scope['company_id'],
                 staff_id,
@@ -1023,7 +1023,7 @@ async def _manual_fact_post(
                 portal_account_id=ctx.portal_account_id,
             )
         except ManualFactConflict as exc:
-            logger.info('manual fact save refused, stale value: month=%s user=%s', month, ctx.user_id)
+            logger.info('manual fact save refused, stale value: day=%s user=%s', day, ctx.user_id)
             raise HTTPException(status_code=409, detail=MANUAL_FACT_CONFLICT_DETAIL) from exc
         except ManualFactRowNotOpen as exc:
             # The reason names staff and branch ids, and the SPA prints `detail` verbatim —
@@ -1035,13 +1035,13 @@ async def _manual_fact_post(
 
 @router.get('/plan/reviews_fact')
 async def dashboard_plan_reviews_fact(
-    month: str = Query(..., description='Reviews fact month in YYYY-MM format'),
+    day: str = Query(..., description='Reviews fact day in YYYY-MM-DD format'),
     company_id: int | None = Query(None),
     staff_id: int | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    return await _manual_fact_get(db, ctx, fetch_manual_review_facts, month, company_id, staff_id)
+    return await _manual_fact_get(db, ctx, fetch_manual_review_facts, day, company_id, staff_id)
 
 
 @router.post('/plan/reviews_fact', dependencies=[Depends(forbid_demo)])
@@ -1051,19 +1051,19 @@ async def dashboard_plan_reviews_fact_save(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     return await _manual_fact_post(
-        db, ctx, REVIEWS_QTY_CODE, payload.month, payload.company_id, payload.staff_id, payload.items
+        db, ctx, REVIEWS_QTY_CODE, payload.day, payload.company_id, payload.staff_id, payload.items
     )
 
 
 @router.get('/plan/opz_fact')
 async def dashboard_plan_opz_fact(
-    month: str = Query(..., description='Additional OPZ month in YYYY-MM format'),
+    day: str = Query(..., description='Additional OPZ day in YYYY-MM-DD format'),
     company_id: int | None = Query(None),
     staff_id: int | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
-    return await _manual_fact_get(db, ctx, fetch_manual_opz_facts, month, company_id, staff_id)
+    return await _manual_fact_get(db, ctx, fetch_manual_opz_facts, day, company_id, staff_id)
 
 
 @router.post('/plan/opz_fact', dependencies=[Depends(forbid_demo)])
@@ -1073,7 +1073,7 @@ async def dashboard_plan_opz_fact_save(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     return await _manual_fact_post(
-        db, ctx, OPZ_QTY_CODE, payload.month, payload.company_id, payload.staff_id, payload.items
+        db, ctx, OPZ_QTY_CODE, payload.day, payload.company_id, payload.staff_id, payload.items
     )
 
 

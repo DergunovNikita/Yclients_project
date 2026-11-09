@@ -131,19 +131,19 @@ async def test_mirror_row_is_not_in_the_editors_and_cannot_be_written(async_sess
         ('reviews_qty', dashboard_service.fetch_manual_review_facts),
         ('opz_qty', dashboard_service.fetch_manual_opz_facts),
     ):
-        editor = await fetch(async_session, '2025-03', company_id=1, portal_account_id=None)
+        editor = await fetch(async_session, '2025-03-15', company_id=1, portal_account_id=None)
         assert MIRROR_ID not in {row['staff_id'] for row in editor['rows']}
         assert ADMIN_ID in {row['staff_id'] for row in editor['rows']}
         with pytest.raises(dashboard_service.ManualFactConflict):
             # The stored value on the mirror is not shown, so a stale editor that still shows it is a conflict.
             await dashboard_service.save_manual_facts(
-                async_session, '2025-03', code, 1, None,
+                async_session, '2025-03-15', code, 1, None,
                 [{'company_id': 1, 'staff_id': MIRROR_ID, 'value': 9, 'previous_value': 5}],
                 actor_user_id=None, portal_account_id=None,
             )
         with pytest.raises(dashboard_service.ManualFactRowNotOpen):
             await dashboard_service.save_manual_facts(
-                async_session, '2025-03', code, 1, None,
+                async_session, '2025-03-15', code, 1, None,
                 [{'company_id': 1, 'staff_id': MIRROR_ID, 'value': 9, 'previous_value': None}],
                 actor_user_id=None, portal_account_id=None,
             )

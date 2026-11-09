@@ -212,7 +212,7 @@ async def test_duplicate_manual_fact_rows_are_refused(async_session):
 
     with pytest.raises(ValueError, match='duplicate row for staff 11'):
         await dashboard_service.save_manual_facts(
-            async_session, '2025-01', 'reviews_qty', None, None,
+            async_session, '2025-01-15', 'reviews_qty', None, None,
             [
                 {'company_id': 1, 'staff_id': 11, 'value': 3, 'previous_value': None},
                 {'company_id': 1, 'staff_id': 11, 'value': 4, 'previous_value': None},

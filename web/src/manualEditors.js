@@ -86,13 +86,29 @@ function applyManualFactDraft(editorEl, items) {
 }
 
 const manualFactParams = (filters) => ({
-  month: filters.month,
+  day: filters.day,
   company_id: filters.branch,
   staff_id: filters.staff,
 });
 
-// The cell the person types into; reviews and OPZ share it.
-function manualFactInputCell(row) {
+function monthName(month) {
+  const [year, number] = String(month).split('-').map(Number);
+  if (!Number.isInteger(year) || !Number.isInteger(number)) return '';
+  return new Intl.DateTimeFormat(intlLocale(), { month: 'long', year: 'numeric', timeZone: 'UTC' })
+    .format(new Date(Date.UTC(year, number - 1, 1)));
+}
+
+// The cell the person types into; reviews and OPZ share it. A row that already holds one number for the whole month
+// cannot be entered by day: it gets a note instead of an input, and so is never posted.
+function manualFactInputCell(row, month) {
+  if (row.editable === false) {
+    const note = t('dash.manualFactLegacyMonth', {
+      month: monthName(month),
+      value: formatNumber(row.legacy_month_value),
+    });
+    return `
+                    <td class="number meta">${escapeHtml(note)}</td>`;
+  }
   return `
                     <td class="number">
                       <input
@@ -107,7 +123,9 @@ function manualFactInputCell(row) {
                     </td>`;
 }
 
-function reviewFactTableHtml(rows) {
+const monthValueCell = (row) => `<td class="number">${escapeHtml(formatNumber(row.month_value || 0))}</td>`;
+
+function reviewFactTableHtml(rows, month) {
   return `
       <div class="table-scroll manual-fact-scroll">
         <table class="manual-fact-table">
@@ -116,6 +134,7 @@ function reviewFactTableHtml(rows) {
               <th>${t('dash.branch')}</th>
               <th>${t('dash.administrator')}</th>
               <th class="number">${t('dash.reviewsFact')}</th>
+              <th class="number">${t('dash.manualFactMonthTotal')}</th>
               <th>${t('dash.manualFactAuthor')}</th>
             </tr>
           </thead>
@@ -128,7 +147,8 @@ function reviewFactTableHtml(rows) {
                 return `
                   <tr>
                     <td>${escapeHtml(branchRowTitle(row, t))}</td>
-                    <td>${escapeHtml(row.staff_name)}${inactiveMark}</td>${manualFactInputCell(row)}
+                    <td>${escapeHtml(row.staff_name)}${inactiveMark}</td>${manualFactInputCell(row, month)}
+                    ${monthValueCell(row)}
                     <td class="meta">${manualFactAuthorCell(row)}</td>
                   </tr>
                 `;
@@ -140,7 +160,7 @@ function reviewFactTableHtml(rows) {
     `;
 }
 
-function opzFactTableHtml(rows) {
+function opzFactTableHtml(rows, month) {
   return `
       <div class="table-scroll manual-fact-scroll">
         <table class="manual-fact-table">
@@ -151,6 +171,7 @@ function opzFactTableHtml(rows) {
               <th class="number">${t('dash.currentOpz')}</th>
               <th class="number">${t('dash.additionalOpz')}</th>
               <th class="number">${t('dash.opzFactTotal')}</th>
+              <th class="number">${t('dash.manualFactMonthTotal')}</th>
               <th>${t('dash.manualFactAuthor')}</th>
             </tr>
           </thead>
@@ -168,8 +189,9 @@ function opzFactTableHtml(rows) {
                   <tr data-current-value="${escapeHtml(current)}" data-counted="${row.counted === false ? 'false' : 'true'}">
                     <td>${escapeHtml(branchRowTitle(row, t))}</td>
                     <td>${escapeHtml(row.staff_name)}${inactiveMark}</td>
-                    <td class="number">${escapeHtml(formatNumber(current))}</td>${manualFactInputCell(row)}
+                    <td class="number">${escapeHtml(formatNumber(current))}</td>${manualFactInputCell(row, month)}
                     <td class="number" data-total-cell>${escapeHtml(formatNumber(row.total_value ?? current))}</td>
+                    ${monthValueCell(row)}
                     <td class="meta">${manualFactAuthorCell(row)}</td>
                   </tr>
                 `;
@@ -265,6 +287,8 @@ export function createManualEditors({ els, filterEls, host }) {
   const review = createManualEntryEditor({
     view: 'reviewFacts',
     filter: filterEls.reviewFacts,
+    periodField: 'day',
+    emptyPeriodRestores: true,
     editorEl: els.reviewFactEditor,
     saveButton: els.reviewFactSave,
     path: '/dashboard/plan/reviews_fact',
@@ -289,10 +313,11 @@ export function createManualEditors({ els, filterEls, host }) {
       els.reviewFactMeta.textContent = t('dash.reviewFactMeta', {
         admins: review.rows.length,
         reviews: formatNumber(totalValue),
+        month: formatNumber(data?.month_total_value || 0),
       });
       els.reviewFactEditor.innerHTML = emptyRows(review)
         ? `<div class="empty compact">${t('dash.noActiveAdministrators')}</div>`
-        : reviewFactTableHtml(review.rows);
+        : reviewFactTableHtml(review.rows, data?.month);
       review.accept(data, loadedFilters);
     },
   }, host);
@@ -307,7 +332,8 @@ export function createManualEditors({ els, filterEls, host }) {
 
   // The fact is the sum, so the row shows it before saving — not only after the reload.
   function refreshOpzFactTotals() {
-    let currentTotal = 0;
+    // Every row's calculated value counts, also one without an input (entered as a whole month the old way).
+    const currentTotal = opz.rows.reduce((sum, row) => sum + Number(row.current_value || 0), 0);
     let additionalTotal = 0;
     els.opzFactEditor.querySelectorAll('input[data-staff-id]').forEach((input) => {
       const row = input.closest('tr');
@@ -322,7 +348,6 @@ export function createManualEditors({ els, filterEls, host }) {
       const additional = valid && counted ? Math.round(parsed) : 0;
       const totalCell = row.querySelector('[data-total-cell]');
       if (totalCell) totalCell.textContent = formatNumber(current + additional);
-      currentTotal += current;
       additionalTotal += additional;
     });
     els.opzFactMeta.textContent = opzMeta(currentTotal, additionalTotal, currentTotal + additionalTotal);
@@ -331,6 +356,8 @@ export function createManualEditors({ els, filterEls, host }) {
   const opz = createManualEntryEditor({
     view: 'opzFacts',
     filter: filterEls.opzFacts,
+    periodField: 'day',
+    emptyPeriodRestores: true,
     editorEl: els.opzFactEditor,
     saveButton: els.opzFactSave,
     path: '/dashboard/plan/opz_fact',
@@ -361,7 +388,7 @@ export function createManualEditors({ els, filterEls, host }) {
       );
       els.opzFactEditor.innerHTML = emptyRows(opz)
         ? `<div class="empty compact">${t('dash.noActiveAdministrators')}</div>`
-        : opzFactTableHtml(opz.rows);
+        : opzFactTableHtml(opz.rows, data?.month);
       opz.accept(data, loadedFilters);
     },
   }, host);
@@ -430,7 +457,7 @@ export function createManualEditors({ els, filterEls, host }) {
     path: '/dashboard/payments/yandex_pay',
     params: (filters) => ({ month: filters.month, company_id: filters.branch }),
     conflictMessageKey: 'dash.yandexPayConflict',
-    emptyMonthRestores: true,
+    emptyPeriodRestores: true,
     draft: { id: 'yandexPayFacts', collect: yandexDraftRows, apply: applyYandexDraft },
     draftSnapshot: () => {
       const dates = yandexRawDates();

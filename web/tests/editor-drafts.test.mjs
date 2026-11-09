@@ -379,7 +379,7 @@ test('a draft whose every row moved is dropped with an outdated notice and stays
   assert.equal(second.notices.length, 1);
 });
 
-test('a draft for another month is not applied to this one', async () => {
+test('a draft for another day is not applied to this one', async () => {
   const storage = new MemoryStorage();
   const first = openPage(storage);
   await loadReview(first);
@@ -387,11 +387,11 @@ test('a draft for another month is not applied to this one', async () => {
   first.controller.flush();
 
   const second = openPage(storage);
-  second.env.filterEls.reviewFacts.month.value = '2026-08';
+  second.env.filterEls.reviewFacts.day.value = '2026-09-14';
   await loadReview(second);
   assert.equal(second.env.els.reviewFactEditor.parsed.inputs[0].value, '5');
   assert.equal(second.editors.review.dirty, false);
-  assert.equal(storage.length, 1, 'the September draft is still waiting for September');
+  assert.equal(storage.length, 1, 'the draft of the 15th is still waiting for that day');
 });
 
 test('restoring never sends anything: the save still carries previous_value from the server', async () => {
@@ -462,8 +462,8 @@ test('leaving through the guard discards the draft', async () => {
   await type(page, page.env.els.reviewFactEditor, 0, '9');
   page.controller.flush();
   page.env.script(reviewGet, ok(REVIEW_ROWS));
-  page.env.filterEls.reviewFacts.month.value = '2026-08';
-  await page.env.filterEls.reviewFacts.month.dispatch('change');
+  page.env.filterEls.reviewFacts.day.value = '2026-09-14';
+  await page.env.filterEls.reviewFacts.day.dispatch('change');
   assert.equal(storage.length, 0);
 });
 

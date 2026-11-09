@@ -36,11 +36,11 @@ async def test_manual_fact_above_the_ceiling_is_a_400(async_session, path):
     try:
         async with await _client(async_session) as client:
             too_big = await client.post(path, json={
-                'month': '2025-01', 'company_id': 1,
+                'day': '2025-01-15', 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': 1e300}],
             })
             at_cap = await client.post(path, json={
-                'month': '2025-01', 'company_id': 1,
+                'day': '2025-01-15', 'company_id': 1,
                 'items': [{'company_id': 1, 'staff_id': 2, 'value': dashboard_service.MAX_INPUT_VALUE}],
             })
     finally:

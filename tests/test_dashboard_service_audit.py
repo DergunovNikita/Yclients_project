@@ -69,7 +69,7 @@ async def test_staff_plan_inputs_are_cut_by_the_reporting_window(async_session):
 
 
 @pytest.mark.asyncio
-async def test_manual_fact_write_refuses_a_month_after_the_branch_left(async_session):
+async def test_manual_fact_write_refuses_a_day_after_the_branch_left(async_session):
     """The editor hides such a branch, so a value POSTed into it could never be seen or cleared."""
     await _seed_leaving_branch(async_session)
     await async_session.commit()
@@ -78,20 +78,22 @@ async def test_manual_fact_write_refuses_a_month_after_the_branch_left(async_ses
 
     with pytest.raises(dashboard_service.ManualFactRowNotOpen):
         await dashboard_service.save_manual_facts(
-            async_session, '2025-09', dashboard_service.OPZ_QTY_CODE, 1, None, [row], **scope
+            async_session, '2025-09-01', dashboard_service.OPZ_QTY_CODE, 1, None, [row], **scope
         )
     assert (await async_session.execute(select(ManualFactMetric))).scalars().all() == []
 
-    # An untouched empty row is still ignored, and the last month of the window is still ours.
+    # An untouched empty row is still ignored, and the last day of the window is still ours.
     await dashboard_service.save_manual_facts(
-        async_session, '2025-09', dashboard_service.OPZ_QTY_CODE, 1, None,
+        async_session, '2025-09-01', dashboard_service.OPZ_QTY_CODE, 1, None,
         [{**row, 'value': None}], **scope,
     )
     await dashboard_service.save_manual_facts(
-        async_session, '2025-08', dashboard_service.OPZ_QTY_CODE, 1, None, [row], **scope
+        async_session, '2025-08-31', dashboard_service.OPZ_QTY_CODE, 1, None, [row], **scope
     )
     stored = (await async_session.execute(select(ManualFactMetric))).scalars().all()
-    assert [(item.period_start, item.value) for item in stored] == [(date(2025, 8, 1), 4.0)]
+    assert [(item.period_start, item.period_end, item.value) for item in stored] == [
+        (date(2025, 8, 31), date(2025, 8, 31), 4.0)
+    ]
 
 
 def _plan_payload():

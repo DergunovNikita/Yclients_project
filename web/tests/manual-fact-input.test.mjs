@@ -52,9 +52,9 @@ test('a row without a rendered cell is not posted', () => {
 
 test('the save goes to the scope the rows were loaded for, not to the picker', () => {
   // The picker may have moved on while the reload is in flight or has failed; the rows and
-  // their previous_value still belong to the loaded month.
-  const loaded = { month: '2025-01', branch: '1', staff: '' };
-  const live = { month: '2025-02', branch: '2', staff: '5' };
-  assert.deepEqual(manualFactSaveScope(loaded, live), { month: '2025-01', company_id: 1, staff_id: null });
-  assert.deepEqual(manualFactSaveScope(null, live), { month: '2025-02', company_id: 2, staff_id: 5 });
+  // their previous_value still belong to the loaded day.
+  const loaded = { day: '2025-01-10', branch: '1', staff: '' };
+  const live = { day: '2025-02-11', branch: '2', staff: '5' };
+  assert.deepEqual(manualFactSaveScope(loaded, live), { day: '2025-01-10', company_id: 1, staff_id: null });
+  assert.deepEqual(manualFactSaveScope(null, live), { day: '2025-02-11', company_id: 2, staff_id: 5 });
 });

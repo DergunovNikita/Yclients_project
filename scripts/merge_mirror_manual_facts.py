@@ -2,9 +2,10 @@
 
 Mirror rows (`source_type = 'portal'`; those of owners, branch admins and managers are not staff at all,
 `models.PORTAL_MIRROR_POSITIONS`) stop counting once the account is tied to the real row, so a manual value left on
-one is lost. This adds each non-zero value of the mirror to the same month and metric of the real row in the same
-branch; the mirror rows themselves stay untouched. The admin «link to YClients» action (`portal_staff_link`) uses the
-same `apply_moves`, and there the mirror's values are deleted once moved.
+one is lost. This adds each non-zero value of the mirror to the same period (a day, or a legacy whole month)
+and metric of the real row in the same branch; the mirror rows themselves stay untouched.
+The admin «link to YClients» action (`portal_staff_link`) uses the same `apply_moves`,
+and there the mirror's values are deleted once moved.
 
 Run: ``python -m scripts.merge_mirror_manual_facts --map <mirror_staff_id>:<real_staff_id> [--map ...]``
 Prints a plan and writes nothing; add ``--apply`` to write. One transaction, every moved value leaves a
@@ -56,6 +57,14 @@ class Move:
     @property
     def target_after(self) -> float:
         return (self.target_before or 0.0) + self.value
+
+
+def _is_daily(row: ManualFactMetric) -> bool:
+    return row.period_start == row.period_end
+
+
+def _next_month(day: date) -> date:
+    return date(day.year + day.month // 12, day.month % 12 + 1, 1)
 
 
 def parse_mappings(raw: list[str]) -> dict[int, int]:
@@ -125,10 +134,20 @@ async def plan_moves(db: AsyncSession, mappings: dict[int, int], *, lock: bool =
         raise MergeRefused(f'Source rows already merged: {", ".join(sorted(already_merged, key=int))}')
 
     moves: list[Move] = []
-    seen_targets: set[tuple[int, str, date]] = set()
+    seen_targets: set[tuple[int, str, date, date | None]] = set()
+    source_kinds: dict[tuple[int, str, date], bool] = {}
     for source in sources:
         target_id = mappings[int(source.staff_id)]
-        target_key = (target_id, source.metric_code, source.period_start)
+        daily = _is_daily(source)
+        month_start = source.period_start.replace(day=1)
+        label = f'{source.metric_code} {month_start:%Y-%m}'
+        if source_kinds.setdefault((target_id, source.metric_code, month_start), daily) != daily:
+            raise MergeRefused(
+                f'Staff {source.staff_id} has both a whole-month row and daily rows for {label}; resolve them first'
+            )
+        # A legacy month is one period whatever its end; a day is exactly its own date.
+        period_key = (source.period_start, source.period_end) if daily else (source.period_start, None)
+        target_key = (target_id, source.metric_code, *period_key)
         if target_key in seen_targets:
             # A legacy month split over several rows: the second add would be computed from the same stale target.
             raise MergeRefused(
@@ -140,11 +159,20 @@ async def plan_moves(db: AsyncSession, mappings: dict[int, int], *, lock: bool =
             ManualFactMetric.company_id == source.company_id,
             ManualFactMetric.staff_id == target_id,
             ManualFactMetric.metric_code == source.metric_code,
-            ManualFactMetric.period_start == source.period_start,
+            ManualFactMetric.period_start >= month_start,
+            ManualFactMetric.period_start < _next_month(month_start),
         )
         if lock:
             target_stmt = target_stmt.with_for_update()
-        targets = (await db.execute(target_stmt)).scalars().all()
+        month_rows = (await db.execute(target_stmt)).scalars().all()
+        # A zero row adds nothing, so it cannot double count: the editor ignores a zero legacy row too.
+        if any(_is_daily(row) != daily and row.value for row in month_rows):
+            raise MergeRefused(
+                f'Staff {target_id} holds {"whole-month" if daily else "daily"} rows for {label}, the mirror '
+                f'{"daily" if daily else "whole-month"} ones: a month must not mix both; resolve them first'
+            )
+        targets = [row for row in month_rows if _is_daily(row) == daily and row.period_start == source.period_start
+                   and (not daily or row.period_end == source.period_end)]
         if len(targets) > 1:
             raise MergeRefused(
                 f'Staff {target_id} has {len(targets)} rows for {source.metric_code} {source.period_start}; '
@@ -210,6 +238,7 @@ async def apply_moves(
                 'company_id': move.company_id,
                 'metric_code': move.metric_code,
                 'period_start': move.period_start.isoformat(),
+                'period_end': move.period_end.isoformat(),
                 'source_staff_id': move.source_staff_id,
                 'target_staff_id': move.target_staff_id,
                 'value': move.value,
@@ -223,15 +252,19 @@ async def apply_moves(
     return moves
 
 
+def _period_label(move: Move) -> str:
+    return f'{move.period_start:%Y-%m-%d}' if move.period_start == move.period_end else f'{move.period_start:%Y-%m}'
+
+
 def format_moves(moves: list[Move]) -> str:
-    header = f'{"source row":>10}  {"mirror":>9}  {"target":>9}  {"company":>9}  {"metric":<12}  {"month":<10}  ' \
+    header = f'{"source row":>10}  {"mirror":>9}  {"target":>9}  {"company":>9}  {"metric":<12}  {"period":<10}  ' \
              f'{"value":>8}  {"target before":>13}  {"target after":>12}'
     lines = [header]
     for move in moves:
         before = '(new row)' if move.target_before is None else f'{move.target_before:g}'
         lines.append(
             f'{move.source_row_id:>10}  {move.source_staff_id:>9}  {move.target_staff_id:>9}  {move.company_id:>9}  '
-            f'{move.metric_code:<12}  {move.period_start:%Y-%m}      {move.value:>8g}  {before:>13}  '
+            f'{move.metric_code:<12}  {_period_label(move):<10}  {move.value:>8g}  {before:>13}  '
             f'{move.target_after:>12g}'
         )
     return '\n'.join(lines)

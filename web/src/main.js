@@ -273,13 +273,13 @@ const filterEls = {
     load: document.getElementById('plan-load'),
   },
   reviewFacts: {
-    month: document.getElementById('review-fact-month'),
+    day: document.getElementById('review-fact-day'),
     branch: document.getElementById('review-fact-branch'),
     staff: document.getElementById('review-fact-staff'),
     load: document.getElementById('review-fact-load'),
   },
   opzFacts: {
-    month: document.getElementById('opz-fact-month'),
+    day: document.getElementById('opz-fact-day'),
     branch: document.getElementById('opz-fact-branch'),
     staff: document.getElementById('opz-fact-staff'),
     load: document.getElementById('opz-fact-load'),
@@ -838,17 +838,19 @@ function applyFilterMonth(filter) {
   return true;
 }
 
-function setManualFactDefaultMonths() {
-  const month = monthValue(branchToday());
-  filterEls.reviewFacts.month.value = month;
-  filterEls.opzFacts.month.value = month;
-  filterEls.yandexPay.month.value = month;
-  limitYandexPayMonth();
+function setManualFactDefaults() {
+  const day = inputDateValue(branchToday());
+  filterEls.reviewFacts.day.value = day;
+  filterEls.opzFacts.day.value = day;
+  filterEls.yandexPay.month.value = monthValue(branchToday());
+  limitManualFactPeriods();
 }
 
-// A month that has not started has nothing to enter; the server refuses it too. Read per
-// activation: a tab left open across the month boundary would otherwise keep the old limit.
-function limitYandexPayMonth() {
+// A day or month that has not started has nothing to enter; the server refuses it too. Read per
+// activation: a tab left open across midnight would otherwise keep the old limit.
+function limitManualFactPeriods() {
+  filterEls.reviewFacts.day.max = inputDateValue(branchToday());
+  filterEls.opzFacts.day.max = inputDateValue(branchToday());
   filterEls.yandexPay.month.max = monthValue(branchToday());
 }
 
@@ -2664,6 +2666,7 @@ async function loadBranches() {
 
 function filterPeriod(filter) {
   if (filter.start && filter.end) return { start: filter.start.value, end: filter.end.value };
+  if (filter.day) return { start: filter.day.value, end: filter.day.value };
   const range = monthRange(filter.month?.value);
   return range || { start: '', end: '' };
 }
@@ -2932,7 +2935,7 @@ function setActiveView(view) {
   els.reviewFactsView.classList.toggle('active', view === 'reviewFacts');
   els.opzFactsView.classList.toggle('active', view === 'opzFacts');
   els.yandexPayView.classList.toggle('active', view === 'yandexPayFacts');
-  if (view === 'yandexPayFacts') limitYandexPayMonth();
+  if (MANUAL_FACT_VIEWS.has(view) || view === 'yandexPayFacts') limitManualFactPeriods();
   els.reportsView.classList.toggle('active', view === 'reports');
   els.shell.classList.toggle('shell--wide', WIDE_VIEWS.has(view));
   els.viewLinks.forEach((link) => {
@@ -3222,7 +3225,7 @@ async function init() {
     afterChange: () => window.location.reload(),
   });
   [filterEls.overview, filterEls.plan].forEach((filter) => defaultDates(filter));
-  setManualFactDefaultMonths();
+  setManualFactDefaults();
   highlightOverviewPreset(overviewPreset);
   els.planSettingsMonth.value = currentMonthValue();
   renderServicesTable([]);

@@ -129,7 +129,7 @@ test('review: every row is posted with the value the last response showed, and t
   assert.deepEqual(posts(env), [{
     path: REVIEW.path,
     body: {
-      month: '2026-09',
+      day: '2026-09-15',
       company_id: null,
       staff_id: null,
       items: [
@@ -150,12 +150,12 @@ test('review: every row is posted with the value the last response showed, and t
   assert.deepEqual(posts(env)[1].body.items.map((item) => item.previous_value), [8, 2, 7]);
 });
 
-test('review: after a month change whose reload failed, every save still goes to the month the rows came from', async () => {
+test('review: after a day change whose reload failed, every save still goes to the day the rows came from', async () => {
   const { env } = await open(REVIEW);
   const editor = REVIEW.container(env);
   env.script(REVIEW.get, fail('down', 503, 'server_error'));
-  await change(REVIEW.filter(env).month, '2026-10');
-  assert.deepEqual(cells(editor), REVIEW_LOADED, 'the rows of the loaded month stay');
+  await change(REVIEW.filter(env).day, '2026-09-16');
+  assert.deepEqual(cells(editor), REVIEW_LOADED, 'the rows of the loaded day stay');
 
   env.script(REVIEW.post, ok(REVIEW.rows));
   await type(editor, 0, '8');
@@ -164,7 +164,7 @@ test('review: after a month change whose reload failed, every save still goes to
   await type(editor, 0, '9');
   await REVIEW.save(env).dispatch('click');
 
-  assert.deepEqual(posts(env).map((post) => post.body.month), ['2026-09', '2026-09']);
+  assert.deepEqual(posts(env).map((post) => post.body.day), ['2026-09-15', '2026-09-15']);
 });
 
 test('review: a cleared cell is posted as null, never as zero', async () => {
@@ -280,21 +280,21 @@ test('review: declining the unsaved-changes dialog puts the pickers back and loa
   await type(REVIEW.container(env), 0, '8');
 
   env.confirmAnswer = false;
-  await change(filter.month, '2026-08');
+  await change(filter.day, '2026-09-14');
   await change(filter.branch, '2');
   await change(filter.staff, '12');
   await filter.load.dispatch('click');
   assert.equal(env.confirmCalls, 4);
   assert.equal(gets(env).length, 1, 'nothing was loaded');
-  assert.deepEqual([filter.month.value, filter.branch.value, filter.staff.value], ['2026-09', '', '']);
+  assert.deepEqual([filter.day.value, filter.branch.value, filter.staff.value], ['2026-09-15', '', '']);
   assert.equal(REVIEW.container(env).parsed.inputs[0].value, '8', 'the draft is still there');
   assert.equal(REVIEW.state(env).dirty, true);
 
   env.confirmAnswer = true;
   env.script(REVIEW.get, ok(REVIEW.rows));
-  await change(filter.month, '2026-08');
-  assert.deepEqual(gets(env).at(-1).params, { month: '2026-08', company_id: '', staff_id: '' });
-  assert.equal(filter.month.value, '2026-08');
+  await change(filter.day, '2026-09-14');
+  assert.deepEqual(gets(env).at(-1).params, { day: '2026-09-14', company_id: '', staff_id: '' });
+  assert.equal(filter.day.value, '2026-09-14');
   assert.deepEqual(cells(REVIEW.container(env)), REVIEW_LOADED, 'the draft was given up');
   assert.equal(REVIEW.state(env).dirty, false);
 });
@@ -318,7 +318,7 @@ test('review: while a save is in flight the pickers cannot be moved, and no dial
 test('review: a clean editor follows every picker with the right query', async () => {
   const { env } = await open(REVIEW);
   const filter = REVIEW.filter(env);
-  for (const [picker, value] of [[filter.month, '2026-07'], [filter.branch, '1'], [filter.staff, '10']]) {
+  for (const [picker, value] of [[filter.day, '2026-09-13'], [filter.branch, '1'], [filter.staff, '10']]) {
     env.script(REVIEW.get, ok(REVIEW.rows));
     await change(picker, value);
   }
@@ -327,11 +327,11 @@ test('review: a clean editor follows every picker with the right query', async (
 
   assert.equal(env.confirmCalls, 0);
   assert.deepEqual(gets(env).map((get) => get.params), [
-    { month: '2026-09', company_id: '', staff_id: '' },
-    { month: '2026-07', company_id: '', staff_id: '' },
-    { month: '2026-07', company_id: '1', staff_id: '' },
-    { month: '2026-07', company_id: '1', staff_id: '10' },
-    { month: '2026-07', company_id: '1', staff_id: '10' },
+    { day: '2026-09-15', company_id: '', staff_id: '' },
+    { day: '2026-09-13', company_id: '', staff_id: '' },
+    { day: '2026-09-13', company_id: '1', staff_id: '' },
+    { day: '2026-09-13', company_id: '1', staff_id: '10' },
+    { day: '2026-09-13', company_id: '1', staff_id: '10' },
   ]);
 });
 
@@ -371,10 +371,10 @@ test('review: discarding restores the loaded values and pickers, and does nothin
 
   const { env, impl } = await open(REVIEW);
   await type(REVIEW.container(env), 0, '8');
-  REVIEW.filter(env).month.value = '2026-01';
+  REVIEW.filter(env).day.value = '2026-09-01';
   impl.discard();
   assert.deepEqual(cells(REVIEW.container(env)), REVIEW_LOADED);
-  assert.equal(REVIEW.filter(env).month.value, '2026-09');
+  assert.equal(REVIEW.filter(env).day.value, '2026-09-15');
   assert.equal(REVIEW.state(env).dirty, false);
 });
 
@@ -401,7 +401,7 @@ test('opz: the save goes to the OPZ endpoint with previous values, and the respo
   assert.deepEqual(posts(env), [{
     path: OPZ.path,
     body: {
-      month: '2026-09',
+      day: '2026-09-15',
       company_id: null,
       staff_id: null,
       items: [
@@ -526,13 +526,13 @@ test('yandex: a half-typed month is put back without a request', async () => {
   assert.equal(gets(env).length, 1);
 });
 
-test('a month change rebuilds the pickers only after the unsaved-changes dialog is answered', async () => {
+test('a day change rebuilds the pickers only after the unsaved-changes dialog is answered', async () => {
   const env = makeEnv();
   const refilters = [];
   const impl = createImpl(env, {
     refilterForPeriod: async (filter) => {
-      env.log.push(['refilterForPeriod', filter.month.id]);
-      refilters.push(filter.month.id);
+      env.log.push(['refilterForPeriod', filter.day.id]);
+      refilters.push(filter.day.id);
     },
   });
   impl.setActiveView('reviewFacts');
@@ -542,26 +542,26 @@ test('a month change rebuilds the pickers only after the unsaved-changes dialog 
   await env.els.reviewFactEditor.dispatch('input', { target: env.els.reviewFactEditor.parsed.inputs[0] });
 
   env.confirmAnswer = false;
-  env.filterEls.reviewFacts.month.value = '2026-08';
-  await env.filterEls.reviewFacts.month.dispatch('change');
-  assert.deepEqual(refilters, [], 'declined: nothing was rebuilt for a month the user did not keep');
-  assert.equal(env.filterEls.reviewFacts.month.value, '2026-09');
+  env.filterEls.reviewFacts.day.value = '2026-09-14';
+  await env.filterEls.reviewFacts.day.dispatch('change');
+  assert.deepEqual(refilters, [], 'declined: nothing was rebuilt for a day the user did not keep');
+  assert.equal(env.filterEls.reviewFacts.day.value, '2026-09-15');
 
   env.confirmAnswer = true;
   env.script('GET /dashboard/plan/reviews_fact', { ok: { data: { rows: [] } } });
-  env.filterEls.reviewFacts.month.value = '2026-08';
-  await env.filterEls.reviewFacts.month.dispatch('change');
-  assert.deepEqual(refilters, ['review-month']);
+  env.filterEls.reviewFacts.day.value = '2026-09-14';
+  await env.filterEls.reviewFacts.day.dispatch('change');
+  assert.deepEqual(refilters, ['review-day']);
   const order = env.log.map((entry) => entry[0]);
   assert.ok(order.lastIndexOf('refilterForPeriod') < order.lastIndexOf('fetchJson'), 'the lists are rebuilt before the load');
 });
 
-test('a month change whose refilter was superseded does not load', async () => {
+test('a day change whose refilter was superseded does not load', async () => {
   const env = makeEnv();
   const impl = createImpl(env, { refilterForPeriod: async () => false });
   impl.setActiveView('opzFacts');
-  env.filterEls.opzFacts.month.value = '2026-08';
-  await env.filterEls.opzFacts.month.dispatch('change');
+  env.filterEls.opzFacts.day.value = '2026-09-14';
+  await env.filterEls.opzFacts.day.dispatch('change');
   assert.equal(env.log.some((entry) => entry[0] === 'fetchJson'), false);
 });
 
@@ -583,4 +583,45 @@ test('the editor takes no input while its save is in flight and takes it again a
   env.release('POST /dashboard/plan/reviews_fact', { ok: rows });
   await saving;
   assert.equal(env.els.reviewFactEditor.inert, false);
+});
+
+test('a row entered as one number for the whole month has no input and is never posted', async () => {
+  for (const [spec, month] of [[REVIEW, '2026-09'], [OPZ, '2026-09'], [REVIEW, undefined], [OPZ, undefined]]) {
+    const legacyRows = withRows(spec.rows, (rows) => {
+      rows[1].editable = false;
+      rows[1].legacy_month_value = 34;
+      rows[1].value = null;
+    });
+    legacyRows.data.month = month;
+    const { env, impl } = page(spec);
+    impl.setActiveView(spec.view);
+    env.script(spec.get, ok(legacyRows));
+    await spec.filter(env).load.dispatch('click');
+
+    assert.equal(spec.container(env).parsed.inputs.length, 2, `${spec.view}: the legacy row draws no input`);
+    env.script(spec.post, ok(legacyRows));
+    await type(spec.container(env), 0, '9');
+    await spec.save(env).dispatch('click');
+    assert.deepEqual(
+      posts(env)[0].body.items.map((item) => item.staff_id),
+      [10, 12],
+      `${spec.view}: only the rows that can be entered go out`,
+    );
+  }
+});
+
+test('a cleared day picker puts the loaded day back without a request', async () => {
+  for (const spec of [REVIEW, OPZ]) {
+    const { env } = await open(spec);
+    await change(spec.filter(env).day, '');
+    assert.equal(spec.filter(env).day.value, '2026-09-15');
+    assert.equal(gets(env).length, 1);
+  }
+});
+
+test('a day change reloads with the day in the query', async () => {
+  const { env } = await open(OPZ);
+  env.script(OPZ.get, ok(OPZ.rows));
+  await change(OPZ.filter(env).day, '2026-09-10');
+  assert.deepEqual(gets(env).at(-1).params, { day: '2026-09-10', company_id: '', staff_id: '' });
 });
