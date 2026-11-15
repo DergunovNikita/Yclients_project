@@ -101,6 +101,7 @@ import { createManualEditors } from './manualEditors.js';
 import './editorDrafts.css';
 import './loader.css';
 import './tableSnapshot.css';
+import { keepFactRows } from './planSnapshot.js';
 import { openTableSnapshot } from './tableSnapshot.js';
 import { mountLoader, stopLoaderWithRequest } from './loader.js';
 import { bindDraftFlush, createDraftController, fingerprint } from './editorDrafts.js';
@@ -354,6 +355,8 @@ let reportsController = null;
 let selectedTenant = null;
 let retryCurrentView = null;
 let currentPlanFactPayload = null;
+// Scope line of the rendered plan/fact view; the fact-only snapshot captions itself with it.
+let planScopeText = '';
 let hiddenPlanMetricCodes = new Set();
 // "table" (plan/fact rows) or "board" (plan values only, one column per person); remembered per viewer.
 const PLAN_VIEW_KEY = 'portal-plan-fact-view/v1';
@@ -1384,7 +1387,7 @@ function renderPlanGroupRows(group, metrics, cells = null, { showBranch = false 
   const cellsByCode = cells || new Map((group.metrics || []).map((cell) => [cell.code, cell]));
   return PLAN_ROW_TYPES
     .map(([field, labelKey], index) => `
-      <tr>
+      <tr data-plan-row="${field}">
         ${
           index === 0
             ? `<th class="branch-cell" rowspan="${PLAN_ROW_TYPES.length}">${escapeHtml(group.title)}${
@@ -1528,6 +1531,9 @@ function renderSelectedStaffPlanTable(staffPlan) {
   const title = t('dash.staffPlanTitle', {
     name: staffPlan.title || t('dash.staffFallbackLower'),
   });
+  const factTitle = t('dash.staffFactTitle', {
+    name: staffPlan.title || t('dash.staffFallbackLower'),
+  });
   return PLAN_SCOPE_ORDER.map((scope) => {
     const metrics = staffPlan.metrics.filter(
       (metric) => (metric.calculation_scope || 'personal') === scope,
@@ -1536,7 +1542,7 @@ function renderSelectedStaffPlanTable(staffPlan) {
     return `
       <section class="plan-section">
         <div class="plan-section-title">
-          <h3>${escapeHtml(`${title} · ${planScopeLabel(scope)}`)}</h3>
+          <h3 data-fact-title="${escapeHtml(`${factTitle} · ${planScopeLabel(scope)}`)}">${escapeHtml(`${title} · ${planScopeLabel(scope)}`)}</h3>
           <span class="meta">${escapeHtml(staffPlan.category_label || '')}</span>
         </div>
         ${planScopeHintHtml(scope)}
@@ -1545,18 +1551,18 @@ function renderSelectedStaffPlanTable(staffPlan) {
             <thead>
               <tr>
                 <th>KPI</th>
-                <th class="number">${t('dash.plan')}</th>
-                <th class="number">${t('dash.fact')}</th>
-                <th class="number">${t('dash.completionPct')}</th>
+                <th class="number" data-plan-col="plan">${t('dash.plan')}</th>
+                <th class="number" data-plan-col="fact">${t('dash.fact')}</th>
+                <th class="number" data-plan-col="completion_pct">${t('dash.completionPct')}</th>
               </tr>
             </thead>
             <tbody>
               ${metrics.map((metric) => `
                 <tr>
                   <td>${escapeHtml(metric.label)}</td>
-                  <td class="number">${escapeHtml(formatMetricValue(metric.plan, metric.format))}</td>
-                  <td class="number">${escapeHtml(formatMetricValue(metric.fact, metric.format))}</td>
-                  <td class="number metric-status ${escapeHtml(metric.status || 'no-plan')}">
+                  <td class="number" data-plan-col="plan">${escapeHtml(formatMetricValue(metric.plan, metric.format))}</td>
+                  <td class="number" data-plan-col="fact">${escapeHtml(formatMetricValue(metric.fact, metric.format))}</td>
+                  <td class="number metric-status ${escapeHtml(metric.status || 'no-plan')}" data-plan-col="completion_pct">
                     ${escapeHtml(formatMetricValue(metric.completion_pct, 'percent'))}
                   </td>
                 </tr>
@@ -1982,14 +1988,21 @@ function syncPlanSnapshotButton() {
 function openPlanSnapshot() {
   // The heading is hidden over the board (the pressed "Планы" button names the view), but the picture has no buttons.
   const heading = els.planFactTitle.textContent.trim();
-  const title = planViewMode === 'board' ? `${heading} · ${t('dash.planViewBoard')}` : heading;
-  const meta = els.planMeta.textContent.trim();
+  const board = planViewMode === 'board';
+  // The table's picture is the fact alone, for the period on screen; the board stays as it is.
+  const period = currentPlanFactPayload?.period;
+  const factPeriod = period?.start && period?.end
+    ? (period.start === period.end ? formatDate(period.start) : `${formatDate(period.start)} – ${formatDate(period.end)}`)
+    : '';
+  const title = board ? `${heading} · ${t('dash.planViewBoard')}` : t('dash.fact');
+  const meta = board ? els.planMeta.textContent.trim() : [planScopeText, factPeriod].filter(Boolean).join(' · ');
   openTableSnapshot({
     nodes: [els.planFactTable],
     title,
     meta,
     fileParts: [title, meta],
     trigger: els.planSnapshot,
+    prepare: board ? undefined : keepFactRows,
   });
 }
 
@@ -2046,6 +2059,7 @@ function renderPlanFact(planFact) {
   const scopeText = planFact?.view_scope === 'staff'
     ? `${planFact.branch?.title || (planFact.level_filter || staffGroup ? t('dash.allBranches') : t('dash.branch'))} · ${staffText}`
     : t('dash.networkAndBranches');
+  planScopeText = scopeText;
   els.planMeta.textContent = t('dash.planMeta', { scope: scopeText, count: groups.length, period: planPeriodText });
   syncPlanTableStickyOffsets();
   syncPlanSnapshotButton();

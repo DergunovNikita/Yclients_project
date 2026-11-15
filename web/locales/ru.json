@@ -416,6 +416,7 @@
     "staffFallbackLower": "сотрудник",
     "staffFallback": "Сотрудник {id}",
     "staffPlanTitle": "План сотрудника: {name}",
+    "staffFactTitle": "Факт сотрудника: {name}",
     "planVsFactTitle": "План vs факт: {name}",
     "scopePersonal": "Личные показатели",
     "scopeAdministratorRecords": "Показатели, закреплённые за администратором",

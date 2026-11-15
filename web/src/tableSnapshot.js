@@ -156,7 +156,7 @@ function showSnapshot({ canvas, pngBlob, title, fileParts }) {
     });
 }
 
-function cloneForSnapshot(node) {
+function cloneForSnapshot(node, prepare) {
   const clone = node.cloneNode(true);
   clone.querySelectorAll(STRIPPED).forEach((element) => element.remove());
   // The clone sits in the same document as the page: a duplicated id would hijack getElementById, and a jump target
@@ -166,6 +166,7 @@ function cloneForSnapshot(node) {
     element.removeAttribute('data-jump-target');
     element.removeAttribute('data-jump-label');
   });
+  prepare?.(clone);
   return clone;
 }
 
@@ -173,7 +174,7 @@ function cloneForSnapshot(node) {
 // including the colgroup widths alignPlanTableColumns put on them. The host is off-screen and the library draws the
 // inner sheet, which is in normal flow: it copies computed styles, and a `fixed; left: -100000px` root would carry
 // its own offset into the picture.
-function buildSheet(nodes, title, meta) {
+function buildSheet(nodes, title, meta, prepare) {
   const live = nodes.filter(Boolean);
   const contentWidth = Math.ceil(Math.max(0, ...live.flatMap((node) => [
     node.clientWidth,
@@ -195,7 +196,7 @@ function buildSheet(nodes, title, meta) {
     line.textContent = meta;
     caption.append(line);
   }
-  sheet.append(caption, ...live.map(cloneForSnapshot));
+  sheet.append(caption, ...live.map((node) => cloneForSnapshot(node, prepare)));
 
   const host = document.createElement('div');
   host.className = 'table-snapshot-host';
@@ -223,9 +224,10 @@ function setTriggerBusy(trigger, isBusy) {
  * @param {string} options.title Caption heading.
  * @param {string} [options.meta] Caption line under the heading.
  * @param {string[]} [options.fileParts] Pieces of the downloaded file name.
+ * @param {(clone: Element) => void} [options.prepare] Reshapes each clone (after controls and ids are gone), synchronously.
  * @param {HTMLElement} [options.trigger] Button that started it: busy while the picture is drawn.
  */
-export async function openTableSnapshot({ nodes, title, meta = '', fileParts = [], trigger = null }) {
+export async function openTableSnapshot({ nodes, title, meta = '', fileParts = [], prepare = null, trigger = null }) {
   if (busy || !dialogParts()) return;
   busy = true;
   opener = trigger;
@@ -234,7 +236,7 @@ export async function openTableSnapshot({ nodes, title, meta = '', fileParts = [
   let built = null;
   let failure = 'snapshot.failed';
   try {
-    built = buildSheet(nodes, title, meta);
+    built = buildSheet(nodes, title, meta, prepare);
     if (!built) throw new Error('nothing to draw');
     failure = 'snapshot.moduleFailed';
     // Its own chunk: the library is only paid for by whoever takes a snapshot. A deploy that removed the chunk

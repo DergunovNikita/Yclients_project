@@ -416,6 +416,7 @@
     "staffFallbackLower": "dipendente",
     "staffFallback": "Dipendente {id}",
     "staffPlanTitle": "Piano dipendente: {name}",
+    "staffFactTitle": "Dato effettivo dipendente: {name}",
     "planVsFactTitle": "Piano vs consuntivo: {name}",
     "scopePersonal": "Indicatori personali",
     "scopeAdministratorRecords": "Dati assegnati all'amministratore",

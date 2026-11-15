@@ -416,6 +416,7 @@
     "staffFallbackLower": "employee",
     "staffFallback": "Employee {id}",
     "staffPlanTitle": "Employee plan: {name}",
+    "staffFactTitle": "Employee fact: {name}",
     "planVsFactTitle": "Plan vs actual: {name}",
     "scopePersonal": "Personal metrics",
     "scopeAdministratorRecords": "Figures assigned to the administrator",
