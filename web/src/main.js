@@ -897,7 +897,8 @@ function highlightOverviewPreset(preset) {
 async function refilterForPeriod(filter) {
   renderBranchOptions(filter);
   if (!filter.staff) return true;
-  return (await loadStaff(filter, { force: true })) !== 'superseded';
+  const status = await loadStaff(filter, { force: true });
+  return staffRefreshAllowsDataLoad(status, '', '', filterForView(activeView) === filter);
 }
 
 function setOverviewPreset(preset) {
@@ -962,30 +963,32 @@ function renderKpi(summary) {
 const opzChartHome = els.opzChartPanel.parentElement;
 
 // A role filter names its group where a chosen person would be named; the server never combines it with a person.
-function renderLevelScope(levelFilter) {
+function renderGroupScope(title, description) {
   els.staffPersonalScope.hidden = false;
   els.staffPersonalScope.removeAttribute('data-jump-target');
   els.staffAdminMetrics.hidden = true;
   els.staffAdminOpz.hidden = true;
   opzChartHome.appendChild(els.opzChartPanel);
-  els.staffPersonalTitle.textContent = t('dash.levelScope', {
-    title: (levelFilter.titles || []).join(', ') || t('dash.level'),
-    count: formatNumber(levelFilter.staff_count ?? 0),
-  });
-  els.staffPersonalDescription.textContent = t('dash.levelScopeDescription');
+  els.staffPersonalTitle.textContent = title;
+  els.staffPersonalDescription.textContent = description;
+}
+
+function renderLevelScope(levelFilter) {
+  renderGroupScope(
+    t('dash.levelScope', {
+      title: (levelFilter.titles || []).join(', ') || t('dash.level'),
+      count: formatNumber(levelFilter.staff_count ?? 0),
+    }),
+    t('dash.levelScopeDescription'),
+  );
 }
 
 // Several chosen people are one group, as a role is: the title counts them, the server's echo says how many it found.
 function renderStaffGroupScope(staffFilter, chosenCount) {
-  els.staffPersonalScope.hidden = false;
-  els.staffPersonalScope.removeAttribute('data-jump-target');
-  els.staffAdminMetrics.hidden = true;
-  els.staffAdminOpz.hidden = true;
-  opzChartHome.appendChild(els.opzChartPanel);
-  els.staffPersonalTitle.textContent = t('dash.staffGroupScope', {
-    count: formatNumber(staffFilter?.staff_count ?? chosenCount),
-  });
-  els.staffPersonalDescription.textContent = t('dash.staffGroupScopeDescription');
+  renderGroupScope(
+    t('dash.staffGroupScope', { count: formatNumber(staffFilter?.staff_count ?? chosenCount) }),
+    t('dash.staffGroupScopeDescription'),
+  );
 }
 
 // A personal account on an administrator row is clamped to it without choosing it: the server answers in administrator mode and
@@ -1756,11 +1759,10 @@ function renderPlanDiagnostics(diagnostics) {
             : [
                 t('dash.diagnosticBarbers', { count: formatNumber(item.barber_clients_fact) }),
                 t('dash.diagnosticAdmins', { count: formatNumber(item.administrator_clients_fact) }),
-                t('dash.diagnosticUnassigned', { count: formatNumber(item.unassigned_records_count) }),
               ];
-          const message = scheduleCoverage
-            ? t('dash.scheduleCoverageWarning', { branch: item.company_title || '' })
-            : item.message || t('dash.dataCheck');
+          let message = item.message || t('dash.dataCheck');
+          if (scheduleCoverage) message = t('dash.scheduleCoverageWarning', { branch: item.company_title || '' });
+          else if (item.code === 'admin_barber_clients_mismatch') message = t('dash.adminBarberClientsMismatch');
           return `
             <div class="diagnostic warning">
               <strong>${escapeHtml(message)}</strong>
@@ -2479,17 +2481,13 @@ function updateServiceManagementDirtyFromForm() {
   setServiceManagementDirty(JSON.stringify(collectServiceManagementPayload()) !== serviceManagementSavedSnapshot);
 }
 
-function renderServiceManagement(data, { updateSnapshot = true } = {}) {
+function renderServiceManagement(data) {
   serviceManagementData = data || { rows: [], categories: [] };
   renderServiceFilterOptions(serviceManagementData);
   renderServiceCatalog(serviceManagementData.rows || []);
-  if (updateSnapshot) {
-    serviceManagementSavedData = structuredClone(serviceManagementData);
-    serviceManagementSavedSnapshot = JSON.stringify(collectServiceManagementPayload());
-    setServiceManagementDirty(false);
-  } else {
-    updateServiceManagementDirtyFromForm();
-  }
+  serviceManagementSavedData = structuredClone(serviceManagementData);
+  serviceManagementSavedSnapshot = JSON.stringify(collectServiceManagementPayload());
+  setServiceManagementDirty(false);
 }
 
 function serviceManagementParams() {
@@ -2808,7 +2806,7 @@ async function refreshStaffForBranch(filter, loadView) {
   const expectedBranch = branchKey();
   if (!filter.staff.multiple) clearSelection(filter.staff);
   const status = await loadStaff(filter, { force: true });
-  if (!staffRefreshAllowsDataLoad(status, expectedBranch, branchKey())) return;
+  if (!staffRefreshAllowsDataLoad(status, expectedBranch, branchKey(), filterForView(activeView) === filter)) return;
   await loadView();
 }
 

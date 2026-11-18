@@ -123,8 +123,11 @@ def load_admin(factory, email):
 def test_bootstrap_creates_a_missing_admin_with_the_password_from_the_environment(monkeypatch, admin_db):
     monkeypatch.setenv('PORTAL_ADMIN_PASSWORD', 'first-password-1')
 
-    assert run_bootstrap(monkeypatch, '--email', 'Admin@Example.com') == 0
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert run_bootstrap(monkeypatch, '--email', 'Admin@Example.com') == 0
 
+    assert 'admin@example.com' not in out.getvalue().lower()
     user = load_admin(admin_db, 'admin@example.com')
     assert user.role == 'platform_admin'
     assert auth_service.verify_password('first-password-1', user.password_hash)
@@ -148,6 +151,7 @@ def test_bootstrap_leaves_an_existing_user_alone(monkeypatch, admin_db):
     assert auth_service.verify_password('changed-by-admin', user.password_hash)
     assert user.is_active is False
     assert 'exists, skipped' in out.getvalue()
+    assert 'admin@example.com' not in out.getvalue()
 
 
 def test_reset_password_flag_restores_the_old_overwrite(monkeypatch, admin_db):

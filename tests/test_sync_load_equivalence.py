@@ -1,6 +1,6 @@
 """Pin the rows the sync loaders write.
 
-Every loader runs through a fixture that exercises adoption of legacy rows, primary keys that
+Every loader runs through a fixture that exercises primary keys that
 collide with another tenant's rows, ids that collide with a key the database itself handed
 out, duplicates inside one payload and a purge-and-reload window. Rows are compared by what
 a branch owns: (company, YClients id) -> values, never by the surrogate primary key.
@@ -102,17 +102,20 @@ def _seed(db):
     from sync_parsing import parse_datetime
 
     db.add_all([
-        # Pre-migration rows: no external_id yet, the primary key doubles as the external id.
-        Staff(id=7, name='Legacy staff', company_id=1),
-        Client(id=42, name='Legacy client', company_id=1),
-        FinancialTransaction(id=5, amount=1.0, date=parse_datetime(day % 5), company_id=1),
-        GoodTransaction(id=5, cost=1.0, date=parse_datetime(day % 5), company_id=1),
-        Comment(id=5, text='legacy', date=parse_datetime(day % 5), company_id=1),
-        Appointment(id=500, date=date_of('2025-01-10'), company_id=1),
+        # Rows already stored from an earlier sync: the primary key equals the external id.
+        Staff(id=7, external_id=7, source_type='yclients', name='Stored staff', company_id=1),
+        Client(id=42, external_id=42, source_type='yclients', name='Stored client', company_id=1),
+        FinancialTransaction(id=5, external_id=5, source_type='yclients', amount=1.0,
+                             date=parse_datetime(day % 5), company_id=1),
+        GoodTransaction(id=5, external_id=5, source_type='yclients', cost=1.0,
+                        date=parse_datetime(day % 5), company_id=1),
+        Comment(id=5, external_id=5, source_type='yclients', text='stored',
+                date=parse_datetime(day % 5), company_id=1),
+        Appointment(id=500, external_id=500, source_type='yclients', date=date_of('2025-01-10'), company_id=1),
         # Already migrated and matched by external id.
         FinancialTransaction(id=6, external_id=6, source_type='yclients', amount=2.0,
                              date=parse_datetime(day % 6), company_id=1),
-        # Other tenant: same primary key as ids company 1 is about to receive, never adopted.
+        # Other tenant: same primary key as ids company 1 is about to receive, never touched.
         FinancialTransaction(id=7, amount=3.0, date=parse_datetime(day % 7), company_id=2),
         FinancialTransaction(id=100, external_id=100, source_type='yclients', amount=4.0,
                              date=parse_datetime(day % 8), company_id=2),
@@ -154,12 +157,6 @@ def _facts(db):
             for model, column in ((FinancialTransaction, 'amount'), (GoodTransaction, 'cost'), (Comment, 'text'))
             for row in db.query(model).filter(model.company_id == 2, model.external_id.is_(None))
         },
-        # Pre-migration rows of the branch are adopted by the payload's ids, never left beside a twin.
-        'unadopted': sorted(
-            (model.__tablename__, row.id)
-            for model in (Staff, Client, Appointment, FinancialTransaction, GoodTransaction, Comment)
-            for row in db.query(model).filter(model.company_id == 1, model.external_id.is_(None))
-        ),
         'appointment_ids': {row.external_id: row.id for row in appointments},
     }
 
@@ -169,7 +166,7 @@ def run_scenario(db):
     _seed(db)
     first = {
         'staff': [
-            {'id': 7, 'name': 'Legacy staff renamed', 'fired': 0},
+            {'id': 7, 'name': 'Stored staff renamed', 'fired': 0},
             {'id': 8, 'name': 'Staff of salon 1', 'fired': 0},
             {'id': 9, 'name': 'New staff', 'fired': 0},
         ],
@@ -216,7 +213,7 @@ def _c1(mapping):
 
 FIRST_PASS = {
     'staff': {
-        **_c1({7: ('Legacy staff renamed', 0), 8: ('Staff of salon 1', 0), 9: ('New staff', 0)}),
+        **_c1({7: ('Stored staff renamed', 0), 8: ('Staff of salon 1', 0), 9: ('New staff', 0)}),
         (2, 8): ('Other tenant staff', 0),
     },
     'clients': _c1({42: 'Client 42', 43: 'Client 43', 44: 'Client 44'}),
@@ -235,7 +232,6 @@ FIRST_PASS = {
         ('goods_transactions', 7): 3.0,
         ('comments', 7): 'other tenant',
     },
-    'unadopted': [],
 }
 SECOND_PASS = {
     'staff': {**FIRST_PASS['staff'], (1, 11): ('Later staff', 1)},
@@ -246,7 +242,6 @@ SECOND_PASS = {
     'goods': _c1({5: 50.0, 7: 70.0, 8: 80.0, 12: 120.0, 13: 130.0}),
     'comments': _c1({5: 'd5', 7: 'd7', 8: 'd8', 14: 'd14'}),
     'other_tenant_unlinked': FIRST_PASS['other_tenant_unlinked'],
-    'unadopted': [],
 }
 
 
@@ -255,11 +250,11 @@ def _check(snapshots):
     # Compared without surrogate keys; `appointment_ids` is checked separately below.
     assert {key: value for key, value in first.items() if key != 'appointment_ids'} == FIRST_PASS
     assert {key: value for key, value in second.items() if key != 'appointment_ids'} == SECOND_PASS
-    # Pre-migration rows are adopted in place: the primary key that doubled as the YClients id survives.
+    # A stored row is updated in place: its primary key survives.
     assert first['appointment_ids'][500] == 500
 
 
-def test_loaders_adopt_isolate_and_reload_the_rows_of_one_branch():
+def test_loaders_update_isolate_and_reload_the_rows_of_one_branch():
     engine, db = make_session()
     try:
         _check(run_scenario(db))

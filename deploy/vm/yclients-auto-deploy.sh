@@ -120,7 +120,8 @@ ensure_portal_admin() {
     return 0
   fi
 
-  echo "Ensuring portal platform_admin (${email})..."
+  # No address in the output: the CI step prints this journal, and Actions logs of a public repository are public.
+  echo "Ensuring portal platform_admin..."
   docker compose run --rm --no-deps --entrypoint python api create_portal_admin.py \
     --email "$email" \
     --full-name "$full_name"

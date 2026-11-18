@@ -160,6 +160,8 @@ async def test_service_management_refuses_a_branch_that_left_the_tenant(async_se
             async_session,
             row_changes=[{'company_id': 2, 'service_id': 10, 'is_extra': True}],
             allowed_company_ids=[1, 2],
+            actor_user_id=None,
+            portal_account_id=None,
         )
     assert (await async_session.execute(select(ServiceLabel))).scalars().all() == []
 
@@ -167,6 +169,8 @@ async def test_service_management_refuses_a_branch_that_left_the_tenant(async_se
         async_session,
         row_changes=[{'company_id': 1, 'service_id': 10, 'is_extra': True}],
         allowed_company_ids=[1, 2],
+        actor_user_id=None,
+        portal_account_id=None,
     )
     assert [row['company_id'] for row in saved['rows']] == [1]
 

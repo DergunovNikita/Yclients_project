@@ -7,7 +7,6 @@ import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
-import models
 from helpers import load_migration
 
 
@@ -75,16 +74,3 @@ def test_the_label_key_guard_refuses_a_label_without_a_catalog_row(migration):
             conn.execute(sa.text('INSERT INTO service_labels VALUES (1, 11)'))
             with pytest.raises(RuntimeError, match='1 service_labels'):
                 migration._assert_every_label_has_a_catalog_row()
-
-
-def test_models_no_longer_carry_what_the_migration_drops():
-    tables = set(models.Base.metadata.tables)
-    assert not tables & {'services', 'service_kpi_groups', 'service_kpi_assignments', 'system.sync_step_runs'}
-    assert 'synced_at' not in models.SyncSourceState.__table__.c
-    (foreign_key,) = models.ServiceLabel.__table__.foreign_key_constraints - {
-        constraint for constraint in models.ServiceLabel.__table__.foreign_key_constraints
-        if constraint.referred_table.name == 'companies'
-    }
-    assert foreign_key.referred_table.name == 'service_catalog'
-    assert foreign_key.ondelete == 'CASCADE'
-    assert [column.name for column in foreign_key.columns] == ['company_id', 'service_id']

@@ -5,7 +5,8 @@ import pytest
 from sqlalchemy import select
 
 from models import Company, Group, ManualFactMetric, PortalAuditEvent, Staff
-import scripts.merge_mirror_manual_facts as merge
+import manual_fact_merge as merge
+import scripts.merge_mirror_manual_facts as merge_script
 
 MIRROR, REAL, OTHER_BRANCH_REAL = 11, 12, 13
 AUG = (date(2026, 8, 1), date(2026, 8, 31))
@@ -64,7 +65,7 @@ async def test_dry_run_plans_only_non_zero_values_and_writes_nothing(async_sessi
         ('opz_qty', 9, 1.0, None, 1.0),
     ]
     assert await _values(async_session, REAL) == {(AUG[0], 'reviews_qty'): 8.0}
-    assert 'new row' in merge.format_moves(moves)
+    assert 'new row' in merge_script.format_moves(moves)
 
 
 @pytest.mark.asyncio
@@ -206,7 +207,7 @@ async def test_a_month_row_and_a_daily_row_on_the_first_are_distinct_periods(asy
     by_period = {(m.period_start, m.period_end): (m.target_before, m.target_after) for m in moves}
     assert by_period[AUG] == (8.0, 13.0)
     assert by_period[_day(1)] == (10.0, 11.0)
-    table = merge.format_moves(moves)
+    table = merge_script.format_moves(moves)
     assert '2026-11-01' in table and '2026-08 ' in table
 
 

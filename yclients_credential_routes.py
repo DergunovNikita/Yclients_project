@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api_types import Int32Id
 from auth_deps import forbid_demo, require_roles
 from auth_hierarchy import CREDENTIAL_ADMIN_ROLES
 from auth_service import load_portal_account_branch_ids
@@ -49,12 +50,12 @@ CREDENTIAL_SOURCE_UNSUPPORTED_DETAIL = 'Unsupported credential source type'
 class YClientsCredentialCreateRequest(BaseModel):
     source_type: str = Field(default=SOURCE_YCLIENTS, min_length=1, max_length=32)
     title: str = Field(min_length=1, max_length=255)
-    portal_account_id: int | None = None
+    portal_account_id: Int32Id | None = None
     partner_token: str = Field(min_length=1, max_length=4096)
     login: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=1, max_length=255)
     is_active: bool = True
-    company_ids: list[int] = Field(default_factory=list)
+    company_ids: list[Int32Id] = Field(default_factory=list)
 
 
 class YClientsCredentialTestRequest(BaseModel):
@@ -71,33 +72,32 @@ class YClientsCredentialTestRequest(BaseModel):
 class YClientsCredentialUpdateRequest(BaseModel):
     source_type: str | None = Field(default=None, min_length=1, max_length=32)
     title: str | None = Field(default=None, min_length=1, max_length=255)
-    portal_account_id: int | None = None
+    portal_account_id: Int32Id | None = None
     partner_token: str | None = Field(default=None, min_length=1, max_length=4096)
     login: str | None = Field(default=None, min_length=1, max_length=255)
     password: str | None = Field(default=None, min_length=1, max_length=255)
     is_active: bool | None = None
-    company_ids: list[int] | None = None
+    company_ids: list[Int32Id] | None = None
 
 
 async def _load_credential(
     db: AsyncSession,
     credential_id: int,
-    actor: PortalUser | None = None,
-    active_portal_account_id: int | None = None,
+    actor: PortalUser,
+    active_portal_account_id: int | None,
 ) -> YClientsCredential:
     credential = (
         await db.execute(select(YClientsCredential).where(YClientsCredential.id == credential_id))
     ).scalar_one_or_none()
     if credential is None:
         raise HTTPException(status_code=404, detail='YClients credentials not found')
-    if actor is not None:
-        if actor.role == 'platform_admin':
-            if active_portal_account_id is None:
-                raise HTTPException(status_code=400, detail='X-Portal-Account-Id is required')
-            if credential.portal_account_id != active_portal_account_id:
-                raise HTTPException(status_code=404, detail='YClients credentials not found')
-        elif credential.portal_account_id != actor.portal_account_id:
+    if actor.role == 'platform_admin':
+        if active_portal_account_id is None:
+            raise HTTPException(status_code=400, detail='X-Portal-Account-Id is required')
+        if credential.portal_account_id != active_portal_account_id:
             raise HTTPException(status_code=404, detail='YClients credentials not found')
+    elif credential.portal_account_id != actor.portal_account_id:
+        raise HTTPException(status_code=404, detail='YClients credentials not found')
     return credential
 
 
@@ -138,7 +138,13 @@ async def _record_credential_failure(
     source_type: str | None = None,
     requested_portal_account_id: int | None = None,
 ) -> None:
-    """Audit a failed credential action and commit it, so the row survives the error that follows."""
+    """Audit a failed credential action and commit it, so the row survives the error that follows.
+
+    Whatever the failed action had flushed (branches materialized before the credential could be stored) is
+    rolled back first: only the audit row is committed.
+    """
+    actor_id = actor.id
+    await db.rollback()
     metadata: dict = {'success': False}
     if source_type is not None:
         metadata['source_type'] = source_type
@@ -150,7 +156,7 @@ async def _record_credential_failure(
         metadata['requested_portal_account_id'] = requested_portal_account_id
     await log_portal_audit(
         db,
-        actor_user_id=actor.id,
+        actor_user_id=actor_id,
         portal_account_id=portal_account_id,
         action=action,
         target_type='yclients_credential',
@@ -228,7 +234,7 @@ async def _sync_credential_companies_from_yclients(
 
 @router.get('/admin/yclients-credentials')
 async def admin_list_yclients_credentials(
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*CREDENTIAL_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -252,7 +258,7 @@ async def admin_list_yclients_credentials(
 @router.post('/admin/yclients-credentials', dependencies=[Depends(forbid_demo)])
 async def admin_create_yclients_credentials(
     body: YClientsCredentialCreateRequest,
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*CREDENTIAL_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -329,9 +335,9 @@ async def admin_create_yclients_credentials(
 
 @router.patch('/admin/yclients-credentials/{credential_id}', dependencies=[Depends(forbid_demo)])
 async def admin_update_yclients_credentials(
-    credential_id: int,
+    credential_id: Int32Id,
     body: YClientsCredentialUpdateRequest,
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*CREDENTIAL_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -395,8 +401,8 @@ async def admin_update_yclients_credentials(
 
 @router.delete('/admin/yclients-credentials/{credential_id}', dependencies=[Depends(forbid_demo)])
 async def admin_delete_yclients_credentials(
-    credential_id: int,
-    x_portal_account_id: int | None = Header(default=None),
+    credential_id: Int32Id,
+    x_portal_account_id: Int32Id | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*CREDENTIAL_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -418,8 +424,8 @@ async def admin_delete_yclients_credentials(
 
 @router.post('/admin/yclients-credentials/{credential_id}/test', dependencies=[Depends(forbid_demo)])
 async def admin_test_saved_yclients_credentials(
-    credential_id: int,
-    x_portal_account_id: int | None = Header(default=None),
+    credential_id: Int32Id,
+    x_portal_account_id: Int32Id | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*CREDENTIAL_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -446,6 +452,7 @@ async def admin_test_saved_yclients_credentials(
         value = decrypted_credential(credential)
     except Exception as exc:
         await mark_credential_failure_async(db, credential.id, CREDENTIAL_DECRYPT_FAILED_DETAIL)
+        await db.commit()  # the failure audit below rolls back whatever is pending
         await _raise_credential_failure(db, actor, exc=exc, detail=CREDENTIAL_DECRYPT_FAILED_DETAIL, **failure)
     try:
         result = await asyncio.to_thread(
@@ -453,6 +460,7 @@ async def admin_test_saved_yclients_credentials(
         )
     except Exception as exc:
         await mark_credential_failure_async(db, credential.id, CREDENTIAL_TEST_FAILED_DETAIL)
+        await db.commit()  # the failure audit below rolls back whatever is pending
         await _raise_credential_failure(db, actor, exc=exc, **failure)
     await mark_credential_success_async(db, credential.id)
     await log_portal_audit(
@@ -471,7 +479,7 @@ async def admin_test_saved_yclients_credentials(
 @router.post('/admin/yclients-credentials/test', dependencies=[Depends(forbid_demo)])
 async def admin_test_yclients_credentials_payload(
     body: dict = Body(default_factory=dict),
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*CREDENTIAL_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):

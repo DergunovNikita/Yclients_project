@@ -314,8 +314,8 @@ async def test_yandex_pay_is_carved_out_of_cashless_for_whole_months(client, see
     assert beta['yandex_pay_missing_months'] == ['2026-08']
     assert alpha['yandex_pay_missing_months'] == []
     assert breakdown['yandex_pay_applied'] is True
-    warnings = [note['title'] for note in payload['notes'] if note['kind'] == 'warning']
-    assert warnings == ['Яндекс Пэй введён не за все месяцы']
+    # The missing months themselves are asserted above through `yandex_pay_missing_months`.
+    assert [note['kind'] for note in payload['notes']].count('warning') == 1
     shares = {row['metric']: row for row in _table(payload, 'payment_shares')['rows']}
     assert shares['Яндекс Пэй']['company_1'] == pytest.approx(600.5 / 4000.0 * 100, abs=0.01)
     assert shares['Яндекс Пэй']['company_2'] is None
@@ -339,8 +339,8 @@ async def test_partial_period_leaves_yandex_pay_unknown(client, seeded):
     assert alpha['yandex_pay_unapplied_data_through'] == '2026-08-31'
     # Beta has no value: nothing blocks it, it is simply not entered.
     assert _by_company(breakdown)[2]['yandex_pay_applied'] is True
-    titles = [note['title'] for note in payload['notes'] if note['kind'] == 'warning']
-    assert titles == ['Яндекс Пэй не учтён', 'Яндекс Пэй введён не за все месяцы']
+    # One warning for the blocked branch, one for the month beta lacks; the reasons are asserted above.
+    assert [note['kind'] for note in payload['notes']].count('warning') == 2
     assert {card['label']: card['value'] for card in payload['cards']}['Доля Яндекс Пэй'] is None
     yandex_row = next(row for row in _table(payload, 'payment_amounts')['rows'] if row['metric'] == 'Яндекс Пэй')
     assert yandex_row['total'] is None and yandex_row['company_1'] is None

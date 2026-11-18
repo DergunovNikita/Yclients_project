@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models import PortalUser, Staff, is_service_staff_name
 from portal_audit import log_portal_audit
 from portal_staff_sync import mirror_staff_clause, sync_portal_user_staff, yclients_staff_clause
-from scripts.merge_mirror_manual_facts import MergeRefused, apply_moves
+from manual_fact_merge import MergeRefused, apply_moves
 
 LINKABLE_ROLES = ('admin', 'barber')
 
@@ -82,15 +82,15 @@ async def list_staff_links(
 ) -> list[dict]:
     """Per branch of the user (inside the actor's scope): the linked row and the rows that could be linked.
 
-    A row linked in a branch the user has since left is listed too, so it can be released.
+    A row linked in a branch the user has since left is listed too, so it can be released; so is one kept
+    by an account whose role changed away from admin/barber, which then has no candidates.
     """
-    _assert_linkable_role(user)
     scope = set(scope_branch_ids)
     linked = [row for row in await _linked_rows(db, user.id) if row.company_id in scope]
     linked_by_company: dict[int, list[Staff]] = {}
     for row in linked:
         linked_by_company.setdefault(int(row.company_id), []).append(row)
-    open_companies = sorted(set(user_branch_ids) & scope)
+    open_companies = sorted(set(user_branch_ids) & scope) if user.role in LINKABLE_ROLES else []
     candidates: dict[int, list[Staff]] = {company_id: [] for company_id in open_companies}
     if open_companies:
         rows = await db.execute(

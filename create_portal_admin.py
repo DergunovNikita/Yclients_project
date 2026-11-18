@@ -67,9 +67,9 @@ def main() -> int:
             db.add(user)
             db.commit()
             db.refresh(user)
-            print(f'Created platform_admin user id={user.id} email={email}')
+            print(f'Created platform_admin user id={user.id}')
         elif not args.reset_password:
-            print(f'platform_admin user id={user.id} email={email} exists, skipped')
+            print(f'platform_admin user id={user.id} exists, skipped')
         else:
             user.password_hash = hash_password(args.password)
             user.role = 'platform_admin'
@@ -78,9 +78,8 @@ def main() -> int:
             user.email_verified_at = user.email_verified_at or utcnow()
             user.full_name = args.full_name
             db.commit()
-            print(f'Reset platform_admin user id={user.id} email={email}')
+            print(f'Reset platform_admin user id={user.id}')
 
-        print(f'Email: {email}')
         return 0
     finally:
         db.close()

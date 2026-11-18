@@ -253,6 +253,24 @@ class YClientsDataSourceAdapter(DataSourceAdapter):
                 )
             ).scalar_one_or_none()
             if company is None:
+                # Held by a tenant without business users (the same rule as `companies_claimed_elsewhere`): the row
+                # moves with its history, a second copy would read the same YClients branch twice. A live tenant's
+                # row (its sync creates one for every company of the network, chosen or not) stays where it is.
+                others = (
+                    await db.execute(
+                        select(Company)
+                        .where(Company.source_type == self.source_type, Company.external_id == cid)
+                        .order_by(Company.id)
+                    )
+                ).scalars().all()
+                for other in others:
+                    if other.portal_account_id is None or await can_reassign_branch_from_tenant(
+                        db, other.portal_account_id, portal_account_id
+                    ):
+                        company = other
+                        company.portal_account_id = portal_account_id
+                        break
+            if company is None:
                 legacy_company = await db.get(Company, cid)
                 if legacy_company is not None and legacy_company.external_id is None and (
                     legacy_company.portal_account_id is None or legacy_company.portal_account_id == portal_account_id

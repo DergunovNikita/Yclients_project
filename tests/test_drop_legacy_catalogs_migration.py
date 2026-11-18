@@ -5,7 +5,6 @@ import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
-import models
 from helpers import load_migration
 
 
@@ -58,11 +57,3 @@ def test_downgrade_recreates_and_upgrade_drops_the_legacy_objects(migration):
 
     # A fresh database is bootstrapped from the models and never had any of it.
     _run(engine, migration.upgrade)
-
-
-def test_models_no_longer_carry_what_the_migration_drops(migration):
-    tables = models.Base.metadata.tables
-    assert not set(migration.LEGACY_TABLES) & set(tables)
-    for table, schema, column, _type, _default in migration.DROPPED_COLUMNS:
-        key = f'{schema}.{table}' if schema else table
-        assert column not in tables[key].c

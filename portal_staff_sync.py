@@ -175,7 +175,7 @@ async def detach_portal_user_staff(db: AsyncSession, portal_user_id: int) -> Non
     )
     await db.execute(
         update(Staff)
-        .where(crm_staff_clause(portal_user_id), Staff.portal_user_id == portal_user_id)
+        .where(crm_staff_clause(portal_user_id))
         .values(portal_user_id=None)
     )
 

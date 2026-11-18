@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api_types import INT32_MAX, INT32_MIN, MAX_BODY_ITEMS, Int32Id
 from auth_deps import forbid_demo, get_dashboard_access
 from auth_hierarchy import USER_ADMIN_ROLES
 from auth_scope import (
@@ -42,6 +43,10 @@ from dashboard_service import (
     OverviewPeriodPreset,
     PLAN_SETTINGS_CONFLICT_DETAIL,
     PlanSettingsConflict,
+    MAX_REPORT_DATE,
+    MIN_REPORT_DATE,
+    SERVICE_LABELS_CONFLICT_DETAIL,
+    ServiceLabelsConflict,
     fetch_branches,
     fetch_tenant_branch_order,
     fetch_manual_opz_facts,
@@ -97,9 +102,9 @@ from payment_methods import (
 from portal_audit import log_portal_audit
 from report_payload import ReportCalculationError, ReportInputError
 from report_usage import fetch_report_usage, track_report_usage
+from sync_control import transactional_state_key
 from sync_orchestrator import get_sync_status
 from sync_parsing import serialize_dt
-from sync_pipeline import transactional_state_key
 
 # Under `yclients`, whose handler and level `api._configure_logging` sets: a module-named logger would drop INFO.
 logger = logging.getLogger('yclients.dashboard')
@@ -125,17 +130,17 @@ PeriodPreset = Annotated[
 
 class MetricVisibilityPayload(BaseModel):
     role: str
-    visible_codes: list[str]
+    visible_codes: list[str] = Field(max_length=MAX_BODY_ITEMS)
 
 
 class BranchOrderPayload(BaseModel):
     # A tenant has a handful of branches; the cap only keeps an absurd body from reaching the comparison.
-    company_ids: list[int] = Field(max_length=1000)
+    company_ids: list[Int32Id] = Field(max_length=1000)
 
 
 class ManualFactItem(BaseModel):
-    company_id: int
-    staff_id: int
+    company_id: Int32Id
+    staff_id: Int32Id
     # Strict: lax float parsing turns `true` into one review.
     value: float | None = Field(None, strict=True)
     # What the last GET showed for this row: the save is an edit only where `value` differs.
@@ -144,9 +149,9 @@ class ManualFactItem(BaseModel):
 
 class ManualFactsPayload(BaseModel):
     day: str
-    company_id: int | None = None
-    staff_id: int | None = None
-    items: list[ManualFactItem]
+    company_id: Int32Id | None = None
+    staff_id: Int32Id | None = None
+    items: list[ManualFactItem] = Field(max_length=MAX_BODY_ITEMS)
 
 
 ISO_DAY = re.compile(r'^\d{4}-\d{2}-\d{2}$')
@@ -168,7 +173,7 @@ IsoDay = Annotated[date | None, BeforeValidator(_iso_day)]
 
 
 class YandexPayItem(BaseModel):
-    company_id: int
+    company_id: Int32Id
     # Strict: lax float parsing turns `true` into one rouble.
     value: float | None = Field(None, strict=True)
     previous_value: float | None = Field(None, strict=True)
@@ -179,12 +184,12 @@ class YandexPayItem(BaseModel):
 
 class YandexPayPayload(BaseModel):
     month: str
-    company_id: int | None = None
-    items: list[YandexPayItem]
+    company_id: Int32Id | None = None
+    items: list[YandexPayItem] = Field(max_length=MAX_BODY_ITEMS)
 
 
 class PlanSettingsBranchPayload(BaseModel):
-    company_id: int
+    company_id: Int32Id
     wax_pct: Any = None
     head_care_pct: Any = None
     face_care_pct: Any = None
@@ -195,8 +200,8 @@ class PlanSettingsBranchPayload(BaseModel):
 
 
 class PlanSettingsStaffPayload(BaseModel):
-    company_id: int
-    staff_id: int
+    company_id: Int32Id
+    staff_id: Int32Id
     staff_category: str
     clients: Any = None
     avg_check_total: Any = None
@@ -209,18 +214,18 @@ class PlanSettingsStaffPayload(BaseModel):
 class PlanSettingsPayload(BaseModel):
     month: str
     copy_from: str | None = Field(None, pattern=r'^\d{4}-(0[1-9]|1[0-2])$')
-    branches: list[PlanSettingsBranchPayload]
-    staff: list[PlanSettingsStaffPayload]
+    branches: list[PlanSettingsBranchPayload] = Field(max_length=MAX_BODY_ITEMS)
+    staff: list[PlanSettingsStaffPayload] = Field(max_length=MAX_BODY_ITEMS)
 
 
 class ServiceManagementRowChange(BaseModel):
-    company_id: int
-    service_id: int
+    company_id: Int32Id
+    service_id: Int32Id
     is_extra: bool
 
 
 class ServiceManagementPayload(BaseModel):
-    row_changes: list[ServiceManagementRowChange] = Field(default_factory=list)
+    row_changes: list[ServiceManagementRowChange] = Field(default_factory=list, max_length=MAX_BODY_ITEMS)
 
     @model_validator(mode='after')
     def validate_unique_targets(self):
@@ -230,13 +235,18 @@ class ServiceManagementPayload(BaseModel):
         return self
 
 
+def _assert_supported_dates(field_names: tuple[str, str], *days: date) -> None:
+    if any(day < MIN_REPORT_DATE or day > MAX_REPORT_DATE for day in days):
+        raise HTTPException(
+            status_code=400,
+            detail=f'{field_names[0]} and {field_names[1]} must be between {MIN_REPORT_DATE} and {MAX_REPORT_DATE}',
+        )
+
+
 def _parse_range(start: date, end: date) -> tuple[date, date]:
     if start > end:
         raise HTTPException(status_code=400, detail='start_date must be <= end_date')
-    # Every window is half-open (`end + 1 day`) and has a baseline before `start`; at the ends of the
-    # calendar that arithmetic overflows into a 500.
-    if start <= date.min or end >= date.max:
-        raise HTTPException(status_code=400, detail='start_date and end_date are out of the supported range')
+    _assert_supported_dates(('start_date', 'end_date'), start, end)
     return start, end
 
 
@@ -305,7 +315,7 @@ MAX_FILTER_IDS = 200
 
 
 def _parse_id_list(raw: str | None, name: str) -> frozenset[int] | None:
-    """A list query value (`staff_position_ids`, `company_ids`, `staff_ids`): comma-separated positive int32s.
+    """A list query value (`staff_position_ids`, `company_ids`, `staff_ids`): comma-separated non-zero int32s.
 
     `None` when absent or empty; repeated ids collapse.
     """
@@ -314,17 +324,17 @@ def _parse_id_list(raw: str | None, name: str) -> frozenset[int] | None:
     ids: set[int] = set()
     for part in raw.split(','):
         part = part.strip()
+        digits = part[1:] if part.startswith('-') else part
         # The length check comes first: `int()` of a thousands-digit string raises instead of answering.
-        if not (part.isascii() and part.isdigit() and len(part) <= 10 and 0 < int(part) <= 2**31 - 1):
-            raise HTTPException(status_code=400, detail=f'{name} must be comma-separated positive integers')
+        if not (
+            digits.isascii() and digits.isdigit() and len(digits) <= 10
+            and int(part) != 0 and INT32_MIN <= int(part) <= INT32_MAX
+        ):
+            raise HTTPException(status_code=400, detail=f'{name} must be comma-separated non-zero integers')
         ids.add(int(part))
     if len(ids) > MAX_FILTER_IDS:
         raise HTTPException(status_code=400, detail=f'{name} takes at most {MAX_FILTER_IDS} ids')
     return frozenset(ids)
-
-
-def _parse_staff_position_ids(raw: str | None) -> frozenset[int] | None:
-    return _parse_id_list(raw, 'staff_position_ids')
 
 
 def _one_or_group(
@@ -585,7 +595,7 @@ async def dashboard_branches(
 
 @router.get('/staff')
 async def dashboard_staff(
-    company_id: int | None = Query(None, description='Optional YClients company (salon) id'),
+    company_id: Int32Id | None = Query(None, description='Optional YClients company (salon) id'),
     company_ids: str | None = Query(None, description='Comma-separated company ids'),
     start_date: date | None = Query(None),
     end_date: date | None = Query(None),
@@ -620,7 +630,7 @@ async def dashboard_staff(
 
 @router.get('/services')
 async def dashboard_services(
-    company_id: int | None = Query(None),
+    company_id: Int32Id | None = Query(None),
     q: str | None = Query(None),
     category: str | None = Query(None),
     is_extra: bool | None = Query(None),
@@ -653,11 +663,17 @@ async def dashboard_services_save(
     _require_settings_admin(ctx)
     allowed_company_ids, _ = user_branch_ids(ctx)
     with _value_error_as_400():
-        data = await save_service_management(
-            db,
-            row_changes=[item.model_dump() for item in payload.row_changes],
-            allowed_company_ids=allowed_company_ids,
-        )
+        try:
+            data = await save_service_management(
+                db,
+                row_changes=[item.model_dump() for item in payload.row_changes],
+                allowed_company_ids=allowed_company_ids,
+                actor_user_id=ctx.user_id,
+                portal_account_id=ctx.portal_account_id,
+            )
+        except ServiceLabelsConflict as exc:
+            logger.warning('service labels save refused, concurrent save: user=%s', ctx.user_id)
+            raise HTTPException(status_code=409, detail=SERVICE_LABELS_CONFLICT_DETAIL) from exc
     return {'success': True, 'data': data}
 
 
@@ -682,14 +698,14 @@ async def dashboard_report_data(
     report_id: str = Query(...),
     start_date: date = Query(...),
     end_date: date = Query(...),
-    company_id: int | None = Query(None),
+    company_id: Int32Id | None = Query(None),
     company_ids: str | None = Query(None, description='Comma-separated company ids'),
-    staff_id: int | None = Query(None),
+    staff_id: Int32Id | None = Query(None),
     staff_ids: str | None = Query(None, description='Comma-separated staff ids'),
     granularity: str = Query('day', description='day, week or month'),
     compare_start_date: date | None = Query(None),
     compare_end_date: date | None = Query(None),
-    compare_staff_id: int | None = Query(None),
+    compare_staff_id: Int32Id | None = Query(None),
     compare_previous: bool = Query(
         False, description='Compare with the Overview baseline of the period; an explicit compare window wins'
     ),
@@ -699,7 +715,7 @@ async def dashboard_report_data(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
-    position_ids = _parse_staff_position_ids(staff_position_ids)
+    position_ids = _parse_id_list(staff_position_ids, 'staff_position_ids')
     company_id, branch_group = _one_or_group(company_id, company_ids, 'company_id', 'company_ids')
     staff_id, staff_group = _one_or_group(staff_id, staff_ids, 'staff_id', 'staff_ids')
     # Every gate speaks about the canonical report: a retired id must not dodge the check
@@ -741,9 +757,8 @@ async def dashboard_report_data(
         )
     if (compare_start_date is None) ^ (compare_end_date is None):
         raise HTTPException(status_code=400, detail='compare_start_date and compare_end_date must be passed together')
-    if compare_end_date is not None and compare_end_date >= date.max:
-        # The comparison window is half-open too; its start has no baseline, so only the end can overflow.
-        raise HTTPException(status_code=400, detail='compare_end_date is out of the supported range')
+    if compare_start_date is not None and compare_end_date is not None:
+        _assert_supported_dates(('compare_start_date', 'compare_end_date'), compare_start_date, compare_end_date)
     await _validate_dashboard_scope(
         db,
         scope['company_id'],
@@ -872,16 +887,16 @@ async def dashboard_widget_sync_status(
 async def dashboard_widget_plan_fact(
     start_date: date = Query(...),
     end_date: date = Query(...),
-    company_id: int | None = Query(None),
+    company_id: Int32Id | None = Query(None),
     company_ids: str | None = Query(None, description='Comma-separated company ids'),
-    staff_id: int | None = Query(None),
+    staff_id: Int32Id | None = Query(None),
     staff_ids: str | None = Query(None, description='Comma-separated staff ids'),
     staff_position_ids: str | None = Query(None, description='Comma-separated barber level position ids'),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
-    position_ids = _parse_staff_position_ids(staff_position_ids)
+    position_ids = _parse_id_list(staff_position_ids, 'staff_position_ids')
     scope, selected_staff = await _validated_widget_scope(db, ctx, company_id, company_ids, staff_id, staff_ids)
     _, force_allowed = user_branch_ids(ctx)
     plan_fact = await fetch_plan_fact(
@@ -1036,8 +1051,8 @@ async def _manual_fact_post(
 @router.get('/plan/reviews_fact')
 async def dashboard_plan_reviews_fact(
     day: str = Query(..., description='Reviews fact day in YYYY-MM-DD format'),
-    company_id: int | None = Query(None),
-    staff_id: int | None = Query(None),
+    company_id: Int32Id | None = Query(None),
+    staff_id: Int32Id | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -1058,8 +1073,8 @@ async def dashboard_plan_reviews_fact_save(
 @router.get('/plan/opz_fact')
 async def dashboard_plan_opz_fact(
     day: str = Query(..., description='Additional OPZ day in YYYY-MM-DD format'),
-    company_id: int | None = Query(None),
-    staff_id: int | None = Query(None),
+    company_id: Int32Id | None = Query(None),
+    staff_id: Int32Id | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -1099,7 +1114,7 @@ async def _yandex_pay_editor(
 @router.get('/payments/yandex_pay')
 async def dashboard_yandex_pay(
     month: str = Query(..., description='Month in YYYY-MM format'),
-    company_id: int | None = Query(None),
+    company_id: Int32Id | None = Query(None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -1152,7 +1167,7 @@ def _require_visibility_admin(ctx: AccessContext, action: str = 'configure metri
 
 @router.get('/metric-visibility')
 async def dashboard_metric_visibility(
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -1185,7 +1200,7 @@ async def dashboard_metric_visibility(
 @router.put('/metric-visibility', dependencies=[Depends(forbid_demo)])
 async def dashboard_metric_visibility_save(
     payload: MetricVisibilityPayload,
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -1237,7 +1252,7 @@ async def dashboard_metric_visibility_save(
 
 @router.get('/branch-order')
 async def dashboard_branch_order(
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -1249,7 +1264,7 @@ async def dashboard_branch_order(
 @router.put('/branch-order', dependencies=[Depends(forbid_demo)])
 async def dashboard_branch_order_save(
     payload: BranchOrderPayload,
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
@@ -1274,9 +1289,9 @@ async def dashboard_branch_order_save(
 async def dashboard_bundle(
     start_date: date = Query(...),
     end_date: date = Query(...),
-    company_id: int | None = Query(None),
+    company_id: Int32Id | None = Query(None),
     company_ids: str | None = Query(None, description='Comma-separated company ids'),
-    staff_id: int | None = Query(None),
+    staff_id: Int32Id | None = Query(None),
     staff_ids: str | None = Query(None, description='Comma-separated staff ids'),
     period_preset: PeriodPreset = None,
     staff_position_ids: str | None = Query(None, description='Comma-separated barber level position ids'),
@@ -1284,7 +1299,7 @@ async def dashboard_bundle(
     ctx: AccessContext = Depends(get_dashboard_access),
 ):
     start, end = _parse_range(start_date, end_date)
-    position_ids = _parse_staff_position_ids(staff_position_ids)
+    position_ids = _parse_id_list(staff_position_ids, 'staff_position_ids')
     scope, staff_id = await _validated_widget_scope(db, ctx, company_id, company_ids, staff_id, staff_ids)
     factual_at = dashboard_service.factual_now()
     level_filter = None

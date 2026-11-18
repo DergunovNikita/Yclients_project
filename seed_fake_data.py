@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import random
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 
 from sqlalchemy import func
 
@@ -243,9 +243,9 @@ def seed_companies(
         for cl_idx in range(clients_per_company):
             external_client_id = cl_idx + 1
             years = rng.randint(18, 65)
-            birthday = date.today() - timedelta(days=years * 365 + rng.randint(0, 364))
+            birthday = utcnow().date() - timedelta(days=years * 365 + rng.randint(0, 364))
             visits = rng.randint(0, 18)
-            last_visit = date.today() - timedelta(days=rng.randint(0, 90))
+            last_visit = utcnow().date() - timedelta(days=rng.randint(0, 90))
             client = Client(
                 id=client_id,
                 external_id=external_client_id,
@@ -333,8 +333,8 @@ def seed_activity(
     appt_max: int,
     negative_ids: bool = False,
 ) -> None:
-    start = date.today() - timedelta(days=days)
-    end = date.today()
+    start = utcnow().date() - timedelta(days=days)
+    end = utcnow().date()
     appointment_id = next_negative_pk(db, Appointment, "id") if negative_ids else next_pk(db, Appointment, "id", 1)
     transaction_id = next_negative_pk(db, Transaction, "id") if negative_ids else next_pk(db, Transaction, "id", 1)
     financial_id = (

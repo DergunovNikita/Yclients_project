@@ -5,7 +5,7 @@ from datetime import date, datetime, time, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import event, select, text
+from sqlalchemy import event, insert, select, text
 from sqlalchemy.exc import OperationalError
 
 from clock import utcnow
@@ -14428,6 +14428,89 @@ async def test_dashboard_service_batch_update_is_atomic_and_normalized(async_ses
     labels = (await async_session.execute(select(ServiceLabel))).scalars().all()
     assert labels == []
 
+    events = (await async_session.execute(
+        select(PortalAuditEvent).where(PortalAuditEvent.action == 'service_labels.updated')
+    )).scalars().all()
+    # Two saves changed labels; the empty batch and the rejected one left no trace.
+    assert [event.metadata_json['rows'] for event in events] == [
+        [{'company_id': 1, 'service_id': 10, 'is_extra': True}],
+        [{'company_id': 1, 'service_id': 10, 'is_extra': False}],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_service_batch_reports_a_lost_first_label_race_as_conflict(async_session, monkeypatch):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add(ServiceCatalog(
+        company_id=1, service_id=10, title='Black Mask', category_title='Care', updated_at=datetime(2025, 1, 1),
+    ))
+    await async_session.commit()
+
+    async def apply_after_rival_insert(db, catalog, *, is_extra, now):
+        # The other tab's label lands after this save looked for one and found none.
+        await db.execute(insert(ServiceLabel).values(
+            company_id=1, service_id=10, is_extra=True, source='dashboard', updated_at=now,
+        ))
+        db.add(ServiceLabel(company_id=1, service_id=10, is_extra=True, source='dashboard', updated_at=now))
+
+    async def override_db():
+        yield async_session
+
+    monkeypatch.setattr(dashboard_service, '_apply_service_label', apply_after_rival_insert)
+    app.dependency_overrides[api.get_async_db] = override_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            response = await client.patch('/dashboard/services', json={
+                'row_changes': [{'company_id': 1, 'service_id': 10, 'is_extra': True}],
+            })
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_dashboard_service_batch_reports_a_lost_race_met_on_a_later_autoflush_as_conflict(
+    async_session, monkeypatch
+):
+    async_session.add(Group(id=1, title='G1'))
+    async_session.add(Company(id=1, title='Salon', group_id=1))
+    async_session.add_all([
+        ServiceCatalog(company_id=1, service_id=sid, title=f'S{sid}', updated_at=datetime(2025, 1, 1))
+        for sid in (10, 20)
+    ])
+    await async_session.commit()
+    real_apply = dashboard_service._apply_service_label
+
+    async def apply_with_rival_label(db, catalog, *, is_extra, now):
+        if catalog.service_id == 10:
+            await db.execute(insert(ServiceLabel).values(
+                company_id=1, service_id=10, is_extra=True, source='dashboard', updated_at=now,
+            ))
+            db.add(ServiceLabel(company_id=1, service_id=10, is_extra=True, source='dashboard', updated_at=now))
+        else:
+            # The pending insert is flushed by this statement, not by the explicit flush after the loop.
+            await real_apply(db, catalog, is_extra=is_extra, now=now)
+
+    async def override_db():
+        yield async_session
+
+    monkeypatch.setattr(dashboard_service, '_apply_service_label', apply_with_rival_label)
+    app.dependency_overrides[api.get_async_db] = override_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            response = await client.patch('/dashboard/services', json={
+                'row_changes': [
+                    {'company_id': 1, 'service_id': 10, 'is_extra': True},
+                    {'company_id': 1, 'service_id': 20, 'is_extra': False},
+                ],
+            })
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+
 
 @pytest.mark.asyncio
 async def test_dashboard_service_batch_rolls_back_after_partial_apply(async_session, monkeypatch):
@@ -14462,6 +14545,8 @@ async def test_dashboard_service_batch_rolls_back_after_partial_apply(async_sess
                 {'company_id': 1, 'service_id': 20, 'is_extra': True},
             ],
             allowed_company_ids=[1],
+            actor_user_id=None,
+            portal_account_id=None,
         )
 
     # Both labels were flushed before the commit failed; the rollback must take them back.

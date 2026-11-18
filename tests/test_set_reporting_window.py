@@ -3,9 +3,12 @@
 A mis-parsed argument silently removes history from every metric of the wrong branch,
 so the guards matter more than the usual CLI plumbing.
 """
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
+
+import dashboard_service
+from dashboard_service import factual_branch_date
 
 import scripts.set_reporting_window as set_reporting_window
 
@@ -19,7 +22,7 @@ def test_parses_dates_and_clear_keywords():
 
 
 def test_rejects_a_future_reporting_start():
-    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    tomorrow = (factual_branch_date() + timedelta(days=1)).isoformat()
 
     with pytest.raises(SystemExit) as excinfo:
         set_reporting_window.parse_assignments([f'1={tomorrow}'])
@@ -28,14 +31,14 @@ def test_rejects_a_future_reporting_start():
 
 
 def test_accepts_today_as_a_reporting_start():
-    today = date.today()
+    today = factual_branch_date()
 
     assert set_reporting_window.parse_assignments([f'1={today.isoformat()}']) == {1: today}
 
 
 def test_accepts_a_future_reporting_end():
     """A branch can be scheduled to leave; only a start in the future is a typo."""
-    tomorrow = date.today() + timedelta(days=1)
+    tomorrow = factual_branch_date() + timedelta(days=1)
 
     parsed = set_reporting_window.parse_assignments([f'1={tomorrow.isoformat()}'], 'end')
 
@@ -87,3 +90,14 @@ def test_resulting_window_merges_assignments_with_stored_values():
     )
 
     assert window == (date(2022, 5, 1), date(2026, 8, 31))
+
+
+def test_a_start_dated_the_branch_today_is_accepted_between_midnight_and_three_moscow(monkeypatch):
+    """23:03 UTC is already the next day in Moscow: that day is today, not the future."""
+    monkeypatch.setattr(dashboard_service, 'factual_now', lambda: datetime(2030, 5, 17, 23, 3))
+
+    parsed = set_reporting_window.parse_assignments(['1=2030-05-18'])
+
+    assert parsed == {1: date(2030, 5, 18)}
+    with pytest.raises(SystemExit):
+        set_reporting_window.parse_assignments(['1=2030-05-19'])

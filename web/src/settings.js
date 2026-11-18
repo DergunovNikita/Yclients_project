@@ -116,7 +116,11 @@ els.changePasswordForm.addEventListener('submit', async (event) => {
       window.location.href = '/login.html';
     }, 1500);
   } catch (error) {
-    showError(els.passwordError, error.message);
+    const known = {
+      'Current password is incorrect': 'settings.currentPasswordWrong',
+      'New password must differ from the current password': 'settings.newPasswordSame',
+    }[error.message];
+    showError(els.passwordError, known ? t(known) : error.message);
   }
 });
 

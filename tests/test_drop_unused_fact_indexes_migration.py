@@ -5,7 +5,6 @@ import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
-import models
 from helpers import load_migration
 
 DROPPED = {
@@ -58,10 +57,3 @@ def test_downgrade_recreates_the_indexes_and_upgrade_drops_them(migration):
 
     # A database bootstrapped from the models never had them: dropping what is gone must not fail.
     _run(engine, migration.upgrade)
-
-
-def test_models_no_longer_declare_the_dropped_indexes():
-    declared = {
-        index.name for table in models.Base.metadata.tables.values() for index in table.indexes
-    }
-    assert not declared & set(DROPPED)

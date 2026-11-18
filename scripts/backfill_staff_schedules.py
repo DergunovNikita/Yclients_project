@@ -17,6 +17,7 @@ from datetime import date, timedelta
 from sqlalchemy import func
 
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
+from dashboard_service import factual_branch_date
 from database import init_database
 from models import Appointment, Company
 from sync_control import SyncControlService
@@ -40,7 +41,7 @@ def _parse_date(value: str) -> date:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Backfill historical staff schedules from YClients')
     parser.add_argument('--start', type=_parse_date, help='Override the start date for every branch')
-    parser.add_argument('--end', type=_parse_date, default=date.today(), help='End date (default: today)')
+    parser.add_argument('--end', type=_parse_date, default=factual_branch_date(), help='End date (default: today)')
     parser.add_argument('--company-id', action='append', type=int, dest='company_ids', help='Internal branch id')
     parser.add_argument(
         '--credential-id', type=int,
@@ -66,7 +67,7 @@ def _company_start(company: Company, first_appointment: date | None, override: d
     elif company.reporting_start_date is not None:
         first_reportable_date = company.reporting_start_date
     else:
-        first_reportable_date = first_appointment or date.today()
+        first_reportable_date = first_appointment or factual_branch_date()
     return first_reportable_date - timedelta(days=1)
 
 

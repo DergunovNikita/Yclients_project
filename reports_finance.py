@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dashboard_service import (
     COMPLETED_ATTENDANCE,
-    GOODS_SALE_TYPE_ID,
     SERVICE_SOLD_ITEM_TYPE,
     DateRange,
     ReportingWindow,
@@ -20,7 +19,6 @@ from dashboard_service import (
     _appointment_factual_at_condition,
     _average_check_block,
     _business_financial_master_condition,
-    _business_staff_id_condition,
     _coerce_date,
     _company_scope_clause,
     _direct_revenue_classifiers,
@@ -38,7 +36,7 @@ from dashboard_service import (
     financial_appointment_match_condition,
     reporting_window_clause,
 )
-from models import AccountCatalog, Appointment, FinancialTransaction, GoodTransaction, SyncSourceState
+from models import AccountCatalog, Appointment, FinancialTransaction, SyncSourceState
 from payment_methods import REASON_BEYOND_PERIOD, REASON_STARTS_MID_MONTH, fetch_payment_breakdown
 from report_common import (
     describe_months,
@@ -79,6 +77,8 @@ async def build_financial_overview(req: ReportRequest) -> dict[str, Any]:
     the card's formula applied to a slice, which makes the card the weighted mean of the rows.
     """
     base = req.base
+    # Built first: an axis over the length limit is a 400, and it should not cost the queries below.
+    axis = period_starts(req.start, req.end, req.granularity)
     avg = await _average_check_block(
         req.db,
         DateRange(start=req.start, end=req.end),
@@ -103,7 +103,7 @@ async def build_financial_overview(req: ReportRequest) -> dict[str, Any]:
     quiet = dict.fromkeys(('revenue', 'service_revenue', 'goods_revenue', 'topup_revenue', 'appointments'), 0.0)
     periods = [
         active.get(key) or {'period': key, **quiet}
-        for key in period_starts(req.start, req.end, req.granularity)
+        for key in axis
     ]
     for row in periods:
         # A day with payments but no completed visits has no average check, not a zero one.
@@ -198,8 +198,8 @@ async def _year_over_year_activity_bounds(
 ) -> tuple[date, dict[str, Any]] | None:
     """Return the first YClients record and the OPZ facts.
 
-    The first record includes every factual component used by Overview/plan-fact:
-    completed visits, paid services, goods/top-up payments and goods movements.
+    The first record includes every factual component the report reads: completed visits, paid services
+    and goods/top-up payments. Goods movements are not read, so they do not open a year.
     """
     appointment_conditions = [
         Appointment.date.is_not(None),
@@ -289,32 +289,10 @@ async def _year_over_year_activity_bounds(
         )
     ).one()
 
-    goods_day = func.date(GoodTransaction.date)
-    goods_conditions = [
-        GoodTransaction.date.is_not(None),
-        GoodTransaction.date <= now,
-        GoodTransaction.type_id == GOODS_SALE_TYPE_ID,
-        _business_staff_id_condition(GoodTransaction.master_id),
-        reporting_window_clause(GoodTransaction.company_id, goods_day),
-    ]
-    scope = _company_scope_clause(GoodTransaction.company_id, company_id, allowed_company_ids)
-    if scope is not None:
-        goods_conditions.append(scope)
-    if staff_id is not None:
-        goods_conditions.append(_staff_match(GoodTransaction.master_id, staff_id))
-    goods_bounds = (
-        await db.execute(
-            select(
-                func.min(goods_day).label('activity_start'),
-            ).where(*goods_conditions)
-        )
-    ).one()
-
     component_bounds = (
         appointment_bounds,
         service_bounds,
         direct_bounds,
-        goods_bounds,
     )
     starts = [
         _coerce_date(bounds.activity_start)

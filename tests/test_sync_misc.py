@@ -11,7 +11,7 @@ import sync_notifier
 from api import app
 from auth_scope import AccessContext
 from models import SyncState, YClientsCredential, YClientsCredentialCompany
-from sync_pipeline import transactional_state_key
+from sync_control import transactional_state_key
 
 
 def test_notifier_logs_the_exception_class_but_not_the_token(monkeypatch):

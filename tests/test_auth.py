@@ -4504,8 +4504,9 @@ async def test_invite_link_outlives_a_reset_link(auth_db, monkeypatch):
     await auth_service.send_account_invite_email(auth_db, user)
     invite_hours = await live_token_hours()
 
-    assert (reset_hours, invite_hours) == (2, 72)
-    assert '72 часа' in bodies[-1]
+    assert invite_hours == auth_service.INVITE_TTL_HOURS
+    assert reset_hours < invite_hours
+    assert str(auth_service.INVITE_TTL_HOURS) in bodies[-1]
 
 
 # ---------- AUTH-19: the password CLI signs the user out everywhere ----------

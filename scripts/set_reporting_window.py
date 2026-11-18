@@ -27,6 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
+from dashboard_service import factual_branch_date
 from database import build_async_database_url
 from models import Company
 
@@ -84,7 +85,7 @@ def parse_assignments(raw: list[str], bound: str = 'start') -> dict[int, date | 
         except ValueError:
             raise SystemExit(f'Expected an ISO date for company {key}, got {value!r}') from None
         # A typo in the year silently empties the branch's reports instead of erroring.
-        if bound == 'start' and day > date.today():
+        if bound == 'start' and day > factual_branch_date():
             raise SystemExit(f'Reporting start for company {key} is in the future: {day}')
         parsed[key] = day
     return parsed

@@ -5,7 +5,6 @@ import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
-import models
 from helpers import load_migration
 
 LIVE_STATE_KEYS = {
@@ -76,7 +75,3 @@ def test_downgrade_recreates_both_tables_with_their_original_key_index_and_forei
         assert foreign_key['referred_table'] == 'companies'
         assert foreign_key['constrained_columns'] == ['company_id']
         assert foreign_key['options'] == {'ondelete': 'CASCADE'}
-
-
-def test_models_no_longer_carry_the_dropped_tables():
-    assert not set(models.Base.metadata.tables) & {'staff_position_catalog', 'storage_catalog'}

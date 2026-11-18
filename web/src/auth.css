@@ -1329,10 +1329,6 @@ body.admin-modal-open {
   min-width: 0;
 }
 
-.staff-link__fired {
-  color: var(--muted);
-}
-
 .staff-link__empty {
   color: var(--muted);
 }

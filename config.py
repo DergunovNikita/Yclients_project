@@ -23,16 +23,7 @@ if LOG_LEVEL not in logging.getLevelNamesMapping():
     raise RuntimeError(f'LOG_LEVEL must be one of: {", ".join(logging.getLevelNamesMapping())}')
 # Zone of a branch that reports none; the sync stores it and the dashboard's "today" is read in it.
 DEFAULT_BRANCH_TIMEZONE = 'Europe/Moscow'
-PLACEHOLDER_SECRET_VALUES = {
-    'change_me_local_jwt_secret',
-    'change_me_sync_api_token',
-    'change_me_strong_api_key',
-    'change_me_long_random_secret',
-    'changeme',
-    'replace_with_openssl_rand_hex_32',
-    'your_app_password',
-    'your_login@yandex.ru',
-}
+PLACEHOLDER_SECRET_VALUES = {'changeme'}
 PLACEHOLDER_SECRET_PREFIXES = ('change_me', 'replace_with_', 'your_')
 
 
@@ -192,8 +183,6 @@ REPORT_USAGE_RETENTION_DAYS = _get_int('REPORT_USAGE_RETENTION_DAYS', 400)
 # ============================================================================
 # API runtime
 # ============================================================================
-API_HOST = os.getenv('API_HOST', '0.0.0.0')
-API_PORT = _get_int('API_PORT', 8000)
 API_KEY = os.getenv('API_KEY', '')
 
 # Comma-separated origins for a dashboard SPA served from another origin. Empty = no CORS middleware.

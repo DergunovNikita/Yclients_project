@@ -20,6 +20,7 @@ from dashboard_service import (
     financial_appointment_match_condition,
 )
 from models import AccountCatalog, Appointment, Company, FinancialTransaction, GoodTransaction
+from plan_config import normalize_plan_text
 from report_common import percent, period_key, period_starts
 from report_payload import (
     DECIMAL_FORMAT,
@@ -36,11 +37,6 @@ from report_payload import (
 
 NO_SELLER = 'Без продавца'
 TOP_GOODS_IN_CHART = 12
-
-
-def _title_key(title: str) -> str:
-    """Same normalization as the service group key: case and «ё» do not split one product."""
-    return title.strip().lower().replace('ё', 'е')
 
 
 def _goods_payment_conditions(req: ReportRequest, *, by_seller: bool) -> list[Any]:
@@ -181,7 +177,7 @@ def _merged_goods(
     )
 
     def entry(title: str, company_id: Any) -> dict[str, Any]:
-        item = goods[_title_key(title)]
+        item = goods[normalize_plan_text(title)]
         item['variants'][title.strip()] += 1
         item['branches'].add(company_id)
         return item
@@ -239,15 +235,14 @@ def _period_rows(
     paid_rows: list[dict[str, Any]],
     visits: dict[date, int],
     goods_visits: dict[date, int],
-    start: date,
-    end: date,
     granularity: str,
+    axis: list[str],
 ) -> list[dict[str, Any]]:
     """Every period of the window, quiet ones as zeros: comparison pairs periods by position."""
     periods: dict[str, dict[str, Any]] = defaultdict(
         lambda: {'revenue': 0.0, 'units': 0.0, 'sales_count': 0, 'completed_visits': 0, 'goods_visits': 0}
     )
-    for key in period_starts(start, end, granularity):
+    for key in axis:
         periods[key]
     for row in unit_rows:
         periods[period_key(_coerce_date(row.day), granularity)]['units'] += float(row.units or 0)
@@ -272,6 +267,8 @@ async def build_goods_dynamics(req: ReportRequest) -> dict[str, Any]:
     count, and the share's denominator is the Overview's completed visits, so all three reconcile with it.
     """
     base = req.base
+    # Built first: an axis over the length limit is a 400, and it should not cost the queries below.
+    axis = period_starts(req.start, req.end, req.granularity)
     unit_rows = await _sold_units(req)
     paid_rows = await fetch_paid_goods_rows(
         req.db,
@@ -288,7 +285,7 @@ async def build_goods_dynamics(req: ReportRequest) -> dict[str, Any]:
 
     goods_rows = _merged_goods(unit_rows, paid_rows)
     seller_rows = _seller_rows(paid_rows, await _company_titles(req.db, req.allowed_company_ids))
-    period_rows = _period_rows(unit_rows, paid_rows, visits, goods_visits, req.start, req.end, req.granularity)
+    period_rows = _period_rows(unit_rows, paid_rows, visits, goods_visits, req.granularity, axis)
 
     total_revenue = sum(row['revenue'] for row in goods_rows)
     total_units = sum(row['units'] for row in goods_rows)

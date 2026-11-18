@@ -37,7 +37,7 @@ from models import METHOD_YANDEX_PAY, ManualPaymentAmount
 from portal_audit import log_portal_audit
 from report_payload import MAX_PERIOD_BUCKETS, ReportInputError
 
-MAX_AMOUNT = Decimal('1000000000')
+MAX_AMOUNT = Decimal(int(dashboard_service.MAX_INPUT_VALUE))
 CENT = Decimal('0.01')
 CONFLICT_DETAIL = 'Value was changed by someone else; reload and try again'
 REASON_STARTS_MID_MONTH = 'period_starts_mid_month'

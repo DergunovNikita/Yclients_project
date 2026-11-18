@@ -6,6 +6,7 @@ globalThis.localStorage = { getItem: () => 'ru' };
 
 const { SUMMARIES } = await import('./fixtures/overview-summaries.mjs');
 const cards = await import('../src/overviewCards.js');
+const { t } = await import('../src/i18n.js');
 
 const reportUrl = (id) => `/reports/${id}?stub`;
 
@@ -32,7 +33,7 @@ test('metricCard picks label and hint by name and a delta by what it is given', 
 test('a missing percent is "was 0" for a non-zero value, nothing for a zero one, and a real percent stays a percent', () => {
   const delta = (options) => cards.metricCard('TotalRevenue', { value: 'x', ...options });
 
-  assert.equal(delta({ change: null, current: 150 }).delta, 'было 0');
+  assert.equal(delta({ change: null, current: 150 }).delta, t('dash.changeFromZero'));
   assert.equal(delta({ change: null, current: 150 }).deltaValue, null);
   assert.equal('delta' in delta({ change: null, current: 0 }), false);
   assert.equal('delta' in delta({ change: null, current: null }), false);
@@ -41,7 +42,7 @@ test('a missing percent is "was 0" for a non-zero value, nothing for a zero one,
   assert.match(delta({ change: 0, current: 150 }).delta, /^0%/);
 
   // A summary that carries the previous value tells a zero base from an unknown one.
-  assert.equal(delta({ change: null, current: 4, previous: 0 }).delta, 'было 0');
+  assert.equal(delta({ change: null, current: 4, previous: 0 }).delta, t('dash.changeFromZero'));
   assert.equal('delta' in delta({ change: null, current: 4, previous: null }), false);
   assert.equal('delta' in delta({ change: null, current: 4, previous: 3 }), false);
 });
@@ -62,7 +63,7 @@ test("an administrator's cards read the previous value from his block", () => {
     },
   };
   const byLabel = Object.fromEntries(cards.administratorCards(summary).cards.map((card) => [card.label, card]));
-  assert.equal(byLabel['Космо, сумма'].delta, 'было 0');
+  assert.equal(byLabel['Космо, сумма'].delta, t('dash.changeFromZero'));
   assert.equal('delta' in byLabel['Закреплённые визиты'], false);
   assert.equal('delta' in byLabel['Количество ОПЗ'], false);
   assert.match(byLabel['Доля ОПЗ от визитов'].delta, /\+100%/);
@@ -171,7 +172,7 @@ test('a percent missing because the previous window has no data is not reported 
   const byLabel = Object.fromEntries(cards.visitCards({ ...SUMMARIES.full, visit_metrics: visitMetrics })
     .map((card) => [card.label, card]));
   assert.equal('delta' in byLabel['Доля ОПЗ после первого визита'], false);
-  assert.equal(byLabel['Доля ОПЗ после повторного визита'].delta, 'было 0');
+  assert.equal(byLabel['Доля ОПЗ после повторного визита'].delta, t('dash.changeFromZero'));
 });
 
 test('the shift block keeps only the branch visits and clients: the extra services are the administrator\'s own', () => {

@@ -351,6 +351,15 @@ def test_authenticate_returns_false_on_a_non_json_reply():
     assert api.user_token is None
 
 
+def test_get_reads_a_non_json_200_as_a_soft_refusal():
+    """A maintenance stub answering 200 with HTML must read like a 5xx, not crash the step."""
+    api = YClientsAPI('token', 'login', 'password', request_delay=0)
+    api.user_token = 'user'
+    api.session.get = lambda *_a, **_k: _Response(200, json_error=True)
+
+    assert api._get('https://example.test/x') is None
+
+
 SNAPSHOT_GETTERS = [
     ('get_groups', ()),
     ('get_service_categories', ('1',)),

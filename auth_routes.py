@@ -9,12 +9,13 @@ from contextlib import asynccontextmanager
 from clock import utcnow
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Path, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
 from pydantic import AfterValidator, BaseModel, EmailStr, Field
 from sqlalchemy import func, inspect as sa_inspect, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api_types import Int32Id
 from auth_deps import forbid_demo, get_current_user, get_dashboard_access, require_roles
 from auth_hierarchy import (
     USER_ADMIN_ROLES,
@@ -22,7 +23,6 @@ from auth_hierarchy import (
     assert_can_assign_role,
     assert_can_manage_user,
     can_list_user,
-    can_manage_staff,
     can_manage_user,
     validate_company_ids_for_role,
 )
@@ -121,7 +121,7 @@ NewPassword = Annotated[
     Field(min_length=PORTAL_PASSWORD_MIN_LENGTH, max_length=128),
     AfterValidator(check_password_bytes),
 ]
-CompanyIds = Annotated[list[int], Field(max_length=200)]
+CompanyIds = Annotated[list[Int32Id], Field(max_length=200)]
 
 
 class RegisterRequest(BaseModel):
@@ -162,7 +162,7 @@ class AdminStaffCreateAccountRequest(BaseModel):
 
 
 class DistributeCredentialsRequest(BaseModel):
-    user_ids: list[int] = Field(min_length=1, max_length=500)
+    user_ids: list[Int32Id] = Field(min_length=1, max_length=500)
 
 
 class AdminUserUpdateRequest(BaseModel):
@@ -173,14 +173,8 @@ class AdminUserUpdateRequest(BaseModel):
     company_ids: CompanyIds | None = None
 
 
-# Ids of the staff-link routes are INTEGER columns: a larger number would reach the database and answer 500.
-INT32_MAX = 2**31 - 1
-LinkUserId = Annotated[int, Path(ge=1, le=INT32_MAX)]
-LinkStaffId = Annotated[int, Path(ge=1, le=INT32_MAX)]
-
-
 class AdminStaffLinkRequest(BaseModel):
-    staff_id: int = Field(ge=1, le=INT32_MAX)
+    staff_id: Int32Id
 
 
 class AdminUserCreateRequest(BaseModel):
@@ -188,7 +182,7 @@ class AdminUserCreateRequest(BaseModel):
     password: NewPassword | None = None
     full_name: str | None = Field(default=None, max_length=255)
     role: str
-    portal_account_id: int | None = None
+    portal_account_id: Int32Id | None = None
     company_ids: CompanyIds = Field(default_factory=list)
 
 
@@ -223,7 +217,7 @@ def _user_payload(
     return payload
 
 
-def _staff_payload(staff: Staff, manageable: bool = False) -> dict:
+def _staff_payload(staff: Staff) -> dict:
     email = normalize_email(staff.email or '') if staff.email else ''
     can_create_account = bool(email and is_deliverable_portal_email(email))
     return {
@@ -237,7 +231,8 @@ def _staff_payload(staff: Staff, manageable: bool = False) -> dict:
         'email_verified': False,
         'company_ids': [staff.company_id],
         'is_portal_user': False,
-        'manageable': manageable,
+        # Only rows of the actor's own branches are listed, and only user admins reach the route.
+        'manageable': True,
         'can_create_account': can_create_account,
         # What the role picker should land on. Derived here so the browser never has to own a
         # second copy of the rule — the two cannot agree on a title like «Барбер-администратор».
@@ -248,7 +243,6 @@ def _staff_payload(staff: Staff, manageable: bool = False) -> dict:
 async def _load_manageable_staff(
     db: AsyncSession,
     staff_id: int,
-    actor: PortalUser,
     actor_branch_ids: list[int],
 ) -> Staff:
     staff = (
@@ -269,6 +263,16 @@ async def _load_manageable_staff(
     if is_service_staff_name(staff.name):
         raise HTTPException(status_code=400, detail='Service staff rows cannot have an account')
     return staff
+
+
+@asynccontextmanager
+async def _unique_conflict(db: AsyncSession, detail: str = 'Email already registered'):
+    """A lost race on a unique index (the check-then-insert is not atomic) is the 409 the check would have given."""
+    try:
+        yield
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=detail) from exc
 
 
 @router.post('/register')
@@ -295,13 +299,15 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     )
     db.add(user)
     if AUTH_EMAIL_VERIFY_REQUIRED:
-        await db.flush()
+        async with _unique_conflict(db):
+            await db.flush()
         try:
             await send_verification_email(db, user)
         except Exception as exc:
             raise HTTPException(status_code=503, detail='Email delivery failed') from exc
     else:
-        await db.commit()
+        async with _unique_conflict(db):
+            await db.commit()
     return {
         'success': True,
         'message_key': 'register.verifySuccess' if AUTH_EMAIL_VERIFY_REQUIRED else 'register.success',
@@ -544,7 +550,7 @@ async def list_sessions(
 
 @router.delete('/sessions/{session_id}', dependencies=[Depends(forbid_demo)])
 async def delete_session(
-    session_id: int,
+    session_id: Int32Id,
     user: PortalUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -687,9 +693,9 @@ async def change_password(
     db: AsyncSession = Depends(get_async_db),
 ):
     if not await asyncio.to_thread(verify_password, body.current_password, user.password_hash):
-        raise HTTPException(status_code=400, detail='Неверный текущий пароль')
+        raise HTTPException(status_code=400, detail='Current password is incorrect')
     if body.current_password == body.new_password:
-        raise HTTPException(status_code=400, detail='Новый пароль должен отличаться от текущего')
+        raise HTTPException(status_code=400, detail='New password must differ from the current password')
 
     user.password_hash = await asyncio.to_thread(hash_password, body.new_password)
     user.password_changed_at = utcnow()
@@ -907,7 +913,7 @@ def _needs_staff_link(user: PortalUser, branch_ids: list[int], linked_companies:
 
 @router.get('/admin/users')
 async def admin_list_users(
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -941,10 +947,8 @@ async def admin_list_users(
                 )
             )
 
-    allowed_staff_companies = actor_branch_ids
-    for staff in await list_unlinked_staff(db, allowed_staff_companies):
-        manageable = can_manage_staff(actor.role, actor_branch_ids, staff.company_id)
-        payload.append(_staff_payload(staff, manageable=manageable))
+    for staff in await list_unlinked_staff(db, actor_branch_ids):
+        payload.append(_staff_payload(staff))
     return {'success': True, 'data': payload}
 
 
@@ -1011,7 +1015,8 @@ async def admin_create_user(
         created_at=utcnow(),
     )
     db.add(user)
-    await db.flush()
+    async with _unique_conflict(db):
+        await db.flush()
     if body.company_ids:
         await set_user_branches(db, user.id, body.company_ids)
     branch_ids = body.company_ids or []
@@ -1036,7 +1041,7 @@ async def admin_create_user(
 
 @router.patch('/admin/users/{user_id}', dependencies=[Depends(forbid_demo)])
 async def admin_update_user(
-    user_id: int,
+    user_id: Int32Id,
     body: AdminUserUpdateRequest,
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
@@ -1086,6 +1091,8 @@ async def admin_update_user(
                 raise HTTPException(status_code=409, detail='Email already registered')
             user.email = email
             user.email_verified_at = utcnow()
+            async with _unique_conflict(db):
+                await db.flush()
             sessions_must_end = True
             # A reset link mailed to the old address must not outlive the address.
             await invalidate_email_tokens(db, user.id, TOKEN_PURPOSE_RESET)
@@ -1123,7 +1130,7 @@ async def admin_update_user(
 
 @router.delete('/admin/users/{user_id}', dependencies=[Depends(forbid_demo)])
 async def admin_delete_user(
-    user_id: int,
+    user_id: Int32Id,
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -1195,7 +1202,7 @@ async def _staff_link_errors(db: AsyncSession):
 
 @router.get('/admin/users/{user_id}/staff-links')
 async def admin_list_staff_links(
-    user_id: LinkUserId,
+    user_id: Int32Id,
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -1207,7 +1214,7 @@ async def admin_list_staff_links(
 
 @router.post('/admin/users/{user_id}/staff-links', dependencies=[Depends(forbid_demo)])
 async def admin_link_staff(
-    user_id: LinkUserId,
+    user_id: Int32Id,
     body: AdminStaffLinkRequest,
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
@@ -1236,8 +1243,8 @@ async def admin_link_staff(
 
 @router.delete('/admin/users/{user_id}/staff-links/{staff_id}', dependencies=[Depends(forbid_demo)])
 async def admin_unlink_staff(
-    user_id: LinkUserId,
-    staff_id: LinkStaffId,
+    user_id: Int32Id,
+    staff_id: Int32Id,
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -1268,7 +1275,7 @@ def _provisioned_payload(account) -> dict:
 
 @router.post('/admin/provision-accounts', dependencies=[Depends(forbid_demo)])
 async def admin_provision_accounts(
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -1291,14 +1298,14 @@ async def admin_provision_accounts(
 
 @router.post('/admin/staff/{staff_id}/create-account', dependencies=[Depends(forbid_demo)])
 async def admin_create_staff_account(
-    staff_id: int,
+    staff_id: Int32Id,
     body: AdminStaffCreateAccountRequest,
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
     actor_branch_ids = await _active_admin_branch_ids(db, actor, x_portal_account_id)
-    staff = await _load_manageable_staff(db, staff_id, actor, actor_branch_ids)
+    staff = await _load_manageable_staff(db, staff_id, actor_branch_ids)
     # No role in the body means nobody picked one (the row-menu shortcut skips the modal), so
     # the CRM position decides — the same rule bulk provisioning follows.
     role = body.role or role_for_staff(staff)
@@ -1309,20 +1316,24 @@ async def admin_create_staff_account(
         # No mail leaves this server, so an account without a password is one nobody can sign into.
         raise HTTPException(status_code=400, detail='A password is required for this account')
     company_ids = body.company_ids if body.company_ids is not None else [staff.company_id]
+    if staff.company_id not in company_ids:
+        # The account's only live staff row is in this branch: outside its scope every widget says "unknown staff_id".
+        raise HTTPException(status_code=400, detail="company_ids must include the staff member's branch")
     validate_company_ids_for_role(actor.role, actor_branch_ids, role, company_ids)
     await _validate_company_ids_in_tenant(
         db, await _active_admin_portal_account_id(db, actor, x_portal_account_id), company_ids
     )
 
     try:
-        account = await provision_staff_account(
-            db,
-            staff,
-            email=body.email,
-            role=role,
-            password=body.password,
-            company_ids=company_ids,
-        )
+        async with _unique_conflict(db, 'The account could not be created: the e-mail or the staff member was taken'):
+            account = await provision_staff_account(
+                db,
+                staff,
+                email=body.email,
+                role=role,
+                password=body.password,
+                company_ids=company_ids,
+            )
     except ProvisionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -1334,7 +1345,7 @@ async def admin_create_staff_account(
 
 @router.get('/admin/initial-passwords')
 async def admin_list_initial_passwords(
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -1374,7 +1385,7 @@ async def admin_list_initial_passwords(
 @router.post('/admin/distribute-credentials', dependencies=[Depends(forbid_demo)])
 async def admin_distribute_credentials(
     body: DistributeCredentialsRequest,
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     actor: PortalUser = Depends(require_roles(*USER_ADMIN_ROLES)),
     db: AsyncSession = Depends(get_async_db),
 ):

@@ -19,8 +19,6 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import (
-    API_HOST,
-    API_PORT,
     LOG_LEVEL,
     DASHBOARD_CORS_ALLOW_HEADERS,
     DASHBOARD_CORS_ALLOW_METHODS,
@@ -35,6 +33,7 @@ from config import (
     SYNC_API_TOKEN,
 )
 from dashboard_routes import router as dashboard_router
+from api_types import Int32Id
 from auth_deps import forbid_demo, require_auth
 from open_paths import OPEN_PATHS
 from auth_routes import router as auth_router
@@ -100,7 +99,7 @@ async def require_api_key(
     request: Request,
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None),
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
 ):
     """Global auth: open paths, JWT user, or API key when configured."""
@@ -252,16 +251,12 @@ def request_access(request: Request) -> AccessContext | None:
     return getattr(request.state, 'access', None)
 
 
-@app.get("/")
-async def root():
-    return {"name": "YClients BI System API", "status": "ok"}
-
-
 # Bounded so a stuck database cannot hold the probe open past the caller's own timeout.
 HEALTH_DB_TIMEOUT_SECONDS = 3
 
 
-@app.get("/health")
+# nginx lets HEAD through to the probe, so the API has to answer it.
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     """Liveness only: the process is up and serving.
 
@@ -293,9 +288,9 @@ async def health_ready(db: AsyncSession = Depends(get_async_db)):
 class SyncTriggerRequest(BaseModel):
     mode: Literal['incremental', 'refresh', 'full'] = 'incremental'
     initiator: str = Field('dashboard', max_length=64)
-    portal_account_id: int | None = None
-    credential_id: int | None = None
-    company_ids: list[int] = Field(default_factory=list, max_length=200)
+    portal_account_id: Int32Id | None = None
+    credential_id: Int32Id | None = None
+    company_ids: list[Int32Id] = Field(default_factory=list, max_length=200)
     global_sync: bool = False
 
 
@@ -377,9 +372,3 @@ async def sync_status(
         "sync": await asyncio.to_thread(get_sync_status),
         "queue": await SyncJobService().async_get_status_payload(db, portal_account_id=portal_account_id),
     }
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host=API_HOST, port=API_PORT)

@@ -21,15 +21,17 @@ globalThis.document = {
   }),
 };
 
-const { initPage } = await import('../src/i18n.js');
+const { initPage, t } = await import('../src/i18n.js');
 
 test('a public auth page gets its language and title, and the title follows a language switch', async () => {
   initPage({ titleKey: 'login.title' });
   assert.equal(document.documentElement.lang, 'ru');
-  assert.equal(document.title, 'Вход — Salon Analytics');
+  assert.equal(document.title, `${t('login.title')} — Salon Analytics`);
+  const russianTitle = document.title;
 
   const select = { value: 'en', disabled: false };
   await Promise.all(switcherListeners.map((listener) => listener({ target: select })));
   assert.equal(document.documentElement.lang, 'en');
-  assert.equal(document.title, 'Sign in — Salon Analytics');
+  assert.equal(document.title, `${t('login.title')} — Salon Analytics`);
+  assert.notEqual(document.title, russianTitle);
 });

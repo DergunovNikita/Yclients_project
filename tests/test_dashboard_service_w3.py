@@ -261,7 +261,7 @@ def test_a_window_at_the_start_of_the_calendar_has_no_baseline():
 
 
 @pytest.mark.asyncio
-async def test_overview_answers_400_for_a_window_without_a_baseline(async_session):
+async def test_overview_answers_400_for_a_window_before_the_supported_calendar(async_session):
     params = {'start_date': '0001-01-10', 'end_date': '0001-01-20', 'period_preset': 'month'}
 
     async def override_db():
@@ -275,4 +275,4 @@ async def test_overview_answers_400_for_a_window_without_a_baseline(async_sessio
         app.dependency_overrides.clear()
 
     assert response.status_code == 400
-    assert response.json() == {'detail': 'the period has no previous period to compare with'}
+    assert 'start_date' in response.json()['detail']

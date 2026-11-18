@@ -113,16 +113,6 @@ def assert_can_manage_user(
         raise HTTPException(status_code=403, detail='Cannot manage this user')
 
 
-def can_manage_staff(
-    actor_role: str,
-    actor_branch_ids: list[int],
-    staff_company_id: int,
-) -> bool:
-    if actor_role not in USER_ADMIN_ROLES:
-        return False
-    return actor_role == PLATFORM_ADMIN_ROLE or staff_company_id in actor_branch_ids
-
-
 def validate_company_ids_for_role(
     actor_role: str,
     actor_branch_ids: list[int],

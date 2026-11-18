@@ -35,14 +35,18 @@ from models import (
     SyncState, SyncSourceState, YClientsCredential,
 )
 from portal_staff_sync import yclients_staff_clause
-from sync_control import SyncControlService
+from sync_control import (
+    PERSONAL_ACCOUNT_SOURCE,
+    STAFF_SCHEDULE_SOURCE,
+    SyncControlService,
+    historical_coverage_state_key,
+    transactional_state_key,
+)
 from sync_parsing import (
     parse_date, parse_datetime, parse_datetime_end, parse_datetime_start, parse_int,
     parse_reference_id, parse_time,
 )
 
-TRANSACTIONAL_STATE_KEY = 'transactions_last_success_date'
-HISTORICAL_COVERAGE_STATE_KEY = 'historical_source_coverage_v1'
 INCREMENTAL_SYNC_MODE = 'incremental'
 REFRESH_SYNC_MODE = 'refresh'
 FULL_SYNC_MODE = 'full'
@@ -53,10 +57,8 @@ RECORDS_STEP = 'Записи'
 FINANCIAL_TRANSACTIONS_STEP = 'Финансовые транзакции'
 GOODS_TRANSACTIONS_STEP = 'Товарные транзакции'
 COMMENTS_STEP = 'Комментарии'
-PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
 APPOINTMENTS_SOURCE = 'appointments_detail'
 GOODS_TRANSACTIONS_SOURCE = 'goods_transactions_detail'
-STAFF_SCHEDULE_SOURCE = 'staff_schedules'
 FULL_REFRESH_COVERAGE_SOURCES = (
     APPOINTMENTS_SOURCE,
     PERSONAL_ACCOUNT_SOURCE,
@@ -115,40 +117,6 @@ def load_existing_branch_map(db, model, company_id: int, ids, id_column, source_
             query = query.filter(model.source_type == source_type)
         for obj in query.all():
             existing[getattr(obj, id_column.key)] = obj
-    return existing
-
-
-def load_existing_or_adopt_legacy_source_map(
-    db,
-    model,
-    company_id: int,
-    ids,
-    id_column,
-    source_type: str = SOURCE_YCLIENTS,
-):
-    ids = list(ids)  # walked twice: a generator would leave nothing to adopt
-    existing = load_existing_branch_map(db, model, company_id, ids, id_column, source_type)
-    missing = [
-        external_id
-        for external_id in dict.fromkeys(int(item_id) for item_id in ids if item_id is not None)
-        if external_id not in existing
-    ]
-    # Rows from before external ids existed carry the YClients id as their primary key. A row of another source
-    # (a portal mirror whose id happens to equal a YClients one) is not that employee and is left alone.
-    for batch in chunked(missing, DB_BATCH_SIZE):
-        for legacy in (
-            db.query(model)
-            .filter(
-                model.id.in_(batch),
-                model.company_id == company_id,
-                model.external_id.is_(None),
-                model.source_type == source_type,
-            )
-            .all()
-        ):
-            legacy.external_id = legacy.id
-            legacy.source_type = source_type
-            existing[legacy.id] = legacy
     return existing
 
 
@@ -323,14 +291,6 @@ def get_sync_state_value(db, key: str):
     return state.value if state else None
 
 
-def transactional_state_key(company_id: int) -> str:
-    return f'{TRANSACTIONAL_STATE_KEY}:company:{int(company_id)}'
-
-
-def historical_coverage_state_key(company_id: int) -> str:
-    return f'{HISTORICAL_COVERAGE_STATE_KEY}:company:{int(company_id)}'
-
-
 def full_sync_start_date(end_date: date) -> date:
     if SYNC_DAYS and SYNC_DAYS > 0:
         return end_date - timedelta(days=SYNC_DAYS)
@@ -421,24 +381,6 @@ def has_valid_historical_coverage_marker(
     )
 
 
-def resolve_transaction_window(db, end_date: date, state_key: str):
-    full_start = full_sync_start_date(end_date)
-    if not SYNC_INCREMENTAL:
-        return full_start, FULL_SYNC_MODE
-
-    raw_value = get_sync_state_value(db, state_key)
-    if not raw_value:
-        return full_start, FULL_SYNC_MODE
-
-    try:
-        last_success = date.fromisoformat(raw_value)
-    except ValueError:
-        return full_start, FULL_SYNC_MODE
-
-    incremental_start = last_success - timedelta(days=max(0, SYNC_LOOKBACK_DAYS))
-    return max(full_start, incremental_start), INCREMENTAL_SYNC_MODE
-
-
 def resolve_sync_window(end_date: date, requested_mode: str):
     """Window reported for a run that resolved no branch (no credentials, nothing selected).
 
@@ -458,28 +400,28 @@ def resolve_company_sync_window(db, end_date: date, requested_mode: str, company
     if normalized_mode == FULL_SYNC_MODE:
         return history_start, FULL_SYNC_MODE
 
-    scoped_key = transactional_state_key(company_id)
-    scoped_checkpoint = get_sync_state_value(db, scoped_key)
-    if scoped_checkpoint and not has_valid_historical_coverage_marker(db, company_id):
+    # SYNC_INCREMENTAL=false is the operator's kill switch for windowed reads: it silences
+    # refresh exactly as incremental. A branch that has never been synced needs the whole
+    # history, not a trailing slice: refresh purges coverage for its window, and a branch
+    # with nothing behind that window would be certified on an interval it cannot honor.
+    checkpoint = get_sync_state_value(db, transactional_state_key(company_id))
+    if not SYNC_INCREMENTAL or not checkpoint:
+        return history_start, FULL_SYNC_MODE
+    if not has_valid_historical_coverage_marker(db, company_id):
         # One full pass is mandatory after introducing detailed source coverage.
         # Otherwise a legacy incremental checkpoint would only certify the recent
         # lookback window and every historical YoY value would remain unknown.
         return history_start, FULL_SYNC_MODE
 
     if normalized_mode == REFRESH_SYNC_MODE:
-        # A branch that has never been synced needs the whole history, not a trailing
-        # slice: refresh purges coverage for its window, and a branch with nothing
-        # behind that window would be certified on a 90-day interval it cannot honor.
-        # SYNC_INCREMENTAL=false is the operator's kill switch for windowed reads, so
-        # it must silence refresh exactly as it silences incremental.
-        if not SYNC_INCREMENTAL or not scoped_checkpoint:
-            return history_start, FULL_SYNC_MODE
         return refresh_sync_start_date(end_date, reporting_start), REFRESH_SYNC_MODE
 
-    if scoped_checkpoint:
-        return resolve_transaction_window(db, end_date, scoped_key)
-
-    return history_start, FULL_SYNC_MODE
+    try:
+        last_success = date.fromisoformat(checkpoint)
+    except ValueError:
+        return history_start, FULL_SYNC_MODE
+    incremental_start = last_success - timedelta(days=max(0, SYNC_LOOKBACK_DAYS))
+    return max(history_start, incremental_start), INCREMENTAL_SYNC_MODE
 
 
 def purge_source_window(db, model, company_id: int, start_date: str, end_date: str) -> int:
@@ -678,12 +620,13 @@ def _prepare_client_map(db, company_id: int, client_payloads: Iterable[dict]) ->
         if external_id is not None:
             payload_by_external_id[external_id] = payload
 
-    existing_clients = load_existing_or_adopt_legacy_source_map(
+    existing_clients = load_existing_branch_map(
         db,
         Client,
         company_id,
         payload_by_external_id.keys(),
         Client.external_id,
+        SOURCE_YCLIENTS,
     )
     changed = False
     for external_id, payload in payload_by_external_id.items():
@@ -740,12 +683,13 @@ def _staff_external_id(value) -> int | None:
 
 def _load_staff_map(db, company_id: int, staff_ids: Iterable[int | None]) -> dict[int, Staff]:
     external_ids = [int(item) for item in dict.fromkeys(staff_ids) if item is not None]
-    return load_existing_or_adopt_legacy_source_map(
+    return load_existing_branch_map(
         db,
         Staff,
         company_id,
         external_ids,
         Staff.external_id,
+        SOURCE_YCLIENTS,
     )
 
 
@@ -809,22 +753,13 @@ def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int):
 
             group = existing_groups.get(group_id)
             if not group:
-                legacy_group = db.get(Group, group_id)
-                if legacy_group is not None and legacy_group.external_id is None and (
-                    legacy_group.portal_account_id is None or legacy_group.portal_account_id == portal_account_id
-                ):
-                    group = legacy_group
-                    group.title = group_data.get('title', '') or group.title
-                    group.portal_account_id = portal_account_id
-                    group.external_id = group_id
-                else:
-                    group = Group(
-                        title=group_data.get('title', ''),
-                        portal_account_id=portal_account_id,
-                        external_id=group_id,
-                    )
-                    db.add(group)
-                    db.flush()
+                group = Group(
+                    title=group_data.get('title', ''),
+                    portal_account_id=portal_account_id,
+                    external_id=group_id,
+                )
+                db.add(group)
+                db.flush()
             else:
                 group.title = group_data.get('title', '') or group.title
                 group.portal_account_id = group.portal_account_id or portal_account_id
@@ -837,31 +772,14 @@ def sync_groups_and_companies(api: YClientsAPI, db, portal_account_id: int):
 
                 company = existing_companies.get(company_id)
                 if not company:
-                    legacy_company = db.get(Company, company_id)
-                    if (
-                        legacy_company is not None
-                        and legacy_company.external_id is None
-                        and (
-                            legacy_company.portal_account_id is None
-                            or legacy_company.portal_account_id == portal_account_id
-                        )
-                    ):
-                        company = legacy_company
-                        company.title = company_data.get('title', '') or company.title
-                        company.group_id = group.id
-                        company.portal_account_id = portal_account_id
-                        company.external_id = company_id
-                        company.source_type = SOURCE_YCLIENTS
-                        company.timezone = _company_timezone(company_data, company.timezone)
-                    else:
-                        db.add(Company(
-                            title=company_data.get('title', ''),
-                            group_id=group.id,
-                            portal_account_id=portal_account_id,
-                            external_id=company_id,
-                            source_type=SOURCE_YCLIENTS,
-                            timezone=_company_timezone(company_data),
-                        ))
+                    db.add(Company(
+                        title=company_data.get('title', ''),
+                        group_id=group.id,
+                        portal_account_id=portal_account_id,
+                        external_id=company_id,
+                        source_type=SOURCE_YCLIENTS,
+                        timezone=_company_timezone(company_data),
+                    ))
                 else:
                     # An answer without a title must not blank the stored one (materialize_branches does the same).
                     company.title = company_data.get('title', '') or company.title
@@ -1148,12 +1066,13 @@ def sync_clients(api: YClientsAPI, db, company_id: str, db_company_id: int | Non
 
     try:
         cid = _db_company_id(company_id, db_company_id)
-        existing_clients = load_existing_or_adopt_legacy_source_map(
+        existing_clients = load_existing_branch_map(
             db,
             Client,
             cid,
             (_client_external_id(client) for client in clients),
             Client.external_id,
+            SOURCE_YCLIENTS,
         )
         for c in clients:
             client_id = _client_external_id(c)
@@ -1362,12 +1281,13 @@ def sync_records(api: YClientsAPI, db, company_id: str,
             print(f"  Full refresh: удалено записей {purged}, транзакций {purged_tx}")
         tx_count = 0
         record_ids = [r.get('id') for r in records if r.get('id') is not None]
-        existing_records = load_existing_or_adopt_legacy_source_map(
+        existing_records = load_existing_branch_map(
             db,
             Appointment,
             cid,
             record_ids,
             Appointment.external_id,
+            SOURCE_YCLIENTS,
         )
         deleted_tx = bulk_delete_by_ids(
             db,
@@ -1536,12 +1456,13 @@ def sync_financial_transactions(api: YClientsAPI, db, company_id: str,
         if _window_safe_to_purge(api, full_refresh, 'финансовые транзакции'):
             purged = purge_source_window(db, FinancialTransaction, cid, start_date, end_date)
             print(f"  Full refresh: удалено транзакций {purged}")
-        existing_txns = load_existing_or_adopt_legacy_source_map(
+        existing_txns = load_existing_branch_map(
             db,
             FinancialTransaction,
             cid,
             (txn.get('id') for txn in txns),
             FinancialTransaction.external_id,
+            SOURCE_YCLIENTS,
         )
         pk_allocator = ExternalPkAllocator(db, FinancialTransaction, (_payload_id(t) for t in txns))
         client_map = _prepare_client_map(
@@ -1639,12 +1560,13 @@ def sync_goods_transactions(api: YClientsAPI, db, company_id: str,
         if _window_safe_to_purge(api, full_refresh, 'товарные транзакции'):
             purged = purge_source_window(db, GoodTransaction, cid, start_date, end_date)
             print(f"  Full refresh: удалено транзакций {purged}")
-        existing_txns = load_existing_or_adopt_legacy_source_map(
+        existing_txns = load_existing_branch_map(
             db,
             GoodTransaction,
             cid,
             (txn.get('id') for txn in txns),
             GoodTransaction.external_id,
+            SOURCE_YCLIENTS,
         )
         pk_allocator = ExternalPkAllocator(db, GoodTransaction, (_payload_id(t) for t in txns))
         client_map = _prepare_client_map(
@@ -1745,12 +1667,13 @@ def sync_comments(api: YClientsAPI, db, company_id: str,
         if _window_safe_to_purge(api, full_refresh, 'комментарии'):
             purged = purge_source_window(db, Comment, cid, start_date, end_date)
             print(f"  Full refresh: удалено комментариев {purged}")
-        existing_comments = load_existing_or_adopt_legacy_source_map(
+        existing_comments = load_existing_branch_map(
             db,
             Comment,
             cid,
             (comment.get('id') for comment in comments),
             Comment.external_id,
+            SOURCE_YCLIENTS,
         )
         pk_allocator = ExternalPkAllocator(db, Comment, (_payload_id(c) for c in comments))
         staff_map = _load_staff_map(
@@ -1956,7 +1879,7 @@ def execute_sync(
     overall_success = False
     companies_count = 0
 
-    end = end_date or date.today()
+    end = end_date or utcnow().date()
     default_start, default_sync_mode = resolve_sync_window(end, mode)
     default_sd = default_start.isoformat()
     ed = end.isoformat()

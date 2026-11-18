@@ -33,6 +33,7 @@ from models import (
     PortalUser,
     PortalUserBranch,
     Staff,
+    SyncJob,
 )
 from portal_account_provision import provision_all_unlinked_staff, provision_staff_account
 
@@ -677,3 +678,150 @@ def test_a_full_entropy_hex_key_is_not_warned_about(monkeypatch, caplog):
 
     assert 'PORTAL_CREDENTIALS_ENCRYPTION_KEY is not' not in caplog.text
     assert 'PORTAL_CREDENTIALS_ENCRYPTION_KEY_OLD is not' in caplog.text
+
+
+# ---------- audit 4: failure audit, forgot-password, user-insert races, onboarding repeats ----------
+
+
+async def _request(db, user_id, role, method, url, **kwargs):
+    async def override_db():
+        yield db
+
+    app.dependency_overrides[api.get_async_db] = override_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            token = await issue_access_token(db, user_id, role)
+            return await client.request(method, url, headers={'Authorization': f'Bearer {token}'}, **kwargs)
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_credential_that_cannot_be_stored_leaves_no_branches_behind(tenant_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setattr('data_sources.YClientsAPI', _FakeYClients)
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', '')
+    tenant_db.add(PortalAccount(id=2, label='Other', created_at=utcnow()))
+    tenant_db.add(_user(40, 'owner', tenant=2))
+    await tenant_db.commit()
+
+    response = await _request(
+        tenant_db, 40, 'owner', 'POST', '/auth/admin/yclients-credentials',
+        json={'title': 'Mine', 'partner_token': 'p', 'login': 'l', 'password': 'pw'},
+    )
+
+    assert response.status_code == 500
+    assert await tenant_db.scalar(
+        select(func.count()).select_from(PortalBranch).where(PortalBranch.portal_account_id == 2)
+    ) == 0
+    audited = (
+        await tenant_db.execute(
+            select(PortalAuditEvent.action).where(PortalAuditEvent.action == 'yclients_credentials.create_failed')
+        )
+    ).scalars().all()
+    assert audited == ['yclients_credentials.create_failed']
+
+
+@contextmanager
+def _lose_the_unique_race(session):
+    """The next flush of a user row fails like a concurrent insert of the same e-mail took the index."""
+    state = {'armed': True}
+
+    def before_flush(sync_session, flush_context, instances):
+        touched = [obj for obj in (*sync_session.new, *sync_session.dirty) if isinstance(obj, PortalUser)]
+        if state['armed'] and touched:
+            state['armed'] = False
+            raise IntegrityError('INSERT', {}, Exception('unique'))
+
+    event.listen(session.sync_session, 'before_flush', before_flush)
+    try:
+        yield
+    finally:
+        event.remove(session.sync_session, 'before_flush', before_flush)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('route', ['create_user', 'change_email', 'create_staff_account', 'register'])
+async def test_a_lost_unique_race_on_a_user_is_a_409_not_a_500(tenant_db, monkeypatch, route):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setattr('auth_routes.AUTH_PUBLIC_REGISTRATION_ENABLED', True)
+    tenant_db.add(_user(60, 'manager', 'manager@example.com'))
+    tenant_db.add(Staff(id=700, external_id=700, name='Anna', position='Барбер', company_id=1))
+    await tenant_db.commit()
+    requests = {
+        'create_user': ('POST', '/auth/admin/users', {'json': {
+            'email': 'new@example.com', 'password': 'Passw0rd!xyz', 'role': 'manager', 'company_ids': [1]}}),
+        'change_email': ('PATCH', '/auth/admin/users/60', {'json': {'email': 'moved@example.com'}}),
+        'create_staff_account': ('POST', '/auth/admin/staff/700/create-account', {'json': {
+            'email': 'anna@example.com', 'role': 'barber', 'password': 'Passw0rd!xyz'}}),
+        'register': ('POST', '/auth/register', {'json': {'email': 'fresh@example.com', 'password': 'Passw0rd!xyz'}}),
+    }
+    method, url, kwargs = requests[route]
+
+    with _lose_the_unique_race(tenant_db):
+        response = await _request(tenant_db, 1, 'owner', method, url, **kwargs)
+
+    assert response.status_code == 409
+    emails = set((await tenant_db.execute(select(PortalUser.email))).scalars())
+    assert emails == {'owner@example.com', 'manager@example.com'}
+    assert (await tenant_db.get(Staff, 700)).portal_user_id is None
+
+
+@pytest.mark.asyncio
+async def test_a_staff_account_cannot_be_given_branches_without_the_staff_members_own(tenant_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    tenant_db.add(Staff(id=700, external_id=700, name='Anna', position='Барбер', company_id=1))
+    await tenant_db.commit()
+
+    refused = await _request(
+        tenant_db, 1, 'owner', 'POST', '/auth/admin/staff/700/create-account',
+        json={'email': 'anna@example.com', 'role': 'barber', 'password': 'Passw0rd!xyz', 'company_ids': [2]},
+    )
+    created = await _request(
+        tenant_db, 1, 'owner', 'POST', '/auth/admin/staff/700/create-account',
+        json={'email': 'anna@example.com', 'role': 'barber', 'password': 'Passw0rd!xyz', 'company_ids': [1, 2]},
+    )
+
+    assert (refused.status_code, created.status_code) == (400, 200)
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_current_password_and_an_unchanged_one_get_stable_english_details(tenant_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+
+    wrong = await _request(
+        tenant_db, 1, 'owner', 'POST', '/auth/change-password',
+        json={'current_password': 'Wrong12345!', 'new_password': 'Another12345!'},
+    )
+    same = await _request(
+        tenant_db, 1, 'owner', 'POST', '/auth/change-password',
+        json={'current_password': 'Password12345!', 'new_password': 'Password12345!'},
+    )
+
+    assert (wrong.status_code, wrong.json()['detail']) == (400, 'Current password is incorrect')
+    assert (same.status_code, same.json()['detail']) == (400, 'New password must differ from the current password')
+
+
+@pytest.mark.asyncio
+async def test_onboarding_steps_are_closed_once_completed(tenant_db, monkeypatch):
+    monkeypatch.setattr('auth_deps.AUTH_REQUIRE_LOGIN', True)
+    monkeypatch.setattr('data_sources.YClientsAPI', _FakeYClients)
+    monkeypatch.setenv('PORTAL_CREDENTIALS_ENCRYPTION_KEY', 'test-encryption-key')
+    tenant_db.add(_user(70, 'owner', 'new-owner@example.com', tenant=None))
+    await tenant_db.commit()
+    credentials = {'partner_token': 'p', 'login': 'l', 'password': 'pw'}
+
+    async def onboarding(path, **body):
+        return await _request(tenant_db, 70, 'owner', 'POST', f'/onboarding/{path}', json=body)
+
+    first = await onboarding('credentials', **credentials, title='First')
+    credential_id = first.json()['data']['credential_id']
+
+    done = await onboarding('branches', credential_id=credential_id, company_ids=[101])
+    jobs_after_completion = await tenant_db.scalar(select(func.count()).select_from(SyncJob))
+    repeat_branches = await onboarding('branches', credential_id=credential_id, company_ids=[101])
+    repeat_credentials = await onboarding('credentials', **credentials)
+
+    assert done.status_code == 200
+    assert (repeat_branches.status_code, repeat_credentials.status_code) == (409, 409)
+    assert await tenant_db.scalar(select(func.count()).select_from(SyncJob)) == jobs_after_completion

@@ -148,16 +148,39 @@ jobs:
           ssh-keyscan -p "$VM_SSH_PORT" -T 15 -t rsa,ecdsa,ed25519 "$VM_HOST" \
             >> ~/.ssh/known_hosts 2>/dev/null || true
 
+      # `systemctl start` on a oneshot unit that the 5-minute timer is already running joins that run and returns when
+      # it ends. That run may have fetched origin/main before this push, so a zero exit does not prove the pushed
+      # commit is served: ask the api container which revision it was built from (the Dockerfile writes
+      # /app/REVISION) and start the unit once more if it is not this one.
       - name: Deploy backend on VM
         if: env.VM_HOST != '' && env.VM_USER != '' && env.VM_SSH_KEY != ''
         run: |
-          set +e
           ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" "$VM_USER@$VM_HOST" \
-            'sudo systemctl start yclients-auto-deploy.service'
-          deploy_status=$?
-          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/vm_deploy_key -p "$VM_SSH_PORT" "$VM_USER@$VM_HOST" \
-            'sudo journalctl -u yclients-auto-deploy.service -n 120 --no-pager'
-          exit "$deploy_status"
+            bash -s -- "$VM_PROJECT_DIR" "$GITHUB_SHA" <<'REMOTE'
+          set -uo pipefail
+          project_dir="$1"
+          sha="$2"
+          cd "$project_dir" || exit 1
+          # A newer main commit deployed meanwhile also contains this one, which is as good as an exact match.
+          serves_sha() {
+            local served
+            # </dev/null: this script arrives on ssh's stdin, and `compose exec` would swallow the rest of it.
+            served="$(docker compose exec -T api cat /app/REVISION 2>/dev/null </dev/null | tr -d '[:space:]')"
+            [ -n "$served" ] && { [ "$served" = "$sha" ] || git -c safe.directory="$PWD" merge-base --is-ancestor "$sha" "$served" 2>/dev/null; }
+          }
+          status=0
+          sudo systemctl start yclients-auto-deploy.service || status=$?
+          if [ "$status" -eq 0 ] && ! serves_sha; then
+            echo "Revision $sha is not served yet (a timer run probably started before the push); starting the deploy again."
+            sudo systemctl start yclients-auto-deploy.service || status=$?
+          fi
+          sudo journalctl -u yclients-auto-deploy.service -n 120 --no-pager
+          if [ "$status" -eq 0 ] && ! serves_sha; then
+            echo "::error::The VM does not serve $sha after two deploy runs; check the journal above."
+            status=1
+          fi
+          exit "$status"
+          REMOTE
 
       # A first full historical pass runs for hours and prints nothing while it pages
       # the YClients API. Tethered to this SSH session it died on an idle disconnect
@@ -180,6 +203,8 @@ jobs:
           command -v docker >/dev/null || { echo 'docker is unavailable on the VM' >&2; exit 1; }
           mkdir -p logs
           log_path="logs/post_deploy_sync_${sha}.log"
+          # Log rotation only knows sync_*.log, so these per-deploy files would pile up forever.
+          find logs -maxdepth 1 -name 'post_deploy_sync_*.log' -mtime +30 -delete
           # --fork makes setsid detach and return regardless of whether it already is a
           # process group leader; without it setsid execs and blocks this step for hours.
           setsid --fork nohup docker compose --profile tools run --rm sync \

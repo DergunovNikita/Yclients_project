@@ -595,14 +595,14 @@ function saveCredentialsAsCsv() {
     { key: 'name', label: t('admin.colName') },
     { key: 'email', label: t('admin.colLoginEmail') },
   ]);
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const blob = new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
   link.href = url;
   link.download = `portal-invites-${stamp}.csv`;
   link.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 async function distributeCredentials() {

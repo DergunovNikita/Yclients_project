@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import jwt
+from api_types import Int32Id
 from auth_scope import AccessContext, BRANCH_SCOPE_ROLES
 from auth_service import (
     decode_access_token,
@@ -132,7 +133,7 @@ async def require_auth(
     request: Request,
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None),
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
 ) -> AccessContext | None:
     """Global auth: JWT user (header or cookie), API key (full access), or open paths."""
@@ -172,7 +173,7 @@ async def get_dashboard_access(
     request: Request,
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None),
-    x_portal_account_id: int | None = Header(default=None),
+    x_portal_account_id: Int32Id | None = Header(default=None),
     db: AsyncSession = Depends(get_async_db),
 ) -> AccessContext:
     # The app-wide require_api_key dependency already resolved (and cached) the context,

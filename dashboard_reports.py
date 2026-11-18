@@ -21,7 +21,6 @@ import reports_services
 import reports_team
 from dashboard_service import DateRange, StaffSelection, _appointment_company_ids
 from models import Company, Staff
-from plan_config import normalize_staff_category
 from report_payload import ReportInputError, ReportRequest
 
 REPORT_GRANULARITIES = {'day', 'week', 'month'}
@@ -608,12 +607,14 @@ async def _fetch_report_payload(
     allowed_company_ids = await _appointment_company_ids(
         db, company_id, staff_id, allowed_company_ids
     )
-    base['calculation_scope'] = await _report_calculation_scope(
-        db,
-        report_id,
-        company_id,
-        staff_id,
-    )
+    # The comparison run's scope is thrown away with the rest of its base, so it is not worth a query.
+    if not for_comparison:
+        base['calculation_scope'] = await _report_calculation_scope(
+            db,
+            report_id,
+            company_id,
+            staff_id,
+        )
     request = ReportRequest(
         db=db,
         base=base,
@@ -651,7 +652,6 @@ async def _report_calculation_scope(
             await db.execute(
                 select(
                     Staff.name,
-                    Staff.position,
                     Staff.company_id,
                     Company.title.label('company_title'),
                 )
@@ -664,11 +664,6 @@ async def _report_calculation_scope(
             'mode': 'plan_fact' if report_id == 'staff_leaderboard' else 'personal',
             'staff_id': staff_id,
             'staff_name': staff.name if staff is not None else None,
-            'staff_category': (
-                normalize_staff_category(staff.position)
-                if staff is not None
-                else None
-            ),
             'company_id': int(staff.company_id) if staff is not None else company_id,
             'company_title': staff.company_title if staff is not None else None,
         }

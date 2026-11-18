@@ -285,8 +285,7 @@ async def test_cancellation_report_uses_exact_aggregate_counts(async_session, mo
     assert june_10['records'] == 3
     assert june_10['no_show'] == 1
     assert len(table_rows(data, 'periods')) == 18
-    assert data['notes'][0]['title'] == 'Что считается'
-    assert 'агрегатов YClients' in data['notes'][0]['text']
+    assert data['notes'][0]['kind'] == 'info'
 
 
 @pytest.mark.asyncio

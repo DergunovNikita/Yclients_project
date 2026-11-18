@@ -87,9 +87,9 @@
         <div class="alert success" id="add-cred-success" hidden></div>
         <form class="settings-form" id="add-cred-form">
           <label><span data-i18n="settings.credTitleLabel">Nome</span><input type="text" id="cred-title" required maxlength="255" value="YClients integration" /></label>
-          <label>Partner token<input type="text" id="cred-token" required autocomplete="off" /></label>
-          <label><span data-i18n="onboarding.login">Login</span><input type="text" id="cred-login" required /></label>
-          <label><span data-i18n="common.password">Password</span><input type="password" id="cred-password" required /></label>
+          <label>Partner token<input type="password" id="cred-token" required autocomplete="off" /></label>
+          <label><span data-i18n="onboarding.login">Login</span><input type="text" id="cred-login" required autocomplete="off" /></label>
+          <label><span data-i18n="common.password">Password</span><input type="password" id="cred-password" required autocomplete="new-password" /></label>
           <button type="submit" class="btn btn--primary" id="cred-submit" data-i18n="settings.credSubmit">Salva e collega</button>
         </form>
       </article>

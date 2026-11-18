@@ -19,6 +19,19 @@ from sync_parsing import parse_datetime, serialize_dt
 _RETENTION_STATE_KEY = 'last_run_retention_at'
 _REPORT_USAGE_RETENTION_STATE_KEY = 'last_report_usage_retention_at'
 UNSCOPED_SUCCESS_STATE_KEY = 'last_unscoped_sync_at'
+TRANSACTIONAL_STATE_KEY = 'transactions_last_success_date'
+HISTORICAL_COVERAGE_STATE_KEY = 'historical_source_coverage_v1'
+# `sync_source_states.source` values: the sync writes them, the dashboard reads coverage by the same names.
+PERSONAL_ACCOUNT_SOURCE = 'financial_transactions_detail'
+STAFF_SCHEDULE_SOURCE = 'staff_schedules'
+
+
+def transactional_state_key(company_id: int) -> str:
+    return f'{TRANSACTIONAL_STATE_KEY}:company:{int(company_id)}'
+
+
+def historical_coverage_state_key(company_id: int) -> str:
+    return f'{HISTORICAL_COVERAGE_STATE_KEY}:company:{int(company_id)}'
 
 
 class SyncControlService:

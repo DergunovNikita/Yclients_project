@@ -45,10 +45,10 @@ test('HTTP errors retain distinct dashboard states and retry metadata', () => {
 
   const error = responseError(
     { status: 503 },
-    { detail: { code: 'report_calculation_failed', message: 'Повторите расчёт', retryable: true } },
+    { detail: { code: 'report_calculation_failed', message: 'Retry the calculation', retryable: true } },
     'fallback',
   );
-  assert.equal(error.message, 'Повторите расчёт');
+  assert.equal(error.message, 'Retry the calculation');
   assert.equal(error.code, 'report_calculation_failed');
   assert.equal(error.apiStatus, 'server_error');
   assert.equal(error.retryable, true);
@@ -158,6 +158,7 @@ test('branch data loads after staff success or failure, but not after stale refr
   assert.equal(staffRefreshAllowsDataLoad('failed', '1', 1), true);
   assert.equal(staffRefreshAllowsDataLoad('superseded', '1', '1'), false);
   assert.equal(staffRefreshAllowsDataLoad('ready', '1', '2'), false);
+  assert.equal(staffRefreshAllowsDataLoad('ready', '1', '1', false), false);
 });
 
 test('service management sends only the rows whose label changed in one batch', () => {

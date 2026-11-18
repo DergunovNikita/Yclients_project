@@ -40,6 +40,12 @@ from sync_pipeline import (
     sync_records,
     sync_services,
     sync_staff,
+)
+from sync_control import (
+    PERSONAL_ACCOUNT_SOURCE,
+    STAFF_SCHEDULE_SOURCE,
+    TRANSACTIONAL_STATE_KEY,
+    historical_coverage_state_key,
     transactional_state_key,
 )
 from yclients_credentials import YClientsCredentialValue, new_credential
@@ -222,9 +228,9 @@ def test_company_window_uses_scoped_checkpoint_not_a_stale_global_one(monkeypatc
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
         db.add(Appointment(id=1, company_id=1, date=date(2026, 6, 20)))
-        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-30'))
+        db.add(SyncState(key=TRANSACTIONAL_STATE_KEY, value='2026-06-30'))
         db.add(SyncState(key=transactional_state_key(1), value='2026-06-20'))
-        db.add(SyncState(key=sync_pipeline.historical_coverage_state_key(1), value='2026-06-20'))
+        db.add(SyncState(key=historical_coverage_state_key(1), value='2026-06-20'))
         for source in sync_pipeline.FULL_REFRESH_COVERAGE_SOURCES:
             db.add(SyncSourceState(
                 company_id=1,
@@ -257,7 +263,7 @@ def test_company_with_coverage_but_no_scoped_checkpoint_runs_full(monkeypatch, m
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
         db.add(Appointment(id=1, company_id=1, date=date(2026, 6, 20)))
-        db.add(SyncState(key=sync_pipeline.historical_coverage_state_key(1), value='2026-06-20'))
+        db.add(SyncState(key=historical_coverage_state_key(1), value='2026-06-20'))
         for source in sync_pipeline.FULL_REFRESH_COVERAGE_SOURCES:
             db.add(SyncSourceState(
                 company_id=1,
@@ -282,7 +288,7 @@ def test_company_window_ignores_global_for_new_company_without_transactional_row
     with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
-        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-30'))
+        db.add(SyncState(key=TRANSACTIONAL_STATE_KEY, value='2026-06-30'))
         db.commit()
 
         assert sync_pipeline.resolve_company_sync_window(db, date(2026, 7, 1), 'incremental', 1) == (
@@ -302,7 +308,7 @@ def test_limited_window_marker_cannot_certify_complete_history(monkeypatch):
         db.add(Appointment(id=1, company_id=1, date=date(2023, 2, 10)))
         db.add(SyncState(key=transactional_state_key(1), value='2026-06-30'))
         db.add(SyncState(
-            key=sync_pipeline.historical_coverage_state_key(1),
+            key=historical_coverage_state_key(1),
             value='2026-06-30',
         ))
         for source in sync_pipeline.FULL_REFRESH_COVERAGE_SOURCES:
@@ -333,7 +339,7 @@ def test_missing_historical_source_interval_invalidates_existing_marker(monkeypa
         db.add(Appointment(id=1, company_id=1, date=date(2023, 2, 10)))
         db.add(SyncState(key=transactional_state_key(1), value='2026-06-30'))
         db.add(SyncState(
-            key=sync_pipeline.historical_coverage_state_key(1),
+            key=historical_coverage_state_key(1),
             value='2026-06-30',
         ))
         for source in sync_pipeline.FULL_REFRESH_COVERAGE_SOURCES[:-1]:
@@ -365,7 +371,7 @@ def _certified_company(db, reporting_start=None):
         reporting_start_date=reporting_start,
     ))
     db.add(SyncState(key=transactional_state_key(1), value='2026-06-30'))
-    db.add(SyncState(key=sync_pipeline.historical_coverage_state_key(1), value='2026-06-30'))
+    db.add(SyncState(key=historical_coverage_state_key(1), value='2026-06-30'))
     for source in sync_pipeline.FULL_REFRESH_COVERAGE_SOURCES:
         db.add(SyncSourceState(
             company_id=1,
@@ -471,6 +477,21 @@ def test_refresh_window_falls_back_to_full_when_incremental_is_disabled(monkeypa
         assert sync_pipeline.resolve_sync_window(date(2026, 7, 1), 'refresh') == (date(2022, 1, 1), 'full')
 
 
+@pytest.mark.parametrize('mode', ['incremental', 'refresh'])
+def test_disabled_incremental_reads_from_the_branch_reporting_start(monkeypatch, mode):
+    """The kill switch gives every windowed mode the same full-history floor, the branch's own start."""
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2000, 1, 1))
+    monkeypatch.setattr(sync_pipeline, 'SYNC_INCREMENTAL', False)
+    monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
+
+    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+        _certified_company(db, reporting_start=date(2024, 3, 1))
+
+        assert sync_pipeline.resolve_company_sync_window(
+            db, date(2026, 7, 1), mode, 1
+        ) == (date(2024, 3, 1), 'full')
+
+
 def test_resolve_sync_window_reports_the_refresh_window_for_the_run(monkeypatch):
     """execute_sync falls back to this window and mode when no company is resolved."""
     monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2022, 1, 1))
@@ -521,7 +542,7 @@ def test_refresh_recertifies_coverage_even_when_a_coverageless_step_fails(monkey
 
         assert result['success'] is False
         assert db.get(
-            SyncState, sync_pipeline.historical_coverage_state_key(1)
+            SyncState, historical_coverage_state_key(1)
         ).value == '2026-07-01'
         # The transactional checkpoint still waits for a clean run.
         assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
@@ -719,7 +740,7 @@ def test_execute_sync_does_not_certify_incomplete_historical_coverage(monkeypatc
         assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
         assert db.get(
             SyncState,
-            sync_pipeline.historical_coverage_state_key(1),
+            historical_coverage_state_key(1),
         ) is None
 
 
@@ -730,8 +751,8 @@ def test_execute_sync_runs_full_for_coverage_without_scoped_checkpoint(monkeypat
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
         db.add(Appointment(id=1, company_id=1, date=date(2026, 6, 20)))
-        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-28'))  # retired, stale
-        db.add(SyncState(key=sync_pipeline.historical_coverage_state_key(1), value='2026-06-20'))
+        db.add(SyncState(key=TRANSACTIONAL_STATE_KEY, value='2026-06-28'))  # retired, stale
+        db.add(SyncState(key=historical_coverage_state_key(1), value='2026-06-20'))
         db.commit()
 
         credential = YClientsCredentialValue(
@@ -750,6 +771,27 @@ def test_execute_sync_runs_full_for_coverage_without_scoped_checkpoint(monkeypat
         assert result['success'] is True
         assert result['mode'] == 'full'
         assert result['window_start'] == '2022-01-01'
+        assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
+
+
+def test_execute_sync_takes_today_from_the_utc_clock_not_the_host(monkeypatch):
+    """Late evening UTC is already tomorrow in Moscow: the sync day must follow clock.utcnow()."""
+    monkeypatch.setattr(sync_pipeline, 'SYNC_HISTORY_START_DATE', date(2022, 1, 1))
+    monkeypatch.setattr(sync_pipeline, 'SYNC_DAYS', 0)
+    monkeypatch.setattr(sync_pipeline, 'utcnow', lambda: datetime(2026, 6, 30, 21, 30))
+    with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
+        db.add(Group(id=1, title='G1'))
+        db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
+        db.commit()
+        credential = YClientsCredentialValue(
+            id=11, title='Tenant credential', partner_token='partner', login='login', password='password',
+            company_ids=(1,), portal_account_id=7,
+        )
+        patch_execute_sync_dependencies(monkeypatch, db, credential)
+
+        result = execute_sync(mode='full', portal_account_id=7)
+
+        assert result['success'] is True
         assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
 
 
@@ -790,7 +832,7 @@ def test_execute_sync_forces_one_time_history_backfill_without_coverage_marker(m
         assert result['mode'] == 'full'
         assert result['window_start'] == '2022-01-01'
         assert db.get(
-            SyncState, sync_pipeline.historical_coverage_state_key(1)
+            SyncState, historical_coverage_state_key(1)
         ).value == '2026-06-30'
 
 
@@ -816,7 +858,7 @@ def test_execute_sync_does_not_checkpoint_when_full_cleanup_fails(monkeypatch):
         assert result['success'] is False
         assert db.get(SyncState, transactional_state_key(1)) is None
         assert db.get(
-            SyncState, sync_pipeline.historical_coverage_state_key(1)
+            SyncState, historical_coverage_state_key(1)
         ) is None
         # The branch is skipped after the failed cleanup: no source step ran for it.
         assert [(item['key'], item['success']) for item in result['step_results']] == [
@@ -831,7 +873,7 @@ def test_execute_sync_full_refreshes_a_new_company_and_leaves_the_retired_global
     with sqlite_session_with_system(TRANSACTIONAL_WINDOW_TABLES) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1, external_id=10, portal_account_id=7))
-        db.add(SyncState(key=sync_pipeline.TRANSACTIONAL_STATE_KEY, value='2026-06-28'))
+        db.add(SyncState(key=TRANSACTIONAL_STATE_KEY, value='2026-06-28'))
         db.commit()
 
         credential = YClientsCredentialValue(
@@ -850,10 +892,10 @@ def test_execute_sync_full_refreshes_a_new_company_and_leaves_the_retired_global
         assert result['success'] is True
         assert result['mode'] == 'full'
         assert result['window_start'] == '2022-01-01'
-        assert db.get(SyncState, sync_pipeline.TRANSACTIONAL_STATE_KEY).value == '2026-06-28'
+        assert db.get(SyncState, TRANSACTIONAL_STATE_KEY).value == '2026-06-28'
         assert db.get(SyncState, transactional_state_key(1)).value == '2026-06-30'
         assert db.get(
-            SyncState, sync_pipeline.historical_coverage_state_key(1)
+            SyncState, historical_coverage_state_key(1)
         ).value == '2026-06-30'
 
 
@@ -938,11 +980,11 @@ def test_execute_sync_refresh_purges_and_reloads_the_rolling_window(monkeypatch)
             state = db.get(SyncSourceState, {'company_id': 1, 'source': source})
             return state.period_start, state.period_end
 
-        assert coverage(sync_pipeline.PERSONAL_ACCOUNT_SOURCE) == (date(2022, 1, 1), date(2026, 7, 1))
+        assert coverage(PERSONAL_ACCOUNT_SOURCE) == (date(2022, 1, 1), date(2026, 7, 1))
         assert coverage(sync_pipeline.APPOINTMENTS_SOURCE) == (date(2022, 1, 1), date(2026, 8, 30))
         assert db.get(SyncState, transactional_state_key(1)).value == '2026-07-01'
         assert db.get(
-            SyncState, sync_pipeline.historical_coverage_state_key(1)
+            SyncState, historical_coverage_state_key(1)
         ).value == '2026-07-01'
 
 
@@ -1102,11 +1144,12 @@ class FakeGroupsAPI:
         return self._groups
 
 
-def test_sync_groups_and_companies_creates_adopts_and_keeps_titles():
+def test_sync_groups_and_companies_creates_updates_and_keeps_titles():
     with sqlite_session_with_system([Group.__table__, Company.__table__]) as db:
-        # A pre-tenant row (external_id IS NULL, id == YClients id) is adopted instead of duplicated.
-        db.add(Group(id=10, title='Legacy group'))
-        db.add(Company(id=500, title='Legacy salon', group_id=10))
+        db.add(Group(id=10, title='Stored group', external_id=10, portal_account_id=7))
+        db.add(Company(
+            id=500, title='Stored salon', group_id=10, external_id=500, portal_account_id=7, source_type='yclients',
+        ))
         db.commit()
         groups = [{'id': 10, 'title': 'Net', 'companies': [
             {'id': 500, 'title': 'Salon', 'timezone': 'Europe/Moscow'},
@@ -1645,7 +1688,7 @@ def test_full_refresh_purge_invalidates_coverage_until_each_source_succeeds():
             ),
             SyncSourceState(
                 company_id=1,
-                source=sync_pipeline.PERSONAL_ACCOUNT_SOURCE,
+                source=PERSONAL_ACCOUNT_SOURCE,
                 period_start=date(2025, 1, 1),
                 period_end=date(2025, 1, 31),
             ),
@@ -1660,7 +1703,7 @@ def test_full_refresh_purge_invalidates_coverage_until_each_source_succeeds():
                 value='2025-01-31',
             ),
             SyncState(
-                key=sync_pipeline.historical_coverage_state_key(1),
+                key=historical_coverage_state_key(1),
                 value='2025-01-31',
             ),
         ])
@@ -1675,7 +1718,7 @@ def test_full_refresh_purge_invalidates_coverage_until_each_source_succeeds():
         ) is True
         assert db.query(SyncSourceState).count() == 0
         assert db.get(
-            SyncState, sync_pipeline.historical_coverage_state_key(1)
+            SyncState, historical_coverage_state_key(1)
         ) is None
 
         assert sync_records(
@@ -1699,7 +1742,7 @@ def test_full_refresh_purge_invalidates_coverage_until_each_source_succeeds():
         )
         financial_state = db.get(
             SyncSourceState,
-            {'company_id': 1, 'source': sync_pipeline.PERSONAL_ACCOUNT_SOURCE},
+            {'company_id': 1, 'source': PERSONAL_ACCOUNT_SOURCE},
         )
         assert (appointment_state.period_start, appointment_state.period_end) == (
             date(2025, 1, 1),
@@ -1745,7 +1788,7 @@ def test_sync_staff_schedules_uses_internal_staff_id_for_tenant_scoped_staff():
         assert schedule.staff_id == 100
         coverage = db.get(
             SyncSourceState,
-            {'company_id': 1, 'source': sync_pipeline.STAFF_SCHEDULE_SOURCE},
+            {'company_id': 1, 'source': STAFF_SCHEDULE_SOURCE},
         )
         assert (coverage.period_start, coverage.period_end) == (
             date(2025, 1, 10),
@@ -1795,7 +1838,7 @@ def test_sync_staff_schedules_deduplicates_slots_and_keeps_past_days_on_empty_an
         assert db.query(StaffSchedule).count() == 1
         coverage = db.get(
             SyncSourceState,
-            {'company_id': 1, 'source': sync_pipeline.STAFF_SCHEDULE_SOURCE},
+            {'company_id': 1, 'source': STAFF_SCHEDULE_SOURCE},
         )
         assert (coverage.period_start, coverage.period_end) == (
             date(2025, 1, 1),
@@ -1940,7 +1983,7 @@ def test_evening_utc_sync_ignores_the_day_yclients_adds_before_the_schedule_wind
         ]
         coverage = db.get(
             SyncSourceState,
-            {'company_id': 1, 'source': sync_pipeline.STAFF_SCHEDULE_SOURCE},
+            {'company_id': 1, 'source': STAFF_SCHEDULE_SOURCE},
         )
         assert (coverage.period_start, coverage.period_end) == (date(2026, 9, 29), date(2026, 11, 28))
 
@@ -2001,8 +2044,8 @@ def test_sync_staff_marks_missing_staff_as_fired():
     ) as db:
         db.add(Group(id=1, title='G1'))
         db.add(Company(id=1, title='Salon', group_id=1))
-        db.add(Staff(id=1, name='Existing', company_id=1, fired=0))
-        db.add(Staff(id=2, name='Stale', company_id=1, fired=0))
+        db.add(Staff(id=1, external_id=1, source_type='yclients', name='Existing', company_id=1, fired=0))
+        db.add(Staff(id=2, external_id=2, source_type='yclients', name='Stale', company_id=1, fired=0))
         # Portal-created row: absent from YClients by design, fired flag owned by the portal.
         db.add(Staff(id=900, name='Portal Manager', company_id=1, fired=0, portal_user_id=42, source_type='portal'))
         db.commit()
@@ -2492,7 +2535,7 @@ def test_failed_coverage_step_leaves_the_branch_needing_a_full_pass(monkeypatch)
         result = execute_sync(mode='refresh', end_date=date(2026, 7, 1), portal_account_id=7)
 
         assert result['success'] is False
-        assert db.get(SyncState, sync_pipeline.historical_coverage_state_key(1)) is None
+        assert db.get(SyncState, historical_coverage_state_key(1)) is None
         assert sync_pipeline.resolve_company_sync_window(
             db, date(2026, 7, 2), 'refresh', 1
         ) == (date(2022, 1, 1), 'full')
@@ -2544,7 +2587,7 @@ def test_empty_answer_still_records_the_window_as_read():
 
         state = db.get(
             SyncSourceState,
-            {'company_id': 1, 'source': sync_pipeline.PERSONAL_ACCOUNT_SOURCE},
+            {'company_id': 1, 'source': PERSONAL_ACCOUNT_SOURCE},
         )
         assert (state.period_start, state.period_end) == (date(2026, 6, 4), date(2026, 6, 30))
 

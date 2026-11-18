@@ -1,10 +1,9 @@
 """Tenant ownership helpers for portal account branch assignment.
 
-A tenant that only contains platform_admin users (or none at all) is considered
-"admin-only": platform admins hop between tenants for support, so their presence
-must not stop a real owner from claiming the branches. When an owner onboards
-and provides valid YClients credentials that cover an admin-only tenant's
-branches, we reassign those branches to the owner's tenant and drop the stale
+A tenant without business users is "admin-only" and its branches may be taken over by an owner onboarding with
+valid YClients credentials. The role filter below names platform admins explicitly, but in the real schema
+(`ck_portal_users_platform_admin_no_tenant`) they have no tenant at all, so in practice the tenant is simply empty.
+Taking over moves the branch (and its `Company` row with the history) to the owner's tenant and drops the stale
 credential<->company links on the source side.
 """
 

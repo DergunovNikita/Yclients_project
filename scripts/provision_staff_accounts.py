@@ -8,15 +8,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
-from database import build_async_database_url, init_database
+from database import build_async_database_url
 from portal_account_provision import provision_all_unlinked_staff
 
 
 async def main() -> int:
-    database = init_database(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
-    if not database.test_connection():
-        return 1
-
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
     engine = create_async_engine(build_async_database_url(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD))

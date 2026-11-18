@@ -353,7 +353,7 @@ async def test_ids_outside_the_database_range_are_refused_before_the_database(li
     too_big = 2**31
 
     assert (await _link(db, too_big)).status_code == 422
-    assert (await _link(db, 0)).status_code == 422
+    assert (await _link(db, -too_big - 1)).status_code == 422
     assert (await _link(db, REAL_ANNA, user=too_big)).status_code == 422
     unlink = await _request(db, OWNER, 'owner', 'DELETE', f'/auth/admin/users/{ADMIN}/staff-links/{too_big}')
     assert unlink.status_code == 422
@@ -431,3 +431,23 @@ async def test_linking_is_refused_when_the_move_would_mix_month_and_daily_rows(l
     assert (await db.get(Staff, REAL_ANNA)).portal_user_id is None
     assert (await db.get(Staff, mirror)).fired == 0
     assert (await _facts(db, mirror)) == {(november[0], 'reviews_qty'): 2.0}
+
+
+@pytest.mark.asyncio
+async def test_a_link_kept_by_an_account_that_is_no_longer_admin_or_barber_can_still_be_seen_and_released(link_db):
+    db = link_db
+    assert (await _link(db, REAL_ANNA)).status_code == 200
+    (await db.get(PortalUser, ADMIN)).role = 'manager'
+    await db.commit()
+
+    listing = await _request(db, OWNER, 'owner', 'GET', f'/auth/admin/users/{ADMIN}/staff-links')
+
+    assert listing.status_code == 200, listing.text
+    branches = {item['company_id']: item for item in listing.json()['data']['branches']}
+    assert [row['staff_id'] for row in branches[1]['linked']] == [REAL_ANNA]
+    # Nothing to offer to a role that cannot take a link, and a hand-made link is still refused.
+    assert all(item['candidates'] == [] for item in branches.values())
+    assert (await _link(db, REAL_BORIS)).status_code == 400
+    released = await _request(db, OWNER, 'owner', 'DELETE', f'/auth/admin/users/{ADMIN}/staff-links/{REAL_ANNA}')
+    assert released.status_code == 200
+    assert (await db.get(Staff, REAL_ANNA)).portal_user_id is None

@@ -412,7 +412,7 @@ async def test_plan_fact_route_parses_the_filter_and_rejects_malformed_ids(async
                     '/dashboard/widget/plan_fact', params={**PLAN_FACT_PARAMS, 'staff_position_ids': value},
                 )
                 for value in (
-                    'abc', '1,,2', '-5', '0', '1.5', '99999999999', '\u0661', '1' * 5000,
+                    'abc', '1,,2', '-2147483649', '0', '1.5', '99999999999', '\u0661', '1' * 5000,
                     ','.join(str(i) for i in range(1, 202)),
                 )
             ]
@@ -843,7 +843,7 @@ async def test_bundle_route_applies_the_level_and_echoes_it(async_session, no_up
             plain = await client.get('/dashboard/bundle', params=BUNDLE_PARAMS)
             bad = [
                 await client.get('/dashboard/bundle', params={**BUNDLE_PARAMS, 'staff_position_ids': value})
-                for value in ('abc', '1,,2', '-5', '0', ','.join(str(i) for i in range(1, 202)))
+                for value in ('abc', '1,,2', '-2147483649', '0', ','.join(str(i) for i in range(1, 202)))
             ]
     finally:
         app.dependency_overrides.clear()

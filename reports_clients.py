@@ -562,6 +562,9 @@ def _lookback_start(day: date) -> date:
 
 async def build_revenue_at_risk(req: ReportRequest) -> dict[str, Any]:
     today = factual_branch_date(req.factual_at)
+    # Built first: an axis over the length limit is a 400, and it should not cost the queries below.
+    cutoff_day = today - timedelta(days=CHURN_DAYS)
+    month_axis = list(_month_starts(req.start, min(req.end, cutoff_day)))
     horizons = await _branch_horizons(req)
     filters = _visit_filters(req)
     ranked = (
@@ -692,7 +695,6 @@ async def build_revenue_at_risk(req: ReportRequest) -> dict[str, Any]:
 
     churned_total = sum(item['clients'] for item in months.values())
     monthly_at_risk = sum(item['revenue'] for item in months.values())
-    cutoff_day = today - timedelta(days=CHURN_DAYS)
     month_rows = [
         {
             'month': month_label(_month_key(month_start)),
@@ -700,7 +702,7 @@ async def build_revenue_at_risk(req: ReportRequest) -> dict[str, Any]:
             'clients': months.get(month_start, {}).get('clients', 0),
             'revenue': months.get(month_start, {}).get('revenue', 0.0),
         }
-        for month_start in _month_starts(req.start, min(req.end, cutoff_day))
+        for month_start in month_axis
     ]
     staff_rows = sorted(staff.values(), key=lambda item: (-item['clients'], -item['revenue'], item['staff_key']))
     for item in staff_rows:

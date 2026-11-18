@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api_types import Int32Id
 from auth_deps import forbid_demo, get_current_user
 from database import get_async_db
 from data_sources import (
@@ -48,13 +49,19 @@ class OnboardingCredentialsRequest(BaseModel):
 
 class OnboardingBranchesRequest(BaseModel):
     source_type: str = Field(default=SOURCE_YCLIENTS, min_length=1, max_length=32)
-    credential_id: int
-    company_ids: list[int] = Field(min_length=1, max_length=200)
+    credential_id: Int32Id
+    company_ids: list[Int32Id] = Field(min_length=1, max_length=200)
 
 
 def _require_owner(user: PortalUser) -> None:
     if user.role != 'owner':
         raise HTTPException(status_code=403, detail='Onboarding is only available to owner accounts')
+
+
+def _require_onboarding_open(user: PortalUser) -> None:
+    """A finished onboarding is not repeatable: branches and credentials are managed in settings and the admin."""
+    if user.onboarding_completed_at is not None:
+        raise HTTPException(status_code=409, detail='Onboarding is already completed')
 
 
 async def _ensure_owner_account(db: AsyncSession, user: PortalUser) -> int:
@@ -140,6 +147,7 @@ async def onboarding_credentials(
     db: AsyncSession = Depends(get_async_db),
 ):
     _require_owner(user)
+    _require_onboarding_open(user)
 
     # requests-based client with retries: keep the blocking HTTP off the event loop.
     adapter = await asyncio.to_thread(
@@ -208,6 +216,10 @@ async def onboarding_branches(
     db: AsyncSession = Depends(get_async_db),
 ):
     _require_owner(user)
+    # A double submit: the second request waits here for the first one's commit and then reads it as completed (409)
+    # instead of racing it into the unique indexes of `companies` (500).
+    await db.refresh(user, with_for_update=True)
+    _require_onboarding_open(user)
     credential = (
         await db.execute(
             select(YClientsCredential).where(

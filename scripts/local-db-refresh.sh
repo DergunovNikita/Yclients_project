@@ -13,22 +13,47 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PG_BIN="${PG_BIN:-/opt/homebrew/opt/postgresql@16/bin}"
 
-for env_file in "$ROOT_DIR/.env" "$ROOT_DIR/.env.local"; do
-  if [ -f "$env_file" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    . "$env_file"
-    set +a
-  fi
-done
+# .env написан для dotenv-парсера docker compose и не shell-совместим (`SMTP_FROM=Portal <no-reply@x.com>` при
+# `source` исполнился бы как редирект), поэтому нужные ключи читаются по одному, как env_value в скрипте деплоя.
+# Приоритет: окружение процесса, затем .env.local, затем .env.
+read_env_file_value() {
+  [ -f "$2" ] || return 0
+  local value
+  value="$(sed -n "s/^$1=//p" "$2" | tail -n 1 | tr -d '\r')"
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    *) value="${value%%[[:space:]]#*}"; value="${value%"${value##*[![:space:]]}"}" ;;
+  esac
+  printf '%s\n' "${value/#\~/$HOME}"
+}
 
+setting() {
+  local name="$1" value="${!1:-}"
+  if [ -z "$value" ]; then
+    value="$(read_env_file_value "$name" "$ROOT_DIR/.env.local")"
+  fi
+  if [ -z "$value" ]; then
+    value="$(read_env_file_value "$name" "$ROOT_DIR/.env")"
+  fi
+  printf '%s\n' "$value"
+}
+
+VM_TARGET="$(setting VM_TARGET)"
 : "${VM_TARGET:?VM_TARGET не задан — добавьте его в .env.local}"
+VM_SSH_KEY="$(setting VM_SSH_KEY)"
 VM_SSH_KEY="${VM_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+VM_PG_CONTAINER="$(setting VM_PG_CONTAINER)"
 VM_PG_CONTAINER="${VM_PG_CONTAINER:-yclients_bi_system-postgres-1}"
+DUMP_DIR="$(setting DUMP_DIR)"
 DUMP_DIR="${DUMP_DIR:-$HOME/Desktop/projects/yclients_dumps}"
+DB_HOST="$(setting DB_HOST)"
 DB_HOST="${DB_HOST:-localhost}"
+DB_PORT="$(setting DB_PORT)"
 DB_PORT="${DB_PORT:-5433}"
+DB_NAME="$(setting DB_NAME)"
 DB_NAME="${DB_NAME:-yclients_db}"
+DB_USER="$(setting DB_USER)"
 DB_USER="${DB_USER:-postgres}"
 
 # Скрипт дропает базу, на которую указывает. Если .env вдруг смотрит наружу,
@@ -40,6 +65,13 @@ case "$DB_HOST" in
     exit 1
     ;;
 esac
+# Локальный хост ещё не значит локальная база: SSH-туннель на localhost:<порт> ведёт в прод. Локальный staging
+# живёт на 5433; другой порт — только явным обходом.
+if [ "$DB_PORT" != "5433" ] && [ "${LOCAL_DB_REFRESH_ALLOW_PORT:-}" != "$DB_PORT" ]; then
+  echo "DB_PORT=$DB_PORT — не порт локального staging (5433), отказываюсь пересоздавать базу." >&2
+  echo "Если это действительно локальная база: LOCAL_DB_REFRESH_ALLOW_PORT=$DB_PORT $0" >&2
+  exit 1
+fi
 
 mkdir -p "$DUMP_DIR"
 dump="$DUMP_DIR/prod_$(date +%Y%m%d_%H%M).dump"

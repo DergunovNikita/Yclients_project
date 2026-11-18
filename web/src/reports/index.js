@@ -54,6 +54,15 @@ const FILTER_INPUTS = {
   staff_position_ids: 'level',
 };
 
+// A copy is shown while the same report reloads, so only the latest few are worth the memory.
+const REPORT_DATA_CACHE_LIMIT = 20;
+
+function rememberReportData(cache, cacheKey, data) {
+  cache.delete(cacheKey);
+  cache.set(cacheKey, data);
+  if (cache.size > REPORT_DATA_CACHE_LIMIT) cache.delete(cache.keys().next().value);
+}
+
 const FAVORITES_KEY = 'yclients_reports_favorites';
 
 function getFavorites() {
@@ -356,8 +365,9 @@ export function initReports({
     els.compareEnd.value = next.window.end;
   }
 
+  /** Resolves false when a newer catalog request took over: the caller must leave the page to it. */
   async function ensureLoaded() {
-    if (state.loaded) return;
+    if (state.loaded) return true;
     const catalogRequest = catalogRequests.start();
     state.branchesLoaded = false;
     setDefaultDates();
@@ -366,7 +376,7 @@ export function initReports({
         const reportsPayload = await fetchJson('/dashboard/reports', {}, {
           signal: catalogRequest.signal,
         });
-        if (!catalogRequest.isCurrent()) return;
+        if (!catalogRequest.isCurrent()) return false;
         state.reports = reportsPayload.data || [];
         state.catalogFetched = true;
         migrateStoredFavorites(state.reports);
@@ -379,7 +389,7 @@ export function initReports({
             signal: branchRequest.signal,
             slowState: false,
           });
-          if (!branchRequest.isCurrent() || !catalogRequest.isCurrent()) return;
+          if (!branchRequest.isCurrent() || !catalogRequest.isCurrent()) return false;
           state.branches = branchesPayload.data || [];
           state.branchesFetched = true;
         }
@@ -401,10 +411,11 @@ export function initReports({
       } finally {
         if (branchRequest.isCurrent()) branchRequest.finish();
       }
-      if (!catalogRequest.isCurrent()) return;
+      if (!catalogRequest.isCurrent()) return false;
       state.loaded = true;
+      return true;
     } catch (error) {
-      if (isSupersededRequest(error) || !catalogRequest.isCurrent()) return;
+      if (isSupersededRequest(error) || !catalogRequest.isCurrent()) return false;
       throw error;
     } finally {
       if (catalogRequest.isCurrent()) catalogRequest.finish();
@@ -734,7 +745,7 @@ export function initReports({
       });
       if (!request.isCurrent() || state.activeReportId !== reportId) return;
       const data = payload.data;
-      state.reportData.set(cacheKey, data);
+      rememberReportData(state.reportData, cacheKey, data);
       els.viewerTitle.textContent = data.title || meta.title;
       els.viewerSubtitle.textContent = periodSubtitle(data, meta);
       renderReportData(els.content, data, charts);
@@ -780,7 +791,7 @@ export function initReports({
 
   async function loadFromLocation() {
     try {
-      await ensureLoaded();
+      if (!(await ensureLoaded())) return;
     } catch (error) {
       showError(error.message, {
         apiStatus: error.apiStatus,

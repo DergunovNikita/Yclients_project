@@ -246,8 +246,9 @@ export function reportRefreshPresentation(previousData) {
     : { state: 'loading', retainedData: null };
 }
 
-export function staffRefreshAllowsDataLoad(status, expectedBranch, currentBranch) {
-  return status !== 'superseded' && String(expectedBranch) === String(currentBranch);
+/** The rebuilt list may start a data load only if nothing newer took over, the branches are unchanged and the view is still shown. */
+export function staffRefreshAllowsDataLoad(status, expectedBranch, currentBranch, viewIsActive = true) {
+  return status !== 'superseded' && String(expectedBranch) === String(currentBranch) && viewIsActive;
 }
 
 /**

@@ -148,11 +148,16 @@ class YClientsAPI:
             return None
 
         if response.status_code == 200:
-            return response.json()
-        else:
-            print(f"✗ GET {url} — {response.status_code}")
-            print(f"Ответ: {response.text[:300]}")
-            return None
+            try:
+                return response.json()
+            except ValueError:
+                # A maintenance page or proxy stub answers 200 with HTML: a soft refusal, like a 5xx.
+                print(f"✗ GET {url} — {response.status_code}, ответ не JSON")
+                print(f"Ответ: {response.text[:300]}")
+                return None
+        print(f"✗ GET {url} — {response.status_code}")
+        print(f"Ответ: {response.text[:300]}")
+        return None
 
     def _get_all_pages(self, url: str, extra_params: dict = None,
                        page_limit: int = None) -> List[Dict]:

@@ -73,6 +73,7 @@ class Database:
             self.database_url,
             pool_pre_ping=True,
             pool_recycle=300,
+            hide_parameters=True,
         )
         self.SessionLocal = sessionmaker(bind=self.engine)
 
@@ -150,6 +151,7 @@ def init_async_database(host: str, port: int, name: str, user: str, password: st
         url,
         pool_pre_ping=True,
         pool_recycle=300,
+        hide_parameters=True,
         pool_size=15,
         max_overflow=15,
         pool_timeout=10,

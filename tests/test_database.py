@@ -127,3 +127,50 @@ def test_migration_engine_bounds_lock_waits_on_postgres(monkeypatch):
     assert options.startswith(prefix)
     # Bounded, but not forever: the deploy timer retries every 5 minutes.
     assert 0 < int(options.removeprefix(prefix)) < 5 * 60 * 1000
+
+
+SECRET_VALUE = 'client-secret-value'
+
+
+def _sqlite_engine_with(kwargs):
+    """A throwaway engine that keeps only the error-reporting setting the production engine was built with."""
+    return create_engine('sqlite://', hide_parameters=kwargs.get('hide_parameters', False))
+
+
+def _duplicate_insert_error(engine) -> str:
+    with engine.begin() as conn:
+        conn.execute(text('CREATE TABLE people (name TEXT PRIMARY KEY)'))
+        conn.execute(text('INSERT INTO people VALUES (:name)'), {'name': SECRET_VALUE})
+        with pytest.raises(Exception) as caught:
+            conn.execute(text('INSERT INTO people VALUES (:name)'), {'name': SECRET_VALUE})
+    return str(caught.value)
+
+
+def test_sync_engine_errors_do_not_echo_query_parameters(monkeypatch):
+    built = {}
+
+    def fake_create_engine(url, **kwargs):
+        built.update(kwargs)
+        return _sqlite_engine_with(kwargs)
+
+    monkeypatch.setattr(database, 'create_engine', fake_create_engine)
+    engine = database.Database('localhost', 5432, 'yclients_db', 'postgres').engine
+
+    message = _duplicate_insert_error(engine)
+
+    assert 'INSERT INTO people' in message
+    assert SECRET_VALUE not in message
+
+
+def test_async_engine_errors_do_not_echo_query_parameters(monkeypatch):
+    built = {}
+
+    def fake_create_async_engine(url, **kwargs):
+        built.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(database, 'create_async_engine', fake_create_async_engine)
+    monkeypatch.setattr(database, '_async_session_factory', None)
+    database.init_async_database('localhost', 5432, 'yclients_db', 'postgres')
+
+    assert SECRET_VALUE not in _duplicate_insert_error(_sqlite_engine_with(built))

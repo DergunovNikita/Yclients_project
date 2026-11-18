@@ -104,7 +104,8 @@ LIST_FILTERS = [(path, base, 'company_ids') for path, base in ENDPOINTS] + [
 @pytest.mark.parametrize('path, base, name', LIST_FILTERS)
 async def test_a_malformed_list_is_a_400_on_every_filtered_endpoint(async_session, path, base, name):
     await _seed(async_session)
-    for bad in ('abc', '1,,2', '-5', '0', '1.5', '99999999999', '1' * 5000, ','.join(str(i) for i in range(1, 202))):
+    too_many = ','.join(str(i) for i in range(1, 202))
+    for bad in ('abc', '1,,2', '-2147483649', '0', '1.5', '99999999999', '1' * 5000, too_many):
         response = await _get(async_session, path, **base, **{name: bad})
         assert response.status_code == 400, (name, bad[:20])
         assert name in response.json()['detail']
