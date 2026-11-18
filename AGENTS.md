@@ -22,24 +22,23 @@
 Модули в корне; фронтенд в `web/`, служебные скрипты в `scripts/`:
 ```
 # ETL / данные
-api_types.py        — общие типы входа API: `INT32_MIN` / `INT32_MAX`, `Int32Id`, `MAX_BODY_ITEMS`
-api.py              — FastAPI-приложение: роутеры портала/дашборда/онбординга, health-пробы (`/health` отвечает и на `HEAD`), sync control (`/sync/*`), middleware, обработчики ошибок; без `GET /` и `__main__` — запуск через uvicorn
+api_types.py        — типы входа API: `INT32_MIN` / `INT32_MAX`, `Int32Id`, `MAX_BODY_ITEMS`
+api.py              — FastAPI-приложение: роутеры, health-пробы (`/health` и на `HEAD`), sync control (`/sync/*`), middleware, обработчики ошибок; без `GET /` и `__main__` (запуск через uvicorn)
 sync_pipeline.py    — основной ETL (extract → transform → load)
 sync_orchestrator.py — оркестрация: логирование, lock, refresh views
-sync_worker.py      — polling worker для очереди задач
+sync_worker.py      — polling worker очереди задач
 sync_control.py     — advisory locks, sync state, run tracking
 sync_jobs.py        — CRUD очереди (enqueue/claim/finish)
 sync_parsing.py     — парсинг дат, нормализация данных
-sync_logging.py     — `TeeWriter` (stdout + файл лога), sync_notifier.py — Telegram-уведомления о прогоне
+sync_logging.py     — `TeeWriter` (stdout + файл лога); sync_notifier.py — Telegram-уведомления о прогоне
 sync_security.py    — `secure_equals` и правила токена `/sync/*`
-main.py             — CLI прогона синка (`--mode`), exit code 75 — синк уже идёт
+main.py             — CLI синка (`--mode`), exit code 75 — синк уже идёт
 models.py           — SQLAlchemy модели (public + system schema)
 database.py         — connection pooling, миграции
 config.py           — переменные окружения (.env) + prod-валидация
-clock.py            — `utcnow()`: наивный UTC, соглашение всех `DateTime`-колонок; синк и воркер (`sync_*.py`) берут время
-                      только оттуда, голый `datetime.now()` — время хоста — запрещён везде (ruff `DTZ005`, и `DTZ011` — `date.today()`, в
-                      `ruff.toml`; исключения: `sync_logging.build_log_path` называет `datetime.now()` файл лога и ничего не хранит,
-                      `date.today()` разрешён только в `tests/*`)
+clock.py            — `utcnow()`: наивный UTC, соглашение всех `DateTime`-колонок; синк и воркер (`sync_*.py`) берут время только
+                      оттуда. Голый `datetime.now()` (время хоста) запрещён везде (ruff `DTZ005`, `DTZ011` для `date.today()` — в
+                      `ruff.toml`); исключения: `sync_logging.build_log_path` (имя файла лога, ничего не хранит) и `tests/*` для `date.today()`
 migrate.py          — миграции деплоя; пустую БД отдаёт `scripts/bootstrap_db.py` (схема из метаданных + stamp head: голый
                       `alembic upgrade head` с нуля не работает, `0001` строит таблицы по текущим моделям)
 yclients_api.py     — HTTP-клиент YClients с retry/throttle
@@ -48,43 +47,43 @@ yclients_credentials.py / yclients_credential_routes.py — шифрованны
 data_sources.py     — граница адаптеров источника данных (онбординг, `companies_claimed_elsewhere`)
 manual_fact_merge.py — перенос ручных фактов с зеркальной строки на настоящую (`plan_moves` / `apply_moves` / `MergeRefused`);
                       `scripts/merge_mirror_manual_facts.py` — тонкий CLI над ним, то же зовёт «Привязать к YClients»
-sync.sh             — разовый прогон синка через `docker compose run --rm sync` (`./sync.sh <mode> <trigger> <initiator>`)
+sync.sh             — разовый прогон через `docker compose run --rm sync` (`./sync.sh <mode> <trigger> <initiator>`)
 seed_fake_data.py   — генератор синтетики; scripts/seed_demo.py — демо-стенд
-scripts/            — служебные скрипты: `set_reporting_window` (окно отчётности филиала, см. ниже), `seed_demo`,
-                      `merge_mirror_manual_facts` (перенос ручных фактов с зеркальной строки на настоящую, см. «admin и barber»),
-                      `backfill_staff_schedules`, `provision_staff_accounts`, `local-db-refresh.sh`, `preflight.sh`, `security-check.sh`,
-                      `check.sh` (локальный полный прогон: ruff, pytest, `npm test`, сборка), `dev-env.sh` (окружение `.venv` для оболочки),
-                      `nginx-allowlist.mjs` (таблица маршрутов `deploy/nginx/routes.mjs` → `deploy/nginx/api-allowlist.conf`), `enqueue-sync.py` (поставить задачу через `/sync/trigger`), `sync-log-summary.py` (сводка `sync_*.log`),
-                      `report_payload_snapshot.py` (золотой diff ответов отчётов до/после правки), `test_smtp.py` (тестовое письмо)
+scripts/            — служебные: `set_reporting_window` (окно отчётности филиала, см. «Окно отчётности филиала»), `seed_demo`,
+                      `merge_mirror_manual_facts` (см. «admin и barber»), `backfill_staff_schedules`, `provision_staff_accounts`,
+                      `local-db-refresh.sh`, `preflight.sh`, `security-check.sh`, `check.sh` (полный локальный прогон: ruff, pytest,
+                      `npm test`, сборка), `dev-env.sh` (окружение `.venv`), `nginx-allowlist.mjs` (`deploy/nginx/routes.mjs` →
+                      `deploy/nginx/api-allowlist.conf`), `enqueue-sync.py` (задача через `/sync/trigger`), `sync-log-summary.py`
+                      (сводка `sync_*.log`), `report_payload_snapshot.py` (золотой diff ответов отчётов до/после правки),
+                      `test_smtp.py` (тестовое письмо)
 
 # Портал (личные кабинеты, multi-tenant)
 auth_routes.py      — эндпоинты аутентификации + администрирование пользователей
 auth_deps.py        — FastAPI-зависимости: require_auth, роли, forbid_demo (демо read-only)
 auth_hierarchy.py   — `ROLE_LEVEL`: ранги ролей, кто кого заводит и меняет (`assignable_roles`, `can_manage_user`)
 open_paths.py       — `OPEN_PATHS`: единственный список маршрутов без аутентификации
-create_portal_admin.py — бутстрап `platform_admin` при деплое (create-only, см. «Security»)
+create_portal_admin.py — бутстрап `platform_admin` при деплое (create-only, см. «Architecture Patterns»)
 auth_service.py     — хэш паролей, JWT, email-токены, отправка почты
-auth_sessions.py    — refresh-токены, cookie/CSRF, управление сессиями
+auth_sessions.py    — refresh-токены, cookie/CSRF, сессии
 auth_scope.py       — AccessContext, скоуп доступа по филиалам
 portal_audit.py     — append-only журнал `portal_audit_events`
 portal_tenant_ownership.py — кто владеет филиалами тенанта (тенант только из `platform_admin` занятым не считается)
 portal_staff_sync.py / portal_account_provision.py — зеркальные строки `staff` портальных пользователей и учётки для сотрудников из CRM
-portal_staff_link.py — «Привязать к YClients»: привязка учётки `admin`/`barber` к настоящей строке `staff` (см. «admin и barber»)
+portal_staff_link.py — «Привязать к YClients»: учётка `admin`/`barber` → настоящая строка `staff` (см. «admin и barber»)
 set_portal_password.py — вручную задать постоянный пароль существующему пользователю
 plan_config.py     — определения метрик План/факта и категории сотрудников
 onboarding_routes.py — онбординг владельца (источник данных, выбор филиалов)
 dashboard_routes.py / dashboard_service.py — API и агрегации дашборда (Обзор, План/факт, виджеты)
 dashboard_reports.py — реестр отчётов (`REPORT_DEFINITIONS`), диспетчер `fetch_report_data`, сравнение периодов
-report_payload.py   — общая форма ответа отчёта: `ReportRequest`, `card`/`chart`/`table`/`ranking_table`, `ReportInputError`,
+report_payload.py   — форма ответа отчёта: `ReportRequest`, `card`/`chart`/`table`/`ranking_table`, `ReportInputError`,
                       константы форматов колонок (`MONEY_FORMAT` … `TEXT_FORMAT`, `DATE_FORMAT`)
-report_common.py    — запросные и подписные помощники, общие для нескольких билдеров (`appointment_conditions`,
-                      `period_key`/`period_starts`, `percent(part, whole, digits=None)` — доля в процентах,
-                      подписи месяцев и дат)
+report_common.py    — помощники нескольких билдеров (`appointment_conditions`, `period_key`/`period_starts`,
+                      `percent(part, whole, digits=None)`, подписи месяцев и дат)
 reports_finance.py / reports_services.py / reports_clients.py / reports_operations.py /
 reports_goods.py / reports_feedback.py / reports_team.py — билдеры отчётов по группам; «Формы оплаты» и
                       «Сравнение по годам» — в finance, «Новые и вернувшиеся» — в clients, «Рейтинги» — в team
 report_usage.py     — учёт открытий отчётов и отчёт «Использование отчётов»
-payment_methods.py  — разбивка выручки по формам оплаты и ручной ввод Яндекс Пэй (отчёт `payment_methods`, `/dashboard/payments/yandex_pay`)
+payment_methods.py  — формы оплаты и ручной ввод Яндекс Пэй (отчёт `payment_methods`, `/dashboard/payments/yandex_pay`)
 web/                — Vite MPA (dashboard/reports, auth, onboarding, settings, admin, i18n ru/en/it)
 deploy/nginx/      — nginx на VM: `routes.mjs` (таблица маршрутов API — единственный источник), `api-allowlist.conf` (генерируется из неё),
                       `static-headers.conf` (заголовки безопасности статики); site-конфиг с доменом и секретом — в приватной документации
@@ -111,12 +110,12 @@ deploy/nginx/      — nginx на VM: `routes.mjs` (таблица маршру�
 
 ### Logging
 - Sync-процессы используют `print()` + `TeeWriter` (stdout + файл в `logs/`)
-- FastAPI и auth используют стандартный Python `logging`; логгеры приложения живут под `yclients.*` (`yclients.api`,
-  `yclients.auth`, `yclients.reports`, `yclients.dashboard`, `yclients.credentials`) — handler и уровень `api._configure_logging` вешает именно на
-  `yclients`, а логгер с именем модуля теряет всё ниже WARNING
+- FastAPI и auth используют стандартный `logging`; логгеры приложения — под `yclients.*` (`yclients.api`, `yclients.auth`,
+  `yclients.reports`, `yclients.dashboard`, `yclients.credentials`): handler и уровень `api._configure_logging` вешает на `yclients`,
+  логгер с именем модуля теряет всё ниже WARNING
 - Логи лаконичные — ошибки, начало/завершение операций, критические решения; не логировать credentials и токены
-- Оба движка БД (`database.py`) созданы с `hide_parameters=True`: ошибки БД в логах, `sync_*.log` и `step_results` не несут
-  блока `[parameters: …]` (ПДн клиентов); собственный текст PostgreSQL (`DETAIL: Key (…)=(…)` при нарушении уникальности) остаётся
+- Оба движка БД (`database.py`) созданы с `hide_parameters=True`: ошибки БД в логах, `sync_*.log` и `step_results` без блока
+  `[parameters: …]` (ПДн клиентов); собственный текст PostgreSQL (`DETAIL: Key (…)=(…)`) остаётся
 - Формат sync-файлов: `sync_{timestamp}_{mode}_{trigger}.log`
 
 ## Running
@@ -170,13 +169,11 @@ cd web && npm run dev
 - **ORM**: SQLAlchemy 2.0 — sync (`Session`) для ETL, async (`AsyncSession`) для API
 - **Batch operations**: chunked по DB_BATCH_SIZE (1000)
 - **Справочники YClients** живут только в филиальных `*_catalog`: услуги (`service_catalog`), кассы (`account_catalog`),
-  категории товаров и товары читает дашборд; `service_category_catalog` читает только сам синк (`sync_services` берёт из неё
-  категории, когда ответ API их не несёт). Должностей и складов в справочниках нет: `staff_position_catalog` и
-  `storage_catalog` (шаги `sync_positions` / `sync_storages`, методы `get_positions` / `get_storages`) удалены миграцией
-  `0061` — их никто не читал; уровень барбера идёт из `staff.position_id` и `staff_position_months`, склад товарной
-  операции — id и название в самой строке `goods_transactions`. Старых глобальных двойников нет (миграции `0054`, `0056`);
-  `service_labels` ссылается составным FK `(company_id, service_id)` на `service_catalog` (`ON DELETE CASCADE`).
-  Та же `0056` убрала `system.sync_step_runs` и `sync_source_states.synced_at`: в них только писали, не читал никто
+  категории товаров и товары читает дашборд; `service_category_catalog` — только сам синк (`sync_services` берёт из неё
+  категории, когда ответ API их не несёт). Должностей и складов в справочниках нет (не возвращать: их никто не читал):
+  уровень барбера — из `staff.position_id` и `staff_position_months`, склад товарной операции — id и название в самой строке
+  `goods_transactions`. Глобальных двойников справочников нет; `service_labels` ссылается составным FK `(company_id, service_id)`
+  на `service_catalog` (`ON DELETE CASCADE`).
 - **Concurrency**: pg_advisory_lock, один sync за раз
 
 ### Migrations (Alembic)
@@ -184,1727 +181,1260 @@ cd web && npm run dev
 - Всегда проверять upgrade и downgrade
 - Запуск: `docker compose run --rm migrate` или `python migrate.py`
 - Миграции идут с `lock_timeout=30 с` (`database.migration_connect_args` → `alembic/env.py`): DDL, не получивший
-  блокировку за 30 с, падает и откатывается, а таймер деплоя повторит через 5 минут — вместо очереди за долгим запросом
+  блокировку за 30 с, падает и откатывается, таймер деплоя повторит через 5 минут — вместо очереди за долгим запросом
 
 ## Architecture Patterns
 - **API (FastAPI)**: async request/DB layer — `AsyncSession` + `asyncpg`; блокирующие legacy-вызовы выносить через `asyncio.to_thread()`
 - **ETL pipeline**: синхронный — `Session` + `psycopg2`, requests (не async)
 - **Два engine**: async для API (`init_async_database`), sync для ETL (`init_database`)
-- **`statement_timeout` = 170 с — только у async-engine API.** Выше `proxy_read_timeout` nginx (150 с): nginx
-  отвечает клиенту 504 раньше, а запрос в базе после этого дорабатывает не дольше 20 с. Starlette не отменяет обычный обработчик при уходе клиента, и брошенный медленный отчёт
-  держал бы соединение пула до конца (30 таких — весь пул, и `/auth/me` падает по `pool_timeout`). Лимит действует на
-  каждое сообщение Execute. Отменённый запрос — JSON 500 из общего обработчика (`Internal server error`).
+- **`statement_timeout` = 170 с — только у async-engine API.** Выше `proxy_read_timeout` nginx (150 с): nginx отвечает 504
+  раньше, а запрос в базе дорабатывает не дольше 20 с. Starlette не отменяет обычный обработчик при уходе клиента, и брошенные
+  медленные отчёты держали бы соединения пула (30 таких — весь пул, `/auth/me` падает по `pool_timeout`). Лимит действует на
+  каждое сообщение Execute; отменённый запрос — JSON 500 из общего обработчика (`Internal server error`).
   У sync-engine ETL лимита нет намеренно: шаги синка идут минутами.
 - **Worker queue**: polling sync_jobs таблицы, без Celery/Redis
-- **Advisory locks**: предотвращение параллельных sync
-  Брошенные `running`-строки (`sync_runs`, `sync_jobs`) закрывает холостой проход воркера, и только пока лок
-  свободен (`SyncControlService.probe_idle_lock`): живой sync, в том числе многочасовой `full`, держит лок,
-  поэтому по возрасту такие строки не рвутся. Один `Database` на воркер переиспользуется в `run_sync_job`.
+- **Advisory locks**: предотвращение параллельных sync. Брошенные `running`-строки (`sync_runs`, `sync_jobs`) закрывает холостой
+  проход воркера, и только пока лок свободен (`SyncControlService.probe_idle_lock`): живой sync, в том числе многочасовой
+  `full`, держит лок, поэтому по возрасту такие строки не рвутся. Один `Database` на воркер переиспользуется в `run_sync_job`.
 - **Ключи `system.sync_state`** — только то, что читает код: контрольные точки (`transactions_last_success_date:company:<id>`,
   `historical_source_coverage_v1:company:<id>`; ключи `transactional_state_key` / `historical_coverage_state_key` и имена
   источников покрытия `PERSONAL_ACCOUNT_SOURCE` / `STAFF_SCHEDULE_SOURCE` живут в `sync_control.py`, API и дашборд импортируют
-  их оттуда, не из `sync_pipeline`), `last_successful_sync_at` (виджет статуса), `last_unscoped_sync_at` (гейт
-  автосинка) и три отметки чисток (`last_run_retention_at`, `last_job_retention_at`, `last_report_usage_retention_at`).
-  Состояние самих прогонов живёт в `sync_runs`; ключей `last_run_*` / `last_successful_run_id` `create_run` / `finish_run`
-  больше не пишут (миграция `0061` удалила и их, и `services_labels_last_*`, и устаревшую глобальную `transactions_last_success_date`). Нужен новый ключ — пиши его только вместе с читателем.
+  их оттуда, не из `sync_pipeline`), `last_successful_sync_at` (виджет статуса), `last_unscoped_sync_at` (гейт автосинка) и три
+  отметки чисток (`last_run_retention_at`, `last_job_retention_at`, `last_report_usage_retention_at`). Состояние прогонов — в
+  `sync_runs`; `create_run` / `finish_run` ключей `last_run_*` / `last_successful_run_id` не пишут. Новый ключ — только вместе с читателем.
 - **Прогресс прогона — best-effort.** `progress_callback` вызывается из `run_sync_step` и `emit_progress` через `_notify_progress`:
   сбой записи (например, оборванное соединение `control_db` в `sync_orchestrator`) печатает одну строку с именем класса исключения,
-  не подменяет результат шага и не обрывает прогон. Колбэк оркестратора при сбое делает `control_db.rollback()` и бросает дальше —
+  не подменяет результат шага и не обрывает прогон. Колбэк оркестратора при сбое делает `control_db.rollback()` и бросает дальше:
   иначе сессия осталась бы в аборт-состоянии и каждая следующая запись прогресса падала бы тоже.
-- **Хранение прогонов**: `purge_old_runs` вместе со строками `sync_runs` удаляет и их файлы логов (`sync_*.log` прямо в
-  `SYNC_LOG_DIR`, best-effort): иначе таблица худела бы, а `logs/` росла вечно.
+- **Хранение прогонов**: `purge_old_runs` вместе со строками `sync_runs` удаляет и их файлы логов (`sync_*.log` в
+  `SYNC_LOG_DIR`, best-effort): иначе `logs/` росла бы вечно.
 - **Режимы синхронизации**: `incremental` (по МСК ежечасно в :35 с 08:35 до 22:35, ночью в 02:35 и 06:35; дочитывает `SYNC_LOOKBACK_DAYS`
-  вокруг чекпоинта), `refresh` (ночью, перечитывает последние `SYNC_REFRESH_DAYS`) и
-  `full` (раз в неделю, вся история). См. ниже
-- **Multi-tenant портал**: `PortalAccount` = тенант, `PortalUser` с ролями (`platform_admin`, `owner`, `branch_admin`, `manager`, `admin`, `barber`); доступ скоупится по филиалам (`company_ids`). Аутентификация email+пароль (не OAuth). `admin` и `barber` — **один уровень доступа под двумя именами**, см. ниже
+  вокруг чекпоинта), `refresh` (ночью, перечитывает последние `SYNC_REFRESH_DAYS`), `full` (раз в неделю, вся история). См. «Окна синхронизации».
+- **Multi-tenant портал**: `PortalAccount` = тенант, `PortalUser` с ролями (`platform_admin`, `owner`, `branch_admin`, `manager`, `admin`, `barber`); доступ скоупится по филиалам (`company_ids`). Аутентификация email+пароль (не OAuth). `admin` и `barber` — **один уровень доступа под двумя именами**, см. «admin и barber».
 - **API auth**: JWT-сессии в httpOnly-cookie (+ Bearer), refresh-токены с ротацией, CSRF для cookie-запросов. Альтернатива — глобальный `X-API-Key` (full-access) и `X-Sync-Token` для `/sync/*`. Скоуп/роли через `require_auth`/`get_dashboard_access`; демо-аккаунт read-only через `forbid_demo`
 - **Почта в console-режиме**: в production (`IS_PRODUCTION`) в лог пишутся только получатель и тема, тело письма (ссылка со
-  сбросом/приглашением — это bearer-токен) не печатается; полный текст виден только вне production. Без SMTP в проде
-  письма просто не доставляются. Ссылка-приглашение живёт `INVITE_TTL_HOURS` (72 ч), сброс пароля — 2 ч: приглашение читают,
-  когда доберутся до почты; в тексте письма срок — `{INVITE_TTL_HOURS} часа`, без склонения «дней».
-- **Доставляется ли почта — `auth_service.email_is_deliverable()`** (SMTP настроен и режим не console), её значение отдаёт
-  `GET /auth/admin/meta` как `invites_deliverable` (больше ничего из конфигурации наружу не идёт). Пока оно `false`, приглашению
-  некуда доехать, поэтому: `create-account` и `POST /auth/admin/users` без `password` — 400 («учётка, в которую никто не войдёт»), массовое заведение
-  (`POST /auth/admin/provision-accounts`, пароля не получает) — 400; с паролем `create-account` работает как обычно.
-  Так же отбивается и рассылка: `POST /auth/admin/distribute-credentials` — 400 («Invite e-mails need e-mail delivery»): в console-режиме отправка
-  «удаётся» без доставки, и админка отчиталась бы о письмах, которых никто не получил. «Забыли пароль» (публичный) не меняется — он ничего не раскрывает.
+  сбросом/приглашением — bearer-токен) не печатается; вне production виден полный текст. Без SMTP в проде письма не доставляются.
+  Ссылка-приглашение живёт `INVITE_TTL_HOURS` (72 ч), сброс пароля — 2 ч (приглашение читают, когда доберутся до почты); в тексте
+  письма срок — `{INVITE_TTL_HOURS} часа`, без склонения «дней».
+- **Доставляется ли почта — `auth_service.email_is_deliverable()`** (SMTP настроен и режим не console); её значение отдаёт
+  `GET /auth/admin/meta` как `invites_deliverable` (больше ничего из конфигурации наружу не идёт). Пока `false`, приглашению некуда
+  доехать, поэтому 400: `create-account` и `POST /auth/admin/users` без `password` («учётка, в которую никто не войдёт»), массовое
+  заведение `POST /auth/admin/provision-accounts` (пароля не получает), рассылка `POST /auth/admin/distribute-credentials`
+  («Invite e-mails need e-mail delivery»: в console-режиме отправка «удаётся» без доставки, и админка отчиталась бы о письмах,
+  которых никто не получил). С паролем `create-account` работает как обычно. «Забыли пароль» (публичный) не меняется — он ничего не раскрывает.
 - **Бутстрап платформенного админа при деплое — create-only.** `create_portal_admin.py` существующего пользователя не трогает
-  (пароль, роль, тенант, активность; печатает `exists, skipped`), иначе каждый деплой откатывал бы смену пароля и
-  включал бы деактивированного админа. Перезапись — только явным `--reset-password`, вручную. Пароль берётся из
-  `PORTAL_ADMIN_PASSWORD` в окружении контейнера (`env_file: .env`), не из argv. Длиннее 72 байт он может быть только у уже существующего админа (его пропускают): при заведении и `--reset-password` такой пароль отклоняется с кодом 2. Деплой заводит только `PORTAL_ADMIN_EMAIL`
-  и список `PORTAL_EXTRA_ADMIN_EMAILS` (через запятую); зашитых адресов нет. Скрипт и деплой e-mail не печатают (только id):
-  журнал юнита уходит в лог Actions.
-- **Скрипт деплоя** не исполняет `.env` как shell (`env_value` читает нужные ключи `sed`-ом); ветка «уже раздаётся эта
-  ревизия» тоже проверяет `/health/ready` (иначе упавший после выкладки API читался бы «нечего деплоить»); после
-  неудачных `build`/`migrate` тег образа возвращается на прежний. `API_PORT` в контейнере всегда 8000 (`.env` задаёт
-  только порт хоста; `API_HOST` читают `docker/entrypoint.sh` (из окружения) и клиентский `scripts/enqueue-sync.py`, `API_PORT` — они же, `docker-compose.yml` и скрипт деплоя (порт хоста); `config` их не знает).
+  (пароль, роль, тенант, активность; печатает `exists, skipped`): иначе каждый деплой откатывал бы смену пароля и включал бы
+  деактивированного админа. Перезапись — только явным `--reset-password`, вручную. Пароль — из `PORTAL_ADMIN_PASSWORD` в окружении
+  контейнера (`env_file: .env`), не из argv. Длиннее 72 байт он может быть только у уже существующего админа (его пропускают): при
+  заведении и `--reset-password` такой пароль отклоняется с кодом 2. Деплой заводит только `PORTAL_ADMIN_EMAIL` и
+  `PORTAL_EXTRA_ADMIN_EMAILS` (через запятую); зашитых адресов нет. Скрипт и деплой e-mail не печатают (только id): журнал юнита уходит в лог Actions.
+- **Скрипт деплоя** не исполняет `.env` как shell (`env_value` читает ключи `sed`-ом); ветка «уже раздаётся эта ревизия» тоже
+  проверяет `/health/ready` (иначе упавший после выкладки API читался бы «нечего деплоить»); после неудачных `build`/`migrate`
+  тег образа возвращается на прежний. `API_PORT` в контейнере всегда 8000 (`.env` задаёт только порт хоста; `API_HOST` читают
+  `docker/entrypoint.sh` (из окружения) и `scripts/enqueue-sync.py`, `API_PORT` — они же, `docker-compose.yml` и скрипт деплоя (порт хоста); `config` их не знает).
 - **Шаг CI «Deploy backend on VM»** после `systemctl start` сверяет `/app/REVISION` раздаваемого api с `$GITHUB_SHA` (или его
   потомком): таймер мог начать прогон до пуша, поэтому при несовпадении юнит запускается ещё раз, и если ревизия не та и после
   этого — шаг падает. `post_deploy_sync_*.log` старше 30 дней удаляются при каждом постдеплойном sync.
-- **Prod fail-closed**: в production `config` требует сильный `AUTH_JWT_SECRET` (≥ 32 символов) и `SYNC_API_TOKEN` не из заглушек (длинной нижней границы у токена нет сознательно: боевой токен короче 32 символов, и подъём порога не дал бы загрузиться api, worker и migrate), `AUTH_COOKIE_SECURE=true` и выключенную публичную регистрацию; `AUTH_REQUIRE_LOGIN=false` допустим только при заданном сильном `API_KEY`; при отправке почты через SMTP (не console) `APP_PUBLIC_URL` обязан быть публичным https-адресом (ссылки в письмах), `LOG_LEVEL` — известным именем уровня
+- **Prod fail-closed**: в production `config` требует сильный `AUTH_JWT_SECRET` (≥ 32 символов) и `SYNC_API_TOKEN` не из заглушек (нижней границы длины у токена нет сознательно: боевой токен короче 32 символов, и подъём порога не дал бы загрузиться api, worker и migrate), `AUTH_COOKIE_SECURE=true` и выключенную публичную регистрацию; `AUTH_REQUIRE_LOGIN=false` допустим только при заданном сильном `API_KEY`; при отправке почты через SMTP (не console) `APP_PUBLIC_URL` обязан быть публичным https-адресом (ссылки в письмах), `LOG_LEVEL` — известным именем уровня
 
 ### Окно отчётности филиала
-`companies.reporting_start_date` и `companies.reporting_end_date` (обе nullable) задают дни,
-за которые факты филиала принадлежат тенанту. **Обе границы включительные.** Начало отсекает
-записи старше открытия филиала — в YClients остаются тестовые записи и история предыдущей точки
-на том же id. Конец отсекает филиал, переставший управляться тенантом: история остаётся видимой,
-факты после передачи перестают считаться. Правило одно: факт принадлежит филиалу, только если его
-дата лежит в окне. Реализация — `reporting_window_clause()` в `dashboard_service.py`; выручка по
-услугам режется **по двум якорям** (визит и оплата), чтобы числитель и знаменатель среднего чека
-остались по одну сторону отсечки.
+`companies.reporting_start_date` / `reporting_end_date` (nullable) — дни, за которые факты филиала принадлежат тенанту. **Обе границы
+включительные.** Начало отсекает записи старше открытия филиала (в YClients остаются тестовые записи и история прежней точки на том
+же id); конец — филиал, переставший управляться тенантом: история видна, факты после передачи не считаются. Факт принадлежит
+филиалу, только если его дата в окне. Реализация — `reporting_window_clause()` (`dashboard_service.py`); выручка по услугам режется
+**по двум якорям** (визит и оплата), чтобы числитель и знаменатель среднего чека остались по одну сторону отсечки.
 
-- Клауза обязана стоять на **каждом** пути, считающем одни и те же цифры, иначе Обзор
-  противоречит отчёту. При добавлении нового запроса по фактам — добавить и её.
-- Питоновские зеркала клаузы (`fetch_reporting_windows` → `ReportingWindow.covers()` /
-  `.intersect()`) отвечают на тот же вопрос там, где строки ещё нет: флаг `counted` у ручных
-  фактов, требуемое покрытие синка в `_source_coverage_status`, `_year_over_year_missing_sources`
-  и `_staff_schedule_coverage_info`. Верхнюю границу надо ставить и там: филиал, переставший
-  синхронизироваться, иначе навсегда читается как «покрытие неполное».
-- Половина вызовов передаёт в клаузу **timestamp**-колонку (`financial_transactions.date`,
-  `goods_transactions.date`, `comments.date`). Нижней границе это сходит с рук, верхней — нет:
-  `31.08 14:30 > 31.08`, и последний день окна выпал бы целиком (замерено: −52 140 ₽ за август
-  на одном филиале). Приведение к дню одно на всех — `_reporting_day()` внутри клаузы; по
-  вызовам его не растаскивать.
-- **План режется вместе с фактом.** `_plan_metric_components_by_company` /
-  `_plan_metric_components_by_staff` спрашивают клаузу по `period_end` — тем же якорем, что и
-  ручные факты. Иначе месяц после передачи филиала показал бы план против нулевого факта и
-  утянул бы исполнение всей сети (замерено: план сети за сентябрь 12 148 400 против 11 090 500).
-  Планы сотрудников из `PlanStaffInput` режутся тем же правилом, что и `PlanMetric` (значения не
-  подмешиваются за месяц вне окна); категория из этих строк остаётся — она не значение плана.
-  Редакторы (план и ручные факты) сохранённое **показывают** — значение, введённое до передачи,
-  должно оставаться видимым и исправимым; не считают его только отчёты.
-- Значение выставляется скриптом `python -m scripts.set_reporting_window --list` (и затем
-  `--start <id>=YYYY-MM-DD` / `--end <id>=YYYY-MM-DD`, `none` — снять); UI для правки нет,
-  в `/dashboard/branches` обе даты отдаются только на чтение.
-- **У ETL потолка нет.** `reporting_end_date` — только про показ; синк продолжит читать филиал
-  и писать данные, которых никто не увидит. Закрывая филиал, надо отдельно снять его со связки
-  `system.yclients_credential_companies` (админка кредов, `set_credential_companies`). Порядок:
-  сначала прогнать `refresh` (он перечитывает `SYNC_REFRESH_DAYS`, дочитывая оплаты, проведённые
-  задним числом за закрытые месяцы), и только потом отвязывать — после отвязки такие оплаты не
-  приедут никогда.
-- Удалять строку `system.portal_branches` вместо этого нельзя: `load_portal_account_branch_ids`
-  перестаёт возвращать филиал, `build_company_scope` отвечает 403, а `fetch_branches` убирает его
-  из селектора — вместе со всей историей.
-- **Списки филиалов — отдельное правило.** Окно режет факты; но филиал ещё и перечисляется
-  в фильтрах, редакторах и справочниках, и там вопрос другой.
-  `branch_window_overlap_clause()` спрашивает его о самом филиале, а не о факте, и
-  покрывает оба случая: с периодом — «пересекается ли окно с периодом» (фильтр
-  «Работник», `fetch_staff(start, end)`), с одинаковым днём дважды — «наш ли филиал
-  сегодня» (каталог услуг). На фронте то же правило —
-  `branchesForPeriod` в `web/src/reportingWindow.js`, по нему сужаются все шесть
-  селекторов филиалов.
-- **Редакторы режутся только сверху.** `branches_not_yet_left()` вместо пересечения:
-  месяц до открытия филиала остаётся редактируемым (значение видно с `counted: false`,
-  чтобы его можно было исправить), а филиал, ушедший от тенанта, пропадает целиком — те
-  месяцы не наши для ввода. Так же ведёт себя строка филиала в План/факте. Запись режется так же:
-  `_write_manual_facts` отбивает `ManualFactRowNotOpen` правку строки филиала, ушедшего до начала месяца. На фронте
-  правило симметричное, и это осознанное расхождение: селектор решает, что можно выбрать,
-  а редактор — что можно исправить.
-- `_company_scope_clause(column, company_id, allowed)`: при заданных и `company_id`, и списке — `column = id AND column IN (allowed)`
-  (защита в глубину; роутеры и так отдают 403). `None` — без ограничения, `[]` — ничего не разрешено.
-- **Сырых таблиц наружу API не отдаёт.** JSON-списки, `/stats` и `/export/csv/*` удалены; данные читает только
-  дашборд (`/dashboard/*`). Скоуп филиалов и окно там ставят сами запросы дашборда.
-- **Записи тоже отбивают филиал, ушедший от тенанта** (400): `save_plan_settings`, правка услуг
-  (`_editable_service_catalog`) и ручные факты — иначе устаревшая вкладка переписала бы цифры истории, которую отчёты ещё
-  показывают. Повтор строки филиала/сотрудника в payload плана или ручных фактов — тоже 400, не 409.
-- `PATCH /dashboard/services` пишет `service_labels.updated` в `portal_audit_events` до `commit`; гонка первой метки (`IntegrityError`) — 409
-  (`ServiceLabelsConflict`).
+- Клауза обязана стоять на **каждом** пути, считающем те же цифры, иначе Обзор противоречит отчёту; новый запрос по фактам — добавить и её.
+- Питоновские зеркала (`fetch_reporting_windows` → `ReportingWindow.covers()` / `.intersect()`) работают там, где строки ещё нет:
+  флаг `counted` ручных фактов, покрытие синка (`_source_coverage_status`, `_year_over_year_missing_sources`,
+  `_staff_schedule_coverage_info`). Верхнюю границу ставить и там: иначе филиал, переставший синхронизироваться, навсегда «покрытие неполное».
+- В клаузу часто приходит **timestamp**-колонка (`financial_transactions.date`, `goods_transactions.date`, `comments.date`):
+  верхней границе это не сходит (`31.08 14:30 > 31.08`, последний день выпал бы). Приведение к дню одно — `_reporting_day()` внутри
+  клаузы; по вызовам не растаскивать.
+- **План режется вместе с фактом**: `_plan_metric_components_by_company` / `_plan_metric_components_by_staff` — по `period_end`, как
+  ручные факты (иначе месяц после передачи показал бы план против нулевого факта и утянул исполнение сети). Планы сотрудников
+  (`PlanStaffInput`) — тем же правилом, что `PlanMetric`; категория из этих строк остаётся (не значение плана). Редакторы
+  (план, ручные факты) сохранённое **показывают** — значение до передачи должно быть видимым и исправимым; не считают его только отчёты.
+- Окно задаёт `python -m scripts.set_reporting_window --list`, затем `--start <id>=YYYY-MM-DD` / `--end <id>=YYYY-MM-DD` (`none` —
+  снять); UI нет, `/dashboard/branches` отдаёт даты только на чтение.
+- **У ETL потолка нет**: `reporting_end_date` — только показ, синк продолжит писать невидимые данные. Закрывая филиал, отдельно
+  снять его со связки `system.yclients_credential_companies` (`set_credential_companies`), порядок: сначала `refresh`
+  (перечитывает `SYNC_REFRESH_DAYS`, дочитывая оплаты задним числом за закрытые месяцы), потом отвязка — после неё такие оплаты не приедут никогда.
+- Строку `system.portal_branches` вместо этого удалять нельзя: `load_portal_account_branch_ids` перестанет возвращать филиал,
+  `build_company_scope` — 403, `fetch_branches` уберёт его из селектора вместе с историей.
+- **Списки филиалов — отдельное правило** (фильтры, редакторы, справочники спрашивают о самом филиале): `branch_window_overlap_clause()` —
+  с периодом «пересекается ли окно с периодом» (фильтр «Работник», `fetch_staff(start, end)`), с одинаковым днём дважды «наш ли
+  филиал сегодня» (каталог услуг). Фронт — `branchesForPeriod` (`web/src/reportingWindow.js`), сужает все шесть селекторов филиалов.
+- **Редакторы режутся только сверху**: `branches_not_yet_left()` вместо пересечения. Месяц до открытия филиала редактируем
+  (значение видно с `counted: false`, чтобы его можно было исправить), ушедший от тенанта филиал пропадает целиком; так же строка
+  филиала в План/факте. Запись режется так же: `_write_manual_facts` отбивает `ManualFactRowNotOpen` правку строки филиала, ушедшего
+  до начала месяца. Фронт симметричен — осознанное расхождение: селектор решает, что можно выбрать, редактор — что исправить.
+- `_company_scope_clause(column, company_id, allowed)`: при заданных `company_id` и списке — `column = id AND column IN (allowed)`
+  (защита в глубину; роутеры и так 403). `None` — без ограничения, `[]` — ничего не разрешено.
+- **Сырых таблиц наружу API не отдаёт**: данные читает только дашборд (`/dashboard/*`), скоуп и окно ставят его запросы.
+- **Записи тоже отбивают филиал, ушедший от тенанта** (400): `save_plan_settings`, правка услуг (`_editable_service_catalog`),
+  ручные факты — иначе устаревшая вкладка переписала бы историю, которую отчёты показывают. Повтор строки филиала/сотрудника в
+  payload плана или ручных фактов — тоже 400, не 409.
+- `PATCH /dashboard/services` пишет `service_labels.updated` в `portal_audit_events` до `commit`; гонка первой метки
+  (`IntegrityError`) — 409 (`ServiceLabelsConflict`).
 
 ### Чужой филиал нельзя привязать вторым тенантом
-Уникальный индекс `companies` — по тенанту, поэтому схема сама не мешает второму тенанту с рабочими кредами
-YClients получить свою копию уже занятой точки (двойной приём данных, два тенанта на одном филиале).
-Проверка одна — `companies_claimed_elsewhere()` (`data_sources.py`): её зовут `materialize_branches` (онбординг,
-выбор филиалов, создание кредов в админке) и предварительный шаг онбординга; отказ — 409. Тенант без бизнес-
-пользователей занятым не считается (на практике — тенант вообще без пользователей: у `platform_admin` по
-`ck_portal_users_platform_admin_no_tenant` тенанта нет), и такую точку забирает новый тенант: существующая `Company` (с
-`external_id`) переносится к нему вместе с историей, а не копируется — но только строка тенанта без бизнес-пользователей
-(тем же предикатом `can_reassign_branch_from_tenant`; при нескольких чужих строках берётся первая подходящая по id). Строка живого
-тенанта без `PortalBranch` (его синк заводит `Company` на всю сеть) остаётся на месте, новый тенант получает свою копию, устаревшие связки кредов старого тенанта снимаются.
-Онбординг после `onboarding_completed_at`: `POST /onboarding/credentials` и `/onboarding/branches` — 409. До завершения каждый проход шага кредов заводит новый кредит; брошенный проход оставляет кредит без филиалов — синк по нему обновляет только сети и компании (`sync_groups_and_companies`, строки `Company` без `PortalBranch`) и данных филиалов не читает; кредит виден только в списке кредов (настройки, админка). Строка `Company` такого тенанта, возникшая до выбора филиалов, перехватывает `materialize_branches` раньше переноса чужой: перенос с историей срабатывает, только если синк не успел пройти между шагами. Правка привязок уже существующего
-кредита (`PATCH`) филиалы не создаёт и проверяется по своему тенанту.
+Уникальный индекс `companies` — по тенанту, поэтому схема не мешает второму тенанту с рабочими кредами YClients получить копию
+занятой точки (двойной приём данных). Проверка одна — `companies_claimed_elsewhere()` (`data_sources.py`): её зовут
+`materialize_branches` (онбординг, выбор филиалов, создание кредов в админке) и предварительный шаг онбординга; отказ — 409. Тенант
+без бизнес-пользователей занятым не считается (на практике — вообще без пользователей: у `platform_admin` тенанта нет,
+`ck_portal_users_platform_admin_no_tenant`), и такую точку забирает новый тенант: существующая `Company` (с `external_id`)
+переносится к нему с историей, а не копируется — только строка тенанта без бизнес-пользователей (`can_reassign_branch_from_tenant`;
+из нескольких берётся первая по id); при переносе (`reassign_branch_from_admin_only_tenant`) устаревшие связки кредов старого
+тенанта снимаются (`_detach_source_credential_company_links`). Строка живого тенанта без `PortalBranch` (его синк заводит `Company`
+на всю сеть) остаётся, новый тенант получает свою копию.
 
-- Сгенерированный пароль при массовом заведении учёток никому не показывается, поэтому хэш у них общий —
-  `DUMMY_PASSWORD_HASH`, а не свой bcrypt на каждого (~250 мс): вход по такой учётке стоит те же один раунд bcrypt,
-  а доступ даёт только письмо-приглашение. Заданный руками пароль хэшируется как обычно.
-- Письмо «забыли пароль» уходит фоновой задачей на своей сессии
-  (`_send_auth_email_after_response`): время ответа и ошибки SMTP не выдают, есть ли такой адрес.
-  Кулдаун ставится только после отправки, поэтому пока письмо уходит, повторные запросы не плодят письма:
-  `_queue_auth_email` держит в памяти процесса пару (отправитель, пользователь) не дольше 60 с. Три отправителя
-  (`send_verification_email`, `send_password_reset_email`, `send_account_invite_email`) — тонкие обёртки над `_send_token_email`;
-  очередь ключуется по `sender.__name__`, поэтому имена публичные. Письмо подтверждения шлёт только регистрация
-  (inline): повторной отправки нет.
-- `POST /auth/admin/distribute-credentials` читает всё нужное циклу (почта, роль, id, роль актора) в локальные значения до
-  отправки: откат сессии после сбоя гасит все загруженные строки, и перед отправкой обновляется (раз) только тот
-  пользователь, которого откат погасил (`inspect(user).expired`), а не все загруженные на каждом сбое: «обновить один раз
-  после отката» оставило бы погашенными остальных, и их письма падали бы `MissingGreenlet`. Письма по-прежнему уходят в запросе.
-- `GET /auth/admin/users` чинит зеркальные строки `staff` по-прежнему, но коммитит только при реальной правке
-  (`sync_all_portal_users_staff` возвращает, писало ли оно), а филиалы и строки `staff` читает двумя запросами
-  на всех, не по два на пользователя. Успешное чтение списка кредов аудита не пишет — только отказ в выборе тенанта.
+Онбординг после `onboarding_completed_at`: `POST /onboarding/credentials` и `/onboarding/branches` — 409. До завершения каждый
+проход шага кредов заводит новый кредит; брошенный проход оставляет кредит без филиалов — синк по нему обновляет только сети и
+компании (`sync_groups_and_companies`), данных филиалов не читает; виден только в списке кредов. `Company` такого тенанта, возникшая
+до выбора филиалов, перехватывает `materialize_branches` раньше переноса чужой (перенос с историей — только если синк не успел
+пройти между шагами). `PATCH` кредита филиалы не создаёт и проверяется по своему тенанту.
+
+- Сгенерированный пароль при массовом заведении учёток никому не показывается, поэтому хэш общий — `DUMMY_PASSWORD_HASH`, а не
+  bcrypt на каждого: вход по такой учётке стоит тот же раунд bcrypt, а доступ даёт только письмо-приглашение. Заданный руками пароль хэшируется как обычно.
+- Письмо «забыли пароль» уходит фоновой задачей на своей сессии (`_send_auth_email_after_response`): время ответа и ошибки SMTP не
+  выдают, есть ли адрес. Кулдаун ставится после отправки, поэтому `_queue_auth_email` держит в памяти процесса пару (отправитель,
+  пользователь) не дольше 60 с — повторные запросы не плодят письма. Отправители (`send_verification_email`,
+  `send_password_reset_email`, `send_account_invite_email`) — тонкие обёртки над `_send_token_email`; очередь ключуется по
+  `sender.__name__`, поэтому имена публичные. Письмо подтверждения шлёт только регистрация (inline), повтора нет.
+- `POST /auth/admin/distribute-credentials` читает нужное циклу (почта, роль, id, роль актора) в локальные значения до отправки:
+  откат после сбоя гасит загруженные строки, поэтому перед отправкой обновляется (раз) только погашенный пользователь
+  (`inspect(user).expired`) — иначе остальные письма падали бы `MissingGreenlet`. Письма уходят в запросе.
+- `GET /auth/admin/users` чинит зеркальные строки `staff`, но коммитит только при реальной правке (`sync_all_portal_users_staff`
+  возвращает, писало ли оно), а филиалы и `staff` читает двумя запросами на всех. Успешное чтение списка кредов аудита не пишет —
+  только отказ в выборе тенанта.
 
 ### База сравнения на Обзоре
-Дельты «к прошлому периоду» считаются не от окна, а от пресета, которым это окно выбрано
-(`DateRange.previous_period`): месяц-к-дате против тех же чисел прошлого месяца, квартал —
-против того же отрезка прошлого квартала, год — против прошлого года, неделя — против той же
-недели семь дней назад. Окно целых месяцев обязано ложиться на целые месяцы, иначе февраль
-сравнится с 1–28 января и три потерянных дня покажутся ростом. Без пресета — прежнее окно
-равной длины непосредственно перед периодом; угадывать месяц по датам нельзя, иначе поле
-сравнения на странице отчётов (`defaultComparePeriod`, отступает днями) и внутренняя дельта
-того же отчёта разойдутся на одном экране.
+Дельты «к прошлому периоду» считаются от пресета, которым выбрано окно (`DateRange.previous_period`): месяц-к-дате — против тех же
+чисел прошлого месяца, квартал — того же отрезка прошлого квартала, год — прошлого года, неделя — той же недели семь дней назад.
+Окно целых месяцев обязано ложиться на целые месяцы (иначе февраль сравнится с 1–28 января и потерянные дни покажутся ростом).
+Без пресета — окно равной длины перед периодом; угадывать месяц по датам нельзя: поле сравнения на странице отчётов
+(`defaultComparePeriod`, отступает днями) и дельта того же отчёта разошлись бы на одном экране.
 
-- Пресет приходит query-параметром `period_preset` и обязан доезжать до **каждого** пути,
-  который считает те же дельты. `fetch_client_mix_metrics` получает его, потому что на этот
-  отчёт ведут карточки Обзора; новый эндпоинт, показывающий ту же цифру, обязан сделать так же,
-  иначе витрины разойдутся — то же правило, что и для `reporting_window_clause()`.
-- Ссылка отчёта везёт пресет через `reportSearchParams`, хотя он и не фильтр: без этого
-  перезагрузка страницы молча меняла бы базу.
-- Выбор месяца (`monthRange` в `web/src/period.js`, поля `*-month` на Обзоре, План/факте
-  и странице отчётов) — второй источник `period_preset=month`, поэтому пресет `month` уже
-  не означает «месяц-к-дате»: прошлый месяц берётся целиком и сравнивается с целым
-  предыдущим. Без пресета апрель (30 дней) отступил бы на 30 дней и база началась бы
-  со 2 марта. Кнопка «Месяц» подсвечивается только на текущем месяце, но пресет уходит
-  всегда — подсветка про «этот месяц», пресет про базу сравнения.
-- Обратное угадывание запрещено по-прежнему: `monthOfRange` лишь показывает в поле то,
-  что выбрано месяцем (на Обзоре — при пресете `month`, в отчётах — `syncMonthPicker`),
-  а руками набранное окно 01–30 остаётся без пресета.
-- Текущий месяц режется по сегодня: иначе средние поделились бы на ещё не наступившие дни.
-- Окно сравнения показано пользователю строкой под пресетами (`overview-compare-note`).
-- **Карточка без процента изменения** (`deltaWithoutChange` в `overviewCards.js`): `change_pct = null` значит, что база нулевая.
-  Текущее значение тоже 0 или пусто — дельты нет вовсе; ненулевое — «было 0» (`dash.changeFromZero`) без цвета. Для этого
-  каждая карточка с `change` передаёт сырое `current`; блок администратора несёт и `previous_value`, и по нему нулевая база
-  отличается от неизвестной (`null` — дельты нет). У остальных карточек предыдущего значения в сводке нет, поэтому пропавший
-  процент при ненулевом текущем читается как нулевая база. `_optional_pct_change` отдаёт `None` и когда предыдущего значения нет
-  вовсе, и это единственная ловушка: для долей ОПЗ после первого/повторного визита сводка несёт `opz_*_visit_pct_previous`
-  (`None` — в прошлом окне таких визитов не было), и по нему «было 0» превращается в отсутствие дельты. Новая карточка на
-  `_optional_pct_change` обязана передать `previous` так же. Отчёты своё «—» при нулевой базе не меняют.
-- «Сегодня» на фронте — **филиальный день** (`branchToday()` в `period.js`, `BRANCH_TIME_ZONE`), а не часы зрителя, и читается
-  при каждом обращении, а не фиксируется при загрузке страницы: итальянец около полуночи по Москве и вкладка, открытая через
-  границу месяца, иначе получали окно, отстающее на день. Функции периода принимают `today` аргументом — тестам часы не нужны.
-- Пресет «Сегодня» отступает на месяц, а не на день: одиночный день сравнивается с тем же
-  числом прошлого месяца. День недели при этом не совпадает — сознательный размен в пользу
-  единого месячного чтения страницы.
-- В последний день месяца окно целых месяцев меняет форму: 27 февраля сравнивается с 1–27
-  января, 28-е — уже с 1–31 января. Разрыв виден в строке сравнения; иначе февраль мерился бы
-  против 1–28 января и три потерянных дня показались бы ростом.
-- Явное окно сравнения на странице отчётов старше пресета (`fetch_report_data` обнуляет его):
-  иначе таблица и блок сравнения показали бы разные проценты по одной метрике на одном экране.
-- Ручная половина ОПЗ с ноября 2026 вводится по дням и идёт по тому же окну, что и расчётная (база — прошлое окно
-  целиком, см. «Ручные факты»). Legacy-месяцы (октябрь 2026 и раньше) неделимы и попадают в базу, только если прошлое
-  окно покрывает их целиком.
+- `period_preset` (query) обязан доезжать до **каждого** пути с теми же дельтами: `fetch_client_mix_metrics` его получает (на этот
+  отчёт ведут карточки Обзора); новый эндпоинт с той же цифрой — так же (то же правило, что у `reporting_window_clause()`).
+- Ссылка отчёта везёт пресет через `reportSearchParams`, хотя он не фильтр: иначе перезагрузка молча меняла бы базу.
+- Выбор месяца (`monthRange` в `web/src/period.js`, поля `*-month` на Обзоре, План/факте, отчётах) — второй источник
+  `period_preset=month`, поэтому `month` не значит «месяц-к-дате»: прошлый месяц берётся целиком и сравнивается с целым предыдущим
+  (без пресета апрель отступил бы на 30 дней — база со 2 марта). Кнопка «Месяц» подсвечена только на текущем месяце, но пресет уходит
+  всегда: подсветка про «этот месяц», пресет про базу.
+- Обратное угадывание запрещено: `monthOfRange` лишь показывает в поле выбранное месяцем (Обзор — при пресете `month`, отчёты —
+  `syncMonthPicker`); руками набранное окно 01–30 остаётся без пресета.
+- Текущий месяц режется по сегодня (иначе средние делились бы на ненаступившие дни). Окно сравнения показано строкой под
+  пресетами (`overview-compare-note`).
+- **Карточка без процента изменения** (`deltaWithoutChange` в `overviewCards.js`): `change_pct = null` — база нулевая. Текущее 0 или
+  пусто — дельты нет; ненулевое — «было 0» (`dash.changeFromZero`) без цвета. Каждая карточка с `change` передаёт сырое `current`;
+  блок администратора несёт и `previous_value` (по нему нулевая база отличается от неизвестной: `null` — дельты нет). У остальных
+  предыдущего значения в сводке нет, и пропавший процент при ненулевом текущем читается как нулевая база. Ловушка:
+  `_optional_pct_change` отдаёт `None` и когда предыдущего значения нет вовсе; для долей ОПЗ после первого/повторного визита сводка
+  несёт `opz_*_visit_pct_previous` (`None` — в прошлом окне таких визитов не было), и по нему «было 0» становится отсутствием дельты.
+  Новая карточка на `_optional_pct_change` обязана передать `previous` так же. Отчёты своё «—» при нулевой базе не меняют.
+- «Сегодня» на фронте — **филиальный день** (`branchToday()` в `period.js`, `BRANCH_TIME_ZONE`), не часы зрителя, и читается при
+  каждом обращении, а не при загрузке страницы (иначе у итальянца около полуночи по Москве и у вкладки через границу месяца окно
+  отстаёт на день). Функции периода принимают `today` аргументом — тестам часы не нужны.
+- Пресет «Сегодня» отступает на месяц, не на день: день сравнивается с тем же числом прошлого месяца (день недели не совпадает —
+  сознательный размен ради единого месячного чтения). В последний день месяца окно целых месяцев меняет форму: 27 февраля — с 1–27
+  января, 28-е — уже с 1–31 января; разрыв виден в строке сравнения.
+- Явное окно сравнения на странице отчётов старше пресета (`fetch_report_data` обнуляет его): иначе таблица и блок сравнения
+  показали бы разные проценты одной метрики.
+- Ручная половина ОПЗ с ноября 2026 вводится по дням и идёт по тому же окну, что расчётная (база — прошлое окно целиком, см. «Ручные
+  факты (отзывы и дополнительные ОПЗ)»). Legacy-месяцы (октябрь 2026 и раньше) неделимы и попадают в базу, только если прошлое окно покрывает их целиком.
 
 ### Корзины клиентов по визитам
-Корзины «1 / 2–3 / 4+ визита» считаются по всей истории клиента в филиале до конца периода,
-а не по визитам внутри периода — иначе за месяц почти никто не набирает четырёх визитов и
-корзина 4+ стоит в нуле. Правило обязано стоять на **обоих** путях, считающих эти цифры:
-`_client_visit_frequency_block()` для Обзора и `_clients_rows()`
-для отчёта по клиентам, — иначе витрины разойдутся, как и с `reporting_window_clause()`.
+Корзины «1 / 2–3 / 4+ визита» считаются по всей истории клиента в филиале до конца периода, а не по визитам внутри периода (иначе
+за месяц 4+ почти пуста). Правило обязано стоять на **обоих** путях: `_client_visit_frequency_block()` (Обзор) и `_clients_rows()`
+(отчёт по клиентам) — иначе витрины разойдутся.
 
 - Фильтр по сотруднику выбирает, каких клиентов показать, но историю не укорачивает.
-- Окно истории заканчивается концом периода, чтобы прошлый месяц показывал то, что было
-  верно тогда.
-- История читается только по клиентам периода (`Appointment.client_id IN (клиенты периода)`) в обоих путях — это сужение
-  чтения, а не правила: числа те же.
+- Окно истории кончается концом периода: прошлый месяц показывает то, что было верно тогда.
+- История читается только по клиентам периода (`Appointment.client_id IN (клиенты периода)`) в обоих путях — сужение чтения, числа те же.
 
 ### ОПЗ: одно событие на визит
-Событие ОПЗ — визит, после которого клиент записался снова (правило якоря — «Якорный визит ОПЗ» ниже).
-Единица — **визит**, та же, что у знаменателя `opz_pct` (завершённые визиты): клиент, которого
-перезаписали после каждого из двух визитов, даёт два события; визит, после которого создали две записи, —
-одно, по первой из них. До 12.10.2026 клиент засчитывался раз за период, и на длинном окне процент
-проваливался: числитель в клиентах, знаменатель в визитах (год по сети — 5,8 % против ~16 % помесячно).
+Событие ОПЗ — визит, после которого клиент записался снова (правило якоря — «Якорный визит ОПЗ»). Единица — **визит**, как у
+знаменателя `opz_pct` (завершённые визиты): клиент, перезаписанный после двух визитов, даёт два события; визит с двумя созданными
+после него записями — одно, по первой. Числитель в клиентах при знаменателе в визитах проваливал процент на длинном окне (так считали до 12.10.2026).
 
-- Правило одно на всех: Обзор, План/факт, Рейтинги, «Сравнение по годам», ручная колонка «Текущие ОПЗ» —
-  все считают `_opz_events`. Параметра дедупликации у функции больше нет.
-- Счёт окна равен сумме счетов его частей: месяцы складываются в год, недели — в месяц. Для этого
-  `_opz_events` читает и записи **дня перед периодом** — только чтобы знать, какие якоря уже
-  перезаписаны: визит 28 февраля, перезаписанный 28-го и ещё раз 1 марта, — событие февраля, а не по
-  одному в феврале и в марте. Хватает одного дня: якорь лежит в дне записи или днём раньше.
-- Месячные планы ОПЗ ставились под прежнее правило; на месяце новое даёт примерно на 10 % больше
-  (сеть, сентябрь 2026: 272 → 298 расчётных событий).
-  Ручные «доп. ОПЗ», введённые до перехода, тоже вводились против прежнего, меньшего расчёта: если
-  администраторы добирали ими повторные перезаписи одного клиента, теперь эти события учтены дважды.
+- Правило одно на всех: Обзор, План/факт, Рейтинги, «Сравнение по годам», «Текущие ОПЗ» считают `_opz_events`; параметра дедупликации нет.
+- Счёт окна равен сумме счетов его частей (месяцы — в год, недели — в месяц), поэтому `_opz_events` читает и записи **дня перед
+  периодом** — только чтобы знать, какие якоря уже перезаписаны (визит 28 февраля, перезаписанный 28-го и 1 марта, — событие
+  февраля, не по одному в феврале и марте). Одного дня хватает: якорь в дне записи или днём раньше.
+- Месячные планы ОПЗ ставились под прежнее правило; новое даёт на месяце ~на 10 % больше. Ручные «доп. ОПЗ», введённые до перехода,
+  вводились против меньшего расчёта: если ими добирали повторные перезаписи, эти события теперь учтены дважды.
 
 ### ОПЗ после первого и повторного визита
-Каждое событие помечено `OpzEvent.first_visit`: якорный визит — первый завершённый визит клиента в филиале.
-Определение одно — `_first_visit_days()`: день первого визита каждого клиента в филиале по тем же визитам, что
-читают «новые клиенты» (завершённые, `business_appointment_condition`, окно отчётности; `factual_at` не нужен —
-более ранний день уже прошёл), а первый визит — визит в этот день (целые дни: два визита в первый день оба
-первые). `appointments.client_id` — внутренний `clients.id`, одна строка на филиал (`sync_pipeline._internal_client_id`),
-поэтому разбивка по филиалу совпадает с «новыми клиентами», которые группируют по клиенту на весь скоуп; тест держит
-«первые визиты = новые клиенты» на данных без двух визитов в первый день. При таких визитах первых визитов больше,
-чем новых клиентов: это визиты, а не люди. При фильтре по мастеру бывает и меньше: клиент «новый» у каждого мастера,
-у которого был в периоде, а первый визит — только у того, к кому пришёл в первый день. По нему `_opz_events` помечает якоря, а `_first_visit_join()` считает базу
-«первых визитов» (`_first_visit_count`, помесячно — в `fetch_year_over_year_facts`), поэтому числитель и знаменатель
-не расходятся. Сам счёт «новых клиентов» (`_client_recency_block`) — отдельный запрос по тем же визитам; связь
-держит тест «первые визиты = новые клиенты».
+Каждое событие помечено `OpzEvent.first_visit`: якорный визит — первый завершённый визит клиента в филиале. Определение одно —
+`_first_visit_days()`: день первого визита каждого клиента в филиале по тем же визитам, что читают «новые клиенты» (завершённые,
+`business_appointment_condition`, окно отчётности; `factual_at` не нужен — более ранний день уже прошёл), первый визит — визит в этот день (два визита в первый
+день оба первые). `appointments.client_id` — внутренний `clients.id`, одна строка на филиал (`sync_pipeline._internal_client_id`),
+поэтому разбивка по филиалу совпадает с «новыми клиентами»; тест держит «первые визиты = новые клиенты» на данных без двух визитов в
+первый день (с ними первых визитов больше — это визиты, не люди; при фильтре по мастеру бывает и меньше: клиент «новый» у каждого
+мастера периода, а первый визит — только у того, к кому пришёл в первый день). По `_first_visit_days` `_opz_events` помечает
+якоря, а `_first_visit_join()` считает базу «первых визитов» (`_first_visit_count`, помесячно — в `fetch_year_over_year_facts`),
+поэтому числитель и знаменатель не расходятся. «Новые клиенты» (`_client_recency_block`) — отдельный запрос по тем же визитам.
 
-- Это сгруппированный запрос, а не построчный `NOT EXISTS`: на скоупе сети планировщик гонял `NOT EXISTS`
-  вложенным циклом — база за сентябрь 2026 стоила 0,62 с против 0,02 с сейчас, а в `_opz_events` построчная
-  проверка была в ~17 раз дороже остальной функции. `_first_visit_join` группирует только клиентов с визитом
-  в периоде, `_opz_events` — только клиентов своих событий (и не спрашивает вовсе, если событий нет). Замер `fetch_summary` по сети (локальная копия, `ANALYZE`): месяц 0,44 → 0,54 с, месяц-к-дате
-  0,33 → 0,42 с, год 1,9 → 2,16 с против кода до разбивки.
-  «Новые и повторные клиенты» теперь читают события ОПЗ за оба окна: месяц ~0,11 → 0,28 с, год ~0,16 → 0,48 с,
-  2022–2026 ~0,2 → 0,73 с (со сравнением — вдвое; прод ~в 3 раза медленнее). План/факт и Рейтинги
-  платят за запрос первых дней в `_opz_events`, хотя признак не читают (~+0,05–0,1 с на месяце сети), а на всей
-  истории — ~+0,35–0,4 с, в основном за то, что через атрибуцию администраторам идёт ~в 2,9 раза больше событий.
-- Доли — каждая от своих визитов: `opz_first_visit_pct` = события после первого визита / первые визиты,
-  `opz_repeat_visit_pct` = события после повторного / остальные завершённые визиты. Первые + повторные =
-  все завершённые визиты Обзора; визиты без карточки клиента попадают в повторные, как они есть и в общей базе.
-  Часть без визитов не имеет доли (`None`, «—» на всех витринах, `_opz_rate`), а не «0 %»: у барбера без единого
-  первого визита ноль читался бы как «никого не перезаписали».
-- Ручная добавка «доп. ОПЗ» в разбивку не входит: она одно число на администратора и месяц. Итог —
-  `opz_qty` = первые + повторные + добавка (добавка — только без фильтра по сотруднику; исключение — выбранный на Обзоре
-  администратор, см. ниже).
-- Показывается на Обзоре (`_opz_split_metrics` → `visit_metrics`, две карточки: процент, под ним строка «N шт из M визитов» —
-  `opz_*_visit_qty` из `first_visits` / `repeat_visits`, `count` у карточки в `overviewCards.js`, своя строка
-  subgrid-сетки карточек), в «Новых и повторных клиентах» (тот же блок через `fetch_client_mix_metrics`, таблица
-  `opz_by_visit`) и в «Сравнении по годам» (колонки и графики по годам и месяцам). В План/факте и Рейтингах разбивки нет —
-  там только общий ОПЗ. Доп. услуги выбранного администратора — в его личном блоке (см. «Доп. услуги администратора»), ОПЗ с разбивкой — тоже (см. ниже).
+- Это сгруппированный запрос, не построчный `NOT EXISTS` (на скоупе сети планировщик гонял его вложенным циклом, ~30× дороже).
+  `_first_visit_join` группирует только клиентов с визитом в периоде, `_opz_events` — только клиентов своих событий (и не спрашивает,
+  если событий нет). План/факт и Рейтинги платят за него в `_opz_events`, хотя признак не читают.
+- Доли — каждая от своих визитов: `opz_first_visit_pct` = события после первого / первые визиты, `opz_repeat_visit_pct` = события
+  после повторного / остальные завершённые визиты. Первые + повторные = все завершённые визиты Обзора; визиты без карточки клиента
+  идут в повторные, как и в общую базу. Часть без визитов не имеет доли (`None`, «—» на всех витринах, `_opz_rate`), не «0 %»
+  (ноль читался бы как «никого не перезаписали»).
+- Ручная добавка «доп. ОПЗ» в разбивку не входит (одно число на администратора и месяц). Итог — `opz_qty` = первые + повторные +
+  добавка (добавка — только без фильтра по сотруднику; исключение — выбранный на Обзоре администратор).
+- Показывается на Обзоре (`_opz_split_metrics` → `visit_metrics`; карточки: процент и строка «N шт из M визитов» — `opz_*_visit_qty`
+  из `first_visits` / `repeat_visits`, `count` у карточки в `overviewCards.js`), в «Новых и повторных клиентах» (блок через
+  `fetch_client_mix_metrics`, таблица `opz_by_visit`) и в «Сравнении по годам». В План/факте и Рейтингах разбивки нет — только общий ОПЗ.
 - **ОПЗ выбранного администратора на Обзоре — как в План/факте, а не по барберу визита.** При `service_attribution.mode ==
-  'administrator_schedule'` `_opz_split_metrics(administrator_company_id=…)` берёт числа у `_staff_opz_window_facts()`:
-  по ролевым сегментам (`_staff_role_segments`, как строки План/факта) — месяц администратором: события, закреплённые за
-  ним `_admin_opz_events_by_created_appointments` (та же раздача, что и у `_admin_opz_by_created_appointments`, ядро —
-  `_admin_event_assignments`: создатель в смену, иначе наименее загруженный за день, затем за окно), над записями, закреплёнными за ним
-  (`_admin_assigned_records(with_first_visits=True)` — те же, что «клиенты» его строки План/факта); месяц барбером — события
-  его визитов над его визитами. Доли разбивки — события / записи, из которых первая запись клиента в филиале (`_first_visit_join`).
-  Ручная добавка в разбивку не входит, но в итог `opz_qty` и `opz_pct` входит (см. «Обзор выбранного администратора»);
-  `opz_pct` делится на закреплённые записи, а не на `cur['appointments']`
-  (визиты, где он мастер, у администратора почти нулевые). Окно План/факта — `_resolve_plan_period`, как у самого План/факта.
-  Инвариант (тест `test_an_administrators_overview_opz_is_what_plan_fact_credits_to_them`, замер на локальной копии, 112 строк
-  администраторов за июнь–сентябрь 2026): `opz_qty` Обзора = факт `opz_qty` строки План/факта за целый месяц,
-  первые + повторные + добавка = `opz_qty`, первые + повторные визиты = `clients` строки. Второй реализации раздачи нет и быть не должно;
-  отчёт «Новые и повторные клиенты» берёт тот же путь, иначе витрины разойдутся.
-- Якорные визиты читаются без `business_appointment_condition` (как и до разбивки): событие, опирающееся на визит
-  служебного сотрудника, входит в числитель, а в знаменатели нет — и попадает в «первые», если до дня якоря у
-  клиента нет ни одного бизнес-визита (даже если они появятся позже). Редкий случай, общий для итогового `opz_pct`.
-- Клиент, пришедший впервые и вернувшийся в том же периоде, даёт по событию в обе части: классифицируется
-  визит, а не клиент (в отличие от корзин «1 / 2–3 / 4+», где клиент — по истории на конец периода).
-- В «Сравнении по годам» часть без визитов за все годы (история из одних первых визитов) не получает графиков,
-  а год без её визитов — линии на помесячном графике: пустой график читается как сломанный.
+  'administrator_schedule'` `_opz_split_metrics(administrator_company_id=…)` берёт числа у `_staff_opz_window_facts()` по ролевым
+  сегментам (`_staff_role_segments`, как строки План/факта): месяц администратором — события, закреплённые за ним
+  `_admin_opz_events_by_created_appointments` (та же раздача, что у `_admin_opz_by_created_appointments`, ядро —
+  `_admin_event_assignments`), над закреплёнными за ним записями (`_admin_assigned_records(with_first_visits=True)` — теми же, что
+  «клиенты» его строки); месяц барбером — события его визитов над его визитами. Доли — события / записи, из которых первая запись
+  клиента в филиале (`_first_visit_join`). Добавка в разбивку не входит, но в `opz_qty` и `opz_pct` входит (см. «Обзор выбранного
+  администратора»); `opz_pct` делится на закреплённые записи, а не на `cur['appointments']` (мастерские визиты администратора почти
+  нулевые). Окно — `_resolve_plan_period`. Инвариант (тест `test_an_administrators_overview_opz_is_what_plan_fact_credits_to_them`):
+  `opz_qty` Обзора = факт `opz_qty` строки План/факта за целый месяц; первые + повторные + добавка = `opz_qty`; первые + повторные
+  визиты = `clients` строки. Второй реализации раздачи нет и быть не должно; «Новые и повторные клиенты» берут тот же путь.
+- Якорные визиты читаются без `business_appointment_condition`: событие на визит служебного сотрудника входит в числитель, а в
+  знаменатели нет — и попадает в «первые», если до дня якоря у клиента нет бизнес-визитов. Редкий случай, общий для `opz_pct`.
+- Клиент, пришедший впервые и вернувшийся в том же периоде, даёт по событию в обе части: классифицируется визит, а не клиент (в
+  отличие от корзин «1 / 2–3 / 4+»).
+- В «Сравнении по годам» часть без визитов за все годы не получает графиков, а год без её визитов — линии на помесячном графике
+  (пустой график читается как сломанный).
 
 ### Обзор выбранного администратора
-Администратор выбран (`service_attribution.mode == 'administrator_schedule'`) — Обзор показывает **его строку План/факта**,
-а не то, что он сделал как мастер (его мастерские визиты почти нулевые). Решение владельца 2026-10-14.
+Администратор выбран (`service_attribution.mode == 'administrator_schedule'`) — Обзор показывает **его строку План/факта**, а не его
+работу как мастера (мастерские визиты почти нулевые). Решение владельца 2026-10-14.
 
-- **Блок `administrator_personal`** в `fetch_summary` (`_administrator_personal_block`): факты `ADMIN_METRIC_CODES` за окно и
-  за прошлое окно, дельты — `_optional_pct_change`. Значения берутся **из самого пути План/факта** —
-  `_staff_plan_groups_for_branch(staff_id=…)`, ячейки `fact`, — а не пересчитываются: второй реализации нет и быть не
-  должно. Прошлое окно читается тем же путём и тем же правилом ручных фактов, что и у дельты Обзора (дневные строки
-  прошлого окна плюс legacy-месяцы, которые оно покрывает). Строки План/факта, которой нет (нет ни плана, ни фактов), блок не прячет, а читает нулями. Дополнительная цена на локальной
-  копии (блок, разбивка и дневной ряд вместе, самый нагруженный администратор): ~0,2 с на месяц и ~0,6 с на год сверх сводки
-  (прод ~в 3 раза медленнее).
-- **Кэши запроса**: `_staff_opz_segments` (`db.info['staff_opz_segments']`, ключ — окно, период плана, филиал, сотрудник,
-  `factual_at`) и `_admin_assigned_records` (`'admin_assigned_records'`, ключ — окно, филиал, составы администраторов и барберов,
-  соответствие user→staff, `factual_at`) считаются один раз на запрос: сводка и дневной ряд просят одно окно, а строка План/факта —
-  те же записи. Ответ неизменяемый (кортежи); кэш с флагом первого визита обслуживает и вызов без него, обратно — нет.
-  Дневной ряд делит кэш со сводкой только при общем `factual_at` (так зовёт `/bundle`). Замер (локально, 8 прогонов, сводка + ряд
-  за год): 1,64 → 1,52 с, числа побайтно те же; основная цена — в `_administrator_service_scope` и самих запросах записей, не в повторах.
-  Запись плана сбрасывает кэш вместе с кэшами ролей (`_drop_role_period_caches`).
-- Расхождение двух атрибуций (План/факта меньше расчёта Обзора) не прячется: `_administrator_personal_block` обрезает отрицательную
+- **Блок `administrator_personal`** в `fetch_summary` (`_administrator_personal_block`): факты `ADMIN_METRIC_CODES` за окно и прошлое
+  окно, дельты — `_optional_pct_change`. Значения берутся **из самого пути План/факта** (`_staff_plan_groups_for_branch(staff_id=…)`,
+  ячейки `fact`), не пересчитываются: второй реализации нет и быть не должно. Прошлое окно — тем же путём и правилом ручных фактов,
+  что дельта Обзора (дневные строки плюс покрытые целиком legacy-месяцы). Нет строки План/факта (ни плана, ни фактов) — блок
+  не прячется, читает нули.
+- **Кэши запроса** (один раз на запрос): `_staff_opz_segments` (`db.info['staff_opz_segments']`, ключ — окно, период плана, филиал,
+  сотрудник, `factual_at`) и `_admin_assigned_records` (`'admin_assigned_records'`, ключ — окно, филиал, составы администраторов и
+  барберов, соответствие user→staff, `factual_at`). Ответ неизменяемый (кортежи); кэш с флагом первого визита обслуживает и вызов
+  без него, обратно — нет. Дневной ряд делит кэш со сводкой только при общем `factual_at` (так зовёт `/bundle`). Запись плана
+  сбрасывает кэш вместе с кэшами ролей (`_drop_role_period_caches`).
+- Расхождение атрибуций (План/факта меньше расчёта Обзора) не прячется: `_administrator_personal_block` обрезает отрицательную
   добавку до нуля для экрана, но пишет warning в `yclients.dashboard` (id филиала и сотрудника, без ПДн).
-- **Ручная добавка входит в итог**: `opz_qty` и `opz_pct` в `visit_metrics` и в блоке — те же, что в его строке; добавка
-  отдельно — `opz_manual_qty` (= факт строки − расчётные события), на карточке «в т.ч. доп. ОПЗ: N». Правило «при фильтре по
-  сотруднику добавку не подмешивать» относится к барберу; расчётную часть у администратора считает та же атрибуция, что и в
-  его строке. Разбивка (первые/повторные) — по-прежнему только расчётная часть.
-- **Деньги**: у администратора одна денежная метрика — `cosmo_sum`. Выручки и среднего чека в `ADMIN_METRIC_CODES` нет
-  (владелец 16.10.2026: у него это в основном косметика над «визитами» продаж товара, 1300 ₽ / 2 = 650), поэтому их нет ни в
-  строке План/факта, ни в блоке, ни в «Рейтингах» (доски `revenue_admin` и «Косметика, %» администраторов — доля личной выручки —
-  убраны, у выбранного администратора нет карточки «Личная выручка»). Выручка филиала и Обзор по мастеру его продажи по-прежнему
-  считают. Роли `admin` по умолчанию открыта `cosmo_sum` (остальные деньги — нет). `cosmo_sum` лежит в `metrics` блока и вычищается в `_hide_summary_financials` по
-  `money_payload_keys(hidden, 'plan')` — теми же кодами, что и ячейки План/факта. Новая денежная метрика в `ADMIN_METRIC_CODES`
-  обязана быть в `MONEY_METRICS[...]['plan']`, иначе она утечёт через блок. Карточки без метрики просто не рисуются.
-- **Дневной ряд ОПЗ** (`fetch_revenue_daily(administrator_attribution=True)` — только Обзор, отчёты ключ не передают):
-  события по дню события и записи, закреплённые за ним, по дню записи — `fetch_administrator_opz_daily` над теми же
-  `_staff_opz_segments`, что и карточки; сумма ряда равна расчётной части карточки (добавка — число месяца, по дням не делится).
-  Выручка в ряду по-прежнему мастерская; график выручки в режиме администратора скрыт.
-- **Вёрстка**: в режиме администратора скрыты разделы по мастеру (KPI, «Записи», «Клиенты», «Выручка», «Товары и услуги» —
-  их данные для него противоречат блоку). Остаются «Личные показатели» (блок; в нём и доп. услуги, закреплённые за ним, — `extra_services_qty` / `_pct`
-  его строки План/факта), «Филиал во время смен» (только посещения и клиенты филиала за его смены, карточек доп. услуг там нет:
-  они противоречили бы личным; графики и таблицы услуг переезжают в него, а панель «Servizi extra» скрыта — по той же причине)
-  и график ОПЗ: панель графика переносится из «Записей» в `#staff-admin-opz` (`renderStaffPersonalScope`). Пункты
-  быстрого перехода берутся из `data-jump-target` видимых блоков; у «Личных показателей» атрибут ставится только в этом режиме.
-- Карточка «Доп. услуги от посещений» осталась только в разделе «Товары и услуги» (раньше дублировалась в «Записях»).
+- **Ручная добавка входит в итог**: `opz_qty` и `opz_pct` в `visit_metrics` и блоке — те же, что в его строке; добавка отдельно —
+  `opz_manual_qty` (= факт строки − расчётные события), на карточке «в т.ч. доп. ОПЗ: N». Правило «при фильтре по сотруднику добавку
+  не подмешивать» — про барбера. Разбивка (первые/повторные) — только расчётная часть.
+- **Деньги**: у администратора одна денежная метрика — `cosmo_sum`. Выручки и среднего чека в `ADMIN_METRIC_CODES` нет (владелец
+  16.10.2026: у него это в основном косметика над «визитами» продаж товара), поэтому их нет ни в строке План/факта, ни в блоке, ни в
+  «Рейтингах» (доски `revenue_admin` и «Косметика, %» администраторов не строятся; карточки «Личная выручка» нет). Выручка филиала и
+  Обзор по мастеру его продажи по-прежнему считают. Роли `admin` по умолчанию открыта `cosmo_sum` (остальные деньги — нет). `cosmo_sum` лежит в `metrics`
+  блока и вычищается в `_hide_summary_financials` по `money_payload_keys(hidden, 'plan')` — теми же кодами, что ячейки План/факта.
+  Новая денежная метрика в `ADMIN_METRIC_CODES` обязана быть в `MONEY_METRICS[...]['plan']`, иначе утечёт через блок. Карточки без метрики не рисуются.
+- **Дневной ряд ОПЗ** (`fetch_revenue_daily(administrator_attribution=True)` — только Обзор): события по дню события, закреплённые
+  записи — по дню записи (`fetch_administrator_opz_daily` над теми же `_staff_opz_segments`); сумма ряда равна расчётной части
+  карточки (добавка — число месяца, по дням не делится). Выручка в ряду мастерская; график выручки в этом режиме скрыт.
+- **Вёрстка**: скрыты разделы по мастеру (KPI, «Записи», «Клиенты», «Выручка», «Товары и услуги» — противоречат блоку). Остаются
+  «Личные показатели» (блок; в нём и доп. услуги, закреплённые за ним, — `extra_services_qty` / `_pct` его строки План/факта;
+  `data-jump-target` у блока — только в этом режиме), «Филиал во время смен» (только посещения и клиенты филиала за его смены;
+  карточек доп. услуг нет — противоречили бы личным; графики и таблицы услуг переезжают сюда, панель «Servizi extra» скрыта) и
+  график ОПЗ: панель переносится из «Записей» в `#staff-admin-opz` (`renderStaffPersonalScope`). Быстрый переход — из
+  `data-jump-target` видимых блоков. Карточка «Доп. услуги от посещений» — только в «Товары и услуги».
 
 ### ОПЗ в сравнении по годам
-Отчёт `year_over_year` показывает ОПЗ по годам и по месяцам из одного вызова `_opz_events` на филиал
-(`fetch_opz_year_facts`); год — сумма своих месяцев. Граница истории (`_year_over_year_activity_bounds`) читает визиты и платежи;
-движения товаров её тоже не открывают.
+Отчёт `year_over_year` считает ОПЗ по годам и месяцам одним вызовом `_opz_events` на филиал (`fetch_opz_year_facts`); год — сумма
+месяцев. Граница истории (`_year_over_year_activity_bounds`) читает визиты и платежи; движения товаров её не открывают.
 
-- Фильтр по сотруднику — барбер якорного визита. У выбранного **администратора** на Обзоре ОПЗ считается иначе (как в
-  План/факте, см. «ОПЗ после первого и повторного визита»), а этот отчёт по-прежнему берёт барбера якорного визита
-  (у администратора он обычно пуст).
-- `appointment_dependencies` — диапазон визитов, на которые опираются события года, `monthly_appointment_dependencies` —
-  то же по месяцу события (`min/max(last_visit_date, appointment_date)`). `latest_date` из `fetch_opz_year_facts` убран:
-  годы идут от первой записи до сегодняшней даты (`_year_periods`).
-- Ручная добавка (`_manual_opz_by_month`) ложится в **свой** месяц месячного ряда и в год годового, и только
-  когда нет фильтра по сотруднику — то же условие, что и везде.
-- Знаменатель месячного `opz_pct` — сырые завершённые визиты месяца (те же фильтры, что у
-  `cur['appointments']` в Обзоре); месяц без визитов даёт `None`, как средний чек. То же у частей разбивки.
-- Маскирование повторяет годовое: месяц вне периода активности или с `appointments_detail`, не
-  покрывающим визиты месяца, прячет ОПЗ (с разбивкой); отдельная проверка по зависимостям события прячет **только**
-  ОПЗ, не выручку и не визиты, но дописывает пробел в `missing_components` и переводит месяц в `partial`.
-  Зависимость события может уходить в соседний месяц и даже в прошлый год (визит 31 декабря).
+- Фильтр по сотруднику — барбер якорного визита (у выбранного администратора Обзор считает иначе, см. «ОПЗ после первого и
+  повторного визита»; здесь у администратора он обычно пуст).
+- `appointment_dependencies` — диапазон визитов, на которые опираются события года; `monthly_appointment_dependencies` — то же по
+  месяцу события (`min/max(last_visit_date, appointment_date)`). Годы — от первой записи до сегодня (`_year_periods`).
+- Ручная добавка (`_manual_opz_by_month`) ложится в **свой** месяц ряда и в год, и только без фильтра по сотруднику.
+- Знаменатель месячного `opz_pct` — сырые завершённые визиты месяца (те же фильтры, что `cur['appointments']` Обзора); месяц без
+  визитов — `None`, как средний чек; то же у частей разбивки.
+- Маскирование повторяет годовое: месяц вне периода активности или с `appointments_detail`, не покрывающим визиты месяца, прячет ОПЗ
+  (с разбивкой); проверка зависимостей события прячет **только** ОПЗ (не выручку и визиты), дописывает пробел в `missing_components`
+  и переводит месяц в `partial`. Зависимость может уходить в соседний месяц и в прошлый год (визит 31 декабря).
 - Покрытие года и месяца сертифицируют только `appointments_detail` и `financial_transactions_detail` (`YOY_SOURCES` в
-  `reports_finance.py`): выручка, в том числе товарная и пополнения, считается по платежам. Движения товаров
-  (`goods_transactions_detail`) питали только число проданных единиц, которого отчёт не показывал, — `fetch_year_over_year_facts`
-  его больше не читает, и отсутствие этого источника год «неполным» не делает.
+  `reports_finance.py`): выручка (в том числе товарная и пополнения) считается по платежам. `goods_transactions_detail`
+  `fetch_year_over_year_facts` не читает — отсутствие источника год «неполным» не делает.
 
 ### Ручные факты (отзывы и дополнительные ОПЗ)
-`manual_fact_metrics` хранит значения, которые вводят руками. С 09.11.2026 (решение владельца) значение привязано
-к **дню**: одна строка на `(день, филиал, сотрудник, metric_code)`, `period_start = period_end = день`
-(гарантия — уникальный индекс по обеим датам). Строки, введённые раньше, — **целые календарные месяцы**
-(`period_start` — 1-е число, `period_end` — последнее, «legacy»); их не разложить по дням, и они остаются как есть.
-Различает их только `period_start == period_end`. Кодов два: `reviews_qty` (метрики нет в YClients вовсе) и
-`opz_qty` — добавка к расчётным ОПЗ.
+`manual_fact_metrics` хранит вводимые руками значения. С 09.11.2026 (решение владельца) значение привязано к **дню**: одна строка на
+`(день, филиал, сотрудник, metric_code)`, `period_start = period_end = день` (уникальный индекс по обеим датам). Введённые раньше
+строки — **целые календарные месяцы** («legacy»: `period_start` — 1-е, `period_end` — последнее число), по дням неделимы и остаются
+как есть; различает их только `period_start == period_end`. Кодов два: `reviews_qty` (в YClients метрики нет) и `opz_qty` — добавка к расчётным ОПЗ.
 
-- **Правило подсчёта одно на все витрины и обе метрики** — `_manual_row_counts_clause()` (SQL) и его Python-близнец
-  `_manual_row_counts()`: за окно `[start, end]` идут дневные строки, чей день лежит в окне, плюс legacy-месяцы из
-  `_countable_manual_months` (см. ниже). День в октябре 2026 и раньше поэтому показывает 0 отзывов, а не весь месяц —
-  раньше `reviews_qty` брала каждый месяц, которого касался период, и одиночный день показывал отзывы за месяц.
-- **В одном месяце у пары (филиал, сотрудник, метрика) не бывает и ненулевой legacy-строки, и дневных** — иначе они сложились бы
-  дважды. Нулевая legacy-строка (таких много за август–сентябрь 2026) ничего не добавляет и в счёт не идёт: ввод по дням она не
-  закрывает, перенос она не отбивает. Чтение этого не проверяет; держат запись: редактор закрывает такую строку для ввода по дням (см. «Кто вводит
-  ручные факты») и `manual_fact_merge.py` отбивает перенос, который смешал бы виды.
-- Роль администратора (месячная) и окно отчётности (`reporting_window_clause` по `period_end` — у дневной строки это сам
-  день) проверяются как раньше.
-- Кто такой администратор, решают две функции, и это не опечатка: `_admin_staff_ids_by_company`
-  (категория из настроек плана важнее должности) задаёт состав редактора и проверяет запись, а
-  показанные цифры — строки сотрудников, итог филиала и годовые факты — идут через месячные
-  роли (`_staff_role_periods_by_staff` / `_administrator_role_periods_by_company`). Пока планы
-  месячные, наборы совпадают. Для `reviews_qty` сумма строк равна итогу филиала; для `opz_qty`
-  итог считает ещё и события, никому не распределённые, поэтому бывает больше.
-- Сотрудник, переставший быть администратором, но со значением за этот день, остаётся в редакторе
-  (`is_active: false`) — иначе его значение нельзя ни увидеть, ни обнулить.
+- **Правило подсчёта одно на все витрины и обе метрики** — `_manual_row_counts_clause()` (SQL) и Python-близнец `_manual_row_counts()`:
+  за окно `[start, end]` идут дневные строки с днём в окне плюс legacy-месяцы из `_countable_manual_months` (см. ниже). День в
+  октябре 2026 и раньше показывает 0 отзывов, не весь месяц.
+- **В одном месяце у пары (филиал, сотрудник, метрика) не бывает и ненулевой legacy-строки, и дневных** — иначе сложились бы дважды.
+  Нулевая legacy-строка (много за август–сентябрь 2026) ничего не добавляет, в счёт не идёт, ввод по дням не закрывает, перенос не
+  отбивает. Чтение этого не проверяет; держит запись: редактор закрывает такую строку для ввода по дням (см. «Кто вводит ручные
+  факты: своя строка против всего филиала») и `manual_fact_merge.py` отбивает перенос, смешавший бы виды.
+- Роль администратора (месячная) и окно отчётности (`reporting_window_clause` по `period_end` — у дневной строки это сам день)
+  проверяются при подсчёте.
+- Кто администратор, решают две функции, и это не опечатка: `_admin_staff_ids_by_company` (категория из настроек плана важнее
+  должности) задаёт состав редактора и проверяет запись; показанные цифры (строки сотрудников, итог филиала, годовые факты) идут
+  через месячные роли (`_staff_role_periods_by_staff` / `_administrator_role_periods_by_company`). Пока планы месячные, наборы
+  совпадают. `reviews_qty`: сумма строк = итог филиала; `opz_qty`: итог считает ещё нераспределённые события, поэтому бывает больше.
+- Переставший быть администратором сотрудник со значением за этот день остаётся в редакторе (`is_active: false`) — иначе значение
+  нельзя ни увидеть, ни обнулить.
 
-**Дополнительные ОПЗ** (`opz_qty`) — не замена, а слагаемое: в факт уходит сумма расчётных
-событий `_opz_events()` и ручной добавки. Она подмешивается везде, где показывается ОПЗ —
-Обзор (`_manual_opz_scope_total`), строки и итоги План/факта, годовые факты отчётов
-(`_manual_opz_by_month`). После сложения обязательно пересчитать `opz_pct`
-(`_apply_manual_opz`):
-`_fact_metric_components()` выводит процент до того, как ручная часть известна.
+**Дополнительные ОПЗ** (`opz_qty`) — слагаемое, не замена: факт = расчётные события `_opz_events()` + ручная добавка. Подмешивается
+везде, где показывается ОПЗ: Обзор (`_manual_opz_scope_total`), строки и итоги План/факта, годовые факты отчётов
+(`_manual_opz_by_month`). После сложения обязательно пересчитать `opz_pct` (`_apply_manual_opz`): `_fact_metric_components()` выводит
+процент до того, как ручная часть известна.
 
-- Дневной ряд `revenue_daily` и график остаются на чистом расчёте: дневные ручные строки туда не подмешиваются,
-  потому что тот же ряд читает отчёт «Финансовый обзор» (а legacy-месяц по дням не разложить вовсе).
-- Вводить можно только администраторам: добавка входит в их строки, барберские остаются чисто
-  расчётными. Итог филиала бывает больше суммы всех строк и без добавок — он считает события,
-  опирающиеся на визит сотрудника, которого филиал уже не показывает.
-- «Клиенты» администратора (`_admin_clients_by_finished_appointments`) берут визиты тем же `_appt_revenue_filters()`,
-  что и «клиенты» филиала, — вместе с `business_appointment_condition()`. Без него сегмент без барберов (фильтра
-  по `staff_id` нет) отдавал бы администраторам визиты, записанные на служебного сотрудника («Администратор…», лист
-  ожидания), и их сумма расходилась бы с итогом филиала.
-- Колонка «Текущие ОПЗ» обязана показывать ровно тот факт, к которому прибавится добавка,
-  поэтому она считается тем же путём, что и строки План/факта — `_admin_opz_by_staff_for_period()`
-  поверх общего `_branch_staff_role_context()`. Отдельно от План/факта её считать нельзя:
-  события, опирающиеся на визит уволенного барбера, в строки администраторов не попадают,
-  и без фильтра база под добавку оказывается завышенной (в проде расхождение доходило до 5×).
-- При фильтре по сотруднику ручная добавка не подмешивается вовсе — ни в Обзоре, ни в годовых
-  фактах отчётов: расчётная половина там отнесена к барберу визита, и сумма двух разных
-  атрибуций не сошлась бы ни со строкой администратора в План/факте, ни с итогом филиала.
-  Исключение одно: **выбранный на Обзоре администратор** — там расчётная половина как раз его строка План/факта
-  (раздел «Обзор выбранного администратора»), и добавка входит. Годовые факты отчётов по-прежнему её не берут.
-- Legacy-месяц неделим, поэтому засчитывается только там, где «весь месяц» —
-  честный ответ: период покрывает месяц целиком либо доходит до сегодня, начинаясь не позже
-  1-го числа этого месяца (`_countable_manual_months`; «сегодня» — филиальный день `factual_branch_date()`, как и у видимости вкладок). Прошедшая
-  неделя и день в середине такого месяца идут без него. Дневных строк правило не касается. Правило одно для Обзора и
-  План/факта, иначе витрины разойдутся. В План/факте набор legacy-месяцев решается один раз на всё окно, а сегменты ролей
-  берут из него только свои месяцы (`_manual_fact_values_by_staff`): иначе сотрудник в двух сегментах получил бы месяц дважды.
-- **База для дельты — то же правило на прошлом окне** (`_manual_opz_scope_total(prev.start, prev.end)`; роли — по нему же):
-  дневные строки прошлого окна плюс legacy-месяцы, которые оно покрывает целиком. Отдельной «месячной» базы
-  (`_previous_period_countable_months`) больше нет. Переходный артефакт: ноябрь 2026 месяц-к-дате сравнивается с
-  1–N октября, где есть только legacy-месяц, — ручная база ноль (один месяц).
-- Итоги в шапке редактора суммируют только то, что реально попадёт в отчёты. Флаг `counted`
-  отвечает на вопрос «засчитается ли значение, если его сюда ввести», и не зависит от того, что
-  уже сохранено (`_countable_manual_opz_keys`): строка за день месяца, когда сотрудник не был
-  администратором, или за день раньше даты начала отчётности, помечается до ввода, остаётся
-  редактируемой и в итоги не входит. Осторожно: `counted` берёт роль из месячных периодов
-  (`_administrator_role_periods_by_company` на день, то есть по его месяцу), а `is_active` — из
-  `_admin_staff_ids_by_company` (точное совпадение периода плана с месяцем). Пока планы
-  месячные, это одно и то же; план на нестандартный период их разведёт.
-  Итог филиала в План/факте бывает больше суммы строк на нераспределённые события.
-
-- **У набранных чисел есть потолок** — `MAX_INPUT_VALUE = 1e9` (`dashboard_service.py`), тот же, что у суммы Яндекс Пэй
-  (`payment_methods.MAX_AMOUNT` выводится из `MAX_INPUT_VALUE` — одна константа, не две). Ручные факты (`_parse_manual_value`, и `value`, и `previous_value`) и числа настроек плана
-  (`_parse_setting_number`) выше него — `ValueError` → 400. Без потолка `1e307` переполнял float: `opz_pct` = 100 × ОПЗ / клиенты
-  давал `inf`, JSON его не сериализует, и `/dashboard/bundle` отвечал 500 на весь филиал; план шёл тем же путём через выручку.
-  Проверка на уровне сервиса, а не `le=` в Pydantic: иначе ответ был бы 422 вместо 400 с понятным `detail`.
+- Дневной ряд `revenue_daily` и график — чистый расчёт: дневные ручные строки не подмешиваются (тот же ряд читает «Финансовый
+  обзор», а legacy-месяц по дням не разложить).
+- Вводить можно только администраторам: добавка входит в их строки, барберские чисто расчётные. Итог филиала бывает больше суммы
+  строк и без добавок — он считает события на визит сотрудника без строки в периоде (служебные «Администратор…», «Лист ожидания»;
+  визиты, которые администратор провёл сам).
+- «Клиенты» администратора (`_admin_clients_by_finished_appointments`) берут визиты тем же `_appt_revenue_filters()`, что «клиенты»
+  филиала, — вместе с `business_appointment_condition()`: иначе сегмент без барберов (фильтра по `staff_id` нет) отдавал бы
+  администраторам визиты служебного сотрудника, и сумма расходилась бы с итогом филиала.
+- «Текущие ОПЗ» обязаны показывать ровно тот факт, к которому прибавится добавка, поэтому считаются тем же путём, что строки
+  План/факта, — `_admin_opz_by_staff_for_period()` поверх `_branch_staff_role_context()`. Отдельно считать нельзя: события на визит
+  сотрудника без строки в периоде в строки администраторов не попадают, и база под добавку оказалась бы завышенной.
+- При фильтре по сотруднику добавка не подмешивается вовсе — ни в Обзоре, ни в годовых фактах отчётов: расчётная половина отнесена
+  к барберу визита, и сумма двух атрибуций не сошлась бы ни со строкой администратора, ни с итогом филиала. Исключение одно:
+  **выбранный на Обзоре администратор** (расчётная половина — его строка План/факта; см. «Обзор выбранного администратора»), там
+  добавка входит. Годовые факты отчётов её по-прежнему не берут.
+- Legacy-месяц неделим, поэтому засчитывается только там, где «весь месяц» — честный ответ: период покрывает месяц целиком либо
+  доходит до сегодня, начинаясь не позже 1-го числа этого месяца (`_countable_manual_months`; «сегодня» — `factual_branch_date()`,
+  как у видимости вкладок). Неделя и день в середине такого месяца идут без него. Дневных строк правило не касается. Правило одно
+  для Обзора и План/факта; в План/факте набор legacy-месяцев решается один раз на окно, сегменты ролей берут из него только свои
+  месяцы (`_manual_fact_values_by_staff`) — иначе сотрудник в двух сегментах получил бы месяц дважды.
+- **База для дельты — то же правило на прошлом окне** (`_manual_opz_scope_total(prev.start, prev.end)`; роли — по нему же): дневные
+  строки прошлого окна плюс покрытые им целиком legacy-месяцы. Переходный артефакт: ноябрь 2026 месяц-к-дате сравнивается с 1–N
+  октября, где только legacy-месяц, — ручная база ноль.
+- Итоги в шапке редактора суммируют только то, что попадёт в отчёты. Флаг `counted` — «засчитается ли значение, если его ввести»,
+  не зависит от сохранённого (`_countable_manual_opz_keys`): строка за день месяца, когда сотрудник не был администратором, или
+  раньше даты начала отчётности, помечается до ввода, остаётся редактируемой и в итоги не входит. Осторожно: `counted` берёт роль из
+  месячных периодов (`_administrator_role_periods_by_company` на день), а `is_active` — из `_admin_staff_ids_by_company` (точное
+  совпадение периода плана с месяцем); пока планы месячные, это одно и то же, план на нестандартный период их разведёт.
+- **Потолок набранных чисел** — `MAX_INPUT_VALUE = 1e9` (`dashboard_service.py`), тот же, что у суммы Яндекс Пэй
+  (`payment_methods.MAX_AMOUNT` выводится из него — одна константа, не две). Ручные факты (`_parse_manual_value`, и `value`, и
+  `previous_value`) и числа настроек плана (`_parse_setting_number`) выше него — `ValueError` → 400 (без потолка `1e307` давал `inf`
+  в `opz_pct`, JSON его не сериализует, `/dashboard/bundle` отвечал 500 на весь филиал). Проверка на уровне сервиса, не `le=` в
+  Pydantic: иначе 422 вместо 400 с понятным `detail`.
 
 ### Сохранение плана
-`save_plan_settings` — «удалить всё и вставить» по месяцу и филиалам, без оптимистичной блокировки:
-последнее сохранение побеждает. Два одновременных сохранения одного месяца выстраиваются
-в очередь через `pg_advisory_xact_lock(7301, год*12+месяц)` (только PostgreSQL), взятый **до** чтения
-снимка; столкновение вставок на уникальных индексах (`IntegrityError`) — `PlanSettingsConflict` → **409**. `detail` у 409 английский,
-SPA его не печатает: на 409 она перечитывает загруженный месяц и показывает `dash.planSettingsConflict` (как у ручных фактов).
-Каждое сохранение пишет `plan_settings.updated` в `portal_audit_events` до `commit()`; актор и тенант
-передаются в функцию обязательными именованными аргументами (как у ручных фактов).
+`save_plan_settings` — «удалить всё и вставить» по месяцу и филиалам, без оптимистичной блокировки: последнее сохранение побеждает.
+Одновременные сохранения одного месяца выстраиваются в очередь через `pg_advisory_xact_lock(7301, год*12+месяц)` (только
+PostgreSQL), взятый **до** чтения снимка; столкновение вставок на уникальных индексах (`IntegrityError`) — `PlanSettingsConflict` →
+**409**. `detail` у 409 английский, SPA его не печатает: перечитывает месяц и показывает `dash.planSettingsConflict` (как у ручных
+фактов). Каждое сохранение пишет `plan_settings.updated` в `portal_audit_events` до `commit()`; актор и тенант — обязательные
+именованные аргументы (как у ручных фактов).
 
-- **«Личная» роль не получает уровня филиала.** `fetch_plan_fact(include_branch_row=False)` — для `barber`, зажатого
-  на свою строку `staff` (всё, что вне `STAFF_VIEW_ROLES`): ни `parent_group`, ни диагностик уровня филиала в ответе нет, и запросы под них не выполняются
-  (итоги филиала раскрыли бы то, что зажим прячет, а считать их ради отброшенного ответа дорого). `admin` читает строку филиала и
-  всех коллег (см. «Администратор читает весь филиал»), только без выручки и среднего чека.
-- **Правила плана — `plan_rules` в ответе одного филиала.** `fetch_plan_fact(company_id=…)` отдаёт `plan_rules`: проценты из
-  `plan_branch_settings` по коду метрики, которую правило порождает (`wax_qty`, `head_care_qty`, `face_care_qty`,
-  `camouflage_qty`, `cosmo_qty`, `opz_qty`; дроби хранятся, наружу идут проценты тем же `_setting_display_value`, что у редактора).
-  Ключ с `NULL` опущен; `None` — нет строки правил ровно на период плана (`plan_period`), все шесть пусты либо окно отчётности
-  не покрывает конец периода (тот же якорь `period_end`, что у плана). `cosmo_price` не входит — это деньги. Правила не деньги и
-  не итоги филиала, поэтому их видят и личные роли (`include_branch_row=False` их не прячет), и роль со скрытой выручкой.
-  В ответе по сети поля нет; для отчёта «Рейтинги» (`for_ratings`) ключ есть, но `None` — запрос не делается. Читает их вкладка «Планы» на фронте (только просмотр).
+- **«Личная» роль не получает уровня филиала.** `fetch_plan_fact(include_branch_row=False)` — для `barber`, зажатого на свою строку
+  `staff` (всё вне `STAFF_VIEW_ROLES`): ни `parent_group`, ни диагностик филиала в ответе нет, запросы под них не выполняются
+  (итоги филиала раскрыли бы то, что прячет зажим). `admin` читает строку филиала и всех коллег (см. «Администратор читает весь
+  филиал (решение владельца 03.11.2026)»), без выручки и среднего чека.
+- **Правила плана — `plan_rules` в ответе одного филиала** (`fetch_plan_fact(company_id=…)`): проценты из `plan_branch_settings` по
+  коду метрики, которую правило порождает (`wax_qty`, `head_care_qty`, `face_care_qty`, `camouflage_qty`, `cosmo_qty`, `opz_qty`;
+  хранятся дроби, наружу проценты через `_setting_display_value`, как у редактора). Ключ с `NULL` опущен; `None` — нет строки правил
+  ровно на период плана (`plan_period`), все шесть пусты либо окно отчётности не покрывает конец периода (якорь `period_end`).
+  `cosmo_price` не входит — деньги. Правила не деньги и не итоги филиала, поэтому их видят личные роли (`include_branch_row=False`
+  их не прячет) и роль со скрытой выручкой. В ответе по сети поля нет; для «Рейтингов» (`for_ratings`) ключ есть, но `None` —
+  запрос не делается. Читает вкладка «Планы» (только просмотр).
 - **План ОПЗ администратора** — его запланированные клиенты × `opz_pct` филиала того же месяца, округление half-up
   (`_staff_metric_values_from_input`; `opz_pct` плана выводится как у всех: 100 × `opz_qty` / клиенты). Нет клиентов или правила —
-  плана нет, а не нулевой план. Итог филиала (`_branch_metric_values_from_staff`) по-прежнему только по барберам: ОПЗ администратора —
-  вторая атрибуция тех же событий, и сумма задвоила бы их. Сохранённые месяцы дозаполнила миграция `0059` (только строки с `source =
-  'dashboard_plan_settings'`, где у администратора нет `opz_qty`; арифметика та же, в float8; откат удаляет эти строки).
+  плана нет, не нулевой план. Итог филиала (`_branch_metric_values_from_staff`) по-прежнему только по барберам: ОПЗ администратора —
+  вторая атрибуция тех же событий, сумма задвоила бы их. Сохранённые месяцы дозаполнила миграция `0059` (только строки с `source =
+  'dashboard_plan_settings'`, где у администратора нет `opz_qty`; откат удаляет эти строки).
 
 ### admin и barber — одна роль под двумя именами
-`ROLE_LEVEL` (`auth_hierarchy.py`) больше не выводится из позиции в `PORTAL_ROLES`: это явная
-карта, и у `admin` с `barber` **одинаковый ранг**. Ранг — единственное, что сравнивают
-`assignable_roles()`, `can_list_user()` и `can_manage_user()`, поэтому равенство рангов и делает
-две роли неотличимыми по правам заведения: ни одна не может завести другую, обе лежат вне
-`BRANCH_SCOPE_ROLES` (ручные факты — только свои строки). **Видимость данных у пары разная** — см. «Администратор
-читает весь филиал»: `barber` зажат на свою строку, `admin` читает весь филиал. Заводит обе `branch_admin` и выше: `assignable_roles()` отдаёт пару и менеджеру,
-но это чистая арифметика рангов — до эндпоинта создания он не доходит, там стоит
-`require_roles(*USER_ADMIN_ROLES)`, и `can_manage_user()` отсекает его отдельно. Выбирают из них в модалке «Создать аккаунт» строки YClients (в «Создать пользователя» пары нет) — чтобы в списке
-пользователей было видно, где стойка, а где кресло.
+`ROLE_LEVEL` (`auth_hierarchy.py`) — явная карта (не позиция в `PORTAL_ROLES`), у `admin` и `barber` **одинаковый ранг**. Ранг — единственное,
+что сравнивают `assignable_roles()`, `can_list_user()` и `can_manage_user()`: ни одна роль не заведёт другую, обе вне `BRANCH_SCOPE_ROLES`.
+**Видимость данных разная** (см. «Администратор читает весь филиал»). Обе в `CONFIGURABLE_MONEY_ROLES`: владелец может открыть метрику одной и
+не открыть другой. Заводит обе `branch_admin` и выше: `assignable_roles()` отдаёт пару и менеджеру, но эндпоинт создания закрыт
+`require_roles(*USER_ADMIN_ROLES)` и `can_manage_user()`. В модалке «Создать аккаунт» пару выбирают из строки YClients — чтобы в списке было
+видно, где стойка, а где кресло.
 
-- Показать и изменить — разные вопросы. Равного по рангу `branch_admin` видно при любом пересечении
-  филиалов, но менять (почта, роль, отключение, удаление) можно только если **все** его филиалы лежат
-  среди филиалов актора, как у нижестоящих: иначе через смену почты и сброс пароля забирались бы
-  чужие филиалы. Пароли — не длиннее 72 **байт** (bcrypt 5 бросает на длинных, старые версии молча
-  режут): проверка стоит в Pydantic-моделях, `verify_password` на длинном вводе отвечает `False`.
-
-- Одинаковы ранг и гейты заведения, но **не** видимость: `barber` зажат на свою строку и не видит денег, а `admin` читает весь
-  филиал, и по умолчанию ему открыта `cosmo_sum` (`DEFAULT_ROLE_MONEY_CODES`). Обе роли лежат в
-  `CONFIGURABLE_MONEY_ROLES`, и владелец может открыть метрику одной и не открыть другой.
-
-- Карта рангов и `PORTAL_ROLES` живут в двух файлах, поэтому при расхождении модуль падает на
-  импорте (`RuntimeError`). Добавляя роль, правь оба места.
-- **Ярлык не нейтрален: он решает категорию сотрудника.** `portal_staff_sync` пишет роль в
-  `staff.position` синтетической строки, а `normalize_staff_category()` читает `admin` как
-  «администратор» (алиас) и `barber` как «барбер». Читает не гейт вкладок, а общий
-  `_staff_category()`, поэтому выбор половины пары решает заодно: какой набор метрик несёт
-  строка План/факта (`ADMIN_METRIC_CODES` против `BARBER_METRIC_CODES`), в каком скоупе они
-  считаются (`metric_scope_for_category`: у администратора `clients`, `opz_qty` и `opz_pct`
-  и `extra_services_*` становятся `administrator_records`), в какой
-  половине рейтингов человек окажется (`barbers` / `admins` в `staff_leaderboard`) и попадёт ли
-  он в месячную атрибуцию администратора. Вкладки Отзывов и ОПЗ — самое видимое следствие, но
-  не единственное: смена ярлыка между `admin` и `barber` переклассифицирует человека во всём
-  План/факте. Выдавать `admin` барберу «для удобства» нельзя — цифры поедут.
-- **Подпись «барбер / администратор» в селекторах сотрудников.** `/dashboard/staff` отдаёт `category` — `administrator` /
-  `barber` / `mixed` (`_staff_label_categories`). С периодом это те же месячные роли, по которым Обзор выбирает режим
-  администратора (`_staff_role_periods_by_company`, один пакетный вызов на весь список, не по сотруднику): оба вида месяцев
-  в окне — `mixed`. Без периода — категория должности (`administrator` / `barber`), а если должность не алиас, то `barber`. Синтетические строки портала с должностью `owner` / `branch_admin` /
-  `manager` / `platform_admin` в этот список не попадают вовсе (`fetch_staff` их исключает, `_counts_as_staff()`), поэтому `category` не бывает `null`.
-  На фронте подпись — только текст option (`staffOption` в `web/src/staffLabel.js`); голое имя лежит в `option.dataset.name`, и
-  заголовки («Личные показатели: …») берут его, а не `textContent`.
-- `barber` — **не** переименованный `viewer`: у `viewer` алиаса нет вовсе, и синтетическая
-  строка попадала в `unknown`, а теперь попадает в `barber`. Портальная строка с фактами, но
-  без плана, в барберские рейтинги раньше не входила, а теперь входит. Обратная сторона той же
-  правки: `admin` перестал падать в барберский фолбэк месячных ролей и стал администратором.
-- У учётки, заведённой из CRM (`provision_staff_account`, где `staff.id == portal_user.id`),
-  должность остаётся из YClients, и ярлык роли на неё не влияет.
-- Строки `staff` из YClients в админке портала только читаются; из админки можно лишь завести учётку (`create-account`) —
-  правка и «удаление» отменялись бы следующим синком. `POST /auth/admin/staff/{id}/create-account`: 409 — только
-  `ProvisionConflict(ValueError)` (почта уже зарегистрирована, у сотрудника уже есть учётка, id пользователя занят; та же 409 — проигранная
-  гонка на уникальном индексе, `_unique_conflict` в `auth_routes.py`: он откатывает сессию и ничего не читает с ORM-объектов после); остальные
-  `ValueError` провижининга (нет настоящей почты, сотрудник неактивен, филиал не привязан к тенанту) — 400; `company_ids` без филиала самого
-  сотрудника — тоже 400 (его единственная живая строка `staff` лежит там, вне скоупа учётки каждый виджет отвечал бы `unknown staff_id`).
-  `provision_all_unlinked_staff` ловит оба одним `except ValueError`. `role` — только `admin` или `barber` (иначе 400; пусто —
-  выводит `role_for_staff`).
-- **Служебные строки `staff` — не люди.** «Лист ожидания» и «Администратор…» — заглушки YClients, а не чьё-то кресло. Правило по
-  имени одно — `models.is_service_staff_name` (её зовёт и дашборд — везде напрямую, без алиасов; SQL `_business_staff_id_condition` сравнивает имя
-  после `trim`, который срезает только пробелы, тогда как Python `strip()` — любые пробельные символы): такие строки не попадают в
-  `list_unlinked_staff` (а значит ни в список пользователей как «без аккаунта», ни в массовое заведение), `create-account`
-  на них отвечает 400 (`_load_manageable_staff`), а в `portal_staff_link` их нет ни среди кандидатов, ни в POST привязки (404).
-  Второй копии правила заводить нельзя.
-- **Зеркало и строка CRM различаются по `staff.source_type`, а не по id.** Зеркальная строка (`portal_staff_sync._add_portal_staff`)
-  пишет `source_type = 'portal'` (`models.SOURCE_PORTAL`, миграция `0062` разметила уже существующие), строка YClients, на которую
-  указывает `portal_user_id` (учётка заведена из неё либо привязана админом, см. ниже), — любой другой. Раньше признаком было
-  `id == portal_user_id AND external_id IS NOT NULL`: зеркало берёт `max(Staff.id)+1` из того же пространства номеров, что и учётки
-  из CRM (`_ensure_portal_user_id_sequence`), и могло получить id своего пользователя, а привязанная строка имеет любой id.
-  Зеркалом считается и строка, привязанная к пользователю **без `external_id`**: пока API на старом коде (окно между миграцией
-  `0062` и перезапуском) вставляет зеркала как `'yclients'` без `external_id`, а у каждой настоящей строки YClients он есть (синк,
-  миграция `0033`, демо-сид) — ручной `UPDATE` после деплоя не нужен. Привязать можно только строку с `external_id` (иначе она
-  тут же прочиталась бы зеркалом).
-  Предикат один, у него два близнеца — SQL `mirror_staff_clause` и Python `is_mirror_row`: `_is_crm_row` / `crm_staff_clause` /
-  `yclients_staff_clause` в `portal_staff_sync.py` (`_portal_owned_staff_clause`,
-  `sync_portal_user_staff`, `detach_portal_user_staff`) — и `sync_staff` увольняет не попавших в ответ YClients все строки, кроме
-  зеркал (`yclients_staff_clause`): `fired` у привязанной строки решает YClients, у зеркала — портал. `sync_portal_user_staff` строку CRM
-  не переименовывает и не увольняет, а в филиале с привязанной строкой зеркало не держит (лишние зеркала закрывает). Подбор
-  существующих строк в синке (`load_existing_branch_map`) ищет по `external_id` и берёт только строки своего источника
-  (`source_type`): зеркало, чей id случайно совпал с id сотрудника YClients, сотрудником не становится.
-- **«Привязать к YClients»** — действие админки для учёток `admin` / `barber`, заведённых как «Создать пользователя» и потому
-  имеющих только зеркала (без визитов: `barber` зажат на свою пустую строку и читает нули, `admin` читает коллег, но вводить факты ему некуда). `GET|POST /auth/admin/users/{id}/staff-links`,
-  `DELETE …/staff-links/{staff_id}` (`portal_staff_link.py`; те же права, что у `PATCH /auth/admin/users/{id}`: не себя, тенант
-  учётки — иначе 404, `assert_can_manage_user` — 403; `forbid_demo`; платформенный админ работает в тенанте учётки).
-  GET роли учётки не требует (её проверяет только POST привязки: `admin` / `barber`; права актора — как у всех трёх маршрутов), у прочих ролей `candidates` пусты — так привязку, оставшуюся
-  после смены роли, можно увидеть и открепить. Он отдаёт по филиалам учётки привязанную строку и кандидатов (свободные неуволенные строки YClients, без «Лист ожидания» и
-  «Администратор…»). Привязка: строка должна быть строкой YClients, неуволенной, в филиале учётки и актора (иначе 404 / 400),
-  свободной (409), и в филиале у учётки не должно быть другой привязанной строки (409, в т.ч. уволенной — сначала открепить).
-  Одна транзакция: блокировка строки учётки `FOR UPDATE` (две привязки одной учётки выстраиваются в очередь), захват строки
-  охранённым `UPDATE … WHERE portal_user_id IS NULL` с проверкой `rowcount` (две учётки на одну строку — проигравшей 409),
-  зеркало филиала закрывается (`fired = 1` и `portal_user_id = NULL` — иначе его оживил бы `sync_portal_user_staff`), его ручные
-  значения (отзывы, доп. ОПЗ) прибавляются к строке того же периода (день — к тому же дню, legacy-месяц — к тому же месяцу) и
-  метрики и удаляются с зеркала (`apply_moves(delete_sources=True)` из `manual_fact_merge.py`; месяц, разбитый
-  на несколько строк, и перенос, после которого в одном месяце смешались бы legacy-строка и дневные, — 409), аудит `portal_user.staff_linked` и
-  `manual_fact.merged_from_mirror` до `commit`. Планы (`plan_staff_inputs`), введённые на зеркале, не переносятся. Открепление:
-  `portal_user_id = NULL` (строка YClients не увольняется, её значения остаются на ней), затем `sync_portal_user_staff` возвращает
-  зеркало филиала; аудит `portal_user.staff_unlinked`. Удаление учётки привязанную строку отвязывает, а не увольняет.
-  Открепить можно и строку, из которой учётка заведена (`staff.id == portal_user.id`): не запрещено, потому что обратимо (привязать
-  снова) и строка YClients не теряется, но до новой привязки учётка видит нули на зеркале.
-- **Зеркальные строки не-стоечных ролей — не сотрудники нигде в аналитике.** Учётки `owner` / `branch_admin` / `manager` /
-  `platform_admin` получают синтетическую строку `staff` с должностью-ролью (`PORTAL_MIRROR_POSITIONS` в `models.py`:
-  `PORTAL_ROLES` без `admin`/`barber`; пустая должность не зеркало). Это аккаунт, а не кресло и не стойка, но с плановой
-  категорией (устаревшие `plan_staff_inputs`) строка превращалась в «второго администратора»: двоила человека в
-  План/факте, забирала долю атрибуции записей и ОПЗ и попадала в редакторы ручных фактов. Предикат один —
-  `_counts_as_staff()`; он стоит в источниках перечисления, а не россыпью проверок: `_period_relevant_staff_clause`
-  (роли по месяцам, `_admin_staff_ids_by_company`, `_fetch_company_staff` — а значит строки План/факта, рейтинги,
-  атрибуция, редакторы, проверка записи плана), `fetch_staff` (селектор, настройки плана, выбранный сотрудник
-  План/факта) и `_stored_manual_facts` (значение на зеркале не показывается и не пишется: запись в такую строку —
-  `ManualFactRowNotOpen`, а редактор, показывавший значение, — 409). `_administrator_service_scope` отвечает на явный
-  `staff_id` зеркала «не администратор». Итоги филиала и сети от исключения не меняются, сдвигаются только строки
-  администраторов и их атрибуция; значения, введённые на зеркалах, перестают считаться — перенос на настоящую
-  строку человека делает `python -m scripts.merge_mirror_manual_facts --map <зеркало>:<настоящая> [--apply]`
-  (по умолчанию печатает план; прибавляет значение к строке того же периода — дня или legacy-месяца — и метрики в том же
-  филиале, смешение legacy-строки и дневных в одном месяце отбивает, одна транзакция,
-  аудит `manual_fact.merged_from_mirror`, повторный запуск отбивается; зеркальные строки остаются как были; зеркалом для скрипта
-  считается и строка `source_type = 'portal'` любой роли, в том числе `admin`/`barber` — для них то же делает «Привязать к YClients»).
-  Сами строки `staff` и доступ учёток не трогаются; устаревший `staff_id` зеркала в адресе отвечает как пустой сотрудник,
-  а не 500. Сохранение плана тоже его не ломает: уволенный (деактивированная учётка) зеркальный сотрудник с сохранённым
-  `plan_staff_inputs` не переносится в новый снимок, как переносятся уволенные настоящие, — иначе его отбила бы проверка
-  «сотрудник не относится к периоду» и месяц нельзя было бы пересохранить.
-- **«Создать пользователя» пару не заводит** (`POST /auth/admin/users` с `admin`/`barber` — 400, в модалке их нет): такая учётка
-  получала бы пустую зеркальную строку `staff` и видела нули. Барбер и администратор заводятся только из своей строки YClients
-  (`create-account` / массовое заведение). Смена роли через правку пользователя по-прежнему возможна (ею и пользуется привязка), а
-  `GET /auth/admin/users` помечает такие учётки: `needs_staff_link: true` у активной недемо-учётки `admin` / `barber`, у которой
-  хотя бы в одном филиале нет привязанной строки YClients (зеркало не считается, уволенная привязанная строка — считается, как и у
-  `portal_staff_link`). Считается из строк `staff`, которые список и так читает (`_load_staff_links`, один запрос на всех); в ответах
-  создания и правки поле всегда `false`, актуально оно только в списке.
-- Там, где роль всё же не выбрана и вывести её не из чего, дефолт — `barber`: половина пары,
-  которая **не** открывает редакторы ручных фактов. Так заданы колонка `portal_users.role` и
-  параметр `provision_staff_account()`. В модалке роль выбирается явно; на быстром пути
-  (у сотрудника уже есть почта,
-  модалка не открывается) и при массовом провижининге роль не передаётся вовсе — её выводит
-  сервер, `role_for_staff()` в `portal_account_provision.py`. Второй реализации нет и быть не
-  должно: предвыбор в модалке приходит готовым в `suggested_role` карточки сотрудника. Вывод
-  «из должности» в браузере разошёлся бы с сервером на смешанном названии вроде
-  «Барбер-администратор» — там алиасы барбера проверяются первыми.
-  Роль и филиалы всегда передаются в `createStaffAccount()` аргументами: читать там контролы
-  модалки нельзя, на быстром пути в них лежит остаток от прошлого открытия.
-- Миграция `0046` переименовала `viewer` → `barber` (в проде таких строк не было) и сдвинула
-  server default. Downgrade схлопывает обе роли обратно в `viewer` и возвращает `position`
-  синтетических строк `staff` — **и это в одну сторону**: какая из двух ролей была у учётки,
-  больше нигде не записано, поэтому повторный upgrade сделает всех `barber`, и стойка потеряет
-  вкладки ввода, пока роль не выберут заново. Переопределения `portal_metric_visibility`
-  для пары при откате просто удаляются: любой перенос настройки одного имени на объединённую
-  роль выдал бы второму метрику, которую ему не открывали, а роль без переопределения падает
-  в свой дефолт и не получает ничего.
+- Показать и изменить — разные вопросы. Равного по рангу `branch_admin` видно при любом пересечении филиалов, но менять (почта, роль,
+  отключение, удаление) можно, только если **все** его филиалы среди филиалов актора: иначе через смену почты и сброс пароля забирались бы
+  чужие филиалы. Пароли — не длиннее 72 **байт** (проверка в Pydantic-моделях; `verify_password` на длинном вводе отвечает `False`).
+- Карта рангов и `PORTAL_ROLES` живут в двух файлах: при расхождении модуль падает на импорте (`RuntimeError`). Добавляя роль, правь оба.
+- **Ярлык не нейтрален: он решает категорию сотрудника.** `portal_staff_sync` пишет роль в `staff.position` синтетической строки, а
+  `normalize_staff_category()` читает `admin` как «администратор», `barber` как «барбер». Через общий `_staff_category()` это решает набор
+  метрик строки План/факта (`ADMIN_METRIC_CODES` / `BARBER_METRIC_CODES`), скоуп метрик (`metric_scope_for_category`: у администратора
+  `clients`, `opz_qty`, `opz_pct`, `extra_services_*` — `administrator_records`), половину рейтингов (`barbers` / `admins`) и месячную
+  атрибуцию администратора. Смена ярлыка переклассифицирует человека во всём План/факте; выдавать `admin` барберу «для удобства» нельзя.
+- **Подпись «барбер / администратор» в селекторах.** `/dashboard/staff` отдаёт `category` — `administrator` / `barber` / `mixed`
+  (`_staff_label_categories`). С периодом — те же месячные роли, что выбирают режим администратора на Обзоре (`_staff_role_periods_by_company`,
+  один пакетный вызов): оба вида месяцев в окне — `mixed`. Без периода — категория должности, не алиас — `barber`. Служебные портальные
+  строки (`owner` / `branch_admin` / `manager` / `platform_admin`) в список не попадают (`_counts_as_staff()`), поэтому `category` не `null`.
+  На фронте подпись — только текст option (`staffOption` в `web/src/staffLabel.js`); голое имя в `option.dataset.name`, заголовки («Личные
+  показатели: …») берут его, а не `textContent`.
+- `barber` — **не** переименованный `viewer`: `barber` читается барбером, `admin` — администратором; портальная строка с фактами без плана
+  входит в барберские рейтинги; `admin` больше не падает в барберский фолбэк месячных ролей, он администратор.
+- У учётки из CRM (`provision_staff_account`, `staff.id == portal_user.id`) должность остаётся из YClients, ярлык роли на неё не влияет.
+- Строки `staff` из YClients в админке только читаются (правку отменил бы синк); можно лишь завести учётку — `POST
+  /auth/admin/staff/{id}/create-account`: 409 — только `ProvisionConflict(ValueError)` (почта уже зарегистрирована, у сотрудника уже есть
+  учётка, id пользователя занят) и проигранная гонка на уникальном индексе (`_unique_conflict` в `auth_routes.py`: откатывает сессию и ничего
+  не читает с ORM-объектов после); остальные `ValueError` провижининга (нет настоящей почты, сотрудник неактивен, филиал не привязан к
+  тенанту) — 400; `company_ids` без филиала самого сотрудника — тоже 400 (иначе каждый виджет отвечал бы `unknown staff_id`).
+  `provision_all_unlinked_staff` ловит оба одним `except ValueError`. `role` — только `admin` или `barber` (иначе 400; пусто — выводит
+  `role_for_staff`).
+- **Служебные строки `staff` — не люди.** «Лист ожидания» и «Администратор…» — заглушки YClients. Правило по имени одно —
+  `models.is_service_staff_name` (SQL `_business_staff_id_condition` сравнивает после `trim`, срезающего только пробелы, Python `strip()` —
+  любые пробельные): такие строки не попадают в `list_unlinked_staff` (ни в «без аккаунта», ни в массовое заведение), `create-account`
+  на них — 400 (`_load_manageable_staff`), в `portal_staff_link` их нет среди кандидатов, POST привязки — 404. Второй копии правила нет.
+- **Зеркало и строка CRM различаются по `staff.source_type`, а не по id.** Зеркало (`portal_staff_sync._add_portal_staff`) пишет
+  `source_type = 'portal'` (`models.SOURCE_PORTAL`, миграция `0062`), строка YClients, на которую указывает `portal_user_id` (заведена из неё
+  либо привязана админом), — любой другой. По id нельзя: зеркало берёт `max(Staff.id)+1` из того же пространства, что учётки из CRM
+  (`_ensure_portal_user_id_sequence`), и могло бы получить id своего пользователя. Зеркалом считается и строка, привязанная к пользователю
+  **без `external_id`** (у настоящих он есть; покрывает окно между `0062` и перезапуском API). Привязать можно только строку с `external_id`.
+  Предикат один, два близнеца — SQL `mirror_staff_clause` и Python `is_mirror_row` (`_is_crm_row` / `crm_staff_clause` /
+  `yclients_staff_clause` в `portal_staff_sync.py`; их зовут `_portal_owned_staff_clause`, `sync_portal_user_staff`,
+  `detach_portal_user_staff`). `sync_staff` увольняет не попавших в ответ YClients все строки, кроме зеркал: `fired` у привязанной строки
+  решает YClients, у зеркала — портал. `sync_portal_user_staff` строку CRM не переименовывает и не увольняет, а в филиале с привязанной
+  строкой зеркало не держит (лишние закрывает). `load_existing_branch_map` в синке ищет по `external_id` и берёт только строки своего
+  источника: зеркало с id сотрудника YClients сотрудником не становится.
+- **«Привязать к YClients»** — действие админки для учёток `admin` / `barber`, заведённых как «Создать пользователя» и потому имеющих только
+  зеркала. `GET|POST /auth/admin/users/{id}/staff-links`, `DELETE …/staff-links/{staff_id}` (`portal_staff_link.py`; права как у `PATCH
+  /auth/admin/users/{id}`: не себя, тенант учётки — иначе 404, `assert_can_manage_user` — 403; `forbid_demo`; платформенный админ работает в
+  тенанте учётки). GET роли учётки не требует (её проверяет только POST), у прочих ролей `candidates` пусты — так остаточную привязку после
+  смены роли можно открепить; отдаёт по филиалам учётки привязанную строку и кандидатов (свободные неуволенные строки YClients без
+  служебных). Привязка: строка — YClients, неуволенная, в филиале учётки и актора (иначе 404 / 400), свободная (409), и у учётки в филиале нет
+  другой привязанной (409, в т.ч. уволенной — сначала открепить). Одна транзакция: блокировка строки учётки `FOR UPDATE` (две привязки одной учётки — в очередь), захват строки
+  охранённым `UPDATE … WHERE portal_user_id IS NULL` с проверкой `rowcount` (проигравшей 409), зеркало филиала закрывается (`fired = 1`,
+  `portal_user_id = NULL` — иначе его оживил бы `sync_portal_user_staff`), его ручные значения (отзывы, доп. ОПЗ) прибавляются к строке того
+  же периода (день к дню, legacy-месяц к месяцу) и удаляются с зеркала (`apply_moves(delete_sources=True)` из `manual_fact_merge.py`; месяц,
+  разбитый на несколько строк, и перенос, смешавший бы в месяце legacy-строку и дневные, — 409); аудит `portal_user.staff_linked` и
+  `manual_fact.merged_from_mirror` до `commit`. Планы (`plan_staff_inputs`) с зеркала не переносятся. Открепление: `portal_user_id = NULL`
+  (строка YClients не увольняется, значения остаются), затем `sync_portal_user_staff` возвращает зеркало; аудит `portal_user.staff_unlinked`.
+  Удаление учётки привязанную строку отвязывает, а не увольняет. Открепить можно и строку, из которой учётка заведена: обратимо, но до
+  новой привязки учётка видит нули на зеркале.
+- **Зеркальные строки не-стоечных ролей — не сотрудники нигде в аналитике.** Учётки `owner` / `branch_admin` / `manager` / `platform_admin`
+  получают синтетическую строку `staff` с должностью-ролью (`PORTAL_MIRROR_POSITIONS` в `models.py`: `PORTAL_ROLES` без `admin`/`barber`;
+  пустая должность не зеркало). Это аккаунт, не кресло: с плановой категорией (устаревшие `plan_staff_inputs`) строка стала бы «вторым
+  администратором» — двоила человека в План/факте, забирала долю атрибуции записей и ОПЗ, попадала в редакторы ручных фактов. Предикат один —
+  `_counts_as_staff()`, он стоит в источниках перечисления: `_period_relevant_staff_clause` (она же правило уволенных, см. «Уволенные сотрудники остаются в месяцах, где работали»; роли по месяцам, `_admin_staff_ids_by_company`,
+  `_fetch_company_staff` — а значит строки План/факта, рейтинги, атрибуция, редакторы, проверка записи плана), `fetch_staff` и
+  `_stored_manual_facts` (значение на зеркале не показывается и не пишется: запись — `ManualFactRowNotOpen`, редактор, показывавший
+  значение, — 409). `_administrator_service_scope` на явный `staff_id` зеркала отвечает «не администратор». Итоги филиала и сети не меняются,
+  сдвигаются строки администраторов и их атрибуция. Введённое на зеркалах не считается; перенос на настоящую строку —
+  `python -m scripts.merge_mirror_manual_facts --map <зеркало>:<настоящая> [--apply]` (по умолчанию печатает план; прибавляет к строке того же
+  периода и метрики в том же филиале, смешение legacy-строки и дневных отбивает, одна транзакция, аудит `manual_fact.merged_from_mirror`,
+  повтор отбивается; зеркальные строки `staff` и доступ учёток не трогаются; зеркалом считается и `source_type = 'portal'` любой роли, в т.ч. `admin`/`barber` — для них то же
+  делает «Привязать к YClients»). Устаревший `staff_id` зеркала в адресе отвечает как пустой сотрудник, а не 500. Уволенный (деактивированная
+  учётка) зеркальный сотрудник с `plan_staff_inputs` не переносится в новый снимок плана, как переносятся уволенные настоящие: иначе его
+  отбила бы проверка «сотрудник не относится к периоду» и месяц нельзя было бы пересохранить.
+- **«Создать пользователя» пару не заводит** (`POST /auth/admin/users` с `admin`/`barber` — 400, в модалке их нет): такая учётка видела бы
+  нули на пустом зеркале. Барбер и администратор заводятся только из своей строки YClients (`create-account` / массовое заведение). Смена
+  роли правкой пользователя возможна (ею пользуется привязка); `GET /auth/admin/users` помечает такие учётки `needs_staff_link: true` —
+  активная недемо-учётка `admin` / `barber`, у которой хотя бы в одном филиале нет привязанной строки YClients (зеркало не считается,
+  уволенная привязанная — считается). Считается из строк `staff`, которые список и так читает (`_load_staff_links`, один запрос на всех); в
+  ответах создания и правки поле всегда `false`.
+- Дефолт роли, когда её не выбрали и вывести не из чего, — `barber` (не открывает редакторы ручных фактов; колонка `portal_users.role`,
+  параметр `provision_staff_account()`). В модалке роль выбирается явно; на быстром пути (у сотрудника уже есть почта) и при массовом
+  провижининге её выводит сервер — `role_for_staff()` в `portal_account_provision.py`. Второй реализации нет и быть не должно: предвыбор
+  приходит готовым в `suggested_role` карточки (браузерный вывод «из должности» разошёлся бы с сервером на «Барбер-администратор»: алиасы
+  барбера проверяются первыми). Роль и филиалы всегда передаются в `createStaffAccount()` аргументами, контролы модалки там читать нельзя
+  (на быстром пути в них остаток от прошлого открытия).
+- Миграция `0046` переименовала `viewer` → `barber`. Downgrade схлопывает обе роли в `viewer` и возвращает `position` синтетических строк `staff` — **в одну сторону**: какая из двух была у
+  учётки, нигде не записано, повторный upgrade сделает всех `barber`, и стойка потеряет вкладки ввода. Переопределения
+  `portal_metric_visibility` для пары при откате удаляются: перенос на объединённую роль выдал бы второму метрику, которую ему не открывали (роль без переопределения падает в свой дефолт).
 
 ### Администратор читает весь филиал (решение владельца 03.11.2026)
-Портальная роль `admin` видит всех сотрудников своих филиалов — барберов и администраторов: клиенты, KPI-счётчики, космо
-(штуки и **сумма**), отзывы, ОПЗ, доп. услуги, — но **не** выручку и не средний чек. `barber` остаётся личной ролью (только своя строка).
-Правила, которые держатся вместе:
+Роль `admin` видит всех сотрудников своих филиалов — барберов и администраторов: клиенты, KPI-счётчики, космо (штуки и **сумма**), отзывы,
+ОПЗ, доп. услуги, — но **не** выручку и не средний чек. `barber` остаётся личной ролью (только своя строка).
 
 - **Зажим решает `STAFF_VIEW_ROLES`** (`auth_scope.py`, `BRANCH_SCOPE_ROLES + ('admin',)`), и только он: `effective_staff_selection`,
-  `GET /dashboard/staff` (весь список скоупа, без `last_shift_date`) и `include_branch_row` План/факта (строка филиала и `parent_group`
-  у `admin` есть). Запрошенные `staff_id` / `staff_ids` по-прежнему проверяются по скоупу филиалов (`_validate_dashboard_scope`).
-  Всё остальное, что читает `BRANCH_SCOPE_ROLES` (ручные факты — `manual_fact_staff_keys`, `staff_keys`, платежи филиала), у `admin`
-  не изменилось: вводит он по-прежнему только свои строки, платежей филиала не видит.
-- **Деньги:** `DEFAULT_ROLE_MONEY_CODES['admin'] = {'cosmo_sum'}`; `barber` — пусто. Выручка и средний чек закрыты, пока владелец
-  не откроет их в настройках видимости.
-- **Скрытая выручка не убирает счётчики Обзора.** `_hide_summary_financials` оставляет блок `summary.revenue` и вычищает из него деньги
-  по явному списку **счётных** полей `REVENUE_BLOCK_COUNT_FIELDS` (`appointments`, `unique_clients`, `service_count`, `goods_count`,
-  `extra_service_count` и их `*_change_pct`): поле вне списка удаляется, поэтому новое денежное поле блока скрыто по умолчанию.
-  Так же ведёт себя менеджер. Списки `top_services` / `extra_services` бандла при скрытой выручке по-прежнему пусты.
-- **Доля, делящая на выручку, — тоже выручка.** В таблице «Косметика — мастера» (`cosmo_barber`) колонка `pct` = космо / личная выручка;
-  при скрытой `revenue` `_hide_staff_leaderboard_financials` снимает её целиком (колонка, вариант сортировки, `rows_by_metric['pct']`,
-  поле строк): с видимой суммой космо и процентом выручка восстанавливалась делением. Новая доля от выручки или среднего чека
-  в рейтингах обязана сниматься тем же кодом.
+  `GET /dashboard/staff` (весь список скоупа, без `last_shift_date`) и `include_branch_row` План/факта (строка филиала и `parent_group` у
+  `admin` есть). Запрошенные `staff_id` / `staff_ids` по-прежнему проверяются по скоупу филиалов (`_validate_dashboard_scope`). Остальное, что
+  читает `BRANCH_SCOPE_ROLES` (ручные факты, `staff_keys`, платежи филиала), у `admin` не изменилось: вводит только свои строки, платежей
+  филиала не видит.
+- **Деньги:** `DEFAULT_ROLE_MONEY_CODES['admin'] = {'cosmo_sum'}`; `barber` — пусто. Выручка и средний чек закрыты, пока владелец не откроет
+  их в настройках видимости. Что при этом вычищается из ответов — в «Недоступный блок убирается, а не показывается с ошибкой».
 
 ### Кто вводит ручные факты: своя строка против всего филиала
-Право на ввод — не роль, а **множество пар `(company_id, staff_id)`**. `manual_fact_staff_keys()`
-(`auth_scope.py`) отвечает на это одним значением: `None` — весь филиальный скоуп, множество пар —
-только свои строки. Бранч-уровень (`BRANCH_SCOPE_ROLES`: `platform_admin`, `owner`,
-`branch_admin`, `manager`) видит и правит всё в пределах своих филиалов; остальные — только себя.
-Пары берутся из `staff.portal_user_id`: одна строка `staff` на филиал, поэтому у сотрудника,
-работающего в двух точках, пар две.
+Право на ввод — не роль, а **множество пар `(company_id, staff_id)`**. `manual_fact_staff_keys()` (`auth_scope.py`): `None` — весь филиальный
+скоуп, множество пар — только свои строки. Бранч-уровень (`BRANCH_SCOPE_ROLES`: `platform_admin`, `owner`, `branch_admin`, `manager`) видит и
+правит всё в своих филиалах; остальные — только себя. Пары — из `staff.portal_user_id` (одна строка `staff` на филиал; у работающего в двух
+точках пар две).
 
-- `BRANCH_SCOPE_ROLES` — про ручные факты, `staff_keys` (дополнение набора — `admin` и `barber` — получает
-  `AccessContext.staff_id` / `staff_keys`), платежи филиала и строку филиала в Плане/факте для бранч-ролей. Зажим дашборда
-  решает другой набор — `STAFF_VIEW_ROLES = BRANCH_SCOPE_ROLES + ('admin',)`: роль вне него (сегодня только `barber`)
-  «личная» для `effective_staff_selection()` на **всех** эндпоинтах дашборда, а новая роль вне обоих наборов
-  автоматически становится «личной» — и «личная» здесь fail-closed: если живой строки
-  `staff` у учётки нет (сотрудника уволили в YClients, а логин остался),
-  `effective_staff_selection()` отвечает 403, а не показывает весь филиал.
-- `GET /dashboard/staff` тоже зажимает личную роль: `fetch_staff(staff_id=effective_staff_selection(ctx, None, …))` — барбер
-  видит в селекторе только свои строки (по одной на филиал скоупа запроса; коллег, их должности, уровни и категории он читать не должен);
-  `admin` и бранч-роли получают весь список скоупа;
-  без живой строки `staff` — 403, как везде. Селекторы дашборда и отчётов переносят список из одной строки (пункт «Все»
-  остаётся: запрос без `staff_id` сервер всё равно зажимает). Ответ не несёт `user_id` YClients — селекторы его не читают;
-  редактор планов получает его из `fetch_staff` напрямую.
-- Зажим обязан попасть **внутрь своих филиалов**: у переведённого сотрудника остаётся живой
-  CRM-строкой филиал, из которого он ушёл, и у неё id всегда меньше, поэтому «первая строка»
-  зажимала дашборд на филиал вне скоупа и каждый виджет отвечал `unknown staff_id`. Теперь зажим считается по строкам внутри скоупа
-  запроса (см. «Мультивыбор»), а если внутри него нет ни одной — 403.
-- `/auth/me` обязан спрашивать про свои строки **тот же** `manual_fact_staff_keys(ctx)`, что и
-  эндпоинты. Цена известна и принята: `/auth/me` SPA переспрашивает при каждом возврате фокуса
-  (троттлинг 1 с), и для `admin` и `barber` (вне `BRANCH_SCOPE_ROLES`) туда добавляются четыре узких запроса
-  `manual_fact_entry_keys`. Ответ на бранчевых ролях не считается вовсе. Если станет дорого —
-  кэшировать, но **не** выводить ответ вторым способом: свой второй вывод там уже стоил бага —
-  он не фильтровал по `company_ids`, и сотрудник, переведённый в другой филиал (его прежняя
-  CRM-строка остаётся живой, см. `portal_staff_sync.py`), видел вкладку, которую редактор
-  затем отказывался наполнять.
-- `manager` пущен **только** на эти две вкладки. Планы и настройки услуг по-прежнему закрыты
-  `_require_settings_admin()`; вкладки ручных фактов ушли из-под него на
-  `_require_manual_fact_access()` — это не настройки, а отчётность филиала.
-- Отсечка по парам обязана стоять на **обоих** путях, читающем и пишущем: `allowed_staff_keys`
-  в `_fetch_manual_facts()` и в `_write_manual_facts()`. Иначе сотрудник увидит одно, а сохранит
-  другое — то же правило, что и для `reporting_window_clause()`.
-- `effective_staff_selection()` на этих маршрутах **не применяется**: он зажимает на строки скоупа запроса,
-  а редактор обязан видеть все свои строки разом. Чужая строка отбивается в роутере и
-  всегда как 403: фильтр `staff_id` — `_assert_manual_fact_staff_allowed`, строки payload —
-  `_assert_manual_fact_rows_allowed`. Та же проверка в `_write_manual_facts` остаётся
-  страховкой для других вызывающих, но она умеет только `ValueError` → 400, а SPA показывает
-  `detail` дословно — отказ в доступе не должен приезжать пользователю внутренней фразой.
-- Состав строк редактора не менялся: обе метрики вводят только администраторы, и решает это
-  `_admin_staff_ids_by_company` (категория плана либо должность), а не список метрик — `opz_qty`
-  как раз **есть** в `BARBER_METRIC_CODES`, просто барберская половина чисто расчётная, а
-  `reviews_qty` барберу не показывается вовсе. У барбера вкладок нет —
-  `/auth/me` отдаёт `manual_fact_scope` (`branch` / `self` / `none`), и фронт рисует вкладки
-  только по нему.
-- «Сейчас» для видимости вкладок — филиальный день (`factual_branch_date()`), не UTC-дата:
-  `factual_now()` отдаёт UTC, и с 00:00 до 03:00 МСК первого числа месяц читался бы прошлым,
-  то есть вкладки на три часа показывали бы состав предыдущего месяца.
-- `manual_fact_scope` отвечает на вопрос «есть ли что вводить **сейчас**»
-  (`manual_fact_entry_keys`), а какие строки показать за **запрошенный** день, решают те же
-  `_admin_staff_ids_by_company` ∪ сохранённые значения. Поэтому барбер, дошедший до эндпоинта
-  руками, получает 200 с пустой таблицей, а не 403: 403 оставлен тому, у кого нет ни одной
-  строки `staff` **внутри своего скоупа филиалов**. Флаг один на обе вкладки, поэтому
-  сохранённое значение любой из двух метрик открывает обе; пустая вкладка сама покажет, что
-  вводить нечего.
-- Отказ «строка закрыта для ввода» — свой тип `ManualFactRowNotOpen`, а не голый `ValueError`:
-  его текст называет id сотрудника и филиала, а SPA печатает `detail` дословно. Роутер логирует
-  причину и отдаёт пользователю общую фразу. Обычные ошибки валидации по-прежнему едут как есть.
-- Автор значения — `manual_fact_metrics.updated_by_user_id` (без FK: таблица в тенантной схеме,
-  `portal_users` в `system`). Он же отдаётся в строке редактора как `updated_by_name`, и каждая
-  запись кладёт событие `manual_fact.updated` в `portal_audit_events` **до** `db.commit()`
-  внутри `_write_manual_facts` — иначе аудит уехал бы отдельной транзакцией.
-- **Неизменённые строки не переписываются.** Редактор шлёт на сохранение *все* отрисованные
-  строки, а не только тронутую, поэтому запись «удалить и вставить» по всему payload
-  переклеивала бы авторство на того, кто нажал «Сохранить»: первое же сохранение менеджера
-  делало бы его автором значений всех администраторов, и колонка переставала бы отвечать на
-  вопрос, ради которого заведена. Правкой считается только строка, у которой `value` отличается
-  от `previous_value` — значения, которое строка несла в **последнем ответе GET** (на фронте
-  `buildManualFactItems` в `web/src/manualFactInput.js` берёт его из `rows` ответа, а не из DOM).
-  Совпавшая строка не трогается вовсе: сохраняет значение, автора и `updated_at`, и ровно поэтому
-  сохранение без правок не пишет и события аудита.
-  Обратная сторона того же правила: пустая ячейка обязана приезжать из `_fetch_manual_facts`
-  как `null`, **не** как `0`. Ноль отрисовался бы в поле, уехал бы обратно в payload и был бы
-  прочитан как правка — первое же сохранение месяца подписало бы менеджером все строки, которые
-  никто не заполнял. «Ничего не введено» и «введён ноль» — разные состояния, и разными они
-  должны быть на всём пути. Регрессию стережёт тест, собирающий payload из ответа GET, а не
-  из литерала: только так проверяется то, что делает SPA.
-- **Сравнивать с `stored`, а не с `previous_value`, нельзя — это потерянное обновление.** Так было
-  раньше: A открыл редактор (5), B сохранил 7, A сохраняет соседнюю строку — его payload всё ещё
-  несёт 5, оно отличается от сохранённых 7 и читалось как правка. Значение B молча откатывалось
-  и переподписывалось на A. Теперь это оптимистическая блокировка по образцу редактора Yandex Pay:
-  если у изменённой строки сохранённое значение ≠ `previous_value`, весь пакет отбивается
-  `ManualFactConflict` → **409** (ни одна строка пакета не пишется). Гонку между чтением и записью
-  ловят сами запросы: удаление старых строк охранено `AND value = <прочитанное>` с проверкой
-  `rowcount`, а `IntegrityError` на вставке (два одновременных первых ввода упираются в
-  уникальный индекс; раньше это был 500) — `rollback` и тот же 409. Аудит пишется до `commit`,
-  поэтому отбитое сохранение следа в журнале не оставляет. SPA на 409 перечитывает редактор и
-  показывает `dash.manualFactConflict`: чужое значение побеждает, своё вводится заново —
-  сумма двух правок ничьим намерением не является.
-- Отсутствующий `previous_value` читается как `null`: клиент без поля (старая вкладка до
-  перезагрузки) может заполнить пустую ячейку, а непустую не перезапишет — 409 («reload and try again»).
-  Он шлёт все строки, поэтому строка, повторяющая сохранённое значение, правкой не считается и не роняет пакет.
-  Очистка без поля — тоже 409: `null` совпал бы с отсутствующим `previous_value` и молча читался бы как «не тронуто»
-  (поэтому роутер сериализует payload через `exclude_unset`, а сервис различает «нет поля» и явный `null`).
-- Строка, для которой редактор показывал значение (`previous_value` не `null`), а теперь она ни
-  открыта, ни хранит значения (кто-то его стёр), — тоже 409, а не «строка закрыта для ввода»: иначе
-  сохранение соседней строки падало бы 400 без перезагрузки редактора.
-- Нетронутая пустая строка (`value` и `previous_value` оба `null`), ставшая закрытой с загрузки редактора
-  (синк уволил сотрудника), игнорируется: ничего не пишется, и 400 «не открыта» не должен ронять сохранение
-  правок соседних строк. «Не открыта» остаётся только за попыткой ввести значение в закрытую строку.
-- **Отзывы и ОПЗ вводятся по дням** (решение владельца 09.11.2026): `GET|POST /dashboard/plan/reviews_fact` и `…/opz_fact`
-  принимают `day=YYYY-MM-DD` (`_parse_manual_day`: строго этот формат; день позже филиального «сегодня» — 400). Строки — все
-  администраторы **месяца** этого дня (`_admin_staff_ids_by_company` по месяцу: планы месячные) ∪ у кого есть значение за
-  этот день. Читается и пишется только строка ровно этого дня (`_stored_manual_facts`): другие дни и legacy-месяцы запись
-  не трогает. В строке ещё `month_value` — сумма дневных строк месяца плюс legacy-значение, если оно есть (колонка «За месяц»; столько же показывает План/факт за целый месяц) и `legacy_month_value`: если за
-  месяц уже внесено одно ненулевое число по-старому (нулевое за «нет» считается: `legacy_month_value: null`, `editable: true`), строка `editable: false` — по дням в этом месяце её не ввести (иначе сложилось бы
-  дважды), а правка такой строки — `ManualFactRowNotOpen`. «Текущие ОПЗ» — расчёт за этот день тем же путём, что строка
-  План/факта за окно день–день (`_resolve_plan_period(day, day)`); `counted` — роль и окно отчётности на этот день.
-  Аудит `manual_fact.updated`: `target_id` — ISO-день. Старая вкладка, шлющая `month`, получает 422 и перезагружается.
-- `value` и `previous_value` — строгий `float` (`true` — 422, а не один отзыв), как у суммы Яндекс Пэй. Сохранение
-  адресуется дню/филиалу/сотруднику, **для которых загружены строки** (`manualFactSaveScope`), а не
-  текущим значениям пикеров: пока перезагрузка после смены дня идёт или упала, `previous_value` старых строк
-  против нового дня читался бы как честная правка пустой ячейки. Тот же охват записан и в
-  `loadedFilters` редактора (`editor.accept(data, loadedFilters)` при отрисовке ответа — запроса или сохранения), а не берётся
-  с пикеров в момент рендера. То же правило у редактора Яндекс Пэй: `render(data, loadedFilters)` — от месяца ответа
+- `BRANCH_SCOPE_ROLES` — про ручные факты, `staff_keys` (остальные получают `AccessContext.staff_id` / `staff_keys`), платежи филиала и
+  строку филиала в План/факте. Зажим дашборда — другой набор, `STAFF_VIEW_ROLES`: роль вне него (сегодня `barber`) «личная» для
+  `effective_staff_selection()` на **всех** эндпоинтах дашборда; новая роль вне обоих наборов автоматически «личная». «Личная» fail-closed:
+  нет живой строки `staff` (сотрудника уволили в YClients, логин остался) — 403, а не весь филиал.
+- `GET /dashboard/staff` зажимает личную роль: `fetch_staff(staff_id=effective_staff_selection(ctx, None, …))` — барбер видит только свои
+  строки (по одной на филиал запроса; коллег, должности, уровни и категории читать не должен); `admin` и бранч-роли — весь список скоупа; без
+  живой строки — 403. Селекторы переносят список из одной строки (пункт «Все» остаётся: запрос без `staff_id` сервер всё равно зажимает).
+  Ответ не несёт `user_id` YClients; редактор планов получает его из `fetch_staff` напрямую.
+- Зажим обязан попасть **внутрь своих филиалов**: у переведённого сотрудника живой CRM-строкой остаётся прежний филиал (id меньше), и «первая
+  строка» зажала бы дашборд на филиал вне скоупа (`unknown staff_id`). Зажим считается по строкам внутри скоупа запроса (см. «Мультивыбор
+  филиалов и сотрудников (API)»); нет ни одной — 403.
+- `/auth/me` обязан спрашивать про свои строки **тот же** `manual_fact_staff_keys(ctx)`, что и эндпоинты. Цена принята: SPA переспрашивает
+  `/auth/me` при каждом возврате фокуса (троттлинг 1 с), и для `admin` и `barber` добавляются четыре узких запроса `manual_fact_entry_keys` (на бранчевых ролях ответ не считается вовсе).
+  Нужно будет — кэшировать, но **не** выводить ответ вторым способом: второй вывод не фильтровал по `company_ids`, и переведённый
+  сотрудник видел вкладку, которую редактор отказывался наполнять.
+- `manager` пущен **только** на две вкладки ручных фактов (`_require_manual_fact_access()` — отчётность, не настройки); планы и настройки
+  услуг закрыты `_require_settings_admin()`.
+- Отсечка по парам обязана стоять на **обоих** путях: `allowed_staff_keys` в `_fetch_manual_facts()` и `_write_manual_facts()` — иначе
+  сотрудник увидит одно, а сохранит другое.
+- `effective_staff_selection()` на этих маршрутах **не применяется**: редактор обязан видеть все свои строки разом. Чужая строка отбивается в
+  роутере всегда как 403: фильтр `staff_id` — `_assert_manual_fact_staff_allowed`, строки payload — `_assert_manual_fact_rows_allowed`. Та же
+  проверка в `_write_manual_facts` — страховка для других вызывающих, но умеет только `ValueError` → 400, а SPA показывает `detail`
+  дословно: отказ в доступе не должен приезжать внутренней фразой.
+- Обе метрики вводят только администраторы; состав строк решает `_admin_staff_ids_by_company` (категория плана либо должность), а не список
+  метрик: `opz_qty` **есть** в `BARBER_METRIC_CODES`, но барберская половина чисто расчётная, `reviews_qty` барберу не показывается. У барбера
+  вкладок нет: `/auth/me` отдаёт `manual_fact_scope` (`branch` / `self` / `none`), фронт рисует вкладки только по нему.
+- «Сейчас» для видимости вкладок — филиальный день (`factual_branch_date()`), не UTC (`factual_now()`): с 00:00 до 03:00 МСК первого числа
+  месяц читался бы прошлым.
+- `manual_fact_scope` отвечает «есть ли что вводить **сейчас**» (`manual_fact_entry_keys`), строки за **запрошенный** день решают
+  `_admin_staff_ids_by_company` ∪ сохранённые значения. Поэтому барбер, дошедший до эндпоинта руками, получает 200 с пустой таблицей, а не 403
+  (403 — у кого нет ни одной строки `staff` **внутри скоупа филиалов**). Флаг один на обе вкладки: сохранённое значение любой метрики
+  открывает обе.
+- Отказ «строка закрыта для ввода» — `ManualFactRowNotOpen`, не голый `ValueError`: его текст называет id сотрудника и филиала, а SPA
+  печатает `detail` дословно. Роутер логирует причину и отдаёт общую фразу; обычные ошибки валидации едут как есть.
+- Автор — `manual_fact_metrics.updated_by_user_id` (без FK: таблица в тенантной схеме, `portal_users` в `system`), отдаётся как
+  `updated_by_name`; каждая запись кладёт `manual_fact.updated` в `portal_audit_events` **до** `db.commit()` внутри `_write_manual_facts`
+  (иначе аудит уехал бы отдельной транзакцией).
+- **Неизменённые строки не переписываются.** Редактор шлёт *все* отрисованные строки, и «удалить и вставить» по всему payload переклеивала бы
+  авторство на нажавшего «Сохранить». Правка — только строка, у которой `value` ≠ `previous_value` (значение из **последнего ответа GET**;
+  `buildManualFactItems` в `web/src/manualFactInput.js` берёт его из `rows` ответа, не из DOM). Совпавшая строка не трогается (значение, автор,
+  `updated_at` сохраняются), сохранение без правок не пишет аудит. Отсюда: пустая ячейка обязана приезжать из `_fetch_manual_facts` как
+  `null`, **не** как `0` (ноль уехал бы в payload и прочитался как правка): «ничего не введено» и «введён ноль» — разные состояния на всём
+  пути. Регрессию стережёт тест, собирающий payload из ответа GET, а не из литерала.
+- **Сравнивать с `stored`, а не с `previous_value`, нельзя — потерянное обновление** (A открыл редактор (5), B сохранил 7, A сохраняет соседнюю
+  строку со своим 5 — значение B откатилось бы и переподписалось на A). Поэтому оптимистическая блокировка, как у Yandex Pay: сохранённое
+  значение изменённой строки ≠ `previous_value` — весь пакет отбивается `ManualFactConflict` → **409** (ни одна строка не пишется). Гонку
+  между чтением и записью ловят запросы: удаление охранено `AND value = <прочитанное>` с проверкой `rowcount`, `IntegrityError` на вставке
+  (два одновременных первых ввода) — `rollback` и тот же 409. Аудит до `commit`: отбитое сохранение следа не оставляет. SPA на 409
+  перечитывает редактор и показывает `dash.manualFactConflict`: чужое значение побеждает, своё вводится заново.
+- Отсутствующий `previous_value` читается как `null`: клиент без поля (старая вкладка) может заполнить пустую ячейку, непустую не перезапишет
+  — 409 («reload and try again»). Строка, повторяющая сохранённое значение, правкой не считается. Очистка без поля — тоже 409 (`null`
+  читался бы как «не тронуто»): роутер сериализует payload через `exclude_unset`, сервис различает «нет поля» и явный `null`.
+- Строка, для которой редактор показывал значение (`previous_value` не `null`), а теперь она ни открыта, ни хранит значения (кто-то стёр), —
+  409, а не «закрыта для ввода»: иначе сохранение соседней строки падало бы 400 без перезагрузки редактора. Нетронутая пустая строка
+  (`value` и `previous_value` — `null`), ставшая закрытой с загрузки (синк уволил сотрудника, у которого в месяце нет следов — см. «Уволенные сотрудники остаются в месяцах, где работали»), игнорируется; «не открыта» — только за
+  попыткой ввести значение в закрытую строку.
+- **Отзывы и ОПЗ вводятся по дням** (решение владельца 09.11.2026): `GET|POST /dashboard/plan/reviews_fact` и `…/opz_fact` принимают
+  `day=YYYY-MM-DD` (`_parse_manual_day`: строго этот формат; день позже филиального «сегодня» — 400). Строки — все администраторы **месяца**
+  этого дня (`_admin_staff_ids_by_company` по месяцу: планы месячные) ∪ у кого есть значение за этот день. Читается и пишется только строка
+  ровно этого дня (`_stored_manual_facts`): другие дни и legacy-месяцы запись не трогает. В строке `month_value` — сумма дневных строк месяца
+  плюс legacy-значение (колонка «За месяц»; столько же показывает План/факт) и `legacy_month_value`: если за месяц уже внесено одно ненулевое
+  число по-старому (нулевое за «нет» считается: `legacy_month_value: null`, `editable: true`), строка `editable: false` — иначе значение
+  сложилось бы дважды, а правка такой строки — `ManualFactRowNotOpen`. «Текущие ОПЗ» — расчёт за этот день тем же путём, что строка План/факта
+  за окно день–день (`_resolve_plan_period(day, day)`); `counted` — роль и окно отчётности на этот день. Аудит `manual_fact.updated`:
+  `target_id` — ISO-день. Старая вкладка, шлющая `month`, получает 422 и перезагружается.
+- `value` и `previous_value` — строгий `float` (`true` — 422, а не один отзыв). Сохранение адресуется дню/филиалу/сотруднику, **для которых
+  загружены строки** (`manualFactSaveScope`), а не текущим значениям пикеров: пока перезагрузка после смены дня идёт или упала,
+  `previous_value` старых строк против нового дня читался бы как правка пустой ячейки. Тот же охват — в `loadedFilters`
+  (`editor.accept(data, loadedFilters)` при отрисовке ответа). То же у Яндекс Пэй: `render(data, loadedFilters)` — от месяца ответа
   считается и `min` у полей даты.
-- **Три редактора — один движок.** Отзывы, ОПЗ и Яндекс Пэй живут в `web/src/manualEntryEditor.js` (загрузка, сохранение,
-  409, guard несохранённых правок, слушатели пикеров); `manualEditors.js` задаёт только своё: разметку, смысл ячейки и тело
-  запроса. Поле периода у движка задаётся (`config.periodField`: `'day'` у отзывов и ОПЗ, `'month'` по умолчанию —
-  у Яндекс Пэй), и от него зависят пикер, `loadedFilters` и охват черновика. Правило из этого раздела чинится в одном месте. Рубеж — `web/tests/manual-editors.test.mjs`: он проверяет наблюдаемое
-  поведение (тела POST, перечитывание после 409, guard, ошибки с повтором, `dirty`/`saving`), а не порядок внутренних
-  вызовов страницы. Одно намеренное поведение: перестройка списков филиала и сотрудников по месяцу идёт **внутри** действия guard (`host.refilterForPeriod`),
-  то есть после ответа на диалог, а не рядом с ним, и вид, грузящий данные, ждёт список сотрудников (на Обзоре и План/факте —
-  так же): иначе запрос уходил с прежним сотрудником, а селектор уже показывал «все».
-- Запись — «удалить и вставить», а не UPDATE: охранный DELETE перечисляет каждую строку дня парой `(id, value)` (их не
-  больше одной — уникальный индекс), и проигравшая гонка видна по `rowcount`.
-  Пакет пишется **в порядке ключа** `(company_id, staff_id)` — на каждую строку свой DELETE и INSERT, а не
-  порядок payload: у двух пользователей порядок строк в редакторе разный, и два пакета по одним и тем же
-  строкам ждали бы друг друга крест-накрест (второй вставляющий ключ ждёт первого на уникальном индексе) —
-  PostgreSQL отвечал бы deadlock'ом, то есть 500. У Яндекс Пэй тот же порядок: `sorted(pending.items())`.
-- Имя автора — только `full_name`, без подстановки email: редакторы открыты рядовым сотрудникам.
-  Значения, записанные до появления колонки (и синком по API-ключу), автора не имеют — строка
-  показывает `—` и дату, а не прячет и дату тоже. `updated_by` остаётся в payload рядом с именем:
-  у сотрудника, заведённого из CRM, id портального пользователя равен `staff.id`, который и так
-  ездит во всех витринах; у созданного из портала строка `staff` получает свой id, и тогда
-  `updated_by` — просто непрозрачное число. Новой поверхности не открывает ни тот, ни другой
-  случай, зато привязка точная.
-  Имена авторов читаются с фильтром по тенанту:
-  колонка — голый integer без FK, и фильтр — единственное, что мешает чужому id отрисоваться
-  именем, поэтому `portal_account_id` нигде по дороге не имеет умолчания — забыть его должно
-  быть `TypeError`, а не молча нескоупленным запросом. `None` там означает ровно одно: принципал
-  по API-ключу, у которого тенанта нет. Платформенный админ тенанта тоже не имеет
-  (`ck_portal_users_platform_admin_no_tenant`), поэтому фильтр пускает его отдельной веткой —
-  иначе его собственная правка вернулась бы неподписанной. Дата рендерится в филиальной таймзоне (`BRANCH_TIME_ZONE`), как и остальные деловые
-  метки: зона зрителя развела бы один и тот же момент на две даты на соседних экранах. `updated_at` пишется общими часами
-  `factual_now()`, то есть **наивным UTC**. Строки, записанные до `0045`, сделаны прежним
-  `datetime.now()` — это время хоста; бэкфилла нет, поэтому у них возможен сдвиг на смещение
-  сервера (в проде контейнер без `TZ`, то есть UTC, и расхождения нет). Перед разбором на фронте
-  обязателен маркер
-  `Z` — общий `parseServerInstant()` (`web/src/timestamps.js`). Без него браузер прочитает метку
-  как локальное время и сохранённое после полуночи UTC покажет вчерашним днём. Настройки и админка форматируют серверные
-  метки через `formatBranchDateTime()` (`web/src/timestamps.js`); `formatDate` отчётов (`web/src/reports/format.js`) годится
-  только для дат без времени (берётся префикс `YYYY-MM-DD`) — метку с временем в него передавать нельзя, такой код идёт через
-  `parseServerInstant` / `formatBranchDateTime`.
-- `hidden` сам по себе не работал: авторские правила (`.tab { display: inline-flex }`, `label { display: flex }`)
-  перебивают UA-стиль `[hidden]`. Теперь в `web/index.html` одно общее правило `[hidden] { display: none !important; }`
-  (у остальных страниц оно в `auth.css`): новый скрываемый элемент покрыт автоматически, отдельные `[hidden]`-правила
-  не нужны.
+- **Три редактора — один движок.** Отзывы, ОПЗ и Яндекс Пэй живут в `web/src/manualEntryEditor.js` (загрузка, сохранение, 409, guard
+  несохранённых правок, слушатели пикеров); `manualEditors.js` задаёт только разметку, смысл ячейки и тело запроса. Поле периода
+  (`config.periodField`: `'day'` у отзывов и ОПЗ, `'month'` по умолчанию — Яндекс Пэй) определяет пикер, `loadedFilters` и охват черновика.
+  Рубеж — `web/tests/manual-editors.test.mjs`: наблюдаемое поведение (тела POST, перечитывание после 409, guard, ошибки с повтором,
+  `dirty`/`saving`), не порядок внутренних вызовов. Перестройка списков филиала и сотрудников по месяцу идёт **внутри** действия guard
+  (`host.refilterForPeriod`), после ответа на диалог, и вид, грузящий данные, ждёт список сотрудников (на Обзоре и План/факте так же): иначе
+  запрос ушёл бы с прежним сотрудником при селекторе «все».
+- Запись — «удалить и вставить», не UPDATE: охранный DELETE перечисляет каждую строку дня парой `(id, value)`, проигравшая гонка видна по
+  `rowcount`. Пакет пишется **в порядке ключа** `(company_id, staff_id)`, а не payload: порядок строк у пользователей разный, и два пакета
+  ждали бы друг друга крест-накрест — deadlock PostgreSQL, то есть 500. У Яндекс Пэй тот же порядок: `sorted(pending.items())`.
+- Имя автора — только `full_name`, без подстановки email (редакторы открыты рядовым сотрудникам). Значения без автора (до появления колонки,
+  синк по API-ключу) показывают `—` и дату; `updated_by` остаётся в payload рядом с именем (новой поверхности не открывает: у учётки из CRM это уже `staff.id`, иначе непрозрачное число). Имена читаются с фильтром по тенанту: колонка — голый integer без FK, и фильтр — единственное, что
+  мешает чужому id отрисоваться именем, поэтому `portal_account_id` нигде по дороге не имеет умолчания (забыть — `TypeError`). `None` —
+  ровно принципал по API-ключу без тенанта; платформенный админ тенанта тоже не имеет (`ck_portal_users_platform_admin_no_tenant`), и фильтр
+  пускает его отдельной веткой (иначе его правка вернулась бы неподписанной). Дата рендерится в филиальной таймзоне (`BRANCH_TIME_ZONE`): зона зрителя развела бы один момент на две даты на соседних экранах.
+  `updated_at` пишется `factual_now()` — **наивным UTC** (строки до `0045` — время хоста, бэкфилла нет; в проде контейнер без `TZ`, расхождения
+  нет). На фронте перед разбором обязателен маркер `Z` — общий `parseServerInstant()` (`web/src/timestamps.js`): иначе метка читается как
+  локальная и сохранённое после полуночи UTC покажется вчерашним днём. Серверные метки форматируют `formatBranchDateTime()`; `formatDate`
+  отчётов (`web/src/reports/format.js`) годится только для дат без времени.
 
 ### Черновики несохранённого ввода (`web/src/editorDrafts.js`)
-Редакторы (План — настройки, отзывы, ОПЗ, Яндекс Пэй) пишут набранное в `sessionStorage` (не `localStorage`: черновик
-принадлежит вкладке) через 500 мс после последней правки и при `portal:session-transition` / `pagehide` / скрытии вкладки.
-Ключ — `portal-draft/v1/<user>/<тенант>/<редактор>/<охват>`, охват — то, **для чего загружены строки** (`loadedFilters`:
-день у отзывов и ОПЗ, месяц у Яндекс Пэй; месяц плана), а не пикеры.
+Редакторы (План — настройки, отзывы, ОПЗ, Яндекс Пэй) пишут набранное в `sessionStorage` (не `localStorage`: черновик принадлежит вкладке)
+через 500 мс после последней правки и при `portal:session-transition` / `pagehide` / скрытии вкладки. Ключ —
+`portal-draft/v1/<user>/<тенант>/<редактор>/<охват>`, охват — то, **для чего загружены строки** (`loadedFilters`: день у отзывов и ОПЗ,
+месяц у Яндекс Пэй и плана), а не пикеры.
 
-- **Черновик не обходит оптимистичную блокировку.** В нём лежат только изменённые ячейки и `previous` — то, что строка
-  несла в ответе GET в момент набора (`{value}`, у Яндекс Пэй `{value, data_through}`). Строка возвращается, только если
-  сервер сейчас держит ровно то же значение (`decideDraftRestore`; `null` и `0` — разные состояния); иначе строка
-  отбрасывается и в плашке считается («не восстановлено N»), а если не вернулось ни одной — черновик удаляется с плашкой «устарел».
-  Восстановление ничего не отправляет: это обычная правка, `previous_value` в сохранении берётся из свежего ответа, 409 работает как прежде.
-- **План без блокировки по строкам**: черновик несёт отпечаток (`fingerprint`) снимка загруженных данных
-  (`planSettingsSavedSnapshot`) и возвращается только при совпадении; иначе — плашка «устарел», автоприменения нет.
-  Копирование прошлого месяца (`copy_from`) не черновик: кнопка, а не набор.
-- Восстановленный черновик — обычное «грязное» состояние (`dirty`): его видят guard, `beforeunload`, плавающая кнопка
-  сохранения и реестр несохранённого из `auth.js`. Плашка «Восстановлен несохранённый черновик» + «Отменить черновик»
-  (= `discard`) строится в `editorDrafts.js`; стили — `editorDrafts.css`.
-- Удаляется при успешном сохранении, 409 (перечитанные данные побеждают), явном «Отменить», подтверждённом уходе через guard,
-  явном выходе (`clearSensitivePage('logout')` в `auth.js` зовёт `clearAllDrafts` на любой странице вкладки — «Выйти»,
-  «Выйти везде», смена пароля, `session-ended` с `reason: logout` из другой вкладки; страница дашборда ещё и гасит свои
-  ожидающие записи по `portal:session-transition` с `detail.reason == 'logout'`) и при входе другого пользователя
-  (`purgeForeign` при старте сессии дашборда). Выход по простою **не** чистит: черновик ждёт следующего входа того же человека.
-  Страницы настроек и админки черновиков не пишут и не читают и `purgeForeign` не зовут — это безопасно: чужой черновик
-  там не прочитать, ключ несёт `userId` и тенант, а `read` строит ключ только из текущей личности; остаток в `sessionStorage`
-  вкладки живёт до `purgeForeign` дашборда, явного выхода или закрытия вкладки.
+- **Черновик не обходит оптимистичную блокировку.** В нём только изменённые ячейки и `previous` — то, что строка несла в ответе GET в момент
+  набора (`{value}`, у Яндекс Пэй `{value, data_through}`). Строка возвращается, только если сервер сейчас держит ровно то же значение
+  (`decideDraftRestore`; `null` и `0` — разные состояния); иначе отбрасывается и считается в плашке («не восстановлено N»), а если не вернулась
+  ни одна — черновик удаляется с плашкой «устарел». Восстановление ничего не отправляет: обычная правка, `previous_value` берётся из свежего
+  ответа, 409 работает как прежде.
+- **План без блокировки по строкам**: черновик несёт отпечаток (`fingerprint`) снимка загруженных данных (`planSettingsSavedSnapshot`) и
+  возвращается только при совпадении; иначе — плашка «устарел». Копирование прошлого месяца (`copy_from`) не черновик.
+- Восстановленный черновик — обычное «грязное» состояние (`dirty`): его видят guard, `beforeunload`, плавающая кнопка сохранения и реестр
+  несохранённого из `auth.js`. Плашка «Восстановлен несохранённый черновик» + «Отменить черновик» (= `discard`) строится в `editorDrafts.js`,
+  стили — `editorDrafts.css`.
+- Удаляется при успешном сохранении, 409 (перечитанные данные побеждают), явном «Отменить», подтверждённом уходе через guard, явном выходе
+  (`clearSensitivePage('logout')` в `auth.js` зовёт `clearAllDrafts` на любой странице вкладки: «Выйти», «Выйти везде», смена пароля,
+  `session-ended` с `reason: logout` из другой вкладки; дашборд ещё и гасит ожидающие записи по `portal:session-transition` с
+  `detail.reason == 'logout'`) и при входе другого пользователя (`purgeForeign` при старте сессии дашборда). Выход по простою **не** чистит:
+  черновик ждёт следующего входа того же человека. Настройки и админка черновиков не пишут, не читают и `purgeForeign` не зовут — безопасно:
+  ключ несёт `userId` и тенант, `read` строит ключ только из текущей личности.
 - Движок `manualEntryEditor.js` берёт черновики только если страница передала `host.drafts` и редактор — `config.draft`
-  (`{ id, collect, apply }`); без них поведение прежнее.
+  (`{ id, collect, apply }`).
 
 ### Недоступный блок убирается, а не показывается с ошибкой
-Если роль не может открыть блок, он не должен до неё доезжать вовсе. Иначе пользователь
-упирается в 403 с английской фразой из `detail`, которую SPA печатает дословно
-(`errorMessage` в `web/src/auth.js`). Правило проверялось на трёх местах, и все три ломались
-по-разному:
+Если роль не может открыть блок, он не должен до неё доезжать вовсе: иначе пользователь упирается в 403 с английской фразой из `detail`,
+которую SPA печатает дословно (`errorMessage` в `web/src/auth.js`).
 
-- **Каталог отчётов.** `GET /dashboard/reports` раньше не брал `AccessContext` вообще и отдавал
-  весь каталог любой роли (тогда 61 отчёт, из них 33 закрыты в `/dashboard/reports/data`).
-  Менеджер видел карточки, клик по которым вёл на страницу с «Financial metrics are not allowed
-  for this role». Теперь каталог сужается (`fetch_report_registry(..., hide_financials=...,
-  hide_branch_payments=..., hide_report_usage=...)`). После пересборки реестра в каталоге 18
-  отчётов, 9 из них денежные: менеджеру по умолчанию видно 8 (9 нечисловых без «Использования
-  отчётов», которое открыто только платформенному админу). Смешанные отчёты вроде
+- **Каталог отчётов.** `GET /dashboard/reports` берёт `AccessContext` и сужает каталог (`fetch_report_registry(..., hide_financials=...,
+  hide_branch_payments=..., hide_report_usage=...)`). «Использование отчётов» открыто только платформенному админу. Смешанные отчёты вроде
   `staff_leaderboard` остаются — у них режутся отдельные денежные колонки, а не отчёт целиком.
-- **Админка.** `admin.js` пускал `manager` внутрь (`MANAGER_ROLES`), хотя **все** `/auth/admin/*`
-  отвечают ему 403. `loadAdminMeta()` падал, `applyAdminMeta()` не успевал ничего скрыть, и на
-  экране оставались заголовок, поиск и живая кнопка «Создать пользователя» над красным баннером.
-  Гейт выровнен по `USER_ADMIN_ROLES`; страницу `profile.html` потом удалили целиком (кнопка «назад» в админке ведёт на
-  `/settings.html`), ключ `profile.viewUsers` удалён вместе с блоком `profile.*` — если менеджеру дадут чтение списка,
-  ключ заводится заново.
-- **Заведение учётки сотрудника в админке зависит от доставки писем.** `GET /auth/admin/meta` отдаёт `invites_deliverable`; при
-  `false` (почта в console-режиме) быстрый путь «Создать аккаунт» без модалки не используется — модалка всегда открывается и требует
-  пароль (подсказка называет причину), а кнопка «Создать аккаунты с email», «Разослать» в окне данных доступа и «Повторить приглашение»
-  в таблице начальных паролей скрыты (на их месте подсказка «Почта не настроена»). «Создать пользователя» не предлагает `admin` /
-  `barber`: их заводят из строки YClients. Учётка `admin` / `barber` с `needs_staff_link` (нет строки YClients в части филиалов)
-  помечена в таблице бейджем «Не привязан к YClients», он же открывает окно привязки.
-- **Средний чек несёт в себе выручку.** Блок `average_check` целиком управляется кодом
-  `avg_check`, но внутри лежит `numerator` — доход филиала за период, из которого чек и поделён,
-  плюс `service_revenue` / `goods_revenue` / `topup_revenue`. Роль с `avg_check` и без `revenue`
-  (дефолт менеджера) получала бы выручку в ответе, помеченном `financials_hidden`. Эти поля
-  перечислены в `AVERAGE_CHECK_REVENUE_FIELDS` и вычищаются из сводки, когда скрыт `revenue`.
-  Тот же перекос заложен у досок `extra_services*`: их ключи не заявлены ни одной денежной
-  метрикой, поэтому ни поимённая, ни сплошная сетка до рублёвого `sum` не достаёт. Доски
-  `staff_leaderboards` строит только отчёт «Рейтинги» (`fetch_plan_fact(for_ratings=True)`), в виджет
-  План/факта они не попадают, и снятие у них одно —
-  `_hide_staff_leaderboard_financials`: оно режет денежные таблицы по id из `MONEY_METRICS[...]['leaderboard']`
-  (это id таблиц отчёта, а не ключи виджета) и колонку `sum` у `extra_services`. Снимается и ранжирование по
-  `sum`: порядок сам по себе отвечает «кто больше». Включить доски в виджете — значит вернуть им снятие денег.
-  Средний чек, умноженный на число визитов, всё равно даёт доход — это арифметика, а не дыра:
-  счёт завершённых визитов роль видит законно. Убрана именно сумма как готовое число.
-- **Без `revenue` блок `summary.revenue` приезжает, но только со счётчиками** (визиты, клиенты, число услуг, товаров и доп. услуг
-  с их `*_change_pct`). Карточка Обзора рисуется, когда пришло **её** поле (`hasField` в `overviewCards.js`), а не когда пришёл блок:
-  «Завершённые визиты» и счётчики раздела «Товары и услуги» остаются, деньги (выручка, средние чеки, доля товаров) выпадают. Раздел
-  выручки скрыт целиком; раздел «Товары и услуги» остаётся ради счётчиков, а его панели (таблицы и графики выручки) скрыты, и раздел
+- **Админка.** `admin.js` пускает только `USER_ADMIN_ROLES`: **все** `/auth/admin/*` отвечают `manager` 403, иначе `loadAdminMeta()` падал бы и
+  на экране оставались бы заголовок, поиск и живая кнопка «Создать пользователя» над красным баннером. Кнопка «назад» ведёт на
+  `/settings.html`; если менеджеру дадут чтение списка, ключ `profile.viewUsers` заводится заново.
+- **Заведение учётки зависит от доставки писем.** `auth_service.email_is_deliverable()` (SMTP настроен и режим не console) отдаёт
+  `GET /auth/admin/meta` как `invites_deliverable`. При `false`: быстрый путь «Создать аккаунт» без модалки не используется — модалка всегда
+  открывается и требует пароль (подсказка называет причину); «Создать аккаунты с email», «Разослать» в окне данных доступа и «Повторить
+  приглашение» в таблице начальных паролей скрыты (подсказка «Почта не настроена»). «Создать пользователя» не предлагает `admin` / `barber`
+  (см. «admin и barber»). Учётка с `needs_staff_link` помечена бейджем «Не привязан к YClients», он же открывает окно привязки.
+- **Средний чек несёт в себе выручку.** Блок `average_check` управляется кодом `avg_check`, но содержит `numerator` (доход филиала) и
+  `service_revenue` / `goods_revenue` / `topup_revenue`: роль с `avg_check` без `revenue` (дефолт менеджера) получала бы выручку в ответе с
+  `financials_hidden`. Поля перечислены в `AVERAGE_CHECK_REVENUE_FIELDS` и вычищаются, когда скрыт `revenue`. Средний чек × число визитов даёт
+  доход — это арифметика, не дыра: счёт завершённых визитов роль видит законно; убрана сумма как готовое число.
+- **Доски `extra_services*` и доли от выручки.** Ключи досок не заявлены ни одной денежной метрикой, поэтому до рублёвого `sum` не достаёт ни
+  поимённая, ни сплошная сетка. Доски `staff_leaderboards` строит только отчёт «Рейтинги» (`fetch_plan_fact(for_ratings=True)`), в виджет
+  План/факта они не попадают; снятие у них одно — `_hide_staff_leaderboard_financials`: режет денежные таблицы по id из
+  `MONEY_METRICS[...]['leaderboard']` (id таблиц отчёта, не ключи виджета), колонку `sum` у `extra_services` и ранжирование по `sum` (порядок сам отвечает «кто больше»). Включить
+  доски в виджете — значит вернуть им это снятие. **Доля, делящая на выручку, — тоже выручка:** `pct` в «Косметика — мастера» (`cosmo_barber`) =
+  космо / личная выручка; при скрытой `revenue` снимается целиком (колонка, вариант сортировки, `rows_by_metric['pct']`, поле строк), иначе
+  выручка восстанавливалась бы делением. Новая доля от выручки или среднего чека в рейтингах обязана сниматься тем же кодом.
+- **Без `revenue` блок `summary.revenue` приезжает, но только со счётчиками.** `_hide_summary_financials` вычищает из него деньги по явному
+  списку **счётных** полей `REVENUE_BLOCK_COUNT_FIELDS` (`appointments`, `unique_clients`, `service_count`, `goods_count`,
+  `extra_service_count` и их `*_change_pct`): поле вне списка удаляется, поэтому новое денежное поле блока скрыто по умолчанию. Так же
+  ведёт себя менеджер; списки `top_services` / `extra_services` бандла при скрытой выручке пусты. Карточка Обзора рисуется, когда пришло
+  **её** поле (`hasField` в `overviewCards.js`), а не блок: «Завершённые визиты» и счётчики «Товары и услуги» остаются, деньги (выручка,
+  средние чеки, доля товаров) выпадают. Раздел выручки скрыт целиком; «Товары и услуги» остаётся ради счётчиков (панели выручки скрыты), раздел
   без единой карточки скрывается совсем (`applyFinancialVisibility`). Новая денежная карточка обязана проверять своё денежное поле.
-- **Денежный замок грубее денежных метрик.** `require_financial_access()` спрашивает ровно про
-  `revenue`, а `report_requires_financials()` читает флаг `requires_financials` определения отчёта. Поэтому менеджер,
-  которому по умолчанию открыт `avg_check`, видит средний чек на витринах, но отчёты
-  «Динамика среднего чека» и «Средний чек по услугам» ему по-прежнему закрыты и в каталог не
-  попадают. Осознанный размен: цифра в сводке — не то же самое, что отчёт целиком.
-- **CSS.** `hidden` сам по себе не скрывает элемент, если авторское правило задаёт ему `display`; на дашборде это
-  закрывает общее `[hidden] { display: none !important; }` в `web/index.html`, отдельные пары `.tab[hidden]` и
-  подобные не нужны.
+- **Денежный замок грубее денежных метрик.** `require_financial_access()` спрашивает ровно про `revenue`, `report_requires_financials()`
+  читает флаг `requires_financials` отчёта. Поэтому менеджер с открытым по умолчанию `avg_check` видит средний чек на витринах, но отчёты
+  «Динамика среднего чека» и «Средний чек по услугам» ему закрыты и в каталог не попадают. Осознанный размен.
+- **CSS.** `hidden` сам по себе не скрывает элемент, если авторское правило задаёт `display` (`.tab { display: inline-flex }`): поэтому в
+  `web/index.html` одно общее `[hidden] { display: none !important; }` (у остальных страниц — в `auth.css`); отдельные `[hidden]`-правила не
+  нужны.
 
-Проверка одной строкой в консоли страницы: все элементы с `hidden` обязаны считаться
-`display: none`.
+Проверка в консоли страницы: все элементы с `hidden` обязаны считаться `display: none`.
 
 ```js
 [...document.querySelectorAll('[hidden]')].filter((el) => getComputedStyle(el).display !== 'none')
 ```
 
 ### Виджет статуса синка (`/dashboard/widget/sync_status`)
-Отдаёт `data.sync = {running, last_successful_sync_at, last_run, tenant_sync_failed}` — ровно то, что нужно строке
-в шапке. Прогон синка общий для всех тенантов, поэтому путь лога, сообщение прогона (сырой текст исключения),
-инициатор и очередь задач сюда не попадают: полный ответ — только у `/sync/status`. `last_run` — `{status, finished_at}`.
-Для тенанта с активными кредами `last_successful_sync_at` — самая старая контрольная точка его филиалов (её пишут,
-только когда загрузились записи, платежи, товары и комментарии), `last_run` — `null` (глобальный прогон прочитался бы
-как его собственный, даже если тенанта пропустили), а `tenant_sync_failed` — флаг `needs_reauth` у его кредов.
-Ключ API и тенант без активных кредов видят глобальную картину; платформенный админ обязан выбрать тенанта (400).
+Отдаёт `data.sync = {running, last_successful_sync_at, last_run, tenant_sync_failed}`. Прогон синка общий для всех тенантов, поэтому путь лога,
+сообщение прогона (сырой текст исключения), инициатор и очередь задач сюда не попадают: полный ответ — только у `/sync/status`. `last_run` —
+`{status, finished_at}`. Для тенанта с активными кредами `last_successful_sync_at` — самая старая контрольная точка его филиалов (её пишут,
+только когда загрузились записи, платежи, товары и комментарии), `last_run` — `null` (глобальный прогон прочитался бы как его собственный,
+даже если тенанта пропустили), `tenant_sync_failed` — флаг `needs_reauth` у его кредов. Ключ API и тенант без активных кредов видят глобальную
+картину; платформенный админ обязан выбрать тенанта (400).
 
 ### Каталог отчётов: реестр, алиасы, гейты
-Каталог — одна таблица `REPORT_DEFINITIONS` в `dashboard_reports.py`: id, группа, фильтры
-(`granularity` / `compare` / `staff_filter` / `staff_level` / `date_range`), `requires_financials`, алиасы и путь
-билдера лежат в одном `ReportDefinition`. Порядок каталога — `REPORT_GROUP_ORDER`, затем порядок
-в списке. `_build_registry()` падает на старте при дубле id, неизвестной группе, билдере, который не
-`async def`, и алиасе, занятом чужим id или чужим алиасом: опечатка не должна доехать до прода как «пустой отчёт».
-Билдер в определении — сама функция (`builder=reports_clients.build_retention_3_6_12`), а не строка: опечатка в имени —
-`AttributeError` при импорте, то есть падение на старте.
+Каталог — одна таблица `REPORT_DEFINITIONS` в `dashboard_reports.py`: id, группа, фильтры (`granularity` / `compare` / `staff_filter` /
+`staff_level` / `date_range`), `requires_financials`, алиасы и билдер лежат в одном `ReportDefinition`; порядок — `REPORT_GROUP_ORDER`, затем
+порядок в списке. `_build_registry()` падает на старте при дубле id, неизвестной группе, билдере не `async def` и алиасе, занятом чужим id или
+алиасом: опечатка не должна доехать до прода «пустым отчётом». Билдер — сама функция (`builder=reports_clients.build_retention_3_6_12`), не
+строка: опечатка — `AttributeError` при импорте.
 
-- **Алиасы — это ссылки, а не отчёты.** Старые id (`revenue_dynamics`, `day_overview`,
-  `revenue_decomposition`, `client_cohorts`, …; 21 алиас на 18 отчётов) резолвятся через
-  `resolve_report_id`, чтобы живые закладки и избранное не умирали. В ответе `report_id` всегда
-  канонический, а `requested_report_id` появляется, только если спросили алиасом; каталог несёт
-  `aliases`, и по нему фронт (`web/src/reports/routing.js`) переписывает адрес и избранное. Неизвестный id —
-  400 до любого 403, а на фронте «Отчёт не найден». Заглушки (`planned` / `source_missing`) удалены
-  и тоже неизвестны: в каталоге нет отчёта, которого нельзя открыть.
-- **Гейты стоят на каноническом id.** Демо (`DEMO_UNAVAILABLE_REPORTS`), деньги, платежи по филиалу
-  (`BRANCH_PAYMENT_REPORTS`), `report_usage` и срез денег в рейтингах считаются от `canonical_id` в
-  `dashboard_report_data`: алиас не обходит проверку отчёта, в который превратился, и не наследует
-  гейт, который был у прежнего. Новый гейт обязан смотреть на канонический id.
-- **`requires_financials` описывает то, что билдер реально возвращает**, а не задуманное: деньги в
-  любом месте (карточки, графики, таблицы, заметки), — значит `True`. Подстрочной эвристики по имени (`'revenue' in id`) больше нет,
-  а неизвестный id закрыт (fail closed). Отчёт, которому нужна лишь часть денежных колонок
-  (`staff_leaderboard`), помечен `False`, и колонки режет роутер.
-- **Контракт билдера:** `async def build_x(req: ReportRequest) -> dict` в `reports_*.py`; `dashboard_reports` импортирует
-  эти модули обычным образом, поэтому **ни один модуль билдера не вправе импортировать `dashboard_reports`** (общие
-  помощники живут в `report_common.py`, форма ответа и `ReportInputError` / `ReportCalculationError` — в
-  `report_payload.py`). `report_usage` строит роутер, поэтому в
-  реестре стоит заглушка `_refuse_report_usage`: сам `report_usage.py` читает реестр и импортировать его из реестра
-  нельзя. Билдер заполняет и возвращает `req.base`. Новый отчёт — определение +
-  билдер + тест + строка в этих заметках за один проход; без `row_key` у таблицы и `x_kind` у графика сравнение
-  не выровняет строки.
-- `row_key` — колонка, однозначно идентифицирующая строку между периодами (`staff_id`, `title`, `period`); ставится
-  только там, где такая колонка есть. `x_kind='time'` — подписи графика или строки таблицы это идущие периоды (у таблицы
-  параметр `x_kind` необязателен и ставится только для `'time'`), `'category'` (по умолчанию у графика) — названия сущностей.
-  Таблицу периодов (`periods`, `churn_by_month`, когорты) обязательно помечать `x_kind='time'`: фронт выравнивает такие строки
-  по позиции явно, а не по имени колонки — месячная подпись «Август 2026» против «Июль 2026» иначе не нашла бы пары.
-- Отчёты без фильтра по сотруднику (`staff_filter=False`: `payment_methods`, `report_usage`) обнуляют `staff_id` в
-  `_fetch_report_payload`: допущенные роли не зажаты на строку `staff`, а лишний `staff_id` сузил бы итоги филиала.
-- `report_usage` — единственный отчёт, который строит роутер, а не диспетчер: ему нужен тенант, которого в `ReportRequest`
-  нет, поэтому заглушка `_refuse_report_usage` бросает `RuntimeError`, если его вызвать через реестр; настоящий построитель — `report_usage.fetch_report_usage`.
+- **Алиасы — это ссылки, а не отчёты.** Старые id (`revenue_dynamics`, `day_overview`, `revenue_decomposition`, `client_cohorts`, …)
+  резолвятся через `resolve_report_id`, чтобы живые закладки и избранное не умирали. В ответе `report_id` всегда канонический,
+  `requested_report_id` — только если спросили алиасом; каталог несёт `aliases`, по ним фронт (`web/src/reports/routing.js`) переписывает адрес
+  и избранное. Неизвестный id — 400 до любого 403, на фронте «Отчёт не найден». Заглушек (`planned` / `source_missing`) нет: в каталоге нет
+  отчёта, которого нельзя открыть.
+- **Гейты стоят на каноническом id.** Демо (`DEMO_UNAVAILABLE_REPORTS`), деньги, платежи по филиалу (`BRANCH_PAYMENT_REPORTS`), `report_usage` и
+  срез денег в рейтингах считаются от `canonical_id` в `dashboard_report_data`: алиас не обходит проверку отчёта, в который превратился, и не
+  наследует гейт прежнего. Новый гейт обязан смотреть на канонический id.
+- **`requires_financials` описывает то, что билдер реально возвращает**: деньги в любом месте (карточки, графики, таблицы, заметки) — `True`.
+  Эвристики по имени нет, неизвестный id закрыт (fail closed). Отчёт с частью денежных колонок (`staff_leaderboard`) помечен `False`, колонки
+  режет роутер.
+- **Контракт билдера:** `async def build_x(req: ReportRequest) -> dict` в `reports_*.py`; `dashboard_reports` их импортирует, поэтому **ни один
+  модуль билдера не вправе импортировать `dashboard_reports`** (общие помощники — `report_common.py`, форма ответа и `ReportInputError` /
+  `ReportCalculationError` — `report_payload.py`). Билдер заполняет и возвращает `req.base`. Новый отчёт — определение + билдер + тест +
+  строка в этих заметках за один проход.
+- `row_key` — колонка, однозначно идентифицирующая строку между периодами (`staff_id`, `title`, `period`); ставится только там, где такая
+  колонка есть. `x_kind='time'` — подписи графика или строки таблицы это идущие периоды (у таблицы ставится только для `'time'`), `'category'`
+  (по умолчанию у графика) — названия сущностей. Таблицу периодов (`periods`, `churn_by_month`, когорты) обязательно помечать
+  `x_kind='time'`: фронт выравнивает такие строки по позиции — «Август 2026» против «Июль 2026» иначе не нашла бы пар. Без `row_key` у таблицы
+  и `x_kind` у графика сравнение не выровняет строки.
+- Отчёты без фильтра по сотруднику (`staff_filter=False`: `payment_methods`, `report_usage`) обнуляют `staff_id` в `_fetch_report_payload`:
+  допущенные роли не зажаты на строку `staff`, а лишний `staff_id` сузил бы итоги филиала.
+- `report_usage` — единственный отчёт, который строит роутер, а не диспетчер (нужен тенант, которого нет в `ReportRequest`). В реестре
+  заглушка `_refuse_report_usage` (`RuntimeError` при вызове через реестр: `report_usage.py` читает реестр, импортировать его из реестра
+  нельзя); настоящий построитель — `report_usage.fetch_report_usage`.
 
 ### Сравнение периодов в отчётах
-`compare_previous=true` в `/dashboard/reports/data` берёт окно от `DateRange.previous_period(period_preset)` — ту же базу,
-что и дельты Обзора (см. «База сравнения на Обзоре»), без пресета — равное окно перед периодом. Явное окно
-(`compare_start_date` + `compare_end_date`, только вместе — иначе 400) главнее и обнуляет пресет: иначе таблицы и блок
-сравнения показали бы разные проценты одной метрики. Один `compare_staff_id` пресет не обнуляет: окно сравнения
-сотрудников — то же окно, и в паре с `compare_previous` дельты таблиц и блок сравнения читают одну базу. Сравнение
-строится только для отчётов с `compare=True` (13 из 18).
+`compare_previous=true` в `/dashboard/reports/data` берёт окно от `DateRange.previous_period(period_preset)` — ту же базу, что и дельты Обзора
+(см. «База сравнения на Обзоре»), без пресета — равное окно перед периодом. Явное окно (`compare_start_date` + `compare_end_date`, только
+вместе — иначе 400) главнее и обнуляет пресет: иначе таблицы и блок сравнения показали бы разные проценты одной метрики. Один
+`compare_staff_id` пресет не обнуляет: окно сравнения сотрудников — то же, и в паре с `compare_previous` дельты таблиц и блок сравнения читают одну базу. Сравнение
+строится только для отчётов с `compare=True`; отчёт без сравнения просьбу игнорирует и не падает на окне, которым не пользуется.
 
-- **`compare_staff_id` зажимается `effective_staff_selection` только если клиент его прислал.** Зажим отсутствующего значения
-  превращал «без сравнения по сотруднику» в сравнение сотрудника с самим собой для каждой «личной» роли на каждом запросе.
-- Блок `comparison` собирается для любого `source_status` основного окна и несёт собственный `source_status` (фронт предупреждает
-  «данные периода сравнения неполные»). В нём `cards` и `rows` (дельты по карточкам), а `charts` и `tables` — только те id, что
-  есть в текущем ответе, причём таблицы только с `row_key` (без него строки нечем сопоставить, а список событий вроде
-  низких оценок лишь довёз бы тексты отзывов прошлого окна). У отчётов нет и блока `raw`: страница его не рисует, а на длинном окне он был самой тяжёлой частью ответа и удваивал строки таблиц, поэтому его не стало вовсе — в ответе только `cards`, `charts`, `tables`, `notes`.
-  Категорийные графики блока несут только подписи, которые есть в текущем графике, и те же точки рядов
-  (`_comparison_chart`): страница сопоставляет их по подписи, а прогон сравнения отдаёт все строки; графики периодов
-  (`x_kind='time'`) идут целиком.
-  `delta_pct = None` при нулевой базе — прочерк, а не выдуманные «+100 %». Процент округлён до четырёх знаков, не до двух: страница округляет ещё раз до одного,
-  и уже округлённое −0,55 читалось бы как −0,6, когда ячейки таблицы по тем же точным значениям дают −0,5 — на одном экране.
-  Изменение, округлившееся до нуля, показывается как «0%» без цвета (`formatDeltaPct`, `deltaClass(value, digits)`): ни «-0%», ни «+0%».
-  Правило про нулевую базу общее для всех витрин: `_pct_change` в `dashboard_service.py` тоже отдаёт `None` при `previous == 0`
-  (любой `current`), поэтому дельты Обзора (на карточке — «было 0» или ничего, см. ниже) и годовые `*_change_pct` в «Сравнении по годам» (прочерк) читаются так же, как блок сравнения.
-  Новый потребитель дельты обязан терпеть `None` и не делать с ней арифметику.
-- **Подписи карточек между окнами обязаны быть стабильны**: карточки сопоставляются по `label`. Подпись, в которую зашли
-  число или период, оставила бы карточку без пары — дельты нет.
-- Ранжируемая таблица (`ranking_table`) `row_key` не имеет и в сравнение не попадает; отчёт с такой таблицей
-  (рейтинги) — `compare=False`.
-- **Категорийные графики сравниваются полным списком.** Прогон окна сравнения идёт с `ReportRequest.for_comparison=True`, и
-  `top_rows()` отдаёт в таких графиках все строки, а не топ-12: текущий топ ищется в окне сравнения по подписи, и услуга,
-  стоявшая там тринадцатой, иначе осталась бы без точки — то есть «нет данных» вместо реального значения. Подписи
-  сотрудников различаются по всему списку (`_chart_labels(rows)[:n]`), иначе тёзки получили бы разные подписи в двух окнах.
-- На фронте (`web/src/reports/comparison.js`) таблицы выравниваются по `row_key`, таблицы периодов (`x_kind='time'`) — по позиции;
-  доля сравнивается в п.п., а не в процентах от процента; несовпавшая строка — прочерк. Графики: пунктирная приглушённая серия
-  сравнения, `time` — по индексу, `category` — по подписи, без doughnut / pie / stacked. Страница отчётов не шлёт `granularity`
-  и параметры сравнения отчётам, которые их не предлагают (флаги из `filters` каталога); чекбокс при этом не сбрасывается. Ссылка отчёта не пишет `granularity`
-  отчёту без выбора гранулярности, а подзаголовок называет её только там, где она есть (`periodSubtitle`).
-- **Чекбокс под пресетом переживает перезагрузку.** Галка без окна сравнения под пресетом уходит в запрос как `compare_previous=true`, и ту же пару ссылка
-  несёт в адресе (`reportSearchParams` берёт ответ у `reportComparisonRequest`, тот же, что и запрос); разбор адреса снова ставит галку, только если рядом есть пресет.
-- **Периоды выровнены по позиции только при полной оси**: таблицы и графики по периодам (Финансовый обзор, Товары, Записи, Каналы) заполняют тихие дни нулями
-  (`period_starts`), иначе пропавший день сдвинул бы все последующие против своих пар. Ось ограничена `MAX_PERIOD_BUCKETS`
-  (6000; история с 2018 года по дням — около 3200): запрос на века по дням иначе выделил бы миллионы строк ради нескольких сотен
-  с данными (замерено: 1000 год–сегодня по дням — 74 МБ ответа и 330 МБ памяти). Сверх лимита — `ReportInputError`, то есть 400;
-  то же ограничение стоит на помесячных осях отчётов о клиентах (`_month_starts`) и «Форм оплаты» (`fetch_payment_breakdown`).
-- **400 в отчётах — только `ReportInputError(ValueError)`** (`report_payload.py`): им отказывают сознательные проверки
-  (гранулярность, длина оси, окна, параметры сравнения), и роутер `/dashboard/reports/data` отвечает 400 только на него.
-  Любой другой `ValueError` из билдера — дефект, а не ошибка клиента: он всплывает 500 с логом. Новая намеренная
-  проверка во входе отчёта обязана бросать именно `ReportInputError`. Рейтинги (`staff_leaderboard`) отвечают
-  503 «повторить» только на обрыв соединения или пула (`_is_retryable` в `reports_team.py`: отключение,
-  `OperationalError`/`InterfaceError`, `OSError`, таймаут пула); отмена по `statement_timeout` (в asyncpg это обычный
-  `DBAPIError`) и ошибки запроса — 500 с логом, повтор им не поможет; логи — `yclients.reports`.
-- Окно сравнения считается только для отчёта с `compare=True`: отчёт без сравнения игнорирует просьбу и не падает на окне,
-  которым не пользуется. `service_combos` в прогоне сравнения отдаёт все пары, а не топ-50, по той же причине, что и графики; в блок
-  `comparison` из таблицы идут только строки, у которых есть пара в текущей таблице (`_comparison_table_rows`; таблицы периодов — целиком), остальной хвост в браузер не едет.
-  Список низких оценок в `nps_dashboard` ограничен 200 последними (с заметкой).
-- Окно вне `2000-01-01…2099-12-31` (`MIN_REPORT_DATE` / `MAX_REPORT_DATE` в `dashboard_service.py`, `_assert_supported_dates` в `dashboard_routes.py`) — 400 на всех эндпоинтах дашборда с периодом (`_parse_range`), для явного окна сравнения и для дня редакторов ручных фактов (`_parse_manual_day`, день раньше границы — 400): у краёв календаря полуоткрытое окно (`end + 1 день`) и база сравнения упирались бы в `OverflowError`, то есть в 500.
-- Окно, прошедшее `_parse_range`, но без базы сравнения (окно длиннее остатка календаря перед ним; с границей 2000 года это глубокая защита): `DateRange.previous_period` отвечает `PeriodOutOfRangeError` (`ValueError`); обработчик в `api.py` превращает её в 400 на любом маршруте; диспетчер отчётов (`_previous_window`) дополнительно
-  превращает её в `ReportInputError`, чтобы `track_report_usage` записал 400, а не 500.
+- **`compare_staff_id` зажимается `effective_staff_selection` только если клиент его прислал**: иначе «без сравнения по сотруднику» стало бы
+  сравнением сотрудника с самим собой для каждой «личной» роли.
+- Блок `comparison` собирается для любого `source_status` основного окна и несёт собственный `source_status` (фронт предупреждает «данные
+  периода сравнения неполные»). В нём `cards` и `rows` (дельты по карточкам), а `charts` и `tables` — только id из текущего ответа, причём
+  таблицы только с `row_key` (без него строки нечем сопоставить, а список событий вроде низких оценок довёз бы тексты отзывов прошлого окна);
+  из таблицы идут только строки с парой в текущей (`_comparison_table_rows`; таблицы периодов — целиком). Блока `raw` у отчётов нет — только
+  `cards`, `charts`, `tables`, `notes`. Категорийные графики блока несут только подписи текущего графика и те же точки рядов
+  (`_comparison_chart`): страница сопоставляет по подписи; графики периодов (`x_kind='time'`) идут целиком.
+- `delta_pct = None` при нулевой базе — прочерк, не «+100 %». Процент округлён до четырёх знаков, не двух: страница округляет ещё раз до
+  одного, и округлённое −0,55 читалось бы как −0,6, когда ячейки по точным значениям дают −0,5. Изменение, округлившееся до нуля, — «0%» без
+  цвета (`formatDeltaPct`, `deltaClass(value, digits)`): ни «-0%», ни «+0%». Нулевая база — правило всех витрин: `_pct_change` в
+  `dashboard_service.py` тоже отдаёт `None` при `previous == 0` (любой `current`), так читаются дельты Обзора (на карточке «было 0» или
+  ничего, см. «База сравнения на Обзоре») и годовые `*_change_pct` в «Сравнении по годам». Новый потребитель дельты обязан терпеть `None` и не
+  делать с ней арифметику.
+- **Подписи карточек между окнами обязаны быть стабильны**: карточки сопоставляются по `label`; подпись с числом или периодом осталась бы без
+  пары.
+- Ранжируемая таблица (`ranking_table`) `row_key` не имеет и в сравнение не попадает; отчёт с такой таблицей (рейтинги) — `compare=False`.
+- **Категорийные графики сравниваются полным списком.** Прогон сравнения идёт с `ReportRequest.for_comparison=True`, и `top_rows()` отдаёт
+  все строки, а не топ-12: текущий топ ищется в окне сравнения по подписи, услуга на тринадцатом месте осталась бы без точки. Подписи
+  сотрудников различаются по всему списку (`_chart_labels(rows)[:n]`), иначе тёзки получили бы разные подписи в двух окнах. По той же причине
+  `service_combos` в прогоне сравнения отдаёт все пары, а не топ-50.
+- На фронте (`web/src/reports/comparison.js`) таблицы выравниваются по `row_key`, таблицы периодов (`x_kind='time'`) — по позиции; доля
+  сравнивается в п.п.; несовпавшая строка — прочерк. Графики: пунктирная приглушённая серия сравнения, `time` — по индексу, `category` — по
+  подписи, без doughnut / pie / stacked. Страница не шлёт `granularity` и параметры сравнения отчётам, которые их не предлагают (флаги
+  `filters` каталога); чекбокс при этом не сбрасывается. Ссылка не пишет `granularity` отчёту без неё, а подзаголовок называет её только там,
+  где она есть (`periodSubtitle`).
+- **Чекбокс под пресетом переживает перезагрузку.** Галка без окна сравнения под пресетом уходит в запрос как `compare_previous=true`, ту же
+  пару несёт адрес (`reportSearchParams` берёт ответ у `reportComparisonRequest`, того же, что запрос); разбор адреса ставит галку, только если
+  рядом есть пресет.
+- **Периоды выровнены по позиции только при полной оси**: таблицы и графики по периодам (Финансовый обзор, Товары, Записи, Каналы) заполняют
+  тихие дни нулями (`period_starts`), иначе пропавший день сдвинул бы все последующие против своих пар. Ось ограничена `MAX_PERIOD_BUCKETS`
+  (6000; история с 2018 года по дням — около 3200): запрос на века по дням выделил бы миллионы строк. Сверх лимита — `ReportInputError`, то
+  есть 400; то же на помесячных осях отчётов о клиентах (`_month_starts`) и «Форм оплаты» (`fetch_payment_breakdown`).
+- **400 в отчётах — только `ReportInputError(ValueError)`** (`report_payload.py`): им отказывают сознательные проверки (гранулярность, длина
+  оси, окна, параметры сравнения), и роутер `/dashboard/reports/data` отвечает 400 только на него. Любой другой `ValueError` из билдера —
+  дефект: 500 с логом. Новая намеренная проверка во входе отчёта обязана бросать именно `ReportInputError`. Рейтинги (`staff_leaderboard`)
+  отвечают 503 «повторить» только на обрыв соединения или пула (`_is_retryable` в `reports_team.py`: отключение,
+  `OperationalError`/`InterfaceError`, `OSError`, таймаут пула); отмена по `statement_timeout` (в asyncpg обычный `DBAPIError`) и ошибки
+  запроса — 500 с логом (повтор не поможет); логи — `yclients.reports`.
+- Список низких оценок в `nps_dashboard` ограничен 200 последними (с заметкой).
+- Окно вне `2000-01-01…2099-12-31` (`MIN_REPORT_DATE` / `MAX_REPORT_DATE` в `dashboard_service.py`, `_assert_supported_dates` в
+  `dashboard_routes.py`) — 400 на всех эндпоинтах дашборда с периодом (`_parse_range`), для явного окна сравнения и для дня редакторов ручных
+  фактов (`_parse_manual_day`): у краёв календаря полуоткрытое окно (`end + 1 день`) и база сравнения упирались бы в `OverflowError`, то есть
+  в 500.
+- Окно без базы сравнения (длиннее остатка календаря перед ним; с границей 2000 года — глубокая защита): `DateRange.previous_period` отвечает
+  `PeriodOutOfRangeError` (`ValueError`); обработчик в `api.py` превращает её в 400 на любом маршруте; диспетчер отчётов (`_previous_window`)
+  дополнительно — в `ReportInputError`, чтобы `track_report_usage` записал 400, а не 500.
 
 ### Заметки по отчётам (неочевидное)
-- **Название услуги по платежу идёт через `Appointment.id`.** `financial_transactions.record_id` — внешний id визита YClients,
-  и джойн по нему к строкам визита (`_transaction_title_lookup()`) промахивался: 37–44 % выручки услуг 2020–2022 лежало
-  на строках с числовым названием и `sold = 0` (заодно и в виджете топ-услуг Обзора). Платёж достаёт строку визита через
-  найденный `Appointment.id`. Выручка «сотрудник × услуга» берётся только из `fetch_top_services(group_by_staff=True)`:
-  итог обязан равняться выручке услуг Обзора, сотрудник — `Appointment.staff_id`.
-- `service_combos` считает только количества: пара засчитывается один раз на визит после дедупликации по `(визит, нормализованное
-  название)`, таблица ограничена 50 парами с пометкой, доля — визиты с 2+ услугами.
-- `peak_load`: `Appointment.datetime` — наивный UTC, и разбивка без часового пояса сдвигала часы на 3 (МСК). Бакеты
-  «день недели × час» считаются в зоне **филиала**: PostgreSQL — сгруппированным запросом на зону, SQLite — Python-фолбэком.
-- `booking_channels`: канал определяется `Appointment.created_user_id`: `0` — онлайн-запись, больше нуля — создал пользователь
-  YClients, `NULL` — неизвестно (демо). Разреза по источнику (сайт, виджет, соцсеть) нет — для него синк не хранит данных;
-  без изменения синка его не добавить. `bookings_dynamics` / `booking_channels` считают все записи локальной копии: отменённые и
-  удалённые в YClients не синхронизируются, поэтому в таблицах и графиках «Неявки» — только `attendance = -1`. Карточки берутся из `fetch_appointments_breakdown` (источник Обзора) и
-  зависят от его режима: `local` (причина — `appointments_breakdown.local_reason`: `period_includes_today` / `reporting_window` /
-  `upstream_error`; предупреждение «Точные метрики YClients временно недоступны» на Обзоре — только для `upstream_error`:
-  период до сегодня и окно отчётности — штатный путь, а не сбой) — те же записи, что в
-  таблицах, а `ready` (агрегаты YClients) — `current_canceled_count` как «Неявки», и числа в карточках и таблицах могут разойтись. Заметка отчёта
-  «Что считается» называет режим явно.
-- **Рейтинги: средний чек допуслуг и косметики.** В таблицах `extra_services` (мастера), `cosmo_barber`, `cosmo_admin` есть
-  `avg` = сумма / количество (`None` при нулевом количестве или недоступной сумме допуслуг), колонка «Ср. чек, ₽» стоит
-  сразу после «Суммы», сортировка — «По среднему чеку». Это деньги: `_hide_staff_leaderboard_financials` снимает `avg`
-  вместе с `sum`, когда скрыта `revenue`; косметические таблицы уходят целиком вместе с `cosmo_sum`. `pct` («Косметика, %» —
-  доля личной выручки) снимается при скрытой `revenue`, даже когда сумма космо видна.
-- Таблицы сотрудников ключуются по `staff_id`, филиал — из строки `staff`; запись без мастера — строка «Без мастера» без филиала,
-  в карточку «Сотрудников» она не входит.
-- **Отток (`revenue_at_risk`).** Клиент ушёл, если его **последний завершённый визит в филиале** (к любому мастеру, на филиальное «сегодня»,
-  но не позже `reporting_end_date`) лежит в периоде и с него прошло 90 дней (`CHURN_DAYS`); незрелые клиенты не засчитываются.
-  Выручка под риском — выручка услуг клиента за 365 дней до последнего визита, делённая на 12 (`_service_revenue_union`, то есть та же выручка, что на Обзоре).
-  Выручка клиентская, по всем мастерам: фильтр по мастеру (и зажим личной роли) сужает набор клиентов, а не их платежи, иначе строка мастера в
-  отчёте с фильтром и без него показывала бы разные числа.
-  Основа доли «ушедших» — клиенты периода с визитом **не позже того же срока зрелости** (`share_base_clients`): недавний клиент не мог уйти, и в знаменателе
-  он занижал бы долю на всём окне, упирающемся в сегодня.
-- **Удержание (`retention_3_6_12`).** Когорта — месяц первого визита по определению новых клиентов из `_client_recency_block`, поэтому размер когорты
-  равен `new_clients` Обзора. «В течение k месяцев» — меньше k полных месяцев после первого визита; ячейка `None`, пока не прошёл месяц когорты + k месяцев
-  до горизонта филиала. Горизонт — последний день с полными данными: вчера, а у ушедшего филиала дата конца окна; сегодняшний день ещё набирается, поэтому
-  клиент, впервые пришедший в последний день месяца, окно которого кончается ровно сегодня, ещё не созрел.
-- Фильтр по сотруднику в клиентских отчётах: когорта удержания — по мастеру первого визита, отток — по мастеру последнего, возврат засчитывается у любого мастера.
-  Частоты и Парето: база частот — как у Обзора (пришедшие в периоде); платежи без карточки клиента — строка-остаток Парето, а не потеря.
-- **Товары (`goods_dynamics`).** Доля визитов с покупкой товара = различные завершённые визиты с товарной оплатой в окне / завершённые визиты Обзора.
-  Набор платежей берётся `IN (SELECT …)` с `correlate(None)`: `_business_financial_master_condition` содержит EXISTS по `Appointment`, и прямо в джойне визитов
-  он коррелировал бы с присоединённым `Appointment`, а не со своим. Фильтр по сотруднику: для доли — мастер визита, для выручки, штук и «продаж без визита» — продавец (у платежа без визита мастера нет, а общий по филиалу итог раскрыл бы личной роли то, что зажим прячет).
-  Товары склеиваются по нормализованному названию, продавцы ключуются `company:staff`.
-- **Финансовый обзор** читает карточки из `_average_check_block`, а не из `fetch_summary`; средний чек по периоду = выручка периода / завершённые визиты
-  периода, карточка — их взвешенное среднее. «Записи» переименованы в «Завершённые визиты».
-- **Отзывы (`nps_dashboard`).** Анонимный дубль (мастер `NULL`, те же `company_id` + `record_id` + дата, что у отзыва с мастером) отбрасывается; отзыв без пары остаётся
-  даже без мастера. Фильтр по сотруднику — `Comment.master_id`. Telegram-NPS убран.
+- **Название услуги по платежу идёт через `Appointment.id`.** `financial_transactions.record_id` — внешний id визита YClients, джойн по нему
+  (`_transaction_title_lookup()`) промахивается (часть выручки оставалась на строках с числовым названием). Платёж достаёт строку визита через
+  найденный `Appointment.id`. Выручка «сотрудник × услуга» — только из `fetch_top_services(group_by_staff=True)`: итог обязан равняться выручке
+  услуг Обзора, сотрудник — `Appointment.staff_id`.
+- `service_combos`: только количества; пара — раз на визит после дедупликации по `(визит, нормализованное название)`, таблица — 50 пар с
+  пометкой, доля — визиты с 2+ услугами.
+- `peak_load`: `Appointment.datetime` — наивный UTC, без часового пояса часы сдвинулись бы на 3 (МСК). Бакеты «день недели × час» — в зоне
+  **филиала**: PostgreSQL — сгруппированным запросом на зону, SQLite — Python-фолбэком.
+- `booking_channels`: канал — `Appointment.created_user_id`: `0` — онлайн-запись, > 0 — пользователь YClients, `NULL` — неизвестно (демо).
+  Разреза по источнику (сайт, виджет, соцсеть) нет: синк не хранит данных. `bookings_dynamics` / `booking_channels` считают все записи
+  локальной копии (отменённые и удалённые в YClients не синхронизируются), «Неявки» — только `attendance = -1`. Карточки берутся из
+  `fetch_appointments_breakdown`, режим `local` (причина — `appointments_breakdown.local_reason`: `period_includes_today` / `reporting_window` /
+  `upstream_error`; предупреждение «Точные метрики YClients временно недоступны» — только для `upstream_error`) — те же записи, что в таблицах;
+  `ready` (агрегаты YClients) — `current_canceled_count` как «Неявки», карточки и таблицы могут разойтись. Заметка «Что считается» называет режим.
+- **Рейтинги: средний чек допуслуг и косметики.** В таблицах `extra_services` (мастера), `cosmo_barber`, `cosmo_admin` есть `avg` = сумма /
+  количество (`None` при нулевом количестве или недоступной сумме допуслуг), колонка «Ср. чек, ₽» после «Суммы», сортировка «По среднему чеку». Это деньги:
+  `_hide_staff_leaderboard_financials` снимает `avg` вместе с `sum`, когда скрыта `revenue`; косметические таблицы уходят вместе с
+  `cosmo_sum`; `pct` («Косметика, %» — доля личной выручки) снимается при скрытой `revenue`, даже когда сумма космо видна.
+- Таблицы сотрудников ключуются по `staff_id`, филиал — из строки `staff`; запись без мастера — строка «Без мастера» без филиала, в карточку
+  «Сотрудников» не входит.
+- **Отток (`revenue_at_risk`).** Клиент ушёл, если его **последний завершённый визит в филиале** (к любому мастеру, на филиальное «сегодня», не
+  позже `reporting_end_date`) лежит в периоде и с него прошло 90 дней (`CHURN_DAYS`); незрелые не засчитываются. Выручка под риском — выручка
+  услуг клиента за 365 дней до последнего визита / 12 (`_service_revenue_union`). Выручка клиентская, по всем мастерам: фильтр по мастеру (и
+  зажим личной роли) сужает набор клиентов, а не их платежи, иначе строка мастера с фильтром и без показала бы разные числа. Основа доли
+  «ушедших» — клиенты периода с визитом **не позже того же срока зрелости** (`share_base_clients`): недавний клиент не мог уйти и занижал бы долю.
+- **Удержание (`retention_3_6_12`).** Когорта — месяц первого визита по определению новых клиентов из `_client_recency_block` (размер = `new_clients`
+  Обзора). «В течение k месяцев» — меньше k полных месяцев после первого визита; ячейка `None`, пока не прошёл месяц когорты + k месяцев до
+  горизонта филиала (последний день с полными данными: вчера, у ушедшего филиала — конец окна; сегодняшний день ещё набирается, поэтому клиент,
+  впервые пришедший в последний день месяца, окно которого кончается сегодня, не созрел).
+- Фильтр по сотруднику в клиентских отчётах: когорта удержания — по мастеру первого визита, отток — по мастеру последнего, возврат — у любого.
+  Частоты и Парето: база частот как у Обзора (пришедшие в периоде); платежи без карточки клиента — строка-остаток Парето, не потеря.
+- **Товары (`goods_dynamics`).** Доля визитов с покупкой товара = различные завершённые визиты с товарной оплатой в окне / завершённые визиты
+  Обзора. Набор платежей — `IN (SELECT …)` с `correlate(None)`: `_business_financial_master_condition` содержит EXISTS по `Appointment`, и в
+  джойне визитов он коррелировал бы с присоединённым `Appointment`. Фильтр по сотруднику: для доли — мастер визита, для выручки, штук и «продаж
+  без визита» — продавец (общий итог филиала раскрыл бы личной роли то, что зажим прячет). Товары склеиваются по нормализованному названию,
+  продавцы ключуются `company:staff`.
+- **Финансовый обзор** читает карточки из `_average_check_block`, не из `fetch_summary`; средний чек периода = выручка / завершённые визиты
+  периода, карточка — их взвешенное среднее.
+- **Отзывы (`nps_dashboard`).** Анонимный дубль (мастер `NULL`, те же `company_id` + `record_id` + дата, что у отзыва с мастером) отбрасывается;
+  отзыв без пары остаётся даже без мастера. Фильтр по сотруднику — `Comment.master_id`.
+- Скоуп `req.allowed_company_ids` уже разрешён диспетчером (`_appointment_company_ids`); билдеры повторно его не разрешают.
+- Годовые `opz_pct` и `visits_per_client` у года без завершённых визитов — `None`, как средний чек. Границы годов — по филиальному дню.
 
-- Скоуп филиалов `req.allowed_company_ids` уже разрешён диспетчером (`_appointment_company_ids`); билдеры не разрешают его
-  повторно.
-- Годовые `opz_pct` и `visits_per_client` у года без завершённых визитов — `None`, как средний чек. Границы годов — по
-  филиальному дню.
+### Уволенные сотрудники остаются в месяцах, где работали
+`staff.fired` — текущий флаг YClients, а не история. Решение владельца (18.11.2026): результаты уволенного не удаляются и не прячутся, он просто
+пропадает из следующих месяцев. Правило одно — `_period_relevant_staff_clause` (`dashboard_service.py`): сотрудник относится к периоду, если не
+уволен либо в периоде у него есть смена (день накануне периода — только ночная, переходящая за полночь в период: иначе дневная смена 31-го
+числа держала бы ушедшего в следующем месяце), план, ввод плана, ненулевой ручной факт (отзывы, доп. ОПЗ: введённые значения уволенного тоже его результат; дневная строка — по своему дню, legacy-месяц — только если период накрывает его целиком, как в `_countable_manual_months`, иначе неделя месяца держала бы ушедшего; значение вне окна отчётности следом не считается) или завершённый визит (`attendance` = завершён, без бизнес-фильтров; `Appointment.date` в `[start, end]` включительно и в окне отчётности, у редакторов — месяц; висящие
+несостоявшиеся записи уволенного не в счёт; показ строки решает `_is_visible_staff_row` — план или факты). Действует везде, где перечисляют
+людей периода: строки План/факта, «Рейтинги», доска «Планы», редакторы ручных фактов (`_admin_staff_ids_by_company`, месяц), раздача записей/ОПЗ/доп. услуг администраторам (визиты уволенного барбера
+закрепляются как визиты любого барбера), «Текущие ОПЗ», личный блок выбранного администратора на Обзоре (всё через
+`_branch_staff_role_context`), проверка записи плана и `fetch_staff` с периодом (селекторы «Работник»). `fetch_staff` без периода (редактор
+планов, админка) отдаёт только неуволенных и `include_staff_ids`. Следствие: плитка «KPI товаров» (сумма строк сотрудников) равна строке «Сеть», кроме услуг в визитах без мастера (у них нет строки сотрудника).
+Новая выборка сотрудников периода обязана звать эту клаузу, а не свою проверку `fired`.
+Роль уволенного (администраторская и мастерская) действует только в тех месяцах окна, где он относится к периоду по той же клаузе,
+спрошенной на месяц (`_fired_staff_active_months` в общем резолвере `_resolve_staff_role_periods`; запрос — только когда в нём есть уволенные).
+Иначе в квартале или году он получал бы долю раздачи записей/ОПЗ/доп. услуг за месяцы после ухода. Неуволенные получают роль в каждом месяце
+окна, как и раньше. Цена: роли дробят многомесячное окно на помесячные сегменты, и сетевой План/факт за год примерно вдвое дороже (месяц — без
+изменений).
 
 ### Уровни барберов (должность YClients)
-Уровень — должность сотрудника в YClients («Барбер», «ТОП-барбер», «ПРЕМИУМ-барбер», «БРЕНД-барбер»); **в интерфейсе он
-называется «Роль»** (селектор «Роль», пункт «Все роли»; en «Role» / «All roles», it «Ruolo» / «Tutti i ruoli»), в коде и API
-остаются `level` / `staff_position_ids`. Цена услуги у
-уровней разная, и владелец сравнивает барберов внутри уровня. Уровень — **атрибут поверх категории**, а не замена ей:
-категорию (`barber` / `administrator`) по-прежнему решает `_staff_category()`, и название уровня обязано содержать
-«барбер» (или другой алиас барбера), иначе человек выпадет из барберов во всём План/факте. У администраторов уровня нет.
+Уровень — должность сотрудника в YClients («Барбер», «ТОП-барбер», «ПРЕМИУМ-барбер», «БРЕНД-барбер»); **в интерфейсе он называется «Роль»**
+(селектор «Роль», пункт «Все роли»; en «Role» / «All roles», it «Ruolo» / «Tutti i ruoli»), в коде и API — `level` / `staff_position_ids`.
+Уровень — **атрибут поверх категории**: категорию (`barber` / `administrator`) решает `_staff_category()`, и название уровня обязано содержать
+«барбер» (или другой алиас), иначе человек выпадет из барберов во всём План/факте. У администраторов уровня нет.
 
-- **Номер, а не название.** Синк хранит `staff.position_id` (миграция `0060`). Одно название бывает под несколькими
-  номерами (на 20.10.2026: «ТОП-барбер» — 141895 и 443000 почти во всех филиалах, «Барбер» в Строгино — три номера,
-  старая «ТОП Барбер» 202027), поэтому API фильтрует по **набору** номеров (`staff_position_ids`), а фронт
-  (`levelOptions` в `web/src/staffLevels.js`) склеивает номера с одинаковым `level.key` (`level_key()`: нижний регистр,
-  `ё`→`е`, только буквы и цифры) в один пункт. Переименованная в YClients должность всплывёт отдельным пунктом — так и задумано.
-  Номер вне `INTEGER` (больше 2³¹−1, ноль, не число) синк читает как «номера нет» (`_position_external_id`): один такой номер
-  из YClients не должен ронять шаг `sync_staff`.
-- **Выбор уровня помнится по `key`, а не по набору номеров.** Набор в сети и в одном филиале разный, поэтому пункт селектора
-  несёт `data-key`, а при перестройке списка (смена филиала или периода) выбирается пункт с тем же `key` (`levelSelection`,
-  `chosenLevels` в `staffLevels.js`), и в запрос уходит набор уже этого пункта; нет такого уровня в новом списке — он выпадает
-  из выбора (ничего не осталось — «Все роли»). Ссылка отчёта несёт только номера: их `levelSelection` без `key` отображает
-  на пункты, целиком лежащие в этом наборе (несколько ролей — объединение), иначе на пункт с наибольшим пересечением,
-  иначе «все». Параметр запроса по-прежнему набор номеров; выбранные роли уходят объединением (`levelIdsParam`).
-- **История — `staff_position_months`.** YClients помнит только текущую должность, поэтому каждый синк пишет должность
-  неуволенных сотрудников в строку филиального текущего месяца (последний синк месяца побеждает; уволенных не пишет —
-  у них должность в YClients часто устаревшая). Уровень за период — `_staff_positions_for_period()`: последняя строка
-  с месяцем не позже месяца **конца** периода, а если её нет (период раньше начала истории) — текущая `staff.position_id`.
-  Повышение в середине многомесячного периода читается новым уровнем на весь период. Бэкфилла нет: до первого синка
-  после `0060` номера пусты и уровней нет.
-- **Где фильтр.** `/dashboard/widget/plan_fact` и `/dashboard/reports/data` (только отчёты с `filters.staff_level`, сейчас
-  `staff_leaderboard`) принимают `staff_position_ids` (до 200 ненулевых int32 через запятую, иначе 400 —
-  `_parse_id_list`). Выбранный или зажатый `staff_id` главнее: фильтр игнорируется (личная роль — сегодня только `barber` — всегда зажата на свою строку, поэтому для неё он пуст, а фронт её селект уровня и не показывает — `canPickLevel`; `admin` выбирает роль как менеджер). В одном филиале остаются
-  строки барберов уровня без строки филиала (итог филиала над отфильтрованным списком вводил бы в заблуждение); в сети —
-  строки сотрудников всех филиалов скоупа вместо строк сети и филиалов (`view_scope: 'staff'`). В «Рейтингах» под
-  фильтром убраны доски администраторов и `avg_check_plan_branch`, добавлена заметка. Ответ План/факта несёт `level_filter` (`position_ids` и названия сработавших уровней); `plan_rules` в сетевом виде — `null`,
-  а плитку «KPI товаров» фронт под фильтром не рисует (это цифра филиала, рядом со строками одного уровня она описывала бы других людей).
-  Обзор принимает роль только в `/dashboard/bundle` (`#overview-level`, строится из того же списка сотрудников, что и селектор
-  работника, — общий `renderLevelOptions` и `bindStaffLevelExclusion` в `main.js`; в запрос роль кладёт `levelRequestParam`, выбранный
-  работник главнее). Группа подписана в блоке личных показателей («Роль: ПРЕМИУМ-барбер · 6 чел.», из `summary.level_filter`),
-  ссылки карточек на отчёты под ролью убраны, кроме отчёта с `filters.staff_level` (`levelReportParams`): остальные открылись бы
-  по всему филиалу с другими цифрами. Предупреждение «Точные метрики YClients временно недоступны» — только для `upstream_error`.
-- **Обзор под ролью — группа людей, а не «ещё один фильтр».** `/dashboard/bundle` принимает `staff_position_ids` и один раз на запрос
-  разворачивает набор в людей (`staff_ids_for_levels`: сотрудники скоупа запроса, не зеркала портала, не «Лист ожидания» и не
-  «Администратор…», должность на конец периода в наборе и читается барбером — администратор не входит никогда; уволенный,
-  что попал в набор, входит: его визиты за период настоящие, без снимка — по текущему `staff.position_id`). Группа — `frozenset[int]`
-  на месте `staff_id` во всём пути Обзора (`fetch_summary`, `fetch_revenue_daily`, `fetch_top_services`): условие строит
-  `_staff_match(колонка, выбор)`, питоновский двойник — `_staff_in`, одиночный `int` даёт прежний SQL. Параметр, принимающий группу, аннотирован
-  `Optional[StaffSelection]` (`int | frozenset[int]`, рядом с `_staff_match`): `int(staff_id)` и `== staff_id` там писать нельзя. Пути администратора,
-  План/факта и отчётов остаются на `Optional[int]` — группа до них не доходит: `_administrator_service_scope` отвечает «не администратор»
-  для группы, а `int(staff_id)` стоит только под `is_administrator`. Те же люди стоят **во всех окнах
-  запроса, включая базу сравнения**: дельты сравнивают эту группу с ней самой, а не с теми, кто держал роль месяцем раньше.
-  **Пустая группа — фильтр, под который никто не подходит** (нули, `partial` по покрытию, как у неизвестного сотрудника), а не «без
-  фильтра»: `false()` вместо пропуска условия. Выбранный или зажатый `staff_id` главнее роли. Всё, что завязано на «включён
-  фильтр по сотруднику», читает группу так же: ручная добавка ОПЗ не подмешивается, режим администратора
-  (`_administrator_service_scope`) и `administrator_personal` не включаются, а аналитика YClients (она фильтрует одного
-  сотрудника) не спрашивается — карточки записей считаются локально, `appointments_breakdown.local_reason = 'staff_group'`
-  (штатный путь, предупреждения нет). Кэши `db.info` под группу ключа не имеют: `opz_events` — по филиалу и окну, остальные — по сотруднику
-  и только в режиме администратора. Ответ несёт `summary.level_filter = {position_ids, titles, staff_count}`: `staff_count` — люди, о которых цифры (`level_group_staff_count`, один запрос):
-  члены группы, что не уволены или провели хотя бы один завершённый визит периода (то же определение, что у завершённых визитов Обзора);
-  уволенный без визитов в фигуры ничего не вносит и не считается. Состав группы от этого не меняется. Уникальные клиенты
-  группы меньше суммы по людям, если клиент ходил к двоим. Деньги режутся как обычно (`_hide_summary_financials`).
-- **Одно правило членства для пунктов селектора и группы Обзора.** Пункт «Роль» (`fetch_staff().level`) получает только человек, чья
-  должность на конец периода читается барбером (`normalize_staff_category(title) == 'barber'`, как и в `staff_ids_for_levels`) и чья
-  категория — `barber` / `mixed`: селектор не предлагает роль, людей которой группа Обзора отбросила бы.
-- **Границы правила.** Фильтр совпадает с селектором по периоду (оба читают должность на конец периода), но отбирает
-  строки План/факта по их категории: человек с плановой категорией «администратор» (даже если селектор назвал его `mixed`) под фильтр
-  не попадает, а уволенный барбер с фактами за период попадает, хотя в селекторе его нет — пункта уровня, который есть только у него,
-  не будет. Барбер, чья должность не содержит алиаса барбера, не имеет уровня совсем.
-- **«Топ по среднему чеку — мастера»** (`avg_check_barber`): факт `avg_check_total` и завершённые визиты, только визиты > 0.
-  Это деньги: id стоит в `MONEY_METRICS[avg_check]['leaderboard']`.
-- Подпись в селекторах — название уровня вместо слова «барбер» (`staffOption`): «Рауф — ПРЕМИУМ-барбер · филиал». У `mixed`
-  (был и администратором за период) к уровню дописывается роль: «Рауф — ПРЕМИУМ-барбер / администратор · филиал».
-  `mixed`, закончивший период в должности администратора, уровня не получает: «Администратор» не уровень барбера.
+- **Номер, а не название.** Синк хранит `staff.position_id` (миграция `0060`). Одно название бывает под несколькими номерами, поэтому API
+  фильтрует по **набору** номеров (`staff_position_ids`), а фронт (`levelOptions`, `web/src/staffLevels.js`) склеивает номера с одинаковым
+  `level.key` (`level_key()`: нижний регистр, `ё`→`е`, только буквы и цифры) в один пункт; переименованная должность всплывёт отдельным пунктом —
+  так задумано. Номер вне `INTEGER` (> 2³¹−1, ноль, не число) синк читает как «номера нет» (`_position_external_id`): он не должен ронять
+  `sync_staff`.
+- **Выбор уровня помнится по `key`, а не по набору номеров** (набор в сети и в филиале разный): пункт несёт `data-key`; при перестройке списка
+  выбирается пункт с тем же `key` (`levelSelection`, `chosenLevels`); нет такого — выпадает из выбора (ничего не осталось — «Все роли»).
+  Ссылка отчёта несёт только номера: `levelSelection` без `key` отображает их на пункты, целиком лежащие в наборе, иначе на пункт с наибольшим
+  пересечением, иначе «все». Роли уходят в запрос объединением (`levelIdsParam`).
+- **История — `staff_position_months`.** YClients помнит только текущую должность, поэтому каждый синк пишет должность неуволенных (у уволенных
+  она часто устаревшая) в строку филиального текущего месяца; последний синк месяца побеждает. Уровень за период —
+  `_staff_positions_for_period()`: последняя строка с месяцем не позже месяца **конца** периода, нет её — текущая `staff.position_id`.
+  Повышение внутри многомесячного периода читается новым уровнем на весь период. Бэкфилла нет: до первого синка после `0060` уровней нет.
+- **Где фильтр.** `/dashboard/widget/plan_fact` и `/dashboard/reports/data` (только отчёты с `filters.staff_level`, сейчас `staff_leaderboard`)
+  принимают `staff_position_ids` (до 200 ненулевых int32 через запятую, иначе 400 — `_parse_id_list`). Выбранный или зажатый `staff_id`
+  главнее: фильтр игнорируется (личная роль — сегодня только `barber` — зажата на свою строку, её селект уровня фронт не показывает —
+  `canPickLevel`; `admin` выбирает роль как менеджер). В филиале остаются строки барберов уровня без строки филиала (итог над отфильтрованным
+  списком вводил бы в заблуждение); в сети — строки сотрудников всех филиалов вместо строк сети и филиалов (`view_scope: 'staff'`). В
+  «Рейтингах» под фильтром убраны доски администраторов и `avg_check_plan_branch`, добавлена заметка. Ответ План/факта несёт `level_filter`
+  (`position_ids`, названия); `plan_rules` в сетевом виде — `null`; плитку «KPI товаров» фронт под фильтром не рисует (цифра филиала
+  описывала бы других людей). Обзор принимает роль только в `/dashboard/bundle` (`#overview-level` из того же списка сотрудников, что селектор
+  работника, — `renderLevelOptions`, `bindStaffLevelExclusion` в `main.js`; в запрос роль кладёт `levelRequestParam`, выбранный работник
+  главнее). Группа подписана в личных показателях («Роль: ПРЕМИУМ-барбер · 6 чел.», из `summary.level_filter`); ссылки карточек на отчёты под
+  ролью убраны, кроме отчёта с `filters.staff_level` (`levelReportParams`): остальные открылись бы по всему филиалу с другими цифрами.
+- **Обзор под ролью — группа людей, а не «ещё один фильтр».** `/dashboard/bundle` один раз на запрос разворачивает набор в людей
+  (`staff_ids_for_levels`: сотрудники скоупа запроса, не зеркала портала, не «Лист ожидания» и не «Администратор…», должность на конец периода
+  в наборе и читается барбером — администратор не входит никогда; уволенный в наборе входит: его визиты настоящие; без снимка — по текущему `staff.position_id`). Группа — `frozenset[int]`
+  на месте `staff_id` во всём пути Обзора (`fetch_summary`, `fetch_revenue_daily`, `fetch_top_services`): условие строит `_staff_match`,
+  питоновский двойник — `_staff_in`. Параметр, принимающий группу, аннотирован `Optional[StaffSelection]` (`int | frozenset[int]`, рядом с
+  `_staff_match`): `int(staff_id)` и `== staff_id` там писать нельзя. Пути администратора, План/факта и отчётов остаются на `Optional[int]`:
+  `_administrator_service_scope` отвечает группе «не администратор», `int(staff_id)` стоит только под `is_administrator`. Те же люди стоят
+  **во всех окнах запроса, включая базу сравнения** (дельты сравнивают группу с ней самой). **Пустая группа — фильтр, под который никто не
+  подходит** (нули, `partial`), а не «без фильтра»: `false()` вместо пропуска условия. Всё, что завязано на «включён фильтр по сотруднику»,
+  читает группу так же: ручная добавка ОПЗ не подмешивается, режим администратора и `administrator_personal` не включаются, аналитика YClients
+  (фильтрует одного сотрудника) не спрашивается — записи считаются локально, `appointments_breakdown.local_reason = 'staff_group'` (штатный
+  путь, предупреждения нет). Кэши `db.info` под группу ключа не имеют: `opz_events` — по филиалу и окну, остальные — по сотруднику и только в
+  режиме администратора. Ответ несёт `summary.level_filter = {position_ids, titles, staff_count}`: `staff_count` — люди, о которых цифры
+  (`level_group_staff_count`): члены группы, не уволенные или с хотя бы одним завершённым визитом периода; состав группы от этого не меняется.
+  Уникальных клиентов группы меньше суммы по людям (клиент мог ходить к двоим). Деньги режутся как обычно (`_hide_summary_financials`).
+- **Одно правило членства для пунктов селектора и группы Обзора.** Пункт «Роль» (`fetch_staff().level`) получает только человек, чья должность
+  на конец периода читается барбером (`normalize_staff_category(title) == 'barber'`, как в `staff_ids_for_levels`) и чья категория — `barber` /
+  `mixed`: селектор не предлагает роль, людей которой группа Обзора отбросила бы.
+- **Границы правила.** Фильтр совпадает с селектором по периоду (оба читают должность на конец периода), но отбирает строки План/факта по их
+  категории: человек с плановой категорией «администратор» (даже если селектор назвал его `mixed`) под фильтр не попадает; уволенный барбер с
+  завершённым визитом в периоде попадает и в селектор этого периода (см. «Уволенные сотрудники остаются в месяцах, где работали»). Барбер, чья должность
+  не содержит алиаса барбера, уровня не имеет.
+- **«Топ по среднему чеку — мастера»** (`avg_check_barber`): факт `avg_check_total` и завершённые визиты, только визиты > 0. Это деньги: id
+  стоит в `MONEY_METRICS[avg_check]['leaderboard']`.
+- Подпись в селекторах — название уровня вместо слова «барбер» (`staffOption`): «Рауф — ПРЕМИУМ-барбер · филиал». У `mixed` к уровню дописывается
+  роль («… ПРЕМИУМ-барбер / администратор · филиал»); `mixed`, закончивший период администратором, уровня не получает.
 
 ### Фильтры филиал / сотрудник / роль: множественный выбор (фронтенд)
-Эти три селекта на Обзоре, в План/факте и в просмотрщике отчётов — `<select multiple>` под `customSelect.js`; **пустой
-выбор = «все»**, пункта `""` у них нет (подпись «Все …» — плейсхолдер). Выбор — массив строк, и читать/писать его можно
-только через `multiSelect.js` (`selectedValues`, `setSelectedValues`, `keepListed`, `idListParam`, `parseIdList`): голый
-`.value` / `selectedOptions[0]` вернул бы только первый пункт. Запрос строит `scopeParams()` (`dashboardRequestState.js`):
-`company_ids`, `staff_ids`, `staff_position_ids` списками через запятую (один id — список из одного, сервер читает его как
-скаляр); `/dashboard/staff` тоже спрашивают по `company_ids`.
+Эти три селекта на Обзоре, в План/факте и в просмотрщике отчётов — `<select multiple>` под `customSelect.js`; **пустой выбор = «все»**, пункта
+`""` нет («Все …» — плейсхолдер). Выбор — массив строк, читать/писать его можно только через `multiSelect.js` (`selectedValues`,
+`setSelectedValues`, `keepListed`, `idListParam`, `parseIdList`): голый `.value` / `selectedOptions[0]` вернул бы только первый пункт. Запрос
+строит `scopeParams()` (`dashboardRequestState.js`): `company_ids`, `staff_ids`, `staff_position_ids` списками через запятую (один id — список
+из одного, сервер читает как скаляр); `/dashboard/staff` тоже спрашивают по `company_ids`.
 
-- Ссылка отчёта — `company_ids` / `staff_ids`; старые `company_id` / `staff_id` читаются как список из одного
-  (`reportFiltersFromParams`), перезаписанная ссылка уже со списками. Ссылка с филиалом или сотрудником вне списка по-прежнему
-  блокируется целиком (`reportScopedFilterAllowsLoad`). Ссылки карточек Обзора несут те же списки.
-- Смена филиалов перезагружает список сотрудников; выбранные, которых в новом списке нет, выпадают (`keepListed`) — остальные
-  остаются. Смена периода пересобирает филиалы так же. Сотрудники и роли исключают друг друга, как и раньше: последний выбор
-  очищает другой селект.
-- `change` у этих селектов приходит, когда **меню закрылось** (`commitOnClose` в `customSelect.js`), а не на каждую галочку:
-  выбор пяти человек стоит одной загрузки, а не пяти тяжёлых запросов. В меню есть «Сбросить выбор» (`clearable`).
-- Несколько человек — группа: заголовок «Выбрано сотрудников: N» (`renderStaffGroupScope`, число из `summary.staff_filter`),
-  как у роли; один человек — прежний личный/администраторский вид. Плитка «KPI товаров» под `staff_filter`, как под
-  `level_filter`, не рисуется. Заголовок рисуется, только когда в селекторе выбрано больше одного: группа из собственных строк личной роли
-  (сервер зажимает барбера с двумя филиалами на неё) — не выбор, «Выбрано сотрудников: 2» ему бы лгало.
-- Редакторы ручных фактов и Яндекс Пэй **остаются на одиночных селектах** (с пунктом «Все …» и очисткой сотрудника при смене
-  филиала): общие `loadStaff` / `refreshStaffForBranch` / `fillBranchSelect` различают их по `select.multiple`.
+- Ссылка отчёта — `company_ids` / `staff_ids`; старые `company_id` / `staff_id` читаются как список из одного (`reportFiltersFromParams`).
+  Ссылка с филиалом или сотрудником вне списка блокируется целиком (`reportScopedFilterAllowsLoad`). Ссылки карточек Обзора несут те же списки.
+- Смена филиалов перезагружает список сотрудников; выбранные, которых нет в новом списке, выпадают (`keepListed`). Смена периода пересобирает
+  филиалы так же. Сотрудники и роли исключают друг друга: последний выбор очищает другой селект.
+- `change` приходит, когда **меню закрылось** (`commitOnClose` в `customSelect.js`), а не на каждую галочку: выбор пяти человек — одна
+  загрузка. В меню есть «Сбросить выбор» (`clearable`).
+- Несколько человек — группа: заголовок «Выбрано сотрудников: N» (`renderStaffGroupScope`, число из `summary.staff_filter`), как у роли; один —
+  личный/администраторский вид. Плитка «KPI товаров» под `staff_filter`, как под `level_filter`, не рисуется. Заголовок — только когда в селекторе
+  выбрано больше одного: группа из собственных строк личной роли (сервер зажимает барбера с двумя филиалами на неё) — не выбор.
+- Редакторы ручных фактов и Яндекс Пэй **остаются на одиночных селектах** (с пунктом «Все …» и очисткой сотрудника при смене филиала): общие
+  `loadStaff` / `refreshStaffForBranch` / `fillBranchSelect` различают их по `select.multiple`.
 
 ### Мультивыбор филиалов и сотрудников (API)
-`/dashboard/bundle`, `/dashboard/widget/plan_fact`, `/dashboard/reports/data` принимают `company_ids` и `staff_ids` рядом с
-`company_id` / `staff_id` (`/dashboard/staff` — только `company_ids`). Редакторы ручных фактов и Яндекс Пэй остались одиночными:
-сохранение и оптимистичная блокировка рассчитаны на одну строку.
+`/dashboard/bundle`, `/dashboard/widget/plan_fact`, `/dashboard/reports/data` принимают `company_ids` и `staff_ids` рядом с `company_id` /
+`staff_id` (`/dashboard/staff` — только `company_ids`). Редакторы ручных фактов и Яндекс Пэй одиночные: сохранение и оптимистичная блокировка
+рассчитаны на одну строку.
 
-- **Разбор — один**: `_parse_id_list` (`dashboard_routes.py`; `staff_position_ids` читает тот же, потолок — `api_types.INT32_MAX`) — ненулевые int32 через запятую (отрицательные тоже: id демо-тенанта лежат на минусе),
-  дубли схлопываются, не больше 200, пусто = «не задано», мусор — 400 с именем параметра. `_one_or_group` склеивает скаляр и список:
-  оба сразу — 400 (даже равные), **список из одного id — это скаляр** (`(id, None)`), и дальше идёт ровно путь старых ссылок
-  (режим администратора, однофилиальный План/факт, аналитика YClients). Группа — от двух.
-- **Филиалы**: `query_scope(ctx, company_id, company_ids)` — группа обязана лежать в филиалах принципала (403 `Branch not allowed`;
-  ключ API берёт любые, но несуществующий id — 400 `unknown company_id`) и дальше идёт как `CompanyScope(allowed_company_ids=группа)`,
-  то есть прежний сетевой путь, суженный выбором. Запросы читают список филиалов через `_scope_branch_ids(scope)` (выбор, иначе
-  филиалы принципала), а не `scope['branch_ids']`.
-- **Сотрудники** — `StaffSelection`: один `int` или `frozenset` (путь «Роли» Обзора). Каждый id группы проверяется одним запросом по
-  скоупу филиалов запроса (400 `unknown staff_id`). Группа главнее `staff_position_ids`. Эхо — `staff_filter = {staff_ids,
-  staff_count}` в `summary` Обзора и в ответе План/факта (число — выбранных, а не посчитанных людей).
-- **Личная роль (вне `STAFF_VIEW_ROLES`, то есть `barber`) зажимается на множество своих строк** — `effective_staff_selection(ctx, requested, company_id, allowed_company_ids)`
-  (`auth_scope.py`; заменил прежний зажим на один `staff_id`). Строки — `ctx.staff_keys`, суженные до скоупа запроса (при `company_id` /
-  `company_ids` — до них, иначе до филиалов учётки): так вход во второй филиал берёт **его** строку, а не отвечает 400. Запрошенное
-  обязано лежать среди них (403 `Staff member not allowed`); ничего не запрошено — все такие строки: одна — `int` (прежний путь,
-  режим администратора), несколько — группа; ни одной — 403 `No staff row assigned`. Без `staff_keys` (руками собранный
-  контекст) зажим идёт по `ctx.staff_id`. `compare_staff_id` остаётся скаляром и зажимается так же. Ручные факты своё правило сохраняют
-  (см. выше), `effective_staff_selection` на них не применяется.
-- **Обзор с группой**: группа считается по мастеру визита, как «Роль». Если в группе администратор, его мастерские визиты почти нулевые,
-  а режим администратора (его строка План/факта) включается только при ровно одном выбранном — сознательное решение.
-  Следствие для личной учётки (зажатой на свои строки; роль `admin` к ним больше не относится, она выбирает филиал и людей сама) с живыми строками администратора в двух филиалах: без выбора филиала **сервер** зажимает на группу из обеих
-  строк, и Обзор показал бы мастерский вид (около нуля), а не режим администратора. Поэтому **фронт** держит Обзор и План/факт
-  такого администратора (`isMultiBranchAdministrator` в `web/src/personalScope.js`: любая своя живая строка с
-  категорией `administrator` / `mixed` — метка роли `barber` и должность в YClients расходятся, — и строки минимум в двух филиалах) на **одном**
-  филиале. Открывается он на том, где человек работает сейчас: у чьей собственной строки последняя смена не позже филиального «сегодня»
-  (`last_shift_date` в `/dashboard/staff` личной роли, см. ниже), при равенстве и без смен — первом из его собственных в порядке
-  филиалов (`defaultPersonalBranch`). Селекторы **филиала и сотрудника** этих двух видов у него одиночные: `setSelectExclusive`
-  (`customSelect.js`) делает multiple-селект выбором одного пункта (выбор заменяет прежний, выбранный не снимается, «Сбросить выбор»
-  нет; нативный `<select>` под меню тоже держит один пункт: его `change` от Shift+стрелок или Ctrl+Пробел `customSelect.js` приводит к одному выбору раньше обработчиков страницы), а `personalBranchSelection` — единственное место, решающее, какой выбор допустим: пустой — ветка по умолчанию (в том числе
-  когда смена периода выбросила выбранный филиал из списка, `renderBranchOptions`), несколько (гонка со стартом) — первый. Так ни пара
-  отмеченных филиалов, ни «Все филиалы» не дают запросу группу собственных строк: она читается как мастерская атрибуция. Решение принимает
-  `applyPersonalBranchDefault` в `main.js` один раз в `startSession`, **после** `Promise.all([loadBranches(), ensureStaffForView()])` и до
-  первого запроса данных, а не внутри `loadBranches()`, чтобы не создавать гонку, о которой предупреждает комментарий там; список
-  сотрудников фильтра, получившего филиал, перечитывается. Запрос несёт `company_ids` одного филиала → зажим даёт одну строку → режим
-  администратора. **Просмотр отчётов не ограничен**: отчёты всегда считают по мастеру визита, и группа собственных строк там — ровно то,
-  что цифры значат. `barber` умышленно без предвыбора и без ограничения: группа из своих строк — это ровно его цифры по обоим филиалам.
-  Прямой запрос без филиала (API, закладка со старой ссылкой) по-прежнему получает группу на сервере. Личный блок и «Филиал во время
-  смен» рисуются и без выбранного в селекторе сотрудника: личной учётке (`barber`) на строке администратора имя даёт единственная строка её
-  списка (`personalAdministratorName`), иначе блок остался бы скрытым, а разделы по мастеру — уже убранными. Отдельного режима
-  администратора на несколько филиалов нет.
-- **`last_shift_date` в `/dashboard/staff`.** Только личной роли (вне `STAFF_VIEW_ROLES`, сегодня `barber`), ключ у каждой её строки: ISO-день последней смены строки
-  (`staff_schedules`, `fetch_last_shift_days`, один сгруппированный запрос по `(company_id, staff_id)` своих строк) не позже филиального
-  «сегодня» (`factual_branch_date()`), `null` — смен в прошлом нет; будущие смены не в счёт. Ответ ролей уровня филиала не меняется ни байтом.
-  Нужен затем, что порядок филиалов не говорит, где человек работает: администратор с строками в двух филиалах открывался на первом, где у
-  него в этом месяце ни одного визита, а во втором было 20 закреплённых визитов (замер на копии прода: смены 02.11 против 29.10).
-
-- **План/факт с группой** — обобщённый путь «Роли»: `fetch_plan_fact(staff_id=frozenset)` отдаёт `view_scope: 'staff'`, строки ровно
-  выбранных людей по всем выбранным филиалам (категория строки решает набор метрик: администратор остаётся администратором),
-  без строки филиала и диагностик, `plan_rules: null` в сетевом виде; в однофилиальном — правила филиала остаются (как под «Ролью»).
-  Филиалы без выбранных людей не считаются вовсе. Эхо — `staff_filter`.
-  Выбранный без строки (ни плана, ни визитов за период — правило `_is_visible_staff_row`; барбер в отпуске) не пропадает молча:
-  `staff_without_rows` (`[{staff_id, name}]`, ключ только когда такие есть — и у группы, и у одного выбранного `staff_id`) рисуется
-  строкой под таблицей и доской «Нет в таблице — за период у них нет ни плана, ни визитов: …» (`renderStaffWithoutRowsNote`).
-  Раньше шапка говорила «Выбрано сотрудников: 3», а таблица показывала одного. Счётчики «сотрудников: N» / «строк: N» написаны
-  через двоеточие: склонений в i18n нет, а «1 сотрудников» читалось ошибкой.
-- **Отчёты**: `ReportRequest.staff_id` — `StaffSelection`; всё, что сравнивало с литералом, идёт через `_staff_match` /
-  `_staff_in` (`appointment_conditions`, отзывы, когорта удержания и отток, `year_over_year`, цели, товары). Отчёт без фильтра по
-  сотруднику (`staff_filter=False`) группу обнуляет, как и скаляр. `calculation_scope` группы — `kind: 'staff_group'` (не `staff`:
-  страница рисует личную плашку только для одного человека). В «Рейтингах» группа оставляет доски выбранных людей (мастера и
-  администраторы) и убирает `avg_check_plan_branch` с заметкой. `compare_staff_id` — скаляр; без него сравнение берёт ту же группу.
-  Использование отчётов: `staff_filter` истинно для любого из двух параметров, `company_filter` — тоже.
+- **Разбор — один**: `_parse_id_list` (`dashboard_routes.py`; `staff_position_ids` читает тот же, потолок — `api_types.INT32_MAX`) — ненулевые
+  int32 через запятую (отрицательные тоже: id демо-тенанта на минусе), дубли схлопываются, не больше 200, пусто = «не задано», мусор — 400 с
+  именем параметра. `_one_or_group` склеивает скаляр и список: оба сразу — 400 (даже равные), **список из одного id — скаляр** (`(id, None)`) и
+  идёт путём старых ссылок (режим администратора, однофилиальный План/факт, аналитика YClients). Группа — от двух.
+- **Филиалы**: `query_scope(ctx, company_id, company_ids)` — группа обязана лежать в филиалах принципала (403 `Branch not allowed`; ключ API
+  берёт любые, но несуществующий id — 400 `unknown company_id`) и идёт как `CompanyScope(allowed_company_ids=группа)` — сетевой путь, суженный
+  выбором. Запросы читают филиалы через `_scope_branch_ids(scope)`, а не `scope['branch_ids']`.
+- **Сотрудники** — `StaffSelection`: один `int` или `frozenset`. Каждый id группы проверяется одним запросом по скоупу филиалов запроса (400
+  `unknown staff_id`). Группа главнее `staff_position_ids`. Эхо — `staff_filter = {staff_ids, staff_count}` в `summary` Обзора и в ответе
+  План/факта (число — выбранных, а не посчитанных людей).
+- **Личная роль (вне `STAFF_VIEW_ROLES`, то есть `barber`) зажимается на множество своих строк** — `effective_staff_selection` (`auth_scope.py`).
+  Строки — `ctx.staff_keys`, суженные до скоупа запроса (при `company_id` / `company_ids` — до них, иначе до филиалов учётки): вход во второй
+  филиал берёт **его** строку, а не отвечает 400. Запрошенное обязано лежать среди них (403 `Staff member not allowed`); ничего не запрошено —
+  все такие строки: одна — `int` (режим администратора), несколько — группа; ни одной — 403 `No staff row assigned`. Без `staff_keys` (руками
+  собранный контекст) зажим идёт по `ctx.staff_id`. `compare_staff_id` — скаляр, зажимается так же. Ручные факты своё правило сохраняют (см.
+  «Кто вводит ручные факты»), `effective_staff_selection` на них не применяется.
+- **Обзор с группой**: группа считается по мастеру визита, как «Роль». Если в группе администратор, его мастерские визиты почти нулевые, а режим
+  администратора (его строка План/факта) включается только при ровно одном выбранном — сознательное решение. Следствие для личной учётки
+  (зажатой на свои строки; роль `admin` к ним не относится) с живыми строками администратора в двух филиалах: без выбора филиала **сервер**
+  зажмёт на группу из обеих строк, и Обзор покажет мастерский вид (около нуля). Поэтому **фронт** держит Обзор и План/факт такого администратора
+  (`isMultiBranchAdministrator`, `web/src/personalScope.js`: своя живая строка с категорией `administrator` / `mixed` (метка роли `barber` и должность в YClients расходятся) и строки минимум в двух
+  филиалах) на **одном** филиале: открывается тот, где последняя смена его строки не позже филиального «сегодня» (`last_shift_date`, см. ниже),
+  при равенстве и без смен — первый из его собственных (`defaultPersonalBranch`). Селекторы **филиала и сотрудника** этих двух видов одиночные:
+  `setSelectExclusive` (`customSelect.js`) делает multiple-селект выбором одного пункта (выбор заменяет прежний, выбранный не снимается, «Сбросить выбор» нет;
+  нативный `<select>` под меню тоже держит один пункт), а `personalBranchSelection` — единственное место,
+  решающее, какой выбор допустим: пустой — филиал по умолчанию (и когда смена периода выбросила выбранный), несколько — первый. Так ни два
+  филиала, ни «Все филиалы» не дают запросу группу собственных строк (она читается как мастерская атрибуция): запрос несёт `company_ids`
+  одного филиала → зажим даёт одну строку → режим администратора. Решение принимает `applyPersonalBranchDefault` (`main.js`) один раз в
+  `startSession`, **после** `Promise.all([loadBranches(), ensureStaffForView()])` и до первого запроса данных, а не внутри `loadBranches()`
+  (гонка); список сотрудников фильтра, получившего филиал, перечитывается. **Просмотр отчётов не ограничен**: отчёты считают по мастеру визита,
+  и группа собственных строк там — ровно то, что цифры значат. `barber` умышленно без предвыбора (группа из его строк — его цифры по обоим
+  филиалам). Прямой запрос без филиала (API, старая закладка) получает группу на сервере. Личный блок и «Филиал во время смен» рисуются и без
+  выбранного сотрудника: личной учётке на строке администратора имя даёт единственная строка её списка (`personalAdministratorName`).
+  Отдельного режима администратора на несколько филиалов нет.
+- **`last_shift_date` в `/dashboard/staff`.** Только личной роли (вне `STAFF_VIEW_ROLES`), ключ у каждой её строки: ISO-день последней смены
+  (`staff_schedules`, `fetch_last_shift_days`, один сгруппированный запрос) не позже филиального «сегодня» (`factual_branch_date()`), `null` —
+  смен в прошлом нет; будущие не в счёт. Ответ ролей уровня филиала не меняется. Нужен затем, что порядок филиалов не говорит, где человек работает.
+- **План/факт с группой** — обобщённый путь «Роли»: `fetch_plan_fact(staff_id=frozenset)` отдаёт `view_scope: 'staff'`, строки ровно выбранных
+  людей по всем выбранным филиалам (категория строки решает набор метрик), без строки филиала и диагностик, `plan_rules: null` в сетевом виде; в
+  однофилиальном правила филиала остаются. Филиалы без выбранных людей не считаются. Эхо — `staff_filter`. Выбранный без строки (ни плана, ни
+  визитов за период — `_is_visible_staff_row`) не пропадает молча: `staff_without_rows` (`[{staff_id, name}]`, ключ только когда такие есть —
+  у группы и у одного выбранного `staff_id`) рисуется строкой под таблицей и доской «Нет в таблице — …» (`renderStaffWithoutRowsNote`): иначе
+  «Выбрано сотрудников: 3» не сходилось бы с таблицей. Счётчики «сотрудников: N» / «строк: N» — через двоеточие: склонений в i18n нет.
+- **Отчёты**: `ReportRequest.staff_id` — `StaffSelection`; всё, что сравнивало с литералом, идёт через `_staff_match` / `_staff_in`
+  (`appointment_conditions`, отзывы, когорта удержания и отток, `year_over_year`, цели, товары). Отчёт без фильтра по сотруднику
+  (`staff_filter=False`) группу обнуляет, как и скаляр. `calculation_scope` группы — `kind: 'staff_group'` (не `staff`: личную плашку страница
+  рисует только для одного человека). В «Рейтингах» группа оставляет доски выбранных людей (мастера и администраторы) и убирает
+  `avg_check_plan_branch` с заметкой. `compare_staff_id` — скаляр; без него сравнение берёт ту же группу. Использование отчётов: `staff_filter`
+  истинно для любого из двух параметров, `company_filter` — тоже.
 
 ### Порядок филиалов
-Один порядок на все списки филиалов — `branch_order_by()` (`dashboard_service.py`): `portal_branches.sort_order` по возрастанию
-(`NULL` последними), затем `companies.reporting_start_date` (без даты последними), затем `companies.id`. Без выбора владельца
-это просто «по дате открытия». Его берут `fetch_branches` (селекторы, строки План/факта, настройки плана, столбцы «Форм оплаты»,
-редакторы ручных фактов и Яндекс Пэй — те идут в порядке `fetch_branches`, своей сортировки по названию у них нет),
-`fetch_staff` (ключ филиала раньше имени сотрудника) и каталог услуг. Отчёты, ранжированные по метрике, свой порядок не меняют.
+Один порядок на все списки филиалов — `branch_order_by()` (`dashboard_service.py`): `portal_branches.sort_order` по возрастанию (`NULL`
+последними), затем `companies.reporting_start_date` (без даты последними), затем `companies.id`. Его берут `fetch_branches` (селекторы, строки
+План/факта, настройки плана, столбцы «Форм оплаты», редакторы ручных фактов и Яндекс Пэй), `fetch_staff` (ключ филиала раньше имени
+сотрудника) и каталог услуг. Отчёты, ранжированные по метрике, свой порядок не меняют.
 
-- Подзапрос по `portal_branches` коррелирован только с `Company` (`correlate_except(PortalBranch)`): иначе запрос, где
-  `PortalBranch` уже в FROM (`fetch_tenant_branch_order`), остаётся без FROM. Новый список филиалов обязан звать
-  `branch_order_by()`, а не сортировать по названию или id.
-- Задаёт порядок владелец: `PUT /dashboard/branch-order` (`{company_ids}`, тот же гейт, тенант и аудит `branch_order.updated`, что у
-  `/dashboard/metric-visibility`; `GET` отдаёт филиалы тенанта в действующем порядке — платформенному админу, выбравшему
-  тенанта, `/dashboard/branches` показал бы чужие). Список обязан быть перестановкой **всех** филиалов тенанта (иначе 400:
-  частичный выбор перемешался бы с филиалами без выбора), `[]` — сброс к порядку открытия. UI — вкладка «Филиалы» в
-  `/settings.html` (владелец и платформенный админ; грузится при открытии вкладки, несохранённая перестановка
-  регистрируется в `registerUnsavedWork`; платформенному админу без выбранного тенанта вместо списка показывается подсказка — `GET` отвечает 400). Маршрут вносится в `deploy/nginx/routes.mjs` (см. «Добавление нового endpoint»).
-- `company_ids` пользователя (`auth_service`, `/auth/admin/users`) по-прежнему идут по id: порядок названий в таблице
-  пользователей админка выстраивает на клиенте по `/dashboard/branches` (`branchTitles`).
+- Подзапрос по `portal_branches` коррелирован только с `Company` (`correlate_except(PortalBranch)`): иначе запрос, где `PortalBranch` уже в
+  FROM (`fetch_tenant_branch_order`), остаётся без FROM. Новый список филиалов обязан звать `branch_order_by()`, а не сортировать по названию или id.
+- Порядок задаёт владелец: `PUT /dashboard/branch-order` (`{company_ids}`, тот же гейт, тенант и аудит `branch_order.updated`, что у
+  `/dashboard/metric-visibility`; `GET` отдаёт филиалы тенанта в действующем порядке — `/dashboard/branches` платформенному админу показал бы
+  чужие). Список обязан быть перестановкой **всех** филиалов тенанта (иначе 400), `[]` — сброс к порядку открытия. UI — вкладка «Филиалы» в
+  `/settings.html` (владелец и платформенный админ; несохранённая перестановка регистрируется в `registerUnsavedWork`; платформенному админу без
+  выбранного тенанта — подсказка, `GET` отвечает 400). Маршрут внесён в `deploy/nginx/routes.mjs` (см. «Добавление нового endpoint»).
+- `company_ids` пользователя (`auth_service`, `/auth/admin/users`) идут по id: порядок названий в таблице пользователей админка выстраивает
+  на клиенте по `/dashboard/branches` (`branchTitles`).
 
 ### Учёт использования отчётов
-`system.report_usage_events` (миграция `0051`, модель `ReportUsageEvent`) — append-only журнал открытий отчётов, чтобы платформенный админ видел, какие отчёты живы, а какие можно
-убрать. Без внешних ключей: удалённый пользователь или аккаунт не должен стирать историю, а сбой записи — доехать до запроса.
+`system.report_usage_events` (миграция `0051`, модель `ReportUsageEvent`) — append-only журнал открытий отчётов: платформенный админ видит, какие
+отчёты живы. Без внешних ключей: удалённый пользователь или аккаунт не должен стирать историю, а сбой записи — доехать до запроса.
 
-- **Точка захвата — `track_report_usage` вокруг расчёта в `/dashboard/reports/data`**, после всех проверок доступа. Путь, прошедший гейты, обязан оставаться внутри
-  этого контекста либо сознательно не считаться. В журнал идут успех, `HTTPException` и 500; отмена запроса (клиент ушёл) — нет.
-- **Не пишется:** демо, ключ API (нет `user_id`), контекст без тенанта, сам `report_usage` (`_is_tracked`). Роль `platform_admin` пишется, но **исключается на чтении**
-  (`EXCLUDED_ROLES`): его клики поддержки ничего не говорят о работе тенанта.
-- **Запись — fire-and-forget:** отдельная задача на своей сессии (`database.get_async_session_factory()`), сильные ссылки в `_pending` (иначе цикл событий соберёт
-  задачу на лету), таймаут 5 с, при сбое только warning с именем класса исключения — без параметров строки, без PII. Каждая ожидающая запись стоит в очереди пула
-  рядом с запросами, поэтому при `MAX_PENDING_WRITES` (50) уже летящих новые события отбрасываются с warning, а не копятся на весь таймаут.
-- `staff_filter` — то, что запросил клиент, **до** зажима личной роли; `compare_used` вычисляется в роутере из всех параметров сравнения — новый параметр сравнения
-  надо добавить в `compare_requested` — и гасится для отчёта без сравнения (`compare=False`), который просьбу игнорирует. `usage_day` — филиальный день (`factual_branch_date`), `granularity` пишется только для отчётов, где она есть.
-- Отчёт `report_usage` — только `platform_admin` (`can_view_report_usage`): владелец тенанта его не видит ни в каталоге, ни в данных (403), ключ API не проходит, в демо скрыт. Платформенный админ читает данные выбранного тенанта (`X-Portal-Account-Id`; без него — 400). Окно «Не открывали» — 60 дней, оканчивающихся
-  на `end` периода; если раньше первой записи (`tracking_since`) начинается период или окно «Не открывали» (оно уходит назад от конца периода), отчёт предупреждает, что нули означают отсутствие учёта.
-- Хранение: `REPORT_USAGE_RETENTION_DAYS` (400, `0` — не чистить); чистит холостой проход воркера (`purge_old_report_usage_if_due`, суточный троттлинг) — та же
-  оговорка, что и у остальных чисток: занятый воркер не чистит.
-- Локально таблицы нет, пока база не прогнана через `python migrate.py` (как делает деплой; голый alembic CLI не нужен): копия прода из `local-db-refresh.sh` её
-  не содержит, и каждое открытие отчёта пишет warning вместо записи — на отчёты это не влияет.
+- **Точка захвата — `track_report_usage` вокруг расчёта в `/dashboard/reports/data`**, после всех проверок доступа. Путь, прошедший гейты,
+  обязан оставаться внутри этого контекста либо сознательно не считаться. В журнал идут успех, `HTTPException` и 500; отмена запроса — нет.
+- **Не пишется:** демо, ключ API (нет `user_id`), контекст без тенанта, сам `report_usage` (`_is_tracked`). `platform_admin` пишется, но
+  **исключается на чтении** (`EXCLUDED_ROLES`): его клики поддержки ничего не говорят о работе тенанта.
+- **Запись — fire-and-forget:** отдельная задача на своей сессии (`database.get_async_session_factory()`), сильные ссылки в `_pending` (иначе
+  цикл событий соберёт задачу), таймаут 5 с, при сбое только warning с именем класса исключения — без параметров строки и PII. При
+  `MAX_PENDING_WRITES` (50) летящих записей новые события отбрасываются с warning (они стоят в очереди пула рядом с запросами).
+- `staff_filter` — то, что запросил клиент, **до** зажима личной роли; `compare_used` вычисляется в роутере из всех параметров сравнения (новый
+  параметр — добавить в `compare_requested`) и гасится для отчёта без сравнения (`compare=False`). `usage_day` — филиальный день
+  (`factual_branch_date`), `granularity` пишется только для отчётов, где она есть.
+- Отчёт `report_usage` — только `platform_admin` (`can_view_report_usage`): владелец тенанта не видит его ни в каталоге, ни в данных (403), ключ
+  API не проходит, в демо скрыт. Платформенный админ читает данные выбранного тенанта (`X-Portal-Account-Id`; без него — 400). Окно «Не
+  открывали» — 60 дней, оканчивающихся на `end` периода; если период или это окно начинается раньше первой записи (`tracking_since`), отчёт
+  предупреждает, что нули означают отсутствие учёта.
+- Хранение: `REPORT_USAGE_RETENTION_DAYS` (400, `0` — не чистить); чистит холостой проход воркера (`purge_old_report_usage_if_due`, суточный
+  троттлинг) — занятый воркер не чистит.
+- Локально таблицы нет, пока база не прогнана через `python migrate.py` (копия прода из `local-db-refresh.sh` её не содержит): открытие отчёта
+  пишет warning вместо записи, на отчёты это не влияет.
 
 ### Формы оплаты и ручной Яндекс Пэй
-Отчёт `payment_methods` («Формы оплаты») делит выручку филиала на наличные, безналичные, Яндекс Пэй
-и «Прочие кассы». API YClients платежей Яндекс Пэй не отдаёт, поэтому его сумма вводится руками —
-**одно значение на (календарный месяц, филиал)**, рубли с копейками, **плюс дата «данные по»** — последний
-день, который сумма покрывает (`manual_payment_amounts.data_through`, `NOT NULL`, check «внутри месяца»).
-Значение вычитается из безналичных.
+Отчёт `payment_methods` («Формы оплаты») делит выручку филиала на наличные, безналичные, Яндекс Пэй и «Прочие кассы». API YClients платежей
+Яндекс Пэй не отдаёт, поэтому сумма вводится руками — **одно значение на (календарный месяц, филиал)**, рубли с копейками, **плюс дата «данные
+по»** — последний день, который сумма покрывает (`manual_payment_amounts.data_through`, `NOT NULL`, check «внутри месяца»). Значение
+вычитается из безналичных.
 
-- **Выручка — ровно та же, что на Обзоре.** `fetch_revenue_by_account_type()` строится из тех же
-  строителей, что и `_average_check_block`: `_service_revenue_union()` (услуги завершённых визитов) и
-  `_direct_payment_filters()` (товары и пополнения), только с группировкой по `(филиал, тип кассы)` вместо
-  свёртки. Поэтому сумма корзин равна `fetch_summary(...)['revenue']['total']` до копейки — по каждому
-  филиалу и по сети; тест `test_buckets_add_up_to_the_overview_revenue` стережёт это. Новое условие выручки
-  правится в строителях, а не в отчёте, иначе формы оплаты разойдутся с Обзором. Рефакторинг не менял SQL
-  `_average_check_block` (сверено по выданным запросам до и после).
-- **Тип кассы** — `AccountCatalog.type`: 0 — наличные, 1 — безнал YClients. Кассы без строки в каталоге и
-  любых других типов идут в «Прочие кассы» (столбец-строка видна, только если там где-то не ноль): терять
-  их нельзя, иначе корзины не сойдутся с выручкой. Бонусные/сертификатные счета выручкой не считаются
-  (`_physical_account_condition`) и в корзины не попадают, как и на Обзоре.
-- **«Безналичные» = безнал YClients − Яндекс Пэй, и отрицательное значение не обрезается.** Яндекс Пэй
-  больше безнала значит ошибку ввода либо оплаты, проведённые не по безналу; обрезка до нуля спрятала бы
-  это, а сумма корзин перестала бы сходиться с выручкой. Отчёт показывает число как есть и предупреждает.
-- **Сумма покрывает отрезок «1-е число месяца … данные по», и сравнивать её можно только с периодом, который
-  этот отрезок накрывает.** Значение за месяц M с датой D засчитывается в период `[start, end]`, если
-  `start <= 1-е число M` **и** `end >= D` (плюс окно отчётности по `period_end`). Иначе доля Яндекс Пэй
-  читалась бы против выручки другого отрезка: недельный период взял бы сумму всего месяца, а период, закончившийся
-  раньше D, поставил бы платежи, которых в выручке ещё нет. Месячное значение по-прежнему неделимо — его нельзя
-  разрезать на дни — поэтому проверяются границы, а не пропорция.
-  - **Таблица, карточки, столбцы, кольцо — по филиалу, «всё или ничего»** (`_unapplied_reason`). Филиал не получает
-    Яндекс Пэй (`yandex_pay = null`, безнал YClients целиком, `yandex_pay_applied: false`, причина в
-    `yandex_pay_unapplied_reason`), если месяц, который засчитывается этому филиалу, блокирует: период начинается
-    после 1-го числа (`period_starts_mid_month`; честной суммы за первые дни нет, даже если у месяца вообще нет
-    значения) либо в месяце есть значение с D > end (`value_beyond_period`, дата — в
-    `yandex_pay_unapplied_data_through`). Первая причина важнее. Месяц без значения **не** блокирует — он идёт в
-    «не введён». Месяц, не засчитываемый филиалу окном отчётности (`window.covers(month_end)`), тоже не блокирует.
-    Блокировка одного филиала соседей не трогает; «применён у всех филиалов отчёта» — `fetch_payment_breakdown()['yandex_pay_applied']`.
-  - **Заметка о дате данных** («Яндекс Пэй внесён не за весь месяц», kind `info`): если у засчитанного значения
-    D раньше конца его месяца — по месяцам и датам: «октябрь 2026: данные по 07.10 — Филиал A, Филиал B; по 05.10 —
-    Филиал C». Если какая-то D раньше `min(end, сегодня)`, добавляется фраза, что выручка YClients посчитана по эту
-    дату и доля Яндекс Пэй за дни после D может быть занижена (сегодня — филиальное, потому что выручки за будущие
-    дни нет). Год в датах пишется, только если он не совпадает с годом конца периода (`format_day`).
+- **Выручка — ровно та же, что на Обзоре.** `fetch_revenue_by_account_type()` строится из тех же строителей, что и `_average_check_block`:
+  `_service_revenue_union()` и `_direct_payment_filters()` (товары и пополнения), с группировкой по `(филиал, тип кассы)`. Сумма корзин равна
+  `fetch_summary(...)['revenue']['total']` до копейки (тест `test_buckets_add_up_to_the_overview_revenue`). Новое условие выручки правится в
+  строителях, а не в отчёте, иначе формы оплаты разойдутся с Обзором.
+- **Тип кассы** — `AccountCatalog.type`: 0 — наличные, 1 — безнал YClients. Кассы без строки в каталоге и других типов — «Прочие кассы» (видны,
+  только если где-то не ноль): терять их нельзя, иначе корзины не сойдутся с выручкой. Бонусные/сертификатные счета выручкой не считаются
+  (`_physical_account_condition`), как на Обзоре.
+- **«Безналичные» = безнал YClients − Яндекс Пэй, отрицательное значение не обрезается:** обрезка спрятала бы ошибку ввода (или оплаты не по
+  безналу), а сумма корзин перестала бы сходиться с выручкой. Отчёт показывает число как есть и предупреждает.
+- **Сумма покрывает отрезок «1-е число месяца … данные по» и сравнима только с периодом, который его накрывает.** Значение за месяц M с датой D
+  засчитывается в период `[start, end]`, если `start <= 1-е число M` **и** `end >= D` (плюс окно отчётности по `period_end`): иначе доля
+  читалась бы против выручки другого отрезка. Месячное значение неделимо — проверяются границы, а не пропорция.
+  - **Таблица, карточки, столбцы, кольцо — по филиалу, «всё или ничего»** (`_unapplied_reason`). Филиал не получает Яндекс Пэй (`yandex_pay =
+    null`, безнал YClients целиком, `yandex_pay_applied: false`, причина в `yandex_pay_unapplied_reason`), если месяц, засчитываемый
+    филиалу, блокирует: период начинается после 1-го числа (`period_starts_mid_month`; даже если значения нет) либо в месяце есть значение с
+    D > end (`value_beyond_period`, дата — в `yandex_pay_unapplied_data_through`). Первая причина важнее. Месяц без значения **не** блокирует
+    (идёт в «не введён»); месяц, не засчитываемый окном отчётности (`window.covers(month_end)`), тоже. Блокировка одного филиала соседей не
+    трогает; «применён у всех» — `fetch_payment_breakdown()['yandex_pay_applied']`.
+  - **Заметка о дате данных** («Яндекс Пэй внесён не за весь месяц», kind `info`): если у засчитанного значения D раньше конца месяца — по
+    месяцам и датам; если какая-то D раньше `min(end, сегодня)` (сегодня — филиальное), добавляется фраза, что доля Яндекс Пэй за дни после D
+    может быть занижена. Год в датах — только если не совпадает с годом конца периода (`format_day`).
     `fetch_payment_breakdown()['branches'][].yandex_pay_data_through` — `{месяц: дата}` только засчитанных значений.
-  - Редактор при вводе суммы без даты подставляет дату по умолчанию (`entry_dates`): завершённый месяц — его
-    последний день; текущий — вчера по филиальному дню, но не раньше 1-го (1-го числа — само 1-е). Позже
-    филиального «сегодня» дату поставить нельзя (`max_data_through`).
-    Редактор в браузере сам подставляет её при вводе суммы, а строку с суммой и стёртой датой не сохраняет
-    (`dateRequired`): сервер подставил бы тот же default, и для строки с хранимой датой это была бы тихая правка даты.
-  - `_countable_manual_months` остался за отзывами и ОПЗ; Яндекс Пэй его больше не использует.
-- **«Не введено» и «введён ноль» — разные состояния** (как у ручных фактов). Редактор отдаёт пустую ячейку
-  как `null`: ноль в ней отрисовался бы, уехал обратно в payload и был бы прочитан как правка. Месяцы без
-  значения (внутри окна отчётности филиала) перечисляются в note-предупреждении, а если не введено ни одного
-  месяца — `yandex_pay = null`, а не 0. Месяц, который ещё не начался, пробелом не считается: его нельзя ввести.
-  Предупреждение не должно превращаться в простыню на длинном периоде: филиал, где не введён ни один
-  месяц, называется одним именем в одной фразе, а месяцы перечисляются только у тех, где часть введена
-  (`describe_months()`: три и более месяца подряд сжимаются в «январь 2026 – март 2026»). Полный список
-  остаётся в `fetch_payment_breakdown()['branches'][].yandex_pay_missing_months`.
-- **Окно отчётности режет значение по `period_end` месяца** — тем же якорем, что план и ручные факты:
-  `reporting_window_clause(company_id, period_end)` в SQL и `ReportingWindow.covers(month_end)` в Python
-  (флаг `counted` редактора, список недостающих месяцев). Редактор режется только сверху
-  (`branches_not_yet_left`): месяц до открытия остаётся редактируемым и показывается с `counted: false`,
-  а филиал, ушедший от тенанта, из редактора пропадает. В отчёте, наоборот, филиал, чьё окно не
-  пересекается с периодом, не получает столбца.
-- **Запись — одна транзакция с оптимистичной блокировкой по строке.** Значение строки — **пара**
-  `(amount, data_through)`. Редактор шлёт все отрисованные строки, у каждой `previous_value` и
-  `previous_data_through` — то, что редактор показывал. Совпавшая пара — строка не трогается (автор и
-  `updated_at` остаются, аудита нет); смена одной лишь даты — правка. Иначе хранимая пара обязана равняться
-  предыдущей, и запись идёт защищённым оператором (`UPDATE/DELETE ... WHERE id AND amount = prev AND
-  data_through = prev`, `INSERT` под уникальным индексом); любое расхождение, потерянная гонка или
-  `rowcount != 1` — **409**, и в базе не остаётся ничего: вся пачка сверяется до записи, а каждая проигранная
-  гонка откатывает транзакцию. Без блокировки два менеджера молча перезаписали бы друг друга — денежное
-  значение, которое потом никто не сверит. Забытый `previous_value` или `previous_data_through` тоже конфликт,
-  а не «записать поверх». `value = null` очищает строку, присланная дата игнорируется; сумма без даты получает
-  дату по умолчанию, и если она совпала с хранимой, это не правка. Дата — строго `YYYY-MM-DD`
-  (число или `true` — 422, а не «дата по таймстемпу»), внутри месяца и не позже филиального «сегодня» (иначе 400).
-  Аудит (`manual_payment.updated`) кладётся **до** `db.commit()`, в той же транзакции; в строках события
-  есть `old`/`new` и `old_data_through`/`new_data_through`.
-- **Строка, закрывшаяся после загрузки редактора** (филиал ушёл от тенанта): нетронутая пустая
-  (`value` и `previous_value` — `null`) пропускается и не роняет сохранение остальных; ввод значения в закрытую строку —
-  400 (`PaymentRowNotOpen`); строка с показанным `previous_value` — 409, как у ручных фактов.
-- **Миграция `0050`** добавила `data_through` и заполнила её по хранимым строкам:
-  `GREATEST(period_start, LEAST(period_end, updated_at::date))` — сумма, введённая в день X, не может покрывать
-  дни после X, а для закрытых месяцев это `period_end`. `GREATEST` страхует check: `updated_at` — наивный UTC, и
-  значение, введённое после местной полуночи 1-го числа, иначе получило бы дату до начала месяца.
-- **Деньги — `Numeric(14, 2)`, квантование `ROUND_HALF_UP` через `Decimal(str(v))`**: `round()` на float
-  зависит от двоичного представления и в копейках непредсказуем. Допустимо `0 ≤ v ≤ 1e9`;
-  `NaN`/`Infinity` — ошибка. Записать будущий месяц нельзя, смотреть можно (`editable: false`).
-- **Один предикат доступа на всё**: `can_view_branch_payments(ctx)` (`auth_scope.py`) — `full_access` либо
-  роль из `BRANCH_SCOPE_ROLES` (не `STAFF_VIEW_ROLES`) с открытой `revenue`. Им закрыты каталог отчётов, данные отчёта, GET/POST
-  редактора и флаг `branch_payments_access` в `/auth/me`; второй вывод где-либо — повод для рассинхрона
-  «вкладка есть, а данных нет». По умолчанию: `platform_admin`/`owner`/`branch_admin` — да, `manager` —
-  только если владелец открыл ему `revenue`, `admin`/`barber` — никогда: кассовые итоги филиала — отчётность владельца,
-  а не просмотр коллег (`admin` читает весь филиал, но без выручки), и открытая выручка этого не меняет.
-- **Вырожденные состояния.** Если окно отчётности каждого выбранного филиала не пересекается с периодом
-  (ВДНХ за сентябрь), отчёт отдаёт только предупреждение «Нет данных» — без карточек, таблиц и графиков:
-  таблица из одной колонки «Показатель» читалась бы как сломанный отчёт. Без выручки графики не строятся
-  (доли неизвестны), таблицы остаются. Отрицательная доля безнала (Я.Пэй больше безнала) в таблицах и
-  столбцах показана как есть, а из кольца исключена: Chart.js рисует дугу по модулю, и минус выглядел бы
-  положительным сектором. Месяцы в предупреждениях пишутся по-человечески (`month_label`), в данных `fetch_payment_breakdown()` — ISO.
-  Ось «100» закреплена только у **стопки** долей (`stacked`): обычные процентные графики (ОПЗ %, рост)
-  автомасштабируются, иначе ряд в 5–30 % расплющило бы.
-- Сумма принимается строгим `float` (`true` — не рубль) и без отрицательного нуля; будущий месяц
-  читается без запроса выручки (подсказка «безнал YClients» там нулевая).
-- Отчёт без сравнения периодов, без гранулярности и **без фильтра по сотруднику**: `staff_id` игнорируется
-  (допущенные роли не зажаты на строку, а формы оплаты сотруднику не атрибутируются). `source_status` и
-  `missing_sources` берутся из `_source_coverage_status`, как у выручки: в ней есть пополнения.
-- POST под `forbid_demo`, GET демо открыт. Путь `payments/yandex_pay` внесён в
-  `deploy/nginx/routes.mjs`. Хранилище — `manual_payment_amounts`, а не `manual_fact_metrics`: там `staff_id NOT NULL`
-  и всё читающее рассчитано на значение по сотруднику.
-- Таблица долей стоит **над** таблицей сумм: отчёт читают ради структуры. Обе несут `wrap_headers` —
-  заголовки-филиалы переносятся (`.reports-table--wrap-headers`), а не растягивают каждую колонку до
-  длины названия. Флаг табличный, а не глобальный: остальные отчёты свою вёрстку не меняют.
-- **Линия «Доли форм оплаты по месяцам»** (`payment_shares_by_month`, последняя в сетке, на всю её ширину —
-  флаг `wide` у графика, класс `.reports-panel--span`) строится из `fetch_payment_breakdown()['monthly']`.
-  Только при ≥ 2 месяцах в периоде и ненулевой выручке: пустое состояние и «без выручки» графиков не имеют.
-  - **Помесячные корзины — один сгруппированный запрос**, а не N вызовов:
-    `fetch_revenue_by_account_type(..., by_month=True)` добавляет группировку по месяцу `FinancialTransaction.date`
-    (`extract`, работает и в PostgreSQL, и в SQLite) и отдаёт ключи `(company_id, 1-е число месяца)`.
-    Выручка услуг режется окном только по **дате оплаты** (дата визита — лишь под окном отчётности), поэтому
-    месяцы разбивают период без остатка, и таблица по филиалу — это **сумма месяцев** того же запроса:
-    оплата в августе за визит 31 июля уходит в август. Строители `_service_revenue_union` /
-    `_direct_payment_filters` не менялись; без `by_month` ключи прежние — `company_id`.
-  - **Яндекс Пэй решается по значению, а не по периоду.** Таблица всё-или-ничего по филиалу, а линия иначе:
-    месяц M берёт сумму значений филиалов, засчитываемых тем же правилом (`start <= 1-е число M` и
-    `end >= D`, окно по `period_end`; `None`, если не засчитано ни одно), а остальные месяцы получают
-    `yandex_pay: None` и безнал YClients целиком. Иначе одно блокирующее значение или обрезанная неделя в начале
-    периода стёрли бы всю линию, хотя остальные месяцы честные. Расхождение таблицы и линии — не баг:
-    у таблицы одна цифра на филиал и весь период, у линии точка на месяц. `None` на линии — разрыв (`spanGaps` не включён), а не нуль; ось не закреплена на 100
-    (закрепляется только стопка `stacked`). Это расхождение названо в заметке «Яндекс Пэй не учтён»
-    («На графике по месяцам…», только если на линии Яндекс Пэй действительно вычтен хоть за один месяц; сама
-    заметка называет причину по филиалам: период начался после 1-го числа либо сумма покрывает дни после конца
-    периода), а месяц, где Яндекс Пэй больше безналичных, получает свою заметку
-    «…по месяцам»: таблица нетто-итогом по периоду могла бы его скрыть, а линия уходит ниже нуля.
+  - Редактор при вводе суммы без даты подставляет дату по умолчанию (`entry_dates`): завершённый месяц — последний день; текущий — вчера по
+    филиальному дню, но не раньше 1-го. Позже филиального «сегодня» дату поставить нельзя (`max_data_through`). Браузер подставляет её сам и
+    строку с суммой и стёртой датой не сохраняет (`dateRequired`): сервер подставил бы default, и для строки с хранимой датой это была бы тихая
+    правка даты.
+  - `_countable_manual_months` — только для отзывов и ОПЗ; Яндекс Пэй его не использует.
+- **«Не введено» и «введён ноль» — разные состояния** (как у ручных фактов): пустая ячейка редактора — `null` (ноль отрисовался бы, уехал в payload и читался бы как правка). Месяцы без значения (внутри окна
+  отчётности филиала) перечисляются в note-предупреждении, а если не введено ни одного — `yandex_pay = null`, не 0. Не начавшийся месяц
+  пробелом не считается. Предупреждение не должно превращаться в простыню: филиал без единого введённого месяца называется одним именем в одной
+  фразе, месяцы перечисляются только у тех, где часть введена (`describe_months()`: три и более подряд сжимаются в «январь 2026 – март
+  2026»); полный список — `fetch_payment_breakdown()['branches'][].yandex_pay_missing_months`.
+- **Окно отчётности режет значение по `period_end` месяца** — тем же якорем, что план и ручные факты: `reporting_window_clause(company_id,
+  period_end)` в SQL и `ReportingWindow.covers(month_end)` в Python (флаг `counted`, список недостающих месяцев). Редактор режется только
+  сверху (`branches_not_yet_left`): месяц до открытия редактируем с `counted: false`, ушедший от тенанта филиал пропадает. В отчёте филиал, чьё
+  окно не пересекается с периодом, столбца не получает.
+- **Запись — одна транзакция с оптимистичной блокировкой по строке.** Значение строки — **пара** `(amount, data_through)`. Редактор шлёт все
+  строки с `previous_value` и `previous_data_through`. Совпавшая пара — строка не трогается (автор, `updated_at` остаются, аудита нет); смена
+  одной лишь даты — правка. Иначе хранимая пара обязана равняться предыдущей, и запись идёт защищённым оператором (`UPDATE/DELETE ... WHERE id
+  AND amount = prev AND data_through = prev`, `INSERT` под уникальным индексом); любое расхождение, потерянная гонка или `rowcount != 1` —
+  **409**, и в базе не остаётся ничего: вся пачка сверяется до записи, проигранная гонка откатывает транзакцию. Забытый `previous_value` /
+  `previous_data_through` — тоже конфликт, не «записать поверх» (без блокировки два менеджера молча перезаписали бы друг друга). `value = null` очищает строку, присланная дата игнорируется; сумма без даты получает дату по
+  умолчанию (совпала с хранимой — не правка). Дата — строго `YYYY-MM-DD` (число или `true` — 422), внутри месяца и не позже филиального
+  «сегодня» (иначе 400). Аудит (`manual_payment.updated`, в строках `old`/`new` и `old_data_through`/`new_data_through`) — **до**
+  `db.commit()`, в той же транзакции.
+- **Строка, закрывшаяся после загрузки** (филиал ушёл от тенанта): нетронутая пустая пропускается и не роняет остальные; ввод значения в
+  закрытую строку — 400 (`PaymentRowNotOpen`); строка с показанным `previous_value` — 409, как у ручных фактов.
+- **Миграция `0050`** добавила `data_through`: `GREATEST(period_start, LEAST(period_end, updated_at::date))` (сумма, введённая в день X, не
+  покрывает дни после X; `GREATEST` страхует check — `updated_at` наивный UTC).
+- **Деньги — `Numeric(14, 2)`, квантование `ROUND_HALF_UP` через `Decimal(str(v))`** (`round()` на float в копейках непредсказуем). Допустимо
+  `0 ≤ v ≤ 1e9`; `NaN`/`Infinity` — ошибка; строгий `float` (`true` — не рубль), без отрицательного нуля. Записать будущий месяц нельзя, смотреть
+  можно (`editable: false`); будущий месяц читается без запроса выручки.
+- **Один предикат доступа на всё**: `can_view_branch_payments(ctx)` (`auth_scope.py`) — `full_access` либо роль из `BRANCH_SCOPE_ROLES` (не
+  `STAFF_VIEW_ROLES`) с открытой `revenue`. Им закрыты каталог отчётов, данные отчёта, GET/POST редактора и флаг `branch_payments_access` в
+  `/auth/me`; второй вывод — повод для рассинхрона «вкладка есть, данных нет». По умолчанию: `platform_admin`/`owner`/`branch_admin` — да,
+  `manager` — только если владелец открыл `revenue`, `admin`/`barber` — никогда (кассовые итоги — отчётность владельца; открытая выручка этого не меняет, `admin` читает весь филиал, но без выручки).
+- **Вырожденные состояния.** Если окно отчётности каждого выбранного филиала не пересекается с периодом, отчёт отдаёт только предупреждение
+  «Нет данных». Без выручки графики не строятся (доли неизвестны), таблицы остаются. Отрицательная доля безнала показана как есть в таблицах и
+  столбцах, но исключена из кольца: Chart.js рисует дугу по модулю. Месяцы в предупреждениях — по-человечески (`month_label`), в данных — ISO.
+  Ось «100» закреплена только у **стопки** долей (`stacked`): обычные процентные графики автомасштабируются, иначе ряд в 5–30 % расплющило бы.
+- Отчёт без сравнения, без гранулярности и **без фильтра по сотруднику**: `staff_id` игнорируется (допущенные роли не зажаты на строку, а формы
+  оплаты сотруднику не атрибутируются). `source_status` и `missing_sources` — из `_source_coverage_status`, как у выручки.
+- POST под `forbid_demo`, GET демо открыт. Путь `payments/yandex_pay` внесён в `deploy/nginx/routes.mjs`. Хранилище — `manual_payment_amounts`,
+  а не `manual_fact_metrics`: там `staff_id NOT NULL`, и всё читающее рассчитано на значение по сотруднику.
+- Таблица долей стоит **над** таблицей сумм (читают ради структуры). Обе несут `wrap_headers` — заголовки-филиалы переносятся
+  (`.reports-table--wrap-headers`); флаг табличный, остальные отчёты вёрстку не меняют.
+- **Линия «Доли форм оплаты по месяцам»** (`payment_shares_by_month`, последняя в сетке, на всю ширину — флаг `wide`, `.reports-panel--span`)
+  строится из `fetch_payment_breakdown()['monthly']`, только при ≥ 2 месяцах и ненулевой выручке.
+  - **Помесячные корзины — один сгруппированный запрос**, не N вызовов: `fetch_revenue_by_account_type(..., by_month=True)` группирует по
+    месяцу `FinancialTransaction.date` (`extract`), ключи `(company_id, 1-е число месяца)`. Выручка услуг режется окном только по **дате
+    оплаты** (дата визита — лишь под окном отчётности), поэтому месяцы разбивают период без остатка, и таблица по филиалу — **сумма месяцев**
+    того же запроса (оплата в августе за визит 31 июля уходит в август). Без `by_month` ключи — `company_id`.
+  - **Яндекс Пэй решается по значению, а не по периоду.** Месяц M берёт сумму значений филиалов, засчитываемых тем же правилом (`start <= 1-е
+    число M` и `end >= D`, окно по `period_end`; `None`, если не засчитано ни одно), остальные месяцы — `yandex_pay: None` и безнал YClients
+    целиком: иначе одно блокирующее значение стёрло бы всю линию. Расхождение таблицы (одна цифра на филиал и период) и линии (точка на месяц)
+    — не баг. `None` на линии — разрыв (`spanGaps` не включён), а не нуль; ось не закреплена на 100. Расхождение названо в заметке «Яндекс Пэй
+    не учтён» («На графике по месяцам…», только если на линии Яндекс Пэй вычтен хоть за один месяц), а месяц, где Яндекс Пэй больше
+    безналичных, получает свою заметку «…по месяцам»: нетто-итог по периоду мог бы его скрыть.
 
 ### Сопоставление визита со сменой
-Визит относится к смене администратора, если попал в её интервал; ночная смена ловит и утро
-следующего дня. SQL-условие живёт в одном месте — `_postgres_administrator_schedule_condition()` (EXISTS по
-`StaffSchedule`, только PostgreSQL; режим выбранного администратора на Обзоре: «Филиал во время смен»,
-`_administrator_service_scope`), а его Python-зеркало — `_schedule_slot_covers_local_moment()` (SQLite и сопоставление
-в памяти): правило правится в обоих сразу. **День функция закрепляет сама, до предиката** — `date IN (день, день-1)`,
-а не внутри `OR`. Раздачу
-записей, ОПЗ и доп. услуг между администраторами это условие не делает: её ядро — `_admin_event_assignments`
-(Python, один проход по событиям), см. «Доп. услуги администратора».
+Визит относится к смене администратора, если попал в её интервал; ночная смена ловит и утро следующего дня. SQL-условие живёт в одном месте —
+`_postgres_administrator_schedule_condition()` (EXISTS по `StaffSchedule`, только PostgreSQL; режим выбранного администратора на Обзоре:
+«Филиал во время смен», `_administrator_service_scope`), а его Python-зеркало — `_schedule_slot_covers_local_moment()` (SQLite и сопоставление
+в памяти): правило правится в обоих сразу. **День функция закрепляет сама, до предиката** — `date IN (день, день-1)`, а не внутри `OR`.
+Раздачу записей, ОПЗ и доп. услуг между администраторами это условие не делает: её ядро — `_admin_event_assignments` (Python, один проход по
+событиям), см. «Доп. услуги администратора: каждая — одному администратору».
 
-- Пока обе даты лежали внутри `OR` предиката, планировщику оставался единственный пригодный ключ `company_id`, а
-  он в запросе константа. Выходило декартово произведение: 116.6 млн строк join'а на историю одного филиала
-  (оставалось 37 тысяч), отчёт `staff_leaderboard` за 2018–2026 стоил 31 с, из них 28 с — запрос доп. услуг
-  администраторов. Тот запрос (join визитов со сменами через `union_all` по двум дням) удалён 15.10.2026, когда
-  доп. услуги стали считаться по закреплённым записям; урок остаётся для любого нового join'а со сменами:
-  день — равенством или `IN`, не внутри `OR`.
+- Для любого нового join'а со сменами: день — равенством или `IN`, не внутри `OR`: иначе планировщику остаётся единственный ключ `company_id`
+  (в запросе константа) и выходит декартово произведение.
 - Приведение к таймзоне филиала (`_local_moment`) в таком запросе считается один раз колонкой, а не в условии join'а.
-- Сравнивать выдачу до/после можно только на окнах, **закончившихся раньше сегодня**:
-  `factual_at` — это `now()`, и окно, включающее сегодня, само по себе растёт между
-  прогонами (визиты этого дня становятся фактом по мере хода часов).
+- Сравнивать выдачу до/после можно только на окнах, **закончившихся раньше сегодня**: `factual_at` — это `now()`, и окно, включающее сегодня,
+  само растёт между прогонами.
 
 ### Доп. услуги администратора: каждая — одному администратору
-`extra_services_qty` / `extra_services_pct` строки администратора считает `_admin_extra_services_by_staff()`: количество
-доп. услуг (метка `is_extra`) **в визитах, закреплённых за ним** `_admin_assigned_records()` — тех же, что дают его
-`clients` и базу ОПЗ. Доля — доп. услуги / эти визиты (`extra_services_denominator` = его `clients`: сегменты ролей
-складывают числитель и базу, как и у барбера). Раньше метрики считались по смене (весь филиал, пока администратор на
-смене): пересекающиеся смены считались дважды, внесменные визиты не доставались никому, и сумма по администраторам не
-равнялась итогу (сентябрь 2026: Строгино 187 против 171, Ривьера 117 против 115, Ковалевской 134 против 128).
+`extra_services_qty` / `extra_services_pct` строки администратора считает `_admin_extra_services_by_staff()`: количество доп. услуг (метка
+`is_extra`) **в визитах, закреплённых за ним** `_admin_assigned_records()` — тех же, что дают его `clients` и базу ОПЗ. Доля — доп. услуги /
+эти визиты (`extra_services_denominator` = его `clients`: сегменты ролей складывают числитель и базу, как у барбера). По смене (весь филиал,
+пока он на смене) метрики не считаются: пересекающиеся смены считались бы дважды, внесменные визиты не доставались бы никому, и сумма по
+администраторам не равнялась бы итогу.
 
-- Скоуп метрик — `administrator_records` (`ADMIN_METRIC_SCOPE_BY_CODE`), скоупа `administrator_shift` больше нет: в
-  План/факте они идут общими колонками таблицы «Сотрудники» в строках администраторов (записи, ОПЗ, доп. услуги); подзаголовок «Администраторы» помечен «*».
-- Раздача общая с записями и ОПЗ — второй реализации быть не должно. Визит достаётся создателю записи, если тот был на смене,
-  иначе из бывших на смене тому, кому в этот **местный день** уже закреплено меньше всего (затем — меньше за окно, затем
-  меньший id), иначе создателю или наименее загруженному из всех за окно: каждый визит — ровно одному администратору.
-  Ключ «за день» нужен для двойной смены: раньше весь день целиком доставался тому, у кого меньше месячного счёта
-  (Строгино 12.09.2026: Ксения 24 визита, Мария 0 при обеих сменах 10–22; теперь 12/12, ОПЗ 3/2 вместо 5/0). В день считаются
-  все закреплённые события, и созданные самим администратором тоже: выравнивается итог дня, а правило создателя остаётся
-  первым и баланс может сдвинуть. Раздача без смены (резерв) по-прежнему считает по окну: баланса внутри дня там нет смысла.
-  Сумма по администраторам от этого не меняется, меняется только кому из совместно дежуривших она досталась. Запрос доп. услуг один на сегмент и не зависит от числа администраторов (замер План/факта на локальной
-  копии, `ANALYZE`, 8 прогонов: филиал-месяц 0,14 → 0,14 с, филиал-год 0,39 → 0,41, сеть-месяц 0,78 → 0,78, сеть-год 2,19 → 1,87).
-- **Остаток.** Сумма по администраторам равна итогу филиала на доп. услуги тех же визитов, что дают сумму их `clients`: визиты
-  уволенных барберов и визиты, которые администратор провёл сам (мастер визита — не барбер сегмента), не закреплены ни за кем —
-  как и у `clients`. Сентябрь 2026 на локальной копии: сумма равна итогу в пяти филиалах из шести, в Premium Ривьера 106 против
-  107 (одна доп. услуга в визите уволенного барбера); сумма `clients` в филиалах меньше итога на 4–24 визита из той же причины.
-- Покрытие графиков больше не обнуляет метрики (раньше `fact = None`, `status = 'partial'` и «исключены из рейтинга допуслуг»):
-  раздача без графика откатывается на создателя/наименее загруженного, как у `clients` и ОПЗ. Предупреждение
-  `staff_schedule_coverage` остаётся — график решает, какому администратору достанется визит.
-- Режим выбранного администратора на Обзоре по-прежнему отдаёт в сводке доп. услуги филиала за его смены
-  (`revenue.extra_service_*`), но интерфейс их не рисует; личные берёт из `administrator_personal` (строка План/факта).
+- Скоуп метрик — `administrator_records` (`ADMIN_METRIC_SCOPE_BY_CODE`; скоупа `administrator_shift` нет): в План/факте они идут общими
+  колонками таблицы «Сотрудники» в строках администраторов (записи, ОПЗ, доп. услуги); подзаголовок «Администраторы» помечен «*».
+- Раздача общая с записями и ОПЗ — второй реализации быть не должно. Визит достаётся создателю записи, если тот был на смене, иначе из бывших
+  на смене тому, кому в этот **местный день** закреплено меньше всего (затем — меньше за окно, затем меньший id), иначе создателю или
+  наименее загруженному из всех за окно: каждый визит — ровно одному администратору. Ключ «за день» нужен для двойной смены: иначе весь день
+  достался бы тому, у кого меньше месячного счёта. В день считаются все закреплённые события, и созданные самим администратором тоже: итог
+  дня выравнивается, правило создателя остаётся первым, баланс может его сдвинуть. Раздача без смены (резерв) считает по окну. Сумма по
+  администраторам от этого не меняется, меняется только кому из совместно дежуривших она достаётся. Запрос доп. услуг один на сегмент.
+- **Остаток.** Сумма доп. услуг по администраторам равна итогу филиала на тех же визитах, что дают сумму их `clients`. Ни за кем не закреплены —
+  как и у `clients` — визиты, которые администратор провёл сам (мастер визита — не барбер сегмента): сумма `clients` по администраторам
+  меньше итога филиала. Визиты уволенного барбера закреплены как визиты любого (см. «Уволенные сотрудники остаются в месяцах, где работали»).
+- Покрытие графиков не обнуляет метрики: раздача без графика откатывается на создателя/наименее загруженного, как у `clients` и ОПЗ.
+  Предупреждение `staff_schedule_coverage` остаётся — график решает, какому администратору достанется визит.
+- Режим выбранного администратора на Обзоре отдаёт в сводке доп. услуги филиала за его смены (`revenue.extra_service_*`), но интерфейс их не
+  рисует; личные берёт из `administrator_personal` (строка План/факта).
 
 ### Якорный визит ОПЗ
-Событие ОПЗ засчитывается, когда запись создана в день последнего визита клиента или на
-следующее утро. «Последний визит не позже дня записи» ищется бинарным поиском по списку
-визитов клиента, отсортированному тем же ключом (`_visit_order_key`: дата, время, id), —
-последний элемент до границы и **есть** тот максимум, потому что дата стоит в ключе первой.
+Событие ОПЗ засчитывается, когда запись создана в день последнего визита клиента или на следующее утро. «Последний визит не позже дня записи»
+ищется бинарным поиском по списку визитов клиента, отсортированному тем же ключом (`_visit_order_key`: дата, время, id), — последний элемент
+до границы и **есть** тот максимум, потому что дата стоит в ключе первой. Порядок задаётся один раз на клиента.
 
-- Раньше на каждую запись список фильтровался и заново максимизировался: 1.6 млн вызовов
-  лямбды на историю. Порядок задаётся один раз на клиента.
-- Визиты читаются начиная с `start - 2 дня` (день перед периодом, чьи записи читаются ради якорей, и его
-  предыдущий день): якорь по определению не старше, а более ранние
-  визиты не могут перебить более поздние (они меньше по тому же ключу) — они выигрывали бы
-  только когда других нет, а этот случай всё равно отсекается правилом дня. Без границы
-  отчёт за месяц вычитывал всю историю клиента. У самого начала календаря (`start` не дальше трёх суток от
-  0001-01-01) день перед периодом не читается: его сдвиг вместе с часовым поясом дал бы `OverflowError`.
-- `_opz_events` кэшируется в `db.info`: одна сводка спрашивает один и тот же филиал с периодом
-  из десятка мест (27 вызовов на 18 разных скоупов). Возвращается тот же список — вызывающие
-  только читают его или фильтруют в новый, а `OpzEvent` заморожен.
-- Кандидаты (записи, которые могут стать событием) режутся в SQL префильтром: нужен завершённый
-  визит того же клиента строго раньше самой записи (`prior_visit.date < date`) в окне
-  `[UTC-день create_date − 2, + 1]` (`_booked_within_anchor_reach`, `_DayShift`). Локальный день
-  отличается от UTC-дня не более чем на сутки в любой зоне, а якорь лежит в локальном дне записи
-  или днём раньше — окно не промахнётся. Точный тест по таймзоне остаётся в Python.
-- Префильтр обязан оставаться **надмножеством** точного правила. Окно отчётности и `factual_at`
-  в него намеренно не входят: их применяет чтение визитов, и лишний кандидат там отсеется сам.
-  Добавлять в префильтр условие, которого нет в точном правиле, нельзя — событие пропадёт молча.
-  `_DayShift.days` вшит в текст SQL, поэтому объявлен в `_traverse_internals`; иначе два сдвига
-  делили бы один скомпилированный запрос из кеша SQLAlchemy.
-- Визиты читаются только в досягаемости выживших кандидатов (`survivor.id IN (...)` + то же окно):
-  вся история клиента стоила дороже самого поиска. Id биндятся по параметру на кандидата —
-  самый большой филиал даёт ~3k за всю историю при лимите asyncpg 32767, а выше
-  `OPZ_SURVIVOR_ID_LIMIT` сужение отключается (результат тот же, чтение просто шире).
-  Вариант без списка (те же фильтры кандидата внутри EXISTS) вышел медленнее (за всю историю 0.32 против 0.26 с).
-- Замер на локальной копии (6 филиалов, вся история, `ANALYZE` сделан): 1.4 → ~0.28 с;
-  с 01.10.2025 — 0.35 → ~0.15 с; один месяц — 0.06 → ~0.04 с. Прод примерно в 3 раза
-  медленнее, локальную цифру за продовую не выдавать. Составной индекс
-  `(company_id, client_id, date)` проверен и не помог: планировщик остаётся на hash semi join.
+- Визиты читаются начиная с `start - 2 дня` (день перед периодом, чьи записи читаются ради якорей, и его предыдущий день): якорь не старше, а
+  более ранние визиты не могут перебить более поздние. Без границы отчёт за месяц вычитывал бы всю историю клиента. У самого начала календаря
+  (`start` не дальше трёх суток от 0001-01-01) день перед периодом не читается: сдвиг вместе с часовым поясом дал бы `OverflowError`.
+- `_opz_events` кэшируется в `db.info`: сводка спрашивает один и тот же филиал с периодом из десятка мест. Возвращается тот же список —
+  вызывающие только читают его или фильтруют в новый, а `OpzEvent` заморожен.
+- Кандидаты (записи, которые могут стать событием) режутся в SQL префильтром: нужен завершённый визит того же клиента строго раньше самой
+  записи (`prior_visit.date < date`) в окне `[UTC-день create_date − 2, + 1]` (`_booked_within_anchor_reach`, `_DayShift`): локальный день
+  отличается от UTC-дня не более чем на сутки, якорь лежит в локальном дне записи или днём раньше. Точный тест по таймзоне остаётся в Python.
+- Префильтр обязан оставаться **надмножеством** точного правила. Окно отчётности и `factual_at` в него намеренно не входят (их применяет
+  чтение визитов, лишний кандидат там отсеется). Добавлять в префильтр условие, которого нет в точном правиле, нельзя — событие пропадёт
+  молча. `_DayShift.days` вшит в текст SQL, поэтому объявлен в `_traverse_internals`; иначе два сдвига делили бы один скомпилированный запрос
+  из кеша SQLAlchemy.
+- Визиты читаются только в досягаемости выживших кандидатов (`survivor.id IN (...)` + то же окно). Id биндятся по параметру на кандидата
+  (лимит asyncpg 32767), выше `OPZ_SURVIVOR_ID_LIMIT` сужение отключается (результат тот же, чтение шире). Вариант без списка (фильтры
+  кандидата внутри EXISTS) и составной индекс `(company_id, client_id, date)` не помогли — не возвращаться к ним.
 
 ### Группы услуг KPI (воск, камуфляж, уход за лицом и головой)
-Принадлежность услуги группе решается подстрокой в названии, и решает её **Python** —
-`_title_matches()`. Различающихся названий во всей базе меньше двухсот, поэтому
-`_service_group_titles()` один раз за сессию раскладывает их по группам и отдаёт готовые
-списки, а SQL сравнивает название на равенство (`IN`), а не десятками `LIKE '%…%'` на каждой
-строке фактов.
+Принадлежность услуги группе решается подстрокой в названии, и решает её **Python** — `_title_matches()`. Различающихся названий меньше двухсот,
+поэтому `_service_group_titles()` один раз за сессию раскладывает их по группам и отдаёт готовые списки, а SQL сравнивает название на равенство
+(`IN`), а не десятками `LIKE '%…%'` на каждой строке фактов.
 
-- Сравнивается **сырое** `coalesce(nullif(transactions.service_title, ''), service_catalog.title, '')` (`_kpi_service_title()`:
-  пустая копия названия в визите считается отсутствующей, как в топе услуг и `_transaction_title_lookup`; оба запроса KPI читают
-  её), без `lower()`: списки собраны из тех же двух колонок, поэтому значения совпадают точно.
-  Это заодно снимает расхождение диалектов, ради которого раньше перечислялись написания
-  (`part.capitalize()`, `.upper()`): `lower()` в PostgreSQL сворачивает кириллицу, в SQLite
-  нет, а `str.lower()` в Python — везде. Побочно чинится и `'ВоСк'`, который старый список
-  написаний не ловил.
-- Названия берутся **двумя отдельными** `DISTINCT`, а не одним SQL `UNION`: union хеширует
-  оба входа в один непараллельный проход — замерено 536 мс против 51 мс. Разница видна не на
-  истории, а на окне в месяц, где весь запрос стоит меньше секунды.
-- Кэш живёт в `db.info` (как `reporting_windows` и `administrator_role_periods`), то есть
-  ровно один запрос — сессия создаётся на запрос. Список собирается по всем тенантам, но это
-  безопасно: он лишь расширяет набор названий, а сами суммы по-прежнему режутся скоупом.
-  Все кэши `db.info` (`opz_events`, `staff_schedule_coverage`, `staff_role_periods`, …) держатся на
-  том же допущении: факты под сессией не меняются. Код, который пишет факты и в той же сессии
-  читает витрины (тест, скрипт), обязан сначала `db.info.clear()` — иначе прочитает прежний ответ.
-  Запись плана свои кэши ролей сбрасывает сама.
-- Добавили услугу с новым названием — ничего обновлять не нужно, список строится на лету.
+- Сравнивается **сырое** `coalesce(nullif(transactions.service_title, ''), service_catalog.title, '')` (`_kpi_service_title()`: пустая копия
+  названия в визите считается отсутствующей, как в топе услуг и `_transaction_title_lookup`; оба запроса KPI читают её), без `lower()`: списки
+  собраны из тех же двух колонок. Это снимает расхождение диалектов: `lower()` в PostgreSQL сворачивает кириллицу, в SQLite нет, а
+  `str.lower()` в Python — везде.
+- Названия берутся **двумя отдельными** `DISTINCT`, а не одним SQL `UNION`: union хеширует оба входа в один непараллельный проход (на порядок
+  медленнее).
+- Кэш живёт в `db.info` (как `reporting_windows` и `administrator_role_periods`), то есть ровно один запрос — сессия создаётся на запрос.
+  Список собирается по всем тенантам, но это безопасно: он лишь расширяет набор названий, а суммы режутся скоупом. Все кэши `db.info`
+  (`opz_events`, `staff_schedule_coverage`, `staff_role_periods`, …) держатся на допущении, что факты под сессией не меняются. Код, который
+  пишет факты и в той же сессии читает витрины (тест, скрипт), обязан сначала `db.info.clear()` — иначе прочитает прежний ответ. Запись плана
+  свои кэши ролей сбрасывает сама. Новая услуга с новым названием ничего не требует: список строится на лету.
 - **Маркеры счетов, статей расхода и товарных названий** (`NON_CASH_ACCOUNT_MARKERS`, `PERSONAL_ACCOUNT_EXPENSE_MARKERS`,
-  `NON_COSMETICS_GOODS_MARKERS`) сравниваются без учёта регистра через `_TitleContains`: в PostgreSQL `ILIKE` плюс прежние
-  два `LIKE` (чтобы не сузить выборку, если ctype базы не сворачивает кириллицу), в SQLite три написания `LIKE`.
-- **Дело не только в цене строки.** Десятки `LIKE` под `OR` планировщик оценить не может, и
-  на базе **со статистикой** он выбирал катастрофический порядок join'ов: `revenue_decomposition`
-  за всю историю — 763 с, `booking_channels` — 311 с, `year_over_year` — 53 с. На той же базе
-  без `ANALYZE` те же отчёты укладывались в 10 с, поэтому локально проблема пряталась, а в
-  проде (где статистика есть) отчёты упирались в таймауты. `IN` по списку названий оценивается
-  точно, и те же отчёты стали 5 с. Цифры исторические: `revenue_decomposition` теперь только
-  алиас `financial_overview`, а `booking_channels` пересобран (см. «Каталог отчётов»); `year_over_year` прежний.
+  `NON_COSMETICS_GOODS_MARKERS`) сравниваются без учёта регистра через `_TitleContains`: в PostgreSQL `ILIKE` плюс два `LIKE` (чтобы не сузить
+  выборку, если ctype базы не сворачивает кириллицу), в SQLite три написания `LIKE`.
+- **Дело не только в цене строки.** Десятки `LIKE` под `OR` планировщик оценить не может, и на базе **со статистикой** он выбирает
+  катастрофический порядок join'ов: локально (без `ANALYZE`) проблема прячется, а в проде отчёты упираются в таймауты. `IN` по списку названий
+  оценивается точно.
 
 ### Замеры на локальной копии: сначала ANALYZE
-`pg_restore` не оставляет статистики (`pg_stat_user_tables` пуст по `last_analyze` при 195k изменений у `appointments`):
-планировщик работает на дефолтных оценках, планы не совпадают с продовыми, и замеры врут в обе стороны. Поэтому
-`./scripts/local-db-refresh.sh` сам делает `vacuumdb --analyze-only` после восстановления; руками `VACUUM ANALYZE;` (7 с)
-нужен, только если базу заливали иначе. Тот же скрипт ставит дампу права 600 и после сверки sha256 оставляет в `DUMP_DIR`
-три свежих `prod_*.dump` (остальные такие файлы удаляет, чужие имена не трогает).
+`pg_restore` не оставляет статистики: планировщик работает на дефолтных оценках, планы не совпадают с продовыми, замеры врут в обе стороны.
+`./scripts/local-db-refresh.sh` сам делает `vacuumdb --analyze-only` после восстановления; руками `VACUUM ANALYZE;` — только если базу
+заливали иначе. Тот же скрипт ставит дампу права 600 и после сверки sha256 оставляет в `DUMP_DIR` три свежих `prod_*.dump` (чужие имена не трогает).
 
-- Автовакуум может сработать посреди прогона и переключить планы на ходу; разброс между
-  повторами тогда достигает трёх раз. Сравнивать «до/после» только в одном прогоне, подряд.
-- Локальный `shared_buffers` — 128 МБ на базу в 420 МБ, но упирается всё не в диск:
-  на медленном отчёте 10.3M попаданий в буфер против 18k физических чтений.
+- Автовакуум может переключить планы посреди прогона (разброс до трёх раз): сравнивать «до/после» только в одном прогоне, подряд.
+- Узкое место локального прогона — не диск (страничный кэш уже держит базу): `shared_buffers` для ускорения не поднимать.
 
 ### Мобильная адаптация (web/)
-Брейкпоинты не общие, а per-page: дашборд режется на 1100 / 900 / 560px (`index.html`),
-страницы авторизации — на 640 / 480px (`auth.css`), настройки — на 480px (`settings.css`).
-Общее для всех — `@media (hover: none) and (pointer: coarse)` на 16px для полей ввода: iOS Safari
-масштабирует страницу при фокусе на поле с `font-size` меньше 16px, а `coarse`-указатель
-отличает тач-устройство от десктопа с узким окном.
+Брейкпоинты per-page: дашборд — 1100 / 900 / 560px (`index.html`), авторизация — 640 / 480px (`auth.css`), настройки — 480px (`settings.css`).
+Общее — `@media (hover: none) and (pointer: coarse)`: поля ввода 16px (iOS Safari масштабирует страницу при фокусе на поле меньше 16px).
 
-- Однострочный grid-контейнер (`.field`, `.auth-form`, `.admin-toolbar` и т.п.) без явного
-  `grid-template-columns: minmax(0, 1fr)` растягивается по содержимому (длинный email,
-  непереносимое слово) и уводит страницу в горизонтальный скролл — `minmax(0, …)`, а не
-  голый `1fr`, потому что колонка иначе не сжимается ниже min-content своих детей.
-- Полосы вкладок (`.tabs`, `.settings-tabs`) не переносятся, а скроллятся горизонтально
-  (`overflow-x: auto`, `flex: 0 0 auto` на каждой вкладке); на дашборде активную вкладку
-  в видимую область возвращает `scrollActiveTabIntoView()` в `main.js` — нужно для
-  back/forward, потому что там вкладка активируется и без клика по видимой ссылке.
-  `.settings-tabs` переключается только прямым кликом (без hash-роутинга), поэтому такого
-  вызова не имеет — активная вкладка и так видна в момент клика.
-- Графики Chart.js подстраивают подписи осей и легенду не по ширине экрана, а по ширине
-  своего canvas (`web/src/chartResponsive.js`, порог `NARROW_CHART_WIDTH = 480`) — та же
-  карточка ужимается и на телефоне, и в узкой колонке десктопной сетки.
-- План/факт (`.plan-table`) держит два «опознавательных» столбца (филиал + метка строки)
-  прилипшими при горизонтальном скролле (`position: sticky`); на десктопе первый фиксирован (128 px), на телефоне его ширина
-  не константа (зависит от локали и от того, чьи названия попали в группу), поэтому второй читает её из
-  переменной `--plan-col1-width`, а не из хардкода. `syncPlanTableStickyOffsets()` в `main.js`
-  меряет её `ResizeObserver`, а не событием `resize` окна: рендер может пройти, пока вкладка
-  ещё `display: none` (ширина тогда 0), и только наблюдатель ловит момент, когда вкладка
-  открывается и ячейка получает реальный размер.
-- `position: sticky` на первой колонке перестаёт прилипать, если таблица шире своего
-  содержимого искусственно (`min-width` без данных, чтобы его оправдать) — браузер раздувает
-  саму прилипающую колонку, забирая в неё лишнее место, и она уезжает со скроллом вместо того,
-  чтобы стоять на месте. Поэтому у `.reports-table` и `.extra-services-scroll` этот порог на
-  ≤560px обнулён; `.plan-table` того же не боится — там всегда есть третья, не прилипающая
-  колонка с метрикой, забирающая лишнее вместо первой.
-- **План/факт по сотрудникам — одна таблица «Сотрудники»** (владелец, 16.10.2026): барберы и администраторы вместе, колонки общие — объединение
-  метрик обеих категорий (`metric_sets`, уже отфильтрованные видимостью) в порядке `planFact.metrics`; колонка есть, если её ячейка есть хотя бы
-  у одной строки (ячейки, снятые сервером как денежные, отсутствуют — колонки нет, пока она не нужна другой строке). Строки сгруппированы
-  подзаголовками «Барберы» / «Администраторы» (`.plan-subheader`, текст прилипает к левому краю при скролле), «Без категории» — для `unknown`.
-  У администратора в строке его ячейки: и личные (`cosmo_*`, отзывы), и закреплённые записями (`calculation_scope =
-  administrator_records`: `clients`, ОПЗ, доп. услуги) — отдельной таблицы «Показатели, закреплённые за администратором» больше нет.
-  «—» без цвета статуса — там, где метрика не принадлежит категории: барберские KPI (воск, камуфляж, уход…) у администратора, отзывы у барбера,
-  выручка и средний чек у администратора (этих метрик у него нет вовсе, см. «Обзор выбранного администратора»).
-  Закреплённые записями показатели считаются иначе (визит достаётся одному администратору), поэтому у подзаголовка «Администраторы» стоит «*»
-  (`.plan-mark`, `title` — `dash.scopeAdministratorRecordsHint`), а под таблицей — одна сноска (`.plan-footnote`, «* » + тот же текст); и «*», и сноска —
-  только когда у администратора реально нарисована такая ячейка (`hasRecordsCells` блока). Выбор колонок и ячеек — чистая `mergedStaffTable()`
-  (`web/src/planStaffTable.js`, тест `plan-staff-table.test.mjs`), разметка — `renderMergedStaffSection` (`main.js`); форма ответа бэкенда не менялась,
-  потому что её читают и рейтинги. Колонки без плана и фактов **не** отбрасываются: у всех одни и те же столбцы. Якоря для плавающей навигации —
-  `data-jump-target` / `data-jump-label` на блоках (филиал `plan-branch`, подзаголовки `plan-barbers` / `plan-admins`); навигация подхватывает их
-  сама (`MutationObserver` по `<main>`). Шапка таблицы липкая, поэтому `syncPlanTableFit` публикует её реальную высоту в `--plan-head-height`, а `scroll-margin-top`
-  подзаголовка берёт её — прыжок не прячет подзаголовок под шапку.
-- **Колонки таблиц филиала и «Сотрудники» выровнены** (`alignPlanTableColumns` в `main.js`, арифметика —
-  `web/src/planTableColumns.js`): при двух и более таблицах на экране каждая меряется в `min-content`, ключ колонки
-  (`data-metric`, у первых двух — позиция) получает наибольшую ширину по всем таблицам, лишнее место ящика делится между
-  метриками пропорционально ей («Разрез» и «Показатель» его не берут), и таблицы идут `table-layout: fixed` с `<colgroup>`.
-  Раскладка — по объединению колонок: колонку, которой у таблицы нет (у сотрудников без администраторов — «Отзывы»),
-  забирает соседняя слева, поэтому остальные края совпадают. Пересчёт — на каждом срабатывании `planTableFitObserver`
-  (ширина ящика меняет раздачу); скрытая вкладка (ширина 0) остаётся на авто-раскладке до показа. Доска «Планы» и сеть
-  (одна таблица) не трогаются. Заголовки `thead` План/факта (не доски) — по центру.
-- **План/факт, режим «Планы»** (кнопки «Таблица» / «Планы» в заголовке панели, выбор помнит `localStorage`) — транспонированная доска, как план
-  ведут в таблице у владельца: колонки — люди, строки — метрики, только значения плана, без факта (панель графиков план/факт, плашки диагностик по фактам и заголовок «План / факт» панели — `#plan-fact-title`, `syncPlanViewButtons` — в этом режиме скрыты). Строится `planBoard()` (`web/src/planBoard.js`,
-  чистая функция) из **того же** ответа `plan_fact` после `filterPlanFactForDisplay`, поэтому то же меню режет и строки доски (одно множество скрытых метрик на оба режима, без второго набора и хранения);
-  в режиме доски кнопка и её aria-подпись читаются «Показатели» (`dash.rows`), в таблице — «Столбцы»; подпись обновляется при смене режима. Без нового запроса.
-  Порядок строк зашит: барберы — выручка, клиенты, СЧ, воск … ОПЗ шт, доп. услуги шт/%; администраторы — отзывы, ОПЗ шт, ОПЗ %, … доп. услуги %; сеть — строки барберов (с доп. услугами) + отзывы. Сотрудники без категории — отдельная секция со строками барберов, без итога и правил.
-  Колонка «Итог филиала» — только из `parent_group` (у `barber` его нет — колонки итога тоже нет, у `admin` он есть; выбранный сотрудник показан один, как в таблице), в сети итогом стоит последней колонка «Сеть».
-  Колонка «Цель месяца» — `plan_rules` ответа (% от клиентов по метрике): у барберов все ключи, у администраторов — только `opz_qty` (план ОПЗ администратора = его клиенты × ОПЗ % филиала; остальные строки админов вводят напрямую, правила у них нет); нет правил — нет колонки (`ruleCodes` секции в `planBoard`).
-  **Итоговый СЧ взвешенный:** ячейка `avg_check_total` в колонке-агрегате — «Итог филиала» в филиале, **каждая** колонка секции в сети (каждый филиал и «Сеть»); колонки сотрудников не помечаются, там чек введён ими — плановая выручка ÷ плановые завершённые визиты, а не среднее чеков людей, поэтому она помечена `*` (`title` с тем же пояснением), а под таблицей секции стоит сноска (`dash.planBoardWeightedNote`, `.plan-footnote`); сноска — только если такая ячейка с значением реально нарисована. Решает `planBoard`: флаг `row.weighted[i]` и `section.hasWeighted` (у личной одноколоночной доски и в секциях без итога их нет). Пустые колонки, строки и секции
-  отбрасываются; `calculation_scope` не смотрится (план «закреплённых» метрик администратора тоже показывается). Залипает один столбец (метрика):
-  правила двух липких столбцов для `.plan-board` на ≤560px сняты. Выбранный сотрудник (в том числе зажим личной роли) доску не отключает: в `groups` остаётся он один.
-- **Широкие представления** (План/факт, Установка планов, Отчёты) получают `.shell--wide` (до 1680px, переключается
-  в `setActiveView`), а `.plan-table` без полового `min-width: 950px` и с компактными ячейками: 14 колонок
-  влезают без горизонтального скролла от 1366px (замер: минимальная ширина таблиц ~880px). На ≤560px скролл
-  и sticky-столбцы прежние.
-- **План/факт на десктопе умещается без горизонтального скролла от 1280 px** (замер на реальных данных, все филиалы,
-  сентябрь и октябрь 2026: min-content самой широкой таблицы 1114 px; фиксированная колонка «Разрез» (ниже) добавила ~17 px,
-  то есть ~1131 px против 1182 px рабочей области — запас ~50 px, ~35 px с классическим скроллбаром). Держится на правилах:
-  у `.plan-table th.number` нет `text-transform: uppercase`, у ячеек `8px 4px`, у `.row-label` нет фиксированной `width`, а
-  `.shell--wide` — `min(1680px, 100% - 64px)` всегда (см. «Одна ширина страницы» ниже).
-- **Одна ширина страницы при любой навигации.** Раньше `body.jump-nav-visible .shell--wide` сужал страницу, пока видна
-  плавающая навигация, и сеть (одна цель — навигации нет) была шире филиала (≥ 2 целей) на 40 px: край страницы прыгал при смене
-  фильтра. Теперь `.shell` — `min(1180px, 100% - 64px)`, `.shell--wide` — `min(1680px, 100% - 64px)` без зависимости от
-  навигации: 32 px по краям — её постоянное место (пилюля 38 px при `right: 6px`, левый край на 44 px от окна; панель с
-  отступом 16 px + рамка стоит с 49 px). Шире нельзя без запаса внутри содержимого, а запас внутри (padding панелей или
-  `.table-scroll`) сдвигал бы края таблиц при появлении навигации — ровно то, от чего ушли. Менять размер пилюли — только
-  вместе с этим зазором. Замер (демо, 1280 / 1366 / 1440 / 1920): ширина `.shell` 1216 / 1302 / 1376 / 1680 в сети и в филиале, правый край
-  `.table-scroll` не заходит под пилюлю (1231 при левом крае пилюли 1236 и далее с тем же запасом 5 px), таблицы умещаются.
-- **«Разрез» — одна фиксированная узкая колонка** (`.branch-cell` и `.plan-table thead th:first-child`, от 561 px:
-  `width`/`min-width`/`max-width: 128px`) во всех таблицах План/факта — сети, филиала, сотрудников, администраторов: столбец
-  одной ширины от таблицы к таблице (раньше 115 px у главной и 301–416 px у коротких таблиц — они растягивали первую колонку).
-  Названия в `th` идут капсом, поэтому ширина подобрана по ЗАГЛАВНЫМ: текстовый ящик 120 px шире «OLDBOY МОСКВА» и
-  «КОВАЛЕВСКОЙ, 6» (~114 px) и уже «OLDBOY ЯХРОМСКАЯ» (~137 px) — переносы «Oldboy Москва / (ТРЦ Ривьера)», «Oldboy /
-  Яхромская», «OldBoy Premium / Ривьера», «Oldboy МСК / ул.Софьи / Ковалевской, 6». Менять шрифт или регистр
-  названий — перемерять. На ≤560px прежние 64 px + прилипание: там `--plan-col1-width` по-прежнему читается с живой ячейки.
-  Шапка `.plan-table` липкая: пока таблица умещается, `syncPlanTableFit` (рядом с `syncPlanTableStickyOffsets`) ставит
-  `.table-scroll--fits` и контейнер становится `overflow: clip` — не скролл-контейнером, поэтому шапка липнет к окну. Не умещается
-  (узкое окно, телефон) — внутренний скролл с `max-height: min(75dvh, 720px)`, шапка липнет к этому ящику, а угловые ячейки
-  `thead th:first-child/:nth-child(2)` с `z-index: 3` лежат над липкими слева столбцами. `overflow: hidden` вместо `clip` не годится:
-  он снова делает контейнер скролл-контейнером. Решение «умещается» не зависит от того, скроллится ли ящик сейчас:
-  `table.offsetWidth` сравнивается с полной внутренней шириной ящика (`offsetWidth` минус рамки, вместе с местом под вертикальный
-  скроллбар), а не `scrollWidth` с `clientWidth` — иначе таблица между шириной «со скроллбаром» и «без него» застревала бы в том
-  состоянии, в котором была (классический скроллбар съедает ~15 px `clientWidth`). Нововведённое в таблицу, что расширяет её min-content, проверять тем же замером:
-  `table.style.width = 'min-content'` и `getBoundingClientRect().width` против `clientWidth` контейнера.
-- Курсор ожидания (`wait`/`progress`) — только у занятой кнопки: `.btn:disabled` в `auth.css` показывает `not-allowed`, а
-  `.btn.is-loading:disabled` — `progress` (`withBusyButton` и вход/регистрация ставят `is-loading` вместе с `disabled`).
-  `pointer-events: none` на `.btn.is-loading` убран: с ним курсор брался у соседнего элемента и занятость не была видна.
-  Новое правило с `cursor: wait|progress` обязано содержать `.is-loading`.
-- Быстрая проверка на горизонтальный скролл в консоли страницы:
-  `document.documentElement.scrollWidth > document.documentElement.clientWidth`.
-
-- **Фильтры открытого отчёта липкие** (`.reports-viewer .report-filter-row`, только от 1101px, где это одна-две строки, ~95–170px; ниже сетка складывается
-  в три колонки (~216px, с полями сравнения ~300px), и липкий блок занял бы треть экрана планшета — там он обычный). `position: sticky; top: 0; z-index: 20` — над таблицами и графиками отчёта (≤ 3), под плавающей
-  навигацией (25), докой сохранения (30) и диалогами; меню кастомных селектов (40) раскрываются внутри его контекста наложения.
-  Липнет, потому что у предков (`.shell`, `.view`, `.reports-viewer`, `body`) нет `overflow` — добавлять его туда нельзя. Первая тень — полоса цвета страницы над блоком, чтобы под скруглёнными углами не просвечивал
-  контент. Высота блока публикуется `ResizeObserver`-ом (`reports/stickyFilters.js`) как `--report-filter-height` на `#reports-viewer`,
-  и `[data-jump-target]` внутри просмотрщика берут её в `scroll-margin-top`: прыжок плавающей навигации не прячет блок под фильтрами.
+- Однострочный grid-контейнер (`.field`, `.auth-form`, `.admin-toolbar`…) обязан иметь `grid-template-columns: minmax(0, 1fr)`, не голый `1fr`:
+  иначе колонка не сжимается ниже min-content детей и страница уходит в горизонтальный скролл.
+- Полосы вкладок (`.tabs`, `.settings-tabs`) не переносятся, а скроллятся горизонтально (`overflow-x: auto`); на дашборде активную вкладку возвращает в видимость
+  `scrollActiveTabIntoView()` (`main.js`) — для back/forward. Графики Chart.js подстраиваются по ширине своего canvas
+  (`web/src/chartResponsive.js`, `NARROW_CHART_WIDTH = 480`), а не экрана.
+- План/факт (`.plan-table`): два столбца (филиал + метка строки) прилипают (`position: sticky`); на десктопе первый фиксирован (128 px), на
+  телефоне его ширина не константа — второй читает её из `--plan-col1-width`; `syncPlanTableStickyOffsets()` (`main.js`) меряет её
+  `ResizeObserver`-ом, не `resize` (рендер может пройти при `display: none`, ширина 0).
+- `position: sticky` на первой колонке не прилипает, если таблица искусственно шире содержимого (`min-width` без данных): браузер раздувает
+  колонку. Поэтому у `.reports-table` и `.extra-services-scroll` этот порог на ≤560px обнулён; `.plan-table` не боится — в ней всегда есть третья, не прилипающая колонка.
+- Курсор ожидания (`wait`/`progress`) — только у занятой кнопки: `.btn:disabled` — `not-allowed`, `.btn.is-loading:disabled` — `progress`
+  (`withBusyButton` и вход/регистрация ставят `is-loading` вместе с `disabled`). `pointer-events: none` на `.btn.is-loading` не ставить
+  (курсор брался бы у соседа). Новое правило с `cursor: wait|progress` обязано содержать `.is-loading`.
+- Горизонтальный скролл в консоли: `document.documentElement.scrollWidth > document.documentElement.clientWidth`.
+- **План/факт по сотрудникам — одна таблица «Сотрудники»** (владелец, 16.10.2026): барберы и администраторы вместе, колонки — объединение метрик
+  обеих категорий (`metric_sets`, уже отфильтрованные видимостью), в порядке `planFact.metrics`; колонка есть, если её ячейка есть хотя бы у одной строки (снятые сервером денежные ячейки отсутствуют); подзаголовки
+  «Барберы» / «Администраторы» (`.plan-subheader`), «Без категории» — `unknown`. «—» без цвета — где метрика категории не принадлежит
+  (барберские KPI у администратора, отзывы у барбера, выручка и СЧ у администратора). Метрики `calculation_scope = administrator_records`
+  (`clients`, ОПЗ, доп. услуги) считаются иначе (визит достаётся одному администратору), поэтому подзаголовок «Администраторы» помечен «*»
+  (`.plan-mark`, `dash.scopeAdministratorRecordsHint`) и есть одна сноска (`.plan-footnote`) — только когда такая ячейка нарисована
+  (`hasRecordsCells`). Выбор колонок и ячеек — чистая `mergedStaffTable()` (`web/src/planStaffTable.js`), разметка — `renderMergedStaffSection`
+  (`main.js`); форма ответа бэкенда не менялась (её читают рейтинги). Колонки без плана и фактов **не** отбрасываются.
+- **Колонки таблиц филиала и «Сотрудники» выровнены** (`alignPlanTableColumns` в `main.js`, арифметика — `web/src/planTableColumns.js`): при двух и
+  более таблицах каждая таблица меряется в `min-content`, ключ колонки (`data-metric`, у первых двух — позиция) получает наибольшую ширину по всем таблицам, лишнее место ящика делится между метриками пропорционально ей («Разрез» и «Показатель» его не берут), `table-layout: fixed` + `<colgroup>`; раскладка — по объединению колонок: колонку, которой у таблицы нет (у сотрудников без администраторов — «Отзывы»), забирает соседняя слева. Заголовки `thead` План/факта (не доски) — по центру. Пересчёт — на каждом срабатывании `planTableFitObserver`; скрытая вкладка (ширина 0)
+  остаётся на авто-раскладке. Доска «Планы» и сеть (одна таблица) не трогаются.
+- **План/факт, режим «Планы»** (кнопки «Таблица» / «Планы», выбор в `localStorage`) — транспонированная доска: колонки — люди, строки —
+  метрики, только план (панель графиков, диагностики по фактам и `#plan-fact-title` скрыты; `syncPlanViewButtons`). Строит чистая `planBoard()`
+  (`web/src/planBoard.js`) из **того же** ответа `plan_fact` после `filterPlanFactForDisplay`: то же меню режет строки (одно множество
+  скрытых метрик); подпись кнопки — «Показатели» (`dash.rows`) в доске, «Столбцы» в таблице. Порядок строк зашит в `planBoard` (барберы: выручка, клиенты, СЧ, воск … ОПЗ, доп. услуги; администраторы: отзывы, ОПЗ шт/%, … доп. услуги; сеть — строки барберов + отзывы); без нового запроса. «Итог
+  филиала» — только из `parent_group` (у `barber` колонки нет, у `admin` есть); выбранный сотрудник показан один; в сети итогом стоит последняя колонка «Сеть». «Цель месяца» — `plan_rules`
+  (% от клиентов): у барберов все ключи, у администраторов только `opz_qty` (план ОПЗ администратора = его клиенты × ОПЗ % филиала; остальные строки админов вводят напрямую); нет правил — нет колонки. **Итоговый СЧ взвешенный:**
+  `avg_check_total` в колонках-агрегатах («Итог филиала» в филиале; в сети каждая колонка секции — филиалы и «Сеть»; колонки сотрудников не помечаются: чек введён ими) — плановая выручка ÷ плановые завершённые визиты, а не среднее чеков людей, поэтому помечен `*` и
+  сноской `dash.planBoardWeightedNote` (сноска — только если такая ячейка со значением нарисована; `row.weighted[i]`, `section.hasWeighted`; у личной одноколоночной доски и секций без итога флагов нет). Пустые колонки, строки и секции отбрасываются;
+  `calculation_scope` не смотрится (план «закреплённых» метрик администратора показывается). Сотрудники без категории — отдельная секция со строками барберов, без итога и правил. Выбранный сотрудник (в том числе зажим личной роли) доску не отключает. Залипает один столбец (метрика): правила двух липких столбцов для `.plan-board` на ≤560px сняты.
+- **Ширина страницы.** `.shell--wide` (План/факт, Установка планов, Отчёты; переключается в `setActiveView`) — `min(1680px, 100% - 64px)`,
+  `.shell` — `min(1180px, 100% - 64px)`, **без зависимости от плавающей навигации** (раньше `body.jump-nav-visible` сужал страницу, и край прыгал при смене фильтра сеть↔филиал).
+  32 px по краям — постоянное место навигации (пилюля 38 px при `right: 6px`); менять размер пилюли — только вместе с этим зазором; шире нельзя без запаса внутри содержимого, а запас внутри (padding панелей, `.table-scroll`) сдвигал бы края таблиц при появлении навигации. План/факт
+  умещается без горизонтального скролла от 1280px; держится на: у `.plan-table th.number` нет `text-transform: uppercase`, ячейки `8px 4px`, у
+  `.row-label` нет фиксированной `width`, нет `min-width: 950px`.
+- **«Разрез» — одна фиксированная колонка** (`.branch-cell` и `.plan-table thead th:first-child`, от 561 px: `width`/`min-width`/`max-width:
+  128px`) во всех таблицах План/факта: иначе короткие таблицы растягивали бы её. Названия в `th` идут капсом, ширина подобрана по ЗАГЛАВНЫМ;
+  менять шрифт или регистр — перемерять. На ≤560px — 64 px + прилипание. Шапка `.plan-table` липкая: пока таблица умещается,
+  `syncPlanTableFit` ставит `.table-scroll--fits` и контейнер становится `overflow: clip` (`overflow: hidden` не годится: он делает контейнер
+  скролл-контейнером, и шапка перестаёт липнуть к окну); не умещается — внутренний скролл (`max-height: min(75dvh, 720px)`), угловые
+  ячейки `thead th:first-child/:nth-child(2)` с `z-index: 3`. «Умещается» решает `table.offsetWidth` против полной внутренней ширины ящика (`offsetWidth` минус рамки, вместе с местом под вертикальный скроллбар), а не
+  `scrollWidth` с `clientWidth`: классический скроллбар съедает ~15 px, и таблица застревала бы в прежнем состоянии. Нововведённое, что расширяет min-content таблицы, проверять замером: `table.style.width = 'min-content'` и `getBoundingClientRect().width` против `clientWidth` контейнера. Шапка публикует высоту в `--plan-head-height` (берёт
+  `scroll-margin-top` подзаголовка).
+- **Фильтры открытого отчёта липкие** (`.reports-viewer .report-filter-row`, только от 1101px: ниже блок занял бы треть экрана): `position:
+  sticky; top: 0; z-index: 20` — над таблицами и графиками (≤ 3), под навигацией (25), докой сохранения (30) и диалогами; меню селектов (40) —
+  внутри его контекста. Липнет, потому что у предков (`.shell`, `.view`, `.reports-viewer`, `body`) нет `overflow` — добавлять его туда
+  нельзя. Высота — `--report-filter-height` (`reports/stickyFilters.js`), её берёт `scroll-margin-top` у `[data-jump-target]`.
 
 ### Снимок таблицы (`web/src/tableSnapshot.js`, `snapshotFile.js`)
-Кнопка «Снимок» — в шапке панели План/факта (`#plan-snapshot`: весь `#plan-fact-table`, оба режима, с подзаголовками и сносками) и в каждой
-таблице отчёта (`[data-report-snapshot]` в `.reports-panel__actions`; обработчик — делегированный, на `#reports-report-content`). Нужна администраторам
-с телефона: «вся таблица на одном экране» для скриншота или PDF в мессенджер. Кнопка скрыта, пока таблицы нет (`syncPlanSnapshotButton` после
-каждого `renderPlanFact`; у отчёта — пока у ранжируемой таблицы нет строк).
+Кнопка «Снимок» — в шапке панели План/факта (`#plan-snapshot`: весь `#plan-fact-table`, оба режима, с подзаголовками и сносками) и в каждой таблице отчёта (`[data-report-snapshot]`, делегированный обработчик
+на `#reports-report-content`): «вся таблица на одном экране» для скриншота или PDF с телефона. Скрыта, пока таблицы нет.
 
-- **Картинка, а не масштаб страницы.** CSS `zoom` / `transform` сбивали бы замеры `stickyColumnWidth` и `alignPlanTableColumns` (они читают
-  `getBoundingClientRect` и ширины ящика) и ломали бы липкие шапки. Поэтому таблица рисуется один раз в PNG (`html-to-image`, отдельный чанк,
-  `import()` при первом клике) и показывается в `<dialog id="table-snapshot-dialog">` на ширину диалога; пальцами её увеличивают.
-- **Клон делается синхронно в момент клика**, до первого `await`: пока идёт растеризация, вид может перерисоваться. Клон лежит в `body`
-  (не в `<main>`: за ним следит `MutationObserver` навигации), ширина листа — `max(clientWidth блока, самая широкая таблица)`, чтобы таблицы
-  легли как на экране (инлайновые `colgroup` / `table-layout` от `alignPlanTableColumns` сохраняются). У клона убраны `id`, `data-jump-*`,
-  кнопки, поля, `.view-loader` и `[hidden]`; прокрутка и `position: sticky` в листе отключены (`tableSnapshot.css`). Растеризуется внутренний
-  `.table-snapshot-sheet` в обычном потоке, а не внешний `fixed; left: -100000px`: библиотека копирует вычисленные стили, и корень вынесло бы за кадр.
-  Лист удаляется в `finally`.
-- **Потолок канваса.** iOS Safari режет площадь канваса (16 777 216 пикселей): `snapshotPixelRatio` берёт `min(2, √(16 000 000 / (w·h)))`.
-  Большая таблица получает меньший коэффициент, а не пустую картинку.
-- **Отправка и активация пользователя.** iOS Safari разрешает `navigator.share` только внутри клика. Поэтому файлы готовы до клика
-  (PNG — при открытии диалога, PDF — там же в фоне, кнопка «PDF» до этого `disabled`), а `shareFile` вызывает `share` синхронно из обработчика.
-  «Отправить» (PNG) видна, только если `navigator.canShare({ files })` согласен; «PDF» делится, если может, иначе скачивает. `AbortError` (человек закрыл
-  меню) молчит, остальное — сообщение в диалоге. PDF — одна страница из JPEG (`jpegToPdf`, без библиотеки); страница в пунктах = пиксели × 0,75,
-  не больше 14 400 pt по длинной стороне.
-- **Фокус** при закрытии диалога возвращается на кнопку-источник явно (`returnFocus`): пока рисуется картинка, кнопка `disabled`, а
-  `disabled`-кнопка теряет фокус, и штатный возврат `<dialog>` уходил бы на `<body>` (замер в Chromium).
-- **Ошибки** (нет чанка после деплоя, сбой отрисовки) открывают тот же диалог с одним сообщением; кнопка снова доступна, повторный клик во время
-  работы игнорируется (`busy` + `disabled` / `aria-busy`).
-- **Чистка.** Object URL отзываются, канвас обнуляется при закрытии диалога и на `portal:session-transition` (любая причина); результат, который
-  дорисовался уже после перехода, отбрасывается (`generation`), диалог не открывается. Картинка — данные человека, на выходе она не живёт.
-
+- **Картинка, а не масштаб страницы**: CSS `zoom` / `transform` сбили бы замеры `stickyColumnWidth` / `alignPlanTableColumns` и липкие шапки.
+  Таблица рисуется один раз в PNG (`html-to-image`, отдельный чанк, `import()` при первом клике) в `<dialog id="table-snapshot-dialog">`.
+- **Клон делается синхронно в момент клика**, до первого `await` (вид может перерисоваться). Клон лежит в `body`, не в `<main>` (за ним
+  следит `MutationObserver` навигации); у клона убраны `id`, `data-jump-*`, кнопки, поля, `.view-loader`, `[hidden]`, отключены прокрутка и
+  `position: sticky` (`tableSnapshot.css`). Ширина листа — `max(clientWidth блока, самая широкая таблица)`, инлайновые `colgroup` / `table-layout` от `alignPlanTableColumns` сохраняются. Растеризуется внутренний `.table-snapshot-sheet` в обычном потоке, а не внешний `fixed; left:
+  -100000px` (библиотека копирует вычисленные стили). Лист удаляется в `finally`.
+- **Потолок канваса**: iOS Safari режет площадь (16 777 216 px) — `snapshotPixelRatio` берёт `min(2, √(16 000 000 / (w·h)))`.
+- **Отправка**: iOS Safari разрешает `navigator.share` только внутри клика, поэтому файлы готовы до клика (кнопка «PDF» до этого `disabled`),
+  а `shareFile` зовёт `share` синхронно из обработчика. «Отправить» видна, только если `navigator.canShare({ files })` согласен; PDF делится или скачивается; `AbortError` (закрыл меню) молчит, остальное — сообщение в диалоге. PDF — одна страница из JPEG (`jpegToPdf`), страница в пунктах = пиксели × 0,75, не больше 14 400 pt.
+- Фокус при закрытии диалога возвращается на кнопку явно (`returnFocus`): пока рисуется картинка, кнопка `disabled`, а такая кнопка теряет фокус, и штатный возврат `<dialog>` уходил бы на `<body>`; ошибки (нет чанка после деплоя, сбой отрисовки) — тот же диалог с
+  сообщением; кнопка снова доступна, повторный клик во время работы игнорируется (`busy`).
+- **Чистка**: Object URL отзываются, канвас обнуляется при закрытии и на `portal:session-transition` (любая причина); дорисовавшийся после
+  перехода результат отбрасывается (`generation`). Картинка — данные человека, на выходе она не живёт.
 - **План/факт в режиме «Таблица» — только факт.** Строки `<tr>` несут `data-plan-row` (`plan` / `fact` / `remaining` / `completion_pct`),
-  колонки таблицы выбранного сотрудника — `data-plan-col`; `openTableSnapshot` принимает `prepare`, и `keepFactRows` (`planSnapshot.js`) на клоне
-  оставляет строки факта, перенося `.branch-cell` (rowspan на четвёрку строк) на строку факта. Живая страница не меняется; заголовок секции выбранного сотрудника («План сотрудника: …») в клоне заменяется на `data-fact-title` («Факт сотрудника: …»). Заголовок подписи — «Факт», строка под ним — охват
-  экрана (`planScopeText`) и период факта с экрана (`currentPlanFactPayload.period`), без периода плана и счётчика строк. Доска «Планы» и отчёты снимаются как раньше.
+  колонки выбранного сотрудника — `data-plan-col`; `keepFactRows` (`planSnapshot.js`, через `prepare` в `openTableSnapshot`) на клоне оставляет
+  строки факта, перенося `.branch-cell` на строку факта; заголовок секции выбранного сотрудника — `data-fact-title`; подпись — «Факт», охват
+  экрана (`planScopeText`) и период факта (`currentPlanFactPayload.period`). Живая страница не меняется. Доска «Планы» и отчёты — как есть.
 
 ### Плавающая навигация по блокам (`web/src/jumpNav.js`)
-Один `position: fixed` блок на странице дашборда перечисляет `[data-jump-target]` внутри видимого `section.view.active`
-(метка — `data-jump-label`, уже переведённая) и скроллит к ним. Видимость решает раскладка (`getClientRects().length`), а не
-флаг `hidden`: блок в неактивной вкладке, скрытая финансовая секция Обзора и закрытый просмотрщик отчётов кнопки не получают.
-Меньше двух блоков — навигации нет. Кнопок в разметке больше нет: на Обзоре цели — сами `[data-overview-section]`,
-в План/факте их ставит рендер таблиц, в настройках планов — панели «Филиалы» и «Сотрудники», в отчётах — «Показатели»,
-сравнение, «Графики» и каждая таблица (`renderReportData`). Новый блок, куда стоит прыгать, — это два атрибута, JS не нужен.
+Один `position: fixed` блок перечисляет `[data-jump-target]` внутри видимого `section.view.active` (метка — `data-jump-label`, уже переведённая)
+и скроллит к ним. Видимость решает раскладка (`getClientRects().length`), а не флаг `hidden` (блок в неактивной вкладке, скрытая финансовая секция Обзора и закрытый просмотрщик кнопки не получают); меньше двух блоков — навигации нет. Новый блок,
+куда стоит прыгать, — это два атрибута, JS не нужен (цели: `[data-overview-section]` на Обзоре; в План/факте их ставит рендер таблиц — `plan-branch`, `plan-barbers`, `plan-admins`; в настройках планов — панели «Филиалы» и «Сотрудники»; в отчётах — `renderReportData`).
 
-- Список пересобирается на смену вкладки (`jumpNav.refresh()` в `setActiveView`), `resize` и `MutationObserver` по `<main>`
-  (`hidden` / `class` / `data-jump-target` и состав узлов), через `requestAnimationFrame`; равный набор ключей и подписей
-  DOM не трогает. Отдельного события «цели изменились» нет: рендер, забывший что-то сообщить, не оставит навигацию устаревшей.
-  Мутации внутри `.view-loader` наблюдатель игнорирует (`mutationsAffectJumpTargets`): подпись загрузчика меняет класс
-  каждые 2,7 с, и без фильтра навигация пересчитывалась бы впустую.
-- Десктоп: узкая «пилюля» из точек у правого края (`z-index: 25`, ниже дока сохранения — 30); подписи раскрываются по
-  hover и клавиатурному фокусу (`:focus-visible`, не `:focus-within` — после клика мышью фокус остался бы на кнопке, и
-  подписи висели бы поверх таблицы). Место ей даёт постоянный зазор `.shell` по 32 px (index.html), а не состояние
-  `body.jump-nav-visible`: ширина страницы от навигации не зависит (см. «Одна ширина страницы при любой навигации»).
-  ≤560px: горизонтальная полоса внизу, выше дока сохранения
-  (`body.floating-editor-save-visible`), а `.shell` получает запас снизу (`body.jump-nav-visible`).
-- Текущий блок — последний, чей верх дошёл до 120px от верха окна (`activeTargetIndex`); внизу страницы — последний.
+- Список пересобирается на смену вкладки (`jumpNav.refresh()` в `setActiveView`), `resize` и `MutationObserver` по `<main>`: отдельного события
+  «цели изменились» нет, рендер, забывший что-то сообщить, не оставит навигацию устаревшей. Мутации внутри `.view-loader` наблюдатель
+  игнорирует (`mutationsAffectJumpTargets`).
+- Десктоп: «пилюля» у правого края (`z-index: 25`, ниже дока сохранения — 30); подписи раскрываются по hover и `:focus-visible` (не
+  `:focus-within`: после клика мышью подписи висели бы поверх таблицы); место ей даёт постоянный зазор `.shell`, а не `body.jump-nav-visible`
+  (см. «Мобильная адаптация (web/)», ширина страницы). ≤560px: полоса внизу, выше дока сохранения (`body.floating-editor-save-visible`), `.shell` получает запас снизу (`body.jump-nav-visible`).
+  Текущий блок — последний, чей верх дошёл до 120px от верха окна (`activeTargetIndex`); внизу страницы — последний.
 
 ### Анимация загрузки (`web/src/loader.js`)
-Один индикатор на область данных, два режима. **`first`** — на экране ещё нет данных области: барберский столбик
-с подписью вместо содержимого (всё, что идёт за плейсхолдером, `visibility: hidden`, не `display: none` — холсты графиков
-держат размер). **`refresh`** — данные уже на экране: содержимое тускнеет до `opacity: .45`, а в зазоре над ним бежит
-4-пиксельная полоса нулевой высоты (контент не прыгает). Тайминги — константы модуля: показ через `SHOW_DELAY_MS` (400 мс;
-короткая загрузка не показывает ничего), после показа не меньше `MIN_VISIBLE_MS` (500 мс), подпись `first` меняется каждые
-`CAPTION_INTERVAL_MS` (2,7 с) по девяти ключам `loader.*`. Своей «медленной» заметки нет: через 12 с работает прежняя
-(`showSlowNotice` + «Повторить»). `loader.css` подключает `main.js`, а не `loader.js` (модуль грузится в Node-тестах).
+Один индикатор на область данных, два режима. **`first`** — данных области на экране ещё нет: барберский столбик с подписью вместо содержимого
+(всё за плейсхолдером — `visibility: hidden`, не `display: none`: холсты графиков держат размер). **`refresh`** — данные уже на экране:
+содержимое тускнеет до `opacity: .45`, над ним 4-пиксельная полоса нулевой высоты. Тайминги — константы модуля: `SHOW_DELAY_MS` (400 мс; короткая
+загрузка не показывает ничего), `MIN_VISIBLE_MS` (500 мс), `CAPTION_INTERVAL_MS` (2,7 с, ключи `loader.*`). Своей «медленной» заметки нет:
+через 12 с работает `showSlowNotice` + «Повторить». `loader.css` подключает `main.js`, а не `loader.js` (модуль грузится в Node-тестах).
 
-- **Плейсхолдер** — `<div class="view-loader" hidden></div>` прямым ребёнком области, **после** её органов управления:
-  всё, что за ним, — данные (их скрывает или тускнит сиблинг-правило), всё, что перед ним, — управление и остаётся живым.
-  Дашборд: Обзор — после `#overview-compare-note`, остальные виды — после своего `.toolbar`; отчёты — в `#reports-viewer`
-  между `.report-filter-row` и `#reports-report-content`. Нужен отдельный плейсхолдер — новый вид с запросом данных.
-  Зазор над данными везде один — 16 px (`margin-bottom` панели фильтров или `compare-note`), полоса стоит на `top: -10px`
-  (по центру зазора); у хоста с другим зазором нужен свой `top`. На хостах нет `overflow`/`transform`/`filter`: от этого
-  зависят липкие шапки таблиц и липкие фильтры отчёта.
-- **Режим решает уже показанное.** Дашборд: `viewsWithData.has(view) ? 'refresh' : 'first'` в `beginViewRequest`;
-  отчёты: `refresh`, если есть кэшированная копия или на экране тот же отчёт (`state.renderedReportId`), иначе `first` —
-  с `charts.clear()` и пустым `els.content`. Ошибка без данных, неверный период, закрытый скоуп ссылки, `clear()` и `showCatalog()` сбрасывают
-  `renderedReportId`.
-- **Остановка.** Успешная загрузка снимает индикатор в точке рендера — `markViewLoaded(view)` (он же `viewsWithData.add`,
-  через него же редакторы ручных фактов: хост передаёт `viewsWithData: { add: markViewLoaded }`) — **до** `await syncStatus`,
-  иначе `finally` ждал бы `sync_status`. Любое другое завершение текущего запроса (ошибка, «вытесненная» ошибка, ранний
-  выход) проходит через `finish()`, который `beginViewRequest` оборачивает (`stopLoaderWithRequest`): он останавливает индикатор только у **текущего**
-  запроса, поэтому вытесненный запрос не гасит индикатор нового. Видам, чьи запросы прерывает `setActiveView`, индикатор
-  останавливается там же; `portal:session-transition` гасит все. Старт сессии (`startSession`) запускает `first` активного
-  вида до загрузки филиалов и сотрудников и гасит его, если старт упал; у вида `reports` своего стартового индикатора нет — его
-  запускает `openReport`. В отчётах остановка стоит в `finally` текущего запроса (рендер идёт в том же такте), а также в
-  `clear()`, `showCatalog()`, на ветке неверного периода и при закрытом скоупе ссылки (она ещё и обрывает идущий запрос отчёта:
-  иначе он дорисовал бы данные поверх сообщения «не загрузилось»; оборванный запрос не доходит до своего `finally`, поэтому кнопку «Обновить» ветка включает сама).
-- **Доступность.** Подпись `aria-hidden` (она меняется, а `#reports-viewer` — `aria-live`); один скрытый `role="status"` с
-  `common.loading`; текст пишется таймером в 0 мс **после** снятия `hidden` с плейсхолдера (часть скринридеров не объявляет
-  живую область, возникшую вместе с текстом), `stop()` снимает этот таймер и дописывает текст сразу. `aria-busy` на хосте **не** ставится: `role="status"` лежит внутри хоста, и занятый предок мог бы
-  заглушить единственное объявление. `prefers-reduced-motion`: столбик, полоса и появление
-  подписи не анимируются, подписи всё равно меняются.
+- **Плейсхолдер** — `<div class="view-loader" hidden></div>` прямым ребёнком области **после** её органов управления: всё за ним — данные
+  (скрывает или тускнит сиблинг-правило), всё перед ним остаётся живым. Обзор — после `#overview-compare-note`, остальные виды — после
+  `.toolbar`; отчёты — в `#reports-viewer` между `.report-filter-row` и `#reports-report-content`. Новый вид с запросом данных получает свой
+  плейсхолдер. Зазор над данными 16 px, полоса на `top: -10px` (при другом зазоре нужен свой `top`). На хостах нет `overflow`/`transform`/
+  `filter`: от этого зависят липкие шапки и фильтры отчёта.
+- **Режим решает уже показанное**: дашборд — `viewsWithData.has(view) ? 'refresh' : 'first'` в `beginViewRequest`; отчёты — `refresh`, если есть
+  кэшированная копия или на экране тот же отчёт (`state.renderedReportId`), иначе `first` (с `charts.clear()` и пустым `els.content`).
+  `renderedReportId` сбрасывают ошибка без данных, неверный период, закрытый скоуп ссылки, `clear()` и `showCatalog()`.
+- **Остановка**: успешная загрузка снимает индикатор в точке рендера — `markViewLoaded(view)` (он же `viewsWithData.add`; через него и редакторы
+  ручных фактов) — **до** `await syncStatus`, иначе `finally` ждал бы `sync_status`. Любое другое завершение идёт через `finish()`, который
+  `beginViewRequest` оборачивает (`stopLoaderWithRequest`): гасит индикатор только у **текущего** запроса (вытесненный не гасит индикатор нового).
+  `setActiveView` гасит индикатор прерванных видов, `portal:session-transition` — все; `startSession` запускает `first` активного вида и
+  гасит его, если старт упал; у `reports` стартовый индикатор запускает `openReport`, а гасят его `finally` текущего запроса, `clear()`, `showCatalog()` и ветка неверного периода. Закрытый скоуп ссылки в отчётах ещё и обрывает идущий
+  запрос (иначе он дорисовал бы данные поверх «не загрузилось») и сам включает кнопку «Обновить».
+- **Доступность**: подпись `aria-hidden` (она меняется, а `#reports-viewer` — `aria-live`); один скрытый `role="status"` с `common.loading`, текст пишется таймером в 0 мс **после** снятия
+  `hidden` (часть скринридеров не объявляет живую область, возникшую вместе с текстом); `stop()` снимает этот таймер и дописывает текст сразу. `aria-busy` на хосте **не** ставить: занятый предок мог
+  бы заглушить единственное объявление. `prefers-reduced-motion`: столбик, полоса и появление подписи не анимируются.
 
 ## Testing
 
@@ -1934,129 +1464,96 @@ TEST_DATABASE_URL=postgresql+psycopg2://postgres:pass@localhost/test_db \
 - Публичная регистрация — через `AUTH_PUBLIC_REGISTRATION_ENABLED` (в prod выключена); ссылка на неё на странице входа скрыта, пока сборка фронта не получит `VITE_PUBLIC_REGISTRATION=true`
 - Конкретные значения токенов/ключей/cookie-доменов — только через `.env`; prod-настройки и операционный доступ держать в приватных доках
 - Не документировать в публичном репозитории реальные токены, публичные хосты, правила роутинга и обход аутентификации
-- **Адрес клиента — одна функция**: `client_ip(request)` (`auth_sessions.py`) кормит и лимитер входа, и `ip_hash`
-  сессии. `X-Forwarded-For` ему верят только вместе с `X-Proxy-Secret`, равным `PROXY_SHARED_SECRET`
-  (`secure_equals`); без секрета, с неверным секретом или без самой переменной адрес — `request.client.host`.
-  nginx на VM кладёт секрет из site-конфига (то же значение) и свой `$remote_addr` как адрес посетителя, перезаписывая клиентские
-  `X-Forwarded-For` / `X-Real-IP`. В production `PROXY_SHARED_SECRET`, если задан, ≥ 32 символов. Секрет клиент подделать не может:
-  `proxy_pass_request_headers off` — клиентский `X-Proxy-Secret` до API не доходит.
-  Лимитер — in-memory на процесс; чистятся только тронутый ключ и раз в минуту холостой обход (`_sweep_idle_rate_limit_keys`),
-  не весь словарь на каждый запрос.
-- **CORS** (`DASHBOARD_CORS_ALLOW_METHODS`): GET, POST, PUT, PATCH, DELETE — `PUT` нужен `/dashboard/metric-visibility` и
-  `/dashboard/branch-order`.
-- **Заголовки ответа**: API отвечает с `Cache-Control: private, no-store` по умолчанию (`SECURITY_HEADERS`): всё, что оно
-  отдаёт, — данные пользователя; маршрут со своим заголовком его не теряет (`setdefault`). `/sync/trigger` с чужим
-  `credential_id` — 404.
-- **Сессии**: ротация refresh хранит `previous_token_hash` + `rotated_at` (миграция `0053`). Предыдущий токен
-  принимается ещё раз в течение `REFRESH_ROTATION_GRACE` (30 с, потерянный ответ), позже — это повтор: сессия
-  удаляется (с `commit` до 401, иначе откат вернул бы её), в лог идёт warning без токена. Потолок жизни —
-  `AUTH_SESSION_MAX_AGE_DAYS` (90) от `created_at`: `expires_at` не уезжает дальше, ротация старше потолка отказывает.
-  Живые сессии демо-аккаунта ограничены `DEMO_MAX_ACTIVE_SESSIONS` (200, старейшие удаляются). Ограничение: два
-  одновременных запроса с одним *текущим* токеном по-прежнему дают одному из них 401 — SPA это закрывает
-  блокировкой refresh между вкладками. Сбой `/auth/refresh`
-  (5xx, сеть) не вердикт: окно пароля и выход вызывает только 401/403 от самого refresh (`requestWithReauth`).
-  Сессии удаляются строкой, колонки `revoked_at` больше нет.
-- **Refresh-cookie стоит на двух путях.** Браузер шлёт cookie только на URL под её `Path`, а API живёт и как `/auth/...`
-  (прямой режим), и как `/api/auth/...` (same-origin nginx на VM с `VITE_API_BASE=/api`, Vite dev). С единственным
-  `Path=/auth` на проде refresh никогда не уходил: сессия жила только срок access-токена (90 мин), а выход не отзывал
-  строку сессии. Теперь `set_auth_cookies` ставит `portal_refresh` на `REFRESH_COOKIE_PATHS = ('/auth', '/api/auth')` —
-  одно значение, одни атрибуты (`Secure`/`SameSite`/`HttpOnly`/`Domain` из одного `_cookie_kwargs`), а `clear_auth_cookies`
-  гасит оба пути теми же атрибутами. Пути не вложены друг в друга, поэтому запрос несёт не больше одной копии; тесты
-  читают cookie клиента с явным `path=` — без него httpx бросает `CookieConflict`. Старая cookie `Path=/auth` у уже
-  вошедших остаётся до ближайшего входа/refresh; новый путь добавляется рядом, не вместо.
-- **Мёртвая сессия при несохранённом вводе не стирает страницу.** `revalidateSessionIdentity` (фокус/видимость) на 401/403
-  от самого refresh зовёт `endDeadSession()`: если `hasUnsavedWork()` (реестр в `auth.js`, куда страница кладёт
-  `registerUnsavedWork(() => bool)`; `main.js` регистрирует планы, ручные редакторы и услуги) — показывается диалог
-  пароля с пометкой, что ввод сохранится, и страница стирается только по «Отмена». Без несохранённого — как раньше.
-  Другой пользователь в диалоге не наследует страницу: отпечаток личности не совпадает → `session-changed`, стирание и
-  перезагрузка. Вход того же пользователя, сделанный в другой вкладке, перезагрузкой остальных не кончается:
-  событие `session-changed` теперь несёт `fingerprint`, при совпадении вкладка лишь закрывает свой диалог пароля.
-  `portal:session-transition` — `CustomEvent` с `detail.reason`: `logout` (выход осознанный), `idle`, `ended`, `changed`;
-  подписчикам (черновики) важно различать: после `idle`/`ended` ввод обязан пережить, после `logout` — нет. Причина едет и в
-  межвкладочном `session-ended` (`reason`: `logout` для осознанного выхода и смены пароля, `idle` для выхода по простою;
-  без поля — `ended`): черновики лежат в `sessionStorage` каждой вкладки, и выход в одной вкладке иначе оставил бы набранное
-  в соседних на общем компьютере. Лишний `reason` из чужого сообщения безопасен — значение вне списка читается как `ended`.
-  После начала перехода `rememberSessionPayload` ничего не пишет: запоздавший ответ зонда вернул бы email в localStorage.
-- **Время ожидания диалога пароля не входит в `REQUEST_TIMEOUT_MS`** (190 с): `requestJson` передаёт в `requestWithReauth`
-  свой `reauthFn`, который ставит таймаут запроса на паузу (`createTimedAbortContext().pauseTimeout/resumeTimeout`), и
-  повтор после входа получает полный таймаут.
-- **Ошибка запроса несёт подробности для обращения в поддержку.** `authFetch` вешает на каждую ошибку `error.details`
-  (`web/src/errorDetails.js`: метод, путь без query, статус HTTP или «нет ответа», текст `detail` сервера — поле и сообщение по
-  каждому замечанию 422, без `input`, потому что он эхом возвращает введённое, в том числе пароль, — текст браузера и местное время).
-  Отклонённый `fetch` (`TypeError`: сервер лёг, нет сети) превращается в `authErrors.network` вместо сырого «Failed to fetch»;
-  `AbortError` и `SessionTransitionError` проходят как есть. 422 с ошибкой поля `email` читается как `authErrors.invalidEmail`.
-  Баннеры админки (страничный и каждой модалки) рисует один `renderAlert`: у ошибки с `details` круглая иконка слева становится
-  кнопкой «i» (раскрывает подробности под сообщением, они же в `title`), без `details` — прежняя иконка. Новый баннер ошибки
-  в админке рисовать через `renderAlert` / `showError` / `showFieldError`, а не через `textContent`. Адрес в формах админки до запроса
-  проверяет `looksLikeEmail` (домен с точкой), пароль — `passwordProblem` (от 8 символов и до 72 байт).
-- **«Вы ещё здесь?»** (`web/src/idleSession.js`): `IDLE_PROMPT_AFTER_MS` (2 ч) без активности ВО ВСЕХ вкладках origin —
-  модалка с пятиминутным отсчётом (`IDLE_LOGOUT_AFTER_MS` = 2 ч 5 мин). Последняя активность — общий ключ
-  `portal_last_activity` в localStorage (запись не чаще раза в 5 с), решение каждая вкладка принимает по нему сама, раз в
-  секунду и на фокус/видимость (после сна ноутбука — сразу), поэтому подтверждение в одной вкладке закрывает модалки
-  остальных. После порога обычная активность (мышь, клавиши) сессию **не** спасает — только кнопка: иначе случайное
-  движение мыши по уснувшему ноутбуку продлило бы чужой сеанс. Загрузка/перезагрузка страницы — действие пользователя и
-  счёт обнуляет. По истечении: `clearSensitivePage('idle')` (экран гаснет, черновики сбрасываются на диск; черновики есть только у планов, отзывов, ОПЗ и Яндекс Пэй — несохранённые
-  правки услуг при таком выходе теряются, и текст диалога `idle.text` называет ровно эти четыре редактора), серверный
-  `/auth/logout` с таймаутом 5 с, затем `session-ended` соседям и переход на `/login.html?return_to=…` (порядок важен:
-  соседи уходят на логин только когда cookie уже сняты, иначе страница входа вернула бы их обратно). Не включается для
-  демо-аккаунта и публичных страниц; запущен там, где `auth.js` получил личность (`rememberSessionPayload`). Параллельные
-  выходы из нескольких вкладок допустимы: logout идемпотентен.
-- **Жизненный цикл учёток**: время в БД — наивный UTC из `clock.utcnow()`, не `datetime.utcnow()`. Удаление пользователя
-  или кредов не блокируется историей: `portal_audit_events.actor_user_id`, `sync_jobs.credential_id` и
-  `sync_job_events.credential_id` — `ON DELETE SET NULL` (миграция `0055`). Удаление пользователя, заведённого из CRM,
-  отвязывает его строку `staff` (`detach_portal_user_staff`). Смена email и отключение через админку сбрасывают сессии, а
-  неиспользованные reset-токены — только при смене email (письмо ушло на старый адрес); смена роли и филиалов не трогает ни то, ни другое. `consume_email_token` не коммитит: трата токена и то, ради
-  чего он выдан, попадают в одну транзакцию. `list_branches` при сбое `get_groups()` — ошибка, не пустой список (иначе
-  сохранился бы ключ без филиалов); `authenticate()` успешна только с `user_token`.
-- **Контекст запроса грузится один раз**: `require_auth` кладёт `PortalUser` в `request.state.portal_user`, а
-  `get_current_user` и `forbid_demo` читают его (и `AccessContext.is_demo`), не декодируя JWT и не обращаясь в БД
-  повторно. Запасного разбора токена больше нет: каждый маршрут вне `OPEN_PATHS` проходит общий `require_api_key`, поэтому
-  без `request.state.portal_user` `get_current_user` отвечает 401, а `forbid_demo` (демо = `ctx.is_demo`) пропускает
-  вызывающего без пользователя (ключ API, sync-токен). Открытые пути на этих зависимостях не стоят (тест обходит `app.routes`).
-  Отдельной зависимости `is_demo_request` нет — дашборд читает `ctx.is_demo`. `enforce_csrf(request)` без исключения для
-  Bearer: запрос без сессионной cookie (Bearer, ключ API) CSRF не проверяется вовсе. Отзыв чужих сессий —
-  `DELETE /auth/sessions/{id}`, всех — `/auth/logout-all`.
-- **Открытые пути — один набор** `OPEN_PATHS` (`open_paths.py`), точные совпадения; его читают `auth_deps.require_auth`
-  и `api.require_api_key`. Новый публичный маршрут добавляется туда осознанно: префиксов больше нет, а
-  `/auth/logout-all` — обычный защищённый маршрут.
+- **Адрес клиента — одна функция**: `client_ip(request)` (`auth_sessions.py`) кормит и лимитер входа, и `ip_hash` сессии. `X-Forwarded-For` ему
+  верят только вместе с `X-Proxy-Secret`, равным `PROXY_SHARED_SECRET` (сравнение — `secure_equals`); без секрета, с неверным секретом или без самой
+  переменной адрес — `request.client.host`. nginx кладёт секрет из site-конфига и свой `$remote_addr`, перезаписывая клиентские
+  `X-Forwarded-For` / `X-Real-IP`. В production `PROXY_SHARED_SECRET`, если задан, ≥ 32 символов. Клиент секрет подделать не может:
+  `proxy_pass_request_headers off` — его `X-Proxy-Secret` до API не доходит. Лимитер — in-memory на процесс; чистятся только тронутый ключ и
+  раз в минуту холостой обход (`_sweep_idle_rate_limit_keys`), не весь словарь на каждый запрос.
+- **CORS** (`DASHBOARD_CORS_ALLOW_METHODS`): GET, POST, PUT, PATCH, DELETE — `PUT` нужен `/dashboard/metric-visibility` и `/dashboard/branch-order`.
+- **Заголовки ответа**: API отвечает с `Cache-Control: private, no-store` по умолчанию (`SECURITY_HEADERS`): всё, что оно отдаёт, — данные
+  пользователя; маршрут со своим заголовком его не теряет (`setdefault`). `/sync/trigger` с чужим `credential_id` — 404.
+- **Сессии**: ротация refresh хранит `previous_token_hash` + `rotated_at` (миграция `0053`). Предыдущий токен принимается ещё раз в течение
+  `REFRESH_ROTATION_GRACE` (30 с, потерянный ответ), позже — это повтор: сессия удаляется (с `commit` до 401, иначе откат вернул бы её), в лог
+  идёт warning без токена. Потолок жизни — `AUTH_SESSION_MAX_AGE_DAYS` (90) от `created_at`: `expires_at` не уезжает дальше, ротация старше
+  потолка отказывает. Живые сессии демо-аккаунта ограничены `DEMO_MAX_ACTIVE_SESSIONS` (200, старейшие удаляются). Два одновременных запроса
+  с одним *текущим* токеном дают одному из них 401 — SPA закрывает это блокировкой refresh между вкладками. Сбой `/auth/refresh` (5xx, сеть) —
+  не вердикт: окно пароля и выход вызывает только 401/403 от самого refresh (`requestWithReauth`). Сессии удаляются строкой (`revoked_at` нет).
+- **Refresh-cookie стоит на двух путях.** Браузер шлёт cookie только на URL под её `Path`, а API живёт и как `/auth/...` (прямой режим), и как
+  `/api/auth/...` (same-origin nginx, `VITE_API_BASE=/api`, Vite dev); с единственным `Path=/auth` на проде refresh не уходил бы (сессия
+  жила бы лишь срок access-токена, 90 мин, выход не отзывал бы строку сессии). Поэтому `set_auth_cookies` ставит `portal_refresh` на
+  `REFRESH_COOKIE_PATHS = ('/auth', '/api/auth')` — одно значение, одни атрибуты (`Secure`/`SameSite`/`HttpOnly`/`Domain` из одного
+  `_cookie_kwargs`), а `clear_auth_cookies` гасит оба пути теми же атрибутами. Пути не вложены, запрос несёт не больше одной копии; тесты
+  читают cookie клиента с явным `path=` (без него httpx бросает `CookieConflict`). Старая cookie `Path=/auth` у вошедших живёт до ближайшего
+  входа/refresh; новый путь добавляется рядом, не вместо.
+- **Мёртвая сессия при несохранённом вводе не стирает страницу.** На 401/403 от самого refresh (проверка на фокус/видимость, `revalidateSessionIdentity`) `endDeadSession()` при `hasUnsavedWork()`
+  (реестр `registerUnsavedWork(() => bool)` в `auth.js`; `main.js` регистрирует планы, ручные редакторы и услуги) показывает диалог пароля (ввод сохранится), и
+  страница стирается только по «Отмена»; без несохранённого — стирается сразу. Другой пользователь страницу не наследует: отпечаток личности не совпал → `session-changed`, стирание и перезагрузка; вход того же пользователя в другой вкладке перезагрузкой остальных не кончается (`session-changed` несёт `fingerprint`, при совпадении вкладка лишь закрывает свой диалог пароля). `portal:session-transition` несёт `detail.reason` (`logout`, `idle`, `ended`, `changed`): после `idle`/`ended`
+  черновики обязаны пережить, после `logout` — нет; причина едет и в межвкладочном `session-ended` (без поля или вне списка — `ended`),
+  иначе выход в одной вкладке оставил бы набранное в соседних на общем компьютере. После начала перехода `rememberSessionPayload` ничего не
+  пишет (запоздавший ответ зонда вернул бы email в localStorage). Ожидание диалога пароля не входит в `REQUEST_TIMEOUT_MS` (190 с):
+  `requestJson` (`dashboardApi.js`) передаёт в `requestWithReauth` свой `reauthFn`, ставящий таймаут на паузу (`pauseTimeout/resumeTimeout`),
+  и повтор после входа получает полный таймаут.
+- **Ошибка запроса несёт `error.details` для поддержки** (`web/src/errorDetails.js`: метод, путь без query, статус, `detail` сервера, время);
+  отклонённый `fetch` (`TypeError`: сервер лёг, нет сети) становится `authErrors.network`, а не сырым «Failed to fetch»; `AbortError` и `SessionTransitionError` проходят как есть; 422 с ошибкой поля `email` читается как `authErrors.invalidEmail`. Замечания 422 — поле и сообщение, **без `input`**: он эхом возвращает введённое, в том числе пароль. Баннеры админки — только через
+  `renderAlert` / `showError` / `showFieldError`, не `textContent`. Адрес в формах админки проверяет `looksLikeEmail`, пароль — `passwordProblem`
+  (от 8 символов и до 72 байт).
+- **«Вы ещё здесь?»** (`web/src/idleSession.js`): `IDLE_PROMPT_AFTER_MS` (2 ч) без активности ВО ВСЕХ вкладках (общий ключ
+  `portal_last_activity` в localStorage) — модалка с пятиминутным отсчётом (`IDLE_LOGOUT_AFTER_MS` = 2 ч 5 мин). После порога сессию спасает
+  только кнопка, не мышь/клавиши (случайное движение по уснувшему ноутбуку не должно продлевать чужой сеанс); решение каждая вкладка принимает по общему ключу сама — раз в секунду и на фокус/видимость (подтверждение в одной закрывает модалки остальных); загрузка страницы — действие пользователя и обнуляет счёт. По истечении:
+  `clearSensitivePage('idle')` (черновики сбрасываются на диск; они есть только у планов, отзывов, ОПЗ и Яндекс Пэй — правки услуг
+  теряются, и `idle.text` называет ровно эти четыре редактора), серверный `/auth/logout` (таймаут 5 с), затем `session-ended` соседям и
+  переход на `/login.html?return_to=…` — именно в этом порядке: иначе страница входа вернула бы соседей обратно, пока cookie ещё не сняты.
+  Не включается для демо-аккаунта и публичных страниц; logout идемпотентен.
+- **Жизненный цикл учёток**: время в БД — наивный UTC из `clock.utcnow()`, не `datetime.utcnow()`. Удаление пользователя или кредов не
+  блокируется историей: `portal_audit_events.actor_user_id`, `sync_jobs.credential_id`, `sync_job_events.credential_id` — `ON DELETE SET NULL`
+  (миграция `0055`). Удаление пользователя, заведённого из CRM, отвязывает его строку `staff` (`detach_portal_user_staff`). Смена email и
+  отключение через админку сбрасывают сессии; неиспользованные reset-токены сбрасывает только смена email (письмо ушло на старый адрес);
+  смена роли и филиалов не трогает ни то, ни другое. `consume_email_token` не коммитит: трата токена и то, ради чего он выдан, — одна
+  транзакция. `list_branches` при сбое `get_groups()` — ошибка, не пустой список (иначе сохранился бы ключ без филиалов); `authenticate()`
+  успешна только с `user_token`.
+- **Контекст запроса грузится один раз**: `require_auth` кладёт `PortalUser` в `request.state.portal_user`, а `get_current_user` и `forbid_demo`
+  читают его (и `AccessContext.is_demo`), не декодируя JWT и не ходя в БД. Запасного разбора токена нет: каждый маршрут вне `OPEN_PATHS` проходит
+  общий `require_api_key`, поэтому без `request.state.portal_user` `get_current_user` отвечает 401, а `forbid_demo` пропускает вызывающего без
+  пользователя (ключ API, sync-токен). Открытые пути на этих зависимостях не стоят (тест обходит `app.routes`). Дашборд читает `ctx.is_demo`.
+  `enforce_csrf(request)` без исключения для Bearer: запрос без сессионной cookie (Bearer, ключ API) CSRF не проверяется вовсе. Отзыв чужих
+  сессий — `DELETE /auth/sessions/{id}`, всех — `/auth/logout-all`.
+- **Открытые пути — один набор** `OPEN_PATHS` (`open_paths.py`), точные совпадения; его читают `auth_deps.require_auth` и `api.require_api_key`.
+  Новый публичный маршрут добавляется туда осознанно: префиксов нет, `/auth/logout-all` — обычный защищённый маршрут.
 
 ### Фронтенд на VM: nginx, same-origin
-SPA раздаёт nginx на VM: статика из `current` (симлинк на релиз) и `/api/...` прокси на `127.0.0.1:8000`, всё на одном хосте.
-Домен, сертификат, секрет и site-конфиг — только в приватной документации; в репозитории хостов и доменов нет.
+SPA раздаёт nginx на VM: статика из `current` (симлинк на релиз) и `/api/...` прокси на `127.0.0.1:8000`, всё на одном хосте. Домен,
+сертификат, секрет и site-конфиг — только в приватной документации; в репозитории хостов и доменов нет.
 
-- **nginx проксирует не всё, а allowlist.** Таблица маршрутов — `deploy/nginx/routes.mjs` (`auth` / `dashboard` / `onboarding` с `/api`
-  и без него, `GET|HEAD /api/health`; `/sync/*`, `/docs`, `/openapi.json`, `/api/<что-то другое>` не проксируются; 404 для неизвестного пути,
-  405 с `Allow` для известного с чужим методом, тела — `{"error","detail"}`, которые SPA узнаёт как «маршрут не обслуживается»).
-  `scripts/nginx-allowlist.mjs` превращает таблицу в `deploy/nginx/api-allowlist.conf` (две `map`), `web/tests/nginx-allowlist.test.mjs`
-  падает, если файл устарел, и сверяет карты с таблицей на каждом маршруте, методе и «почти совпавшем» пути.
-  Заголовки запроса — только явный список (`proxy_pass_request_headers off` + `proxy_set_header`): `Authorization`,
-  `X-API-Key`, `X-Sync-Token` до API не доходят. Путь на VM: `auth` → `/dashboard/auth/…`, `onboarding` → `/dashboard/onboarding/…`.
-  Query-строка уходит в API как есть.
+- **nginx проксирует не всё, а allowlist.** Таблица маршрутов — `deploy/nginx/routes.mjs` (`auth` / `dashboard` / `onboarding` с `/api` и без
+  него, `GET|HEAD /api/health`); `/sync/*`, `/docs`, `/openapi.json`, `/api/<что-то другое>` не проксируются. 404 — неизвестный путь, 405 с
+  `Allow` — известный с чужим методом; тела `{"error","detail"}` SPA узнаёт как «маршрут не обслуживается». `scripts/nginx-allowlist.mjs`
+  превращает таблицу в `deploy/nginx/api-allowlist.conf` (две `map`), `web/tests/nginx-allowlist.test.mjs` падает на устаревшем файле и сверяет
+  карты с таблицей на каждом маршруте, методе и «почти совпавшем» пути. Заголовки запроса — только явный список (`proxy_pass_request_headers
+  off` + `proxy_set_header`): `Authorization`, `X-API-Key`, `X-Sync-Token` до API не доходят. Путь на VM: `auth` → `/dashboard/auth/…`,
+  `onboarding` → `/dashboard/onboarding/…`. Query-строка уходит в API как есть.
 - **`X-Proxy-Secret` ставит сам nginx, `X-Forwarded-For` / `X-Real-IP` — `$remote_addr` (перезапись, не дописывание).** API верит адресу только
-  вместе с секретом (`client_ip`), поэтому клиентские значения обоих заголовков отбрасываются; значение секрета — `PROXY_SHARED_SECRET`
-  из `.env` API. Если перед nginx когда-нибудь встанет CDN, `$remote_addr` нужно заменить на настоящий адрес посетителя (`realip`), иначе
-  лимитер входа сложит всех в одну корзину.
+  вместе с секретом (`client_ip`), поэтому клиентские значения обоих заголовков отбрасываются; секрет — `PROXY_SHARED_SECRET` из `.env` API.
+  Если перед nginx встанет CDN, `$remote_addr` нужно заменить на настоящий адрес посетителя (`realip`), иначе лимитер входа сложит всех в одну корзину.
 - **Таймауты: `proxy_read_timeout` 150 с** (`statement_timeout` API, 170 с, остаётся выше), `client_max_body_size` 4500k. Падение или таймаут
-  API — JSON 503 / 504 с `detail`, ответ самого API с этими кодами проходит как есть.
+  API — JSON 503 / 504 с `detail`; ответ самого API с этими кодами проходит как есть.
 - **Заголовки статики — `deploy/nginx/static-headers.conf`** (CSP `script-src 'self'`, Referrer-Policy, X-Content-Type-Options, X-Frame-Options;
-  без хостов), его подключает server-блок. `add_header` наследуется только в локации, где своих нет: у API-локаций свой `add_header`, поэтому
-  снимок они не получают (API отдаёт свои заголовки, строже), там только HSTS; новая локация со своим `add_header` обязана подключить
-  снимок сама. HSTS живёт в site-конфиге (зависит от жизни сертификата). `script-src 'self'` безопасен, пока страницы запускают только модули
-  из файлов: на сайте не должно быть inline-скриптов, обработчиков `on…=` в разметке, `eval` / `new Function` и скриптов, создаваемых из кода;
-  `web/tests/csp-script-src.test.mjs` проверяет и снимок, и исходники. Стили сознательно не ограничены (`style-src` нет) — диалог повторного
-  входа берёт правила из `web/src/reauth.css`, а не из встроенного `<style>`, но запрета на них нет. API отдаёт собственный, более строгий CSP (`api.py`).
-- **Кэш и страницы.** `expires -1` (HTML — всегда с ревалидацией) на API-локации отключён: иначе он затирает `Cache-Control: private, no-store`
-  API. Длинный кэш (`expires 1y`) — только `/assets/` (хэшированные файлы Vite). `/settings`, `/reports`, `/reports/*` — `try_files` на страницы SPA.
-- **Куки.** Сессия привязана к хосту (cookie без `Domain`). Пути refresh-cookie (`/auth`, `/api/auth`), nginx их не переписывает. CORS не нужен
+  без хостов), его подключает server-блок. `add_header` наследуется только в локации, где своих нет: у API-локаций свой `add_header`, снимок
+  они не получают (API отдаёт свои, более строгие заголовки и CSP, `api.py`), там только HSTS; новая локация со своим `add_header` обязана
+  подключить снимок сама. HSTS живёт в site-конфиге (зависит от жизни сертификата). `script-src 'self'` безопасен, пока страницы запускают
+  только модули из файлов: на сайте не должно быть inline-скриптов, обработчиков `on…=` в разметке, `eval` / `new Function` и скриптов,
+  создаваемых из кода; `web/tests/csp-script-src.test.mjs` проверяет и снимок, и исходники. Стили сознательно не ограничены (`style-src` нет);
+  диалог повторного входа берёт правила из `web/src/reauth.css`, а не из встроенного `<style>`.
+- **Кэш и страницы.** `expires -1` (HTML — с ревалидацией) на API-локации отключён: иначе он затирает `Cache-Control: private, no-store` API.
+  Длинный кэш (`expires 1y`) — только `/assets/` (хэшированные файлы Vite). `/settings`, `/reports`, `/reports/*` — `try_files` на страницы SPA.
+- **Куки.** Сессия привязана к хосту (cookie без `Domain`). Пути refresh-cookie (`/auth`, `/api/auth`) nginx не переписывает. CORS не нужен
   (same-origin); `APP_PUBLIC_URL` — база ссылок в письмах.
-- **Как доезжает статика.** CI (`deploy-vm.yml`): job Frontend собирает `web/dist` (`VITE_API_BASE=/api`; необязательные
-  `VITE_DEMO_ORIGIN`, `VITE_DEMO_AUTOLOGIN`, `VITE_PUBLIC_REGISTRATION` — переменные репозитория) и кладёт в артефакт
-  `web-dist`; job Deploy VM после бэкенда и запуска синка по SSH распаковывает сборку в `releases/.incoming-<релиз>` каталога `VM_WEB_ROOT`
-  (секрет с умолчанием) и только целую переименовывает в `releases/<время>-<sha>`, затем атомарно переставляет симлинк `current` (`mv -T`);
-  хранит пять последних релизов (только что включённый не ротируется, брошенные `.incoming-*` чистятся). Нет каталога на VM — шаг пропускается
-  с notice; сбой самого SSH — ошибка шага, а не «каталога нет». nginx перезагружать не нужно. Откат — перекинуть `current` на прежний релиз.
-  Копии `api-allowlist.conf` и `static-headers.conf` в `/etc/nginx` ставятся руками (нужен root); если одна из них отличается от файла
-  в репозитории на VM, шаг печатает warning.
+- **Как доезжает статика.** CI (`deploy-vm.yml`): job Frontend собирает `web/dist` (`VITE_API_BASE=/api`; необязательные `VITE_DEMO_ORIGIN`,
+  `VITE_DEMO_AUTOLOGIN`, `VITE_PUBLIC_REGISTRATION` — переменные репозитория); job Deploy VM после бэкенда и запуска синка по SSH распаковывает сборку в
+  `releases/.incoming-<релиз>` каталога `VM_WEB_ROOT`, переименовывает целиком в `releases/<время>-<sha>` и атомарно переставляет симлинк
+  `current` (`mv -T`); хранит пять последних (только что включённый не ротируется, брошенные `.incoming-*` чистятся). Нет каталога на VM — шаг пропускается с notice; сбой самого SSH — ошибка шага. nginx
+  перезагружать не нужно; откат — перекинуть `current`. Копии `api-allowlist.conf` и `static-headers.conf` в `/etc/nginx` ставятся руками
+  (нужен root); при расхождении с репозиторием шаг печатает warning.
 
 ### SQL Safety
 - Прикладные запросы используют SQLAlchemy ORM/Core и параметризованные выражения
@@ -2076,127 +1573,95 @@ SPA раздаёт nginx на VM: статика из `current` (симлинк 
 ## Common Patterns
 
 ### Добавление нового endpoint
-1. Портальные/дашборд-эндпоинты — в `auth_routes.py` / `dashboard_routes.py` / `onboarding_routes.py` с зависимостями
-   доступа (`get_dashboard_access`, роли); модель в `models.py` и тест рядом, `api.py` не трогать. На мутации навешивать
-   `forbid_demo`, чтобы демо оставался read-only. Все скалярные id в query/path/header/телах — `Int32Id` из `api_types.py`
-   (весь диапазон int32, иначе 422: номер вне него упал бы на int32-колонке 500-кой; знак не проверяется — id демо-тенанта отрицательные); списки в телах — не длиннее `MAX_BODY_ITEMS`.
-   Настройки тенанта (`/dashboard/metric-visibility`): у ключа API и платформенного админа своего
-   тенанта нет, поэтому они обязаны назвать его заголовком `X-Portal-Account-Id` (400 без него или с несуществующим id: иначе
-   неизвестный id всплывал 409 от внешнего ключа при сохранении; `/dashboard/branch-order` идёт тем же
-   `_require_visibility_portal_account_id`) — «самый маленький id»
-   и автосоздание аккаунта из GET убраны. `/dashboard/services*` его не требует (каталог и разметка идут по филиалам, не по
-   тенанту). `ValueError` сервиса в этих роутах превращается в 400 одним
+1. Портальные/дашборд-эндпоинты — в `auth_routes.py` / `dashboard_routes.py` / `onboarding_routes.py` с зависимостями доступа
+   (`get_dashboard_access`, роли); модель в `models.py` и тест рядом, `api.py` не трогаем. На мутации навешивать `forbid_demo` (демо read-only).
+   Все скалярные id в query/path/header/телах — `Int32Id` из `api_types.py` (весь диапазон int32, иначе 422: номер вне него упал бы на
+   int32-колонке 500-кой; знак не проверяется — id демо-тенанта отрицательные); списки в телах — не длиннее `MAX_BODY_ITEMS`.
+   Настройки тенанта (`/dashboard/metric-visibility`, `/dashboard/branch-order` — через `_require_visibility_portal_account_id`): у ключа API и
+   платформенного админа своего тенанта нет, поэтому они обязаны назвать его заголовком `X-Portal-Account-Id` (400 без него или с
+   несуществующим id: иначе неизвестный id всплывал бы 409 от внешнего ключа); «самого маленького id» и автосоздания аккаунта из GET нет.
+   `/dashboard/services*` его не требует (каталог и разметка идут по филиалам). `ValueError` сервиса в этих роутах превращается в 400 одним
    `_value_error_as_400()` вокруг всего try/except (а не вместо узких обработчиков 409), вторую копию писать не надо.
-2. Маршрут в таблицу `deploy/nginx/routes.mjs`, затем `node scripts/nginx-allowlist.mjs > deploy/nginx/api-allowlist.conf`
-   (локально всё работает и без этого, а на сайте запрос вернёт 404); `web/tests/nginx-allowlist.test.mjs` падает на устаревшем файле.
-   Вложенный путь (`plan/settings`, `payments/yandex_pay`) достаточно внести в таблицу. Файл ставится на VM по приватному
-   ранбуку (копия в `/etc/nginx` и `nginx -s reload`; пока этого нет, маршрут на сайте отвечает 404, шаг CI печатает warning о расхождении).
-   Клиентские заголовки запроса, кроме явного списка (`Accept`, `Content-Type`, `Cookie`, `User-Agent`, `X-CSRF-Token`,
-   `X-Portal-Account-Id`), nginx отбрасывает: новому заголовку нужен `proxy_set_header` в site-конфиге (приватная документация).
+2. Маршрут в таблицу `deploy/nginx/routes.mjs`, затем `node scripts/nginx-allowlist.mjs > deploy/nginx/api-allowlist.conf` (локально всё
+   работает и без этого, на сайте запрос вернёт 404); `web/tests/nginx-allowlist.test.mjs` падает на устаревшем файле. Вложенный путь
+   (`plan/settings`, `payments/yandex_pay`) достаточно внести в таблицу. Файл ставится на VM по приватному ранбуку (копия в `/etc/nginx` и
+   `nginx -s reload`; пока этого нет, маршрут на сайте отвечает 404, шаг CI печатает warning). Клиентские заголовки запроса, кроме явного
+   списка (`Accept`, `Content-Type`, `Cookie`, `User-Agent`, `X-CSRF-Token`, `X-Portal-Account-Id`), nginx отбрасывает: новому заголовку
+   нужен `proxy_set_header` в site-конфиге (приватная документация).
 
 ### Окна синхронизации: почему одного инкремента мало
-Оплату в YClients нередко проводят задним числом — через день, неделю или месяц после
-визита. `incremental` перечитывает только `SYNC_LOOKBACK_DAYS` (2) вокруг чекпоинта,
-поэтому такая операция не приезжает **никогда**: визит остаётся без денег, а закрытый
-месяц занижает выручку навсегда. Обратная сторона — удалённые в YClients строки
-(например, задвоенные оплаты) у нас остаются, и месяц завышается.
+Оплату в YClients нередко проводят задним числом (через день, неделю, месяц). `incremental` перечитывает только `SYNC_LOOKBACK_DAYS` (2)
+вокруг чекпоинта, поэтому такая операция не приезжает **никогда**: закрытый месяц занижает выручку навсегда. Обратная сторона — удалённые в
+YClients строки (например, задвоенные оплаты) у нас остаются, и месяц завышается.
 
-Лечит это `refresh`: то же «удалить окно и перечитать», что и `full`, но по скользящему
-окну `SYNC_REFRESH_DAYS` (90) вместо всей истории — достаточно дёшево для ночного
-прогона. `full` остаётся для истории целиком (для филиала с 2018 года это часы, ночью
-такое не гоняют).
+Лечит `refresh`: то же «удалить окно и перечитать», что и `full`, но по скользящему окну `SYNC_REFRESH_DAYS` (90) — достаточно дёшево для
+ночного прогона. `full` — вся история (для филиала с 2018 года это часы, ночью не гоняют).
 
-- Оба режима, что чистят окно, определяются через `is_full_refresh_mode()`. Новый код,
-  решающий «перечитывать или дописывать», обязан спрашивать её, а не сравнивать с
-  `'full'`: иначе `refresh` окажется append-only и не удалит то, что удалил YClients.
+- Оба режима, что чистят окно, определяются через `is_full_refresh_mode()`. Новый код, решающий «перечитывать или дописывать», обязан
+  спрашивать её, а не сравнивать с `'full'`: иначе `refresh` станет append-only и не удалит то, что удалил YClients.
 - Нижняя граница окна — не раньше `reporting_start_date` филиала (`refresh_sync_start_date`).
-- **Контрольная точка только филиальная.** Режим и окно филиала решают `transactions_last_success_date:company:<id>` и маркер
-  покрытия (`resolve_company_sync_window`); глобального ключа без суффикса нет — читалка и фолбэк «у филиала есть строки» убраны.
-  Филиал без своей точки идёт в `full`, даже если маркер покрытия и строки есть: так бывает после `full`, где упал только шаг
-  без покрытия (маркер восстановился, точка не записана), и возобновлять оттуда нельзя — резать окно нечем. Прогон без
-  единого филиала (нет кредов) отдаёт в `window_start` / `mode`: `refresh` — своё скользящее окно (`SYNC_REFRESH_DAYS`),
-  остальные режимы — всю историю и `full` (`resolve_sync_window`). `resolve_company_sync_window` читает ключ точки один раз;
-  рубильник `SYNC_INCREMENTAL=false` отправляет и `incremental`, и `refresh` в `full` с нижней границей `reporting_start_date` филиала.
-- `refresh` не подменяет обязательный первый `full`: филиал без подтверждённого
-  исторического покрытия (`historical_coverage_state_key`) эскалируется в `full`, иначе
-  90-дневный срез сертифицировал бы историю, которой нет.
-- Маркер `historical_coverage_state_key` утверждает ровно одно — что строки покрытия
-  накрывают всю историю филиала, — и восстанавливается по самим строкам, независимо от
-  того, все ли шаги прошли. Иначе падение шага, не владеющего покрытием (комментарии,
-  аналитика), стоило бы филиалу полной пересинхронизации истории на следующем прогоне.
-- Если упал шаг, который покрытием владеет, оно остаётся суженным и следующий запуск
-  сам уйдёт в `full` — так же, как это работает для упавшего `full`.
-- `SYNC_INCREMENTAL=false` — рубильник оконных чтений; он глушит и `refresh`, не только
-  `incremental`.
-- **Здоровье тенанта — не статус глобального прогона.** Прогон по всем тенантам кончается `success`, даже если
-  у одного сломались credentials (шаг `credentials_auth` / `credentials_decrypt` в `step_results` — только предупреждение;
-  `load_active_credentials_sync` молча отбрасывает недешифруемые, их находит `_undecryptable_credentials`). Глобальный
-  статус и `last_successful_sync_at` не трогаем (на нём держится фолбэк виджета); гейт `enqueue_auto_sync_jobs_if_due`
-  читает отдельный ключ `last_unscoped_sync_at`, который `finish_run(scoped=False)` пишет только после успешного прогона без
-  ограничения по тенанту/кредам/филиалам: прогон одного тенанта не откладывает автосинк остальных, а прогоны CLI/timer, не
-  оставляющие строки `sync_jobs`, гейт взводят. Свежесть тенанта —
-  `/dashboard/widget/sync_status` (`_tenant_sync_health`): самая старая per-branch отметка
-  `transactional_state_key` среди филиалов его активных credentials (она пишется только когда записи, платежи,
-  товары и комментарии филиала прочитались целиком), а `tenant_sync_failed` — `needs_reauth` любой активной credential.
-  У тенанта с credentials `last_run` в ответе `null`, иначе страница взяла бы время глобального прогона.
-- Новые строки получают PK = YClients id через `ExternalPkAllocator` (один запрос на пачку id вместо `db.get` на строку);
-  занятый другим тенантом id отдаёт номер из последовательности, а он сам может совпасть с id из этой же пачки — поэтому
-  после такого случая аллокатор перечитывает занятые ключи. `sync_records` кладёт услуги визитов одним `flush` на окно.
+- **Контрольная точка только филиальная.** Режим и окно филиала решают `transactions_last_success_date:company:<id>` и маркер покрытия
+  (`resolve_company_sync_window`, ключ точки читает один раз); глобального ключа без суффикса нет. Филиал без своей точки идёт в `full`, даже
+  если маркер покрытия и строки есть (так бывает после `full`, где упал только шаг без покрытия): возобновлять оттуда нельзя — резать
+  окно нечем. Прогон без единого филиала (нет кредов) отдаёт в `window_start` / `mode`: `refresh` — своё скользящее окно
+  (`SYNC_REFRESH_DAYS`), остальные режимы (и `refresh` при `SYNC_INCREMENTAL=false`) — всю историю и `full` (`resolve_sync_window`).
+- `SYNC_INCREMENTAL=false` — рубильник оконных чтений: отправляет и `incremental`, и `refresh` в `full` с нижней границей
+  `reporting_start_date` филиала.
+- `refresh` не подменяет обязательный первый `full`: филиал без подтверждённого исторического покрытия (`historical_coverage_state_key`)
+  эскалируется в `full`, иначе 90-дневный срез сертифицировал бы историю, которой нет.
+- Маркер `historical_coverage_state_key` утверждает ровно одно — что строки покрытия накрывают всю историю филиала, — и восстанавливается по
+  самим строкам независимо от того, все ли шаги прошли: иначе падение шага, не владеющего покрытием (комментарии, аналитика), стоило бы
+  полной пересинхронизации истории. Если упал шаг, который покрытием владеет, оно остаётся суженным, и следующий запуск сам уйдёт в `full`.
+- **Здоровье тенанта — не статус глобального прогона.** Прогон по всем тенантам кончается `success`, даже если у одного сломались credentials
+  (шаг `credentials_auth` / `credentials_decrypt` в `step_results` — только предупреждение; `load_active_credentials_sync` молча отбрасывает
+  недешифруемые, их находит `_undecryptable_credentials`). Глобальный статус и `last_successful_sync_at` не трогаем (на нём фолбэк виджета);
+  гейт `enqueue_auto_sync_jobs_if_due` читает отдельный ключ `last_unscoped_sync_at`, который `finish_run(scoped=False)` пишет только после
+  успешного прогона без ограничения по тенанту/кредам/филиалам: прогон одного тенанта не откладывает автосинк остальных, а прогоны CLI/timer,
+  не оставляющие строки `sync_jobs`, гейт взводят. Свежесть тенанта — `/dashboard/widget/sync_status` (`_tenant_sync_health`): самая старая
+  per-branch отметка `transactional_state_key` среди филиалов его активных credentials (пишется, только когда записи, платежи, товары и
+  комментарии филиала прочитались целиком), `tenant_sync_failed` — `needs_reauth` любой активной credential. У тенанта с credentials
+  `last_run` в ответе `null`, иначе страница взяла бы время глобального прогона.
+- Новые строки получают PK = YClients id через `ExternalPkAllocator` (один запрос на пачку id вместо `db.get` на строку); занятый другим
+  тенантом id отдаёт номер из последовательности, который сам может совпасть с id из этой же пачки, — после такого случая аллокатор
+  перечитывает занятые ключи. `sync_records` кладёт услуги визитов одним `flush` на окно.
 
 ### Пагинация YClients теряет строки
-Эндпоинты с датами (`records`, `transactions`, `storages/transactions`, `comments`)
-пагинируются по offset поверх сортировки, которая не разрешает одинаковые `date`
-детерминированно, а `total_count` не отдают вовсе. На ответе в несколько страниц строки
-на стыке то приезжают дважды, то не приезжают никогда: замеренный случай — июнь по
-одному филиалу, 639 строк на 4 страницах, потерян реальный платёж 3 100 ₽, который
-узкий запрос отдавал всегда.
+Эндпоинты с датами (`records`, `transactions`, `storages/transactions`, `comments`) пагинируются по offset поверх сортировки, которая не
+разрешает одинаковые `date` детерминированно, а `total_count` не отдают. На ответе в несколько страниц строки на стыке то приезжают дважды, то
+не приезжают никогда (был потерян реальный платёж, который узкий запрос отдавал всегда).
 
-Поэтому `_get_all_pages_dated()` дробит диапазон пополам, пока ответ не умещается в одну
-страницу — у одной страницы нет стыка. Решение принимается по первой странице, так что
-пустые годы до открытия филиала стоят один запрос. Любой новый эндпоинт с датами должен
-идти через него, а не через `_get_all_pages()` напрямую.
+Поэтому `_get_all_pages_dated()` дробит диапазон пополам, пока ответ не умещается в одну страницу — у одной страницы нет стыка. Решение
+принимается по первой странице, так что пустые годы до открытия филиала стоят один запрос. Любой новый эндпоинт с датами обязан идти через
+него, а не через `_get_all_pages()` напрямую.
 
-- **Исключение — один день.** Мельче суток фильтр не режет, поэтому день, не влезающий
-  в страницу, читается постранично и остаётся уязвим. Такой день печатается в лог
-  предупреждением; дедупликация уберёт приехавшее дважды, но не вернёт непришедшее.
-  Если это начнёт встречаться, поднимать `MAX_PER_PAGE`, а не расширять окно.
-- Бюджет запросов растёт только от **уникальных** строк, поэтому эндпоинт, перестающий
-  фильтровать, упирается в потолок, как только начинает повторять уже отданные id.
-  На первом проходе по большой базе это всё ещё тысячи запросов — граница есть, но она
-  не мгновенная.
-- Окно, прочитанное постранично (тот самый однодневный случай), **не чистится** перед
-  перезаливкой: `_window_safe_to_purge()`. Удалить окно и залить неполный ответ — значит
-  потерять строки; оставить лишнее — обратимо.
-- По той же причине **пустой ответ ничего не удаляет** (`_settle_empty_source_window`):
-  `{"success": true, "data": []}` на первой же пробе решает окно любой ширины и выглядит
-  ровно как честно пустой филиал. Окно просто помечается прочитанным. Плата за это —
-  строки, удалённые в YClients внутри окна, которое затем ответило пусто, доживут до
-  прогона с данными. Это осознанный размен: невосстановимое против обратимого.
+- **Исключение — один день.** Мельче суток фильтр не режет: день, не влезающий в страницу, читается постранично и остаётся уязвим. Он
+  печатается в лог предупреждением; дедупликация уберёт приехавшее дважды, но не вернёт непришедшее. Если это начнёт встречаться,
+  поднимать `MAX_PER_PAGE`, а не расширять окно.
+- Бюджет запросов растёт только от **уникальных** строк: эндпоинт, перестающий фильтровать, упирается в потолок, как только начинает
+  повторять уже отданные id.
+- Окно, прочитанное постранично (однодневный случай), **не чистится** перед перезаливкой: `_window_safe_to_purge()`. Удалить окно и залить
+  неполный ответ — потерять строки; оставить лишнее — обратимо.
+- По той же причине **пустой ответ ничего не удаляет** (`_settle_empty_source_window`): `{"success": true, "data": []}` на первой пробе
+  решает окно любой ширины и выглядит как честно пустой филиал. Окно просто помечается прочитанным. Плата — строки, удалённые в YClients
+  внутри окна, которое затем ответило пусто, доживут до прогона с данными: осознанный размен невосстановимого на обратимое.
 
 ### Графики сотрудников: лишний день вечером по UTC
-С 20:00 UTC (23:00 МСК) и до полуночи UTC `/company/{id}/staff/schedule` отдаёт на окно
-`start_date..end_date` ещё и день `start_date − 1`, с тем же содержимым, что днём раньше.
-Окно графиков начинается с `date.today()` контейнера (UTC), так что с нашей стороны ничего
-не сдвинуто: граница дня у YClients в этом ответе лежит на 20:00 UTC (замерено: ручной прогон
-с 19:57 до 20:03 прошёл на трёх филиалах и упал на трёх следующих).
+С 20:00 UTC (23:00 МСК) и до полуночи UTC `/company/{id}/staff/schedule` отдаёт на окно `start_date..end_date` ещё и день `start_date − 1` с
+тем же содержимым, что днём раньше (граница дня у YClients в этом ответе — 20:00 UTC; окно графиков начинается с `date.today()` контейнера, UTC).
 
-- `sync_staff_schedules` этот один день пропускает, а всё, что лежит дальше за окном,
-  по-прежнему валит шаг до удаления (fail-closed). Хранить этот день нельзя: он вне
-  удаляемого окна, и до 22.08.2026 каждый прошедший день так лежал в `staff_schedules`
-  дважды (403 из 432 дней-филиалов в дампе за 13.08; бэкфилл 22.08 это вычистил).
+- `sync_staff_schedules` этот один день пропускает, а всё, что лежит дальше за окном, по-прежнему валит шаг до удаления (fail-closed). Хранить
+  его нельзя: он вне удаляемого окна, и каждый прошедший день лежал бы в `staff_schedules` дважды.
 - Начинать окно с филиального дня вместо UTC бесполезно: в 20:00 UTC в Москве тот же день.
-- **Пустой ответ графиков не удаляет прошлое.** `sync_staff_schedules` на `[]` чистит только дни с филиального «сегодня»
-  (`_branch_today`): прошлые смены питают KPI администраторов и не перечитываются (бэкфилл идёт по прошлым окнам), а
-  пустой ответ неотличим от сбоя. Непустой ответ по-прежнему заменяет окно целиком.
+- **Пустой ответ графиков не удаляет прошлое.** `sync_staff_schedules` на `[]` чистит только дни с филиального «сегодня» (`_branch_today`):
+  прошлые смены питают KPI администраторов и не перечитываются, а пустой ответ неотличим от сбоя. Непустой ответ заменяет окно целиком.
 
 ### Добавление нового шага синхронизации
 1. Метод API в `yclients_api.py`
 2. Функция парсинга в `sync_parsing.py` (если нужно)
-3. Функция `sync_<entity>()` в `sync_pipeline.py`. Справочник филиала — `_upsert_catalog()` с `to_fields(row)`; факты —
-   один словарь `fields` на строку, из него и конструктор, и `_apply_fields()` при обновлении (колонки не писать дважды;
-   `tests/test_sync_upsert_equivalence.py` держит значения колонок после создания и после обновления). Поля, которые
-   выставляются только при создании (`id` из `ExternalPkAllocator`, у клиентов и записей — `external_id` / `source_type`),
-   остаются отдельными аргументами конструктора.
-4. Кортеж в `company_steps` внутри `execute_sync()` — `run_sync_step` сам ловит исключение шага и пишет прогресс. Ключ шага
-   добавить в `checkpoint_step_names`, если шаг решает, продвигать ли контрольную точку; источник — в
-   `FULL_REFRESH_COVERAGE_SOURCES` (и в очистку окна, `purge_full_refresh_window`), если шаг владеет покрытием истории.
+3. Функция `sync_<entity>()` в `sync_pipeline.py`. Справочник филиала — `_upsert_catalog()` с `to_fields(row)`; факты — один словарь `fields` на
+   строку, из него и конструктор, и `_apply_fields()` при обновлении (колонки не писать дважды; `tests/test_sync_upsert_equivalence.py` держит
+   значения колонок после создания и после обновления). Поля, выставляемые только при создании (`id` из `ExternalPkAllocator`, у клиентов и
+   записей — `external_id` / `source_type`), остаются отдельными аргументами конструктора.
+4. Кортеж в `company_steps` внутри `execute_sync()` — `run_sync_step` сам ловит исключение шага и пишет прогресс. Ключ шага добавить в
+   `checkpoint_step_names`, если шаг решает, продвигать ли контрольную точку; источник — в `FULL_REFRESH_COVERAGE_SOURCES` (и в очистку окна,
+   `purge_full_refresh_window`), если шаг владеет покрытием истории.

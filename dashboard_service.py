@@ -28,6 +28,7 @@ from sqlalchemy import (
     extract,
     false,
     func,
+    literal,
     not_,
     or_,
     select,
@@ -96,6 +97,9 @@ GOODS_SOLD_ITEM_TYPE = 'goods_transaction'
 PLAN_SETTINGS_SOURCE = 'dashboard_plan_settings'
 GOODS_KPI_CODES = ('wax_qty', 'camouflage_qty', 'face_care_qty', 'head_care_qty')
 COMPLETED_ATTENDANCE = 1
+# Months asked per query of `_fired_staff_active_months`: every month binds its own dates and branch ids, and one
+# query for a window of the whole allowed calendar (2000-2099) would exceed the driver's limit on parameters.
+FIRED_STAFF_MONTHS_PER_QUERY = 100
 # Ids bound into the OPZ visits read; asyncpg allows 32767 parameters per statement.
 OPZ_SURVIVOR_ID_LIMIT = 20000
 # Same ceiling as the Yandex Pay amount (`payment_methods.MAX_AMOUNT`): an unbounded typed value overflows to inf
@@ -4610,6 +4614,47 @@ async def _staff_role_periods_by_staff(
     return resolved[int(company_id)]
 
 
+async def _fired_staff_active_months(
+    db: AsyncSession,
+    months: list[tuple[date, date]],
+    company_ids: list[int],
+    staff_ids: list[int],
+) -> dict[tuple[int, int], set[int]]:
+    """Month indexes in which each fired employee of the request still belongs to the period.
+
+    Same rule as everywhere (`_period_relevant_staff_clause`), asked per month; a fired employee is absent from
+    the roles of the months after he left (or before he came) instead of taking a share of them. Employees who
+    are not fired are not in the result: they keep a role in every month.
+    """
+    fired_rows = (
+        await db.execute(
+            select(Staff.company_id, Staff.id).where(
+                Staff.id.in_(staff_ids), Staff.company_id.in_(company_ids), Staff.fired != 0
+            )
+        )
+    ).all()
+    if not fired_rows:
+        return {}
+    # No id list inside the branches: it would be bound once per month, and a window of the whole history
+    # against a few hundred fired employees would run into the driver's limit on query parameters.
+    active: dict[tuple[int, int], set[int]] = {(int(row.company_id), int(row.id)): set() for row in fired_rows}
+    indexed_months = list(enumerate(months))
+    for offset in range(0, len(indexed_months), FIRED_STAFF_MONTHS_PER_QUERY):
+        traced = union_all(*[
+            select(Staff.company_id, Staff.id, literal(index).label('month_index')).where(
+                Staff.fired != 0,
+                Staff.company_id.in_(company_ids),
+                _period_relevant_staff_clause(month_start, month_end, *_month_window(month_start, month_end)),
+            )
+            for index, (month_start, month_end) in indexed_months[offset:offset + FIRED_STAFF_MONTHS_PER_QUERY]
+        ])
+        for row in (await db.execute(traced)).all():
+            key = (int(row.company_id), int(row.id))
+            if key in active:
+                active[key].add(int(row.month_index))
+    return active
+
+
 async def _resolve_staff_role_periods(
     db: AsyncSession,
     start: date,
@@ -4663,12 +4708,18 @@ async def _resolve_staff_role_periods(
     for row in metric_rows:
         metric_by_staff[(int(row.company_id), int(row.staff_id))].append(row)
 
+    months = _month_slices(start, end)
+    active_months = await _fired_staff_active_months(db, months, company_ids, staff_ids)
+
     resolved: dict[tuple[int, int], RolePeriods] = {}
     for company_id, current_positions in positions_by_company.items():
         for staff_id, position in current_positions.items():
             fallback = normalize_staff_category(position) or 'barber'
             categorized: list[tuple[date, date, str]] = []
-            for slice_start, slice_end in _month_slices(start, end):
+            traced_months = active_months.get((company_id, staff_id))
+            for month_index, (slice_start, slice_end) in enumerate(months):
+                if traced_months is not None and month_index not in traced_months:
+                    continue
                 input_candidates = [
                     row for row in input_by_staff.get((company_id, staff_id), [])
                     if row.period_start <= slice_end and row.period_end >= slice_start
@@ -4685,7 +4736,12 @@ async def _resolve_staff_role_periods(
                     default=None,
                 )
                 category = selected.staff_category if selected is not None else fallback
-                if categorized and categorized[-1][2] == category:
+                if (
+                    categorized
+                    and categorized[-1][2] == category
+                    # A month the fired employee sat out is a gap, not part of the run.
+                    and categorized[-1][1] + timedelta(days=1) == slice_start
+                ):
                     categorized[-1] = (categorized[-1][0], slice_end, category)
                 else:
                     categorized.append((slice_start, slice_end, category))
@@ -6456,13 +6512,35 @@ def _period_relevant_staff_clause(
     plan_start: date,
     plan_end: date,
 ):
-    """Staff the plan, the roles and the editors enumerate for a period: mirror rows never qualify."""
+    """Staff the plan, the roles and the editors enumerate for a period: mirror rows never qualify.
+
+    The one definition of «belongs to the period». `staff.fired` is the current flag, not history, so a fired
+    employee belongs to every period he still left traces in (shift, plan, plan input, a completed visit or a non-zero
+    manual fact)
+    and to none after. A booking that never took place does not count:
+    leftover future records of a fired employee must not keep him listed.
+    """
+    has_visit_in_period = exists(
+        select(1).where(
+            Appointment.staff_id == Staff.id,
+            Appointment.company_id == Staff.company_id,
+            Appointment.attendance == COMPLETED_ATTENDANCE,
+            Appointment.date >= start,
+            Appointment.date <= end,
+            # Leftover test records and a later owner's visits are not this tenant's result.
+            reporting_window_clause(Appointment.company_id, Appointment.date),
+        )
+    )
     has_schedule_in_period = exists(
         select(1).where(
             StaffSchedule.staff_id == Staff.id,
             StaffSchedule.company_id == Staff.company_id,
-            StaffSchedule.date >= start - timedelta(days=1),
             StaffSchedule.date <= end,
+            # The day before the period counts only for a shift running over midnight into it.
+            or_(
+                StaffSchedule.date >= start,
+                and_(StaffSchedule.date == start - timedelta(days=1), StaffSchedule.slot_to <= StaffSchedule.slot_from),
+            ),
         )
     )
     has_plan_in_period = exists(
@@ -6481,10 +6559,30 @@ def _period_relevant_staff_clause(
             PlanStaffInput.period_end >= plan_start,
         )
     )
+    # An entered value is the employee's result and a trace of work in itself; whether it is counted is still
+    # decided by the reporting window and the manual-fact counting rule, not here.
+    has_manual_fact_in_period = exists(
+        select(1).where(
+            ManualFactMetric.staff_id == Staff.id,
+            ManualFactMetric.company_id == Staff.company_id,
+            ManualFactMetric.value != 0,
+            # A daily row by its day; a whole-month row only when the period covers the month, as it is
+            # counted (`_countable_manual_months`): a week of the month would otherwise keep him for it.
+            ManualFactMetric.period_end >= start,
+            ManualFactMetric.period_start <= end,
+            or_(
+                ManualFactMetric.period_start == ManualFactMetric.period_end,
+                and_(ManualFactMetric.period_start >= start, ManualFactMetric.period_end <= end),
+            ),
+            reporting_window_clause(ManualFactMetric.company_id, ManualFactMetric.period_end),
+        )
+    )
     return and_(
         _counts_as_staff(),
         or_(
             Staff.fired == 0,
+            has_visit_in_period,
+            has_manual_fact_in_period,
             has_schedule_in_period,
             has_plan_in_period,
             has_plan_input_in_period,
@@ -6550,11 +6648,6 @@ async def _branch_staff_role_context(
         plan_values = plans_by_staff.get(sid, {})
         categories_by_staff_id[sid] = _staff_category(staff, categories_by_staff.get(sid), plan_values)
 
-    staff_rows = [
-        staff
-        for staff in staff_rows
-        if not staff.fired or categories_by_staff_id[int(staff.id)] == 'administrator'
-    ]
     role_periods_by_staff = await _staff_role_periods_by_staff(
         db,
         start,
@@ -7092,7 +7185,9 @@ async def fetch_staff(
         .where(
             _counts_as_staff(),
             or_(
-                Staff.fired == 0,
+                _period_relevant_staff_clause(start, end, *_month_window(start, end))
+                if start is not None and end is not None
+                else Staff.fired == 0,
                 Staff.id.in_(sorted(set(include_staff_ids or []))),
             ),
         )

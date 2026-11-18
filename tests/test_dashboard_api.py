@@ -8844,9 +8844,9 @@ async def test_manual_opz_facts_reach_year_facts(async_session):
 async def test_manual_opz_editor_column_matches_plan_fact_admin_row(async_session):
     """The baseline the editor offers must be the number it will be added to.
 
-    Plan/fact drops events anchored on a barber the branch no longer lists, so an editor
-    that counted every branch event would show an administrator a larger baseline than
-    their own row.
+    A fired barber still belongs to the months he worked in, so his events reach the
+    administrator rows there; an editor that spread them differently would show a baseline
+    other than the administrator's own row.
     """
     async_session.add(Group(id=1, title='G1'))
     async_session.add(Company(id=1, title='Salon', group_id=1))
@@ -8919,9 +8919,9 @@ async def test_manual_opz_editor_column_matches_plan_fact_admin_row(async_sessio
             )
     app.dependency_overrides.clear()
 
-    # Day by day: the fired barber's event on the 10th never reaches an administrator row,
-    # the active barber's event on the 11th does — and the editor says exactly what Plan/fact says.
-    expected = {'2025-01-10': 0.0, '2025-01-11': 1.0}
+    # Day by day: the fired barber's event on the 10th reaches the administrator row like the active
+    # barber's on the 11th — and the editor says exactly what Plan/fact says.
+    expected = {'2025-01-10': 1.0, '2025-01-11': 1.0}
     for day, current in expected.items():
         editor_rows = editor_by_day[day].json()['data']['rows']
         assert [(row['staff_id'], row['current_value']) for row in editor_rows] == [(3, current)]
